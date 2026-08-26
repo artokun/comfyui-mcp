@@ -65,6 +65,10 @@ export interface DownloadJob {
    *  (falling back to trayId when unset). Never used for URL adoption (that needs the
    *  stable original-URL trayId). */
   progressId?: string;
+  /** Exact staged partial selected by the physical writer's cache identity. It is
+   *  persisted because the original URL alone cannot reproduce auth headers,
+   *  query auth, cloud credentials, or an HF endpoint rewrite after a restart. */
+  partialPath?: string;
   /** Credential-free ComfyUI endpoint this job serves; absent only on legacy records. */
   target?: string;
   /** Persisted record owner, retained so reconciliation updates that same file. */
@@ -733,6 +737,16 @@ export async function startDownloadJob(
             persistJobRecord(job);
           }
         },
+        (partialPath) => {
+          // The writer has already resolved the effective URL, auth headers, and
+          // cloud principal here. Persist only its resulting path, never secrets;
+          // status must inspect this exact identity rather than approximate it
+          // from the redacted original URL.
+          if (partialPath && partialPath !== job.partialPath) {
+            job.partialPath = partialPath;
+            persistJobRecord(job);
+          }
+        },
       );
       // Local paths already committed done via onLanded at the rename. The remote Manager
       // dispatch has no local rename, so commit done here when it returns (dispatch
@@ -976,6 +990,7 @@ function persistJobRecord(job: DownloadJob, owner = PERSIST_OWNER): boolean {
     id: job.id,
     trayId: job.trayId,
     progressId: job.progressId,
+    partialPath: job.partialPath,
     target: job.target,
     url: job.url,
     target_subfolder: job.target_subfolder,
@@ -1034,6 +1049,7 @@ function jobFromPersisted(rec: PersistedDownloadJob): DownloadJob {
     id: rec.id,
     trayId: rec.trayId,
     progressId: rec.progressId,
+    partialPath: rec.partialPath,
     target: rec.target,
     owner: rec.owner,
     url: rec.url,

@@ -428,6 +428,7 @@ describe("migrateInFlightJobs (#1148)", () => {
       started_at: 1_700_000_000_000,
       via_manager: true,
       progressId: "prog-rt",
+      partialPath: "C:\\cache\\.writer-identity.safetensors.partial",
       resume: { etag: 'W/"abc"' },
     } as never);
 
@@ -455,6 +456,7 @@ describe("migrateInFlightJobs (#1148)", () => {
     expect(rec!.via_manager).toBe(true);
     expect(rec!.url).toBeTruthy();
     expect(rec!.progressId).toBe("prog-rt");
+    expect(rec!.partialPath).toBe("C:\\cache\\.writer-identity.safetensors.partial");
     expect(rec!.resume).toEqual({ etag: "W/\"abc\"" });
 
     // ...and the half that actually closes the class: NO key may appear that the

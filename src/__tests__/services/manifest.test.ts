@@ -407,6 +407,7 @@ describe("applyManifest", () => {
       expect.any(Function), // onTrayId callback — aligns the job trayId with the tray row id (#515)
       expect.any(Function), // onLanded callback — commits done synchronously at the destination rename (#515)
       expect.any(Function), // onDownloadRoute callback — records the download-only network route
+      expect.any(Function), // onStagedPartialPath callback — persists the writer's cache identity (#2356)
     );
   });
 
@@ -879,6 +880,7 @@ describe("applyManifest", () => {
       expect.any(Function), // onTrayId callback — aligns the job trayId with the tray row id (#515)
       expect.any(Function), // onLanded callback — commits done synchronously at the destination rename (#515)
       expect.any(Function), // onDownloadRoute callback — records the download-only network route
+      expect.any(Function), // onStagedPartialPath callback — persists the writer's cache identity (#2356)
     );
     expect(String(downloadModelMock.mock.calls[0]?.[1]).replaceAll("\\", "/")).toBe(
       "checkpoints/foo",
@@ -912,6 +914,7 @@ describe("applyManifest", () => {
       expect.any(Function), // onTrayId callback — aligns the job trayId with the tray row id (#515)
       expect.any(Function), // onLanded callback — commits done synchronously at the destination rename (#515)
       expect.any(Function), // onDownloadRoute callback — records the download-only network route
+      expect.any(Function), // onStagedPartialPath callback — persists the writer's cache identity (#2356)
     );
   });
 

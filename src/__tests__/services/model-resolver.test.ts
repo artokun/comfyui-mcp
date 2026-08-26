@@ -100,6 +100,7 @@ vi.mock("../../services/extra-paths.js", () => ({
 }));
 
 import { config } from "../../config.js";
+import { downloadCacheIdentity } from "../../services/download-cache.js";
 import { downloadModel, resolveDownloadTarget } from "../../services/model-resolver.js";
 import { setDownloadRetryPolicyForTests } from "../../services/download-retry.js";
 import { ModelError } from "../../utils/errors.js";
@@ -404,6 +405,48 @@ describe("downloadModel — auth headers (token never in URL)", () => {
     expect(headersOf().Authorization).toBe("Bearer hf");
   });
 
+  it("publishes the exact authenticated HF-rewrite partial identity used by the writer (#2356)", async () => {
+    const prev = process.env.HF_ENDPOINT;
+    process.env.HF_ENDPOINT = "https://hf-mirror.example";
+    try {
+      config.huggingfaceToken = "hf-secret";
+      failingFetch();
+      const onPartial = vi.fn();
+      const original = "https://huggingface.co/org/repo/resolve/main/m.safetensors";
+
+      await expect(
+        downloadModel(
+          original,
+          "checkpoints",
+          "m.safetensors",
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          onPartial,
+        ),
+      ).rejects.toBeInstanceOf(ModelError);
+
+      const exact = downloadCacheIdentity(
+        "https://hf-mirror.example/org/repo/resolve/main/m.safetensors",
+        { Authorization: "Bearer hf-secret" },
+      ).partialPath;
+      const bareOriginal = downloadCacheIdentity(original).partialPath;
+      expect(onPartial).toHaveBeenCalledWith(exact);
+      expect(onPartial).not.toHaveBeenCalledWith(bareOriginal);
+      expect(fetchMock.mock.calls[0][0]).toBe(
+        "https://hf-mirror.example/org/repo/resolve/main/m.safetensors",
+      );
+      expect(headersOf().Authorization).toBe("Bearer hf-secret");
+    } finally {
+      if (prev === undefined) delete process.env.HF_ENDPOINT;
+      else process.env.HF_ENDPOINT = prev;
+    }
+  });
+
   it("uses explicit bearer auth instead of default host auth", async () => {
     config.huggingfaceToken = "default-hf";
     failingFetch();
@@ -418,6 +461,35 @@ describe("downloadModel — auth headers (token never in URL)", () => {
     ).rejects.toBeInstanceOf(ModelError);
 
     expect(headersOf().Authorization).toBe("Bearer explicit");
+  });
+
+  it("publishes the query-auth URL identity selected by the writer (#2356)", async () => {
+    failingFetch();
+    const onPartial = vi.fn();
+    const original = "https://private.example.com/model.safetensors?access_token=existing";
+    const auth = { type: "query" as const, query_param: "download_key", query_value: "query-secret" };
+
+    await expect(
+      downloadModel(
+        original,
+        "checkpoints",
+        "model.safetensors",
+        auth,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        onPartial,
+      ),
+    ).rejects.toBeInstanceOf(ModelError);
+
+    const requestedUrl =
+      "https://private.example.com/model.safetensors?access_token=existing&download_key=query-secret";
+    expect(onPartial).toHaveBeenCalledWith(downloadCacheIdentity(requestedUrl).partialPath);
+    expect(onPartial).not.toHaveBeenCalledWith(downloadCacheIdentity(original).partialPath);
+    expect(fetchMock.mock.calls[0][0]).toBe(requestedUrl);
   });
 
   it("uses explicit basic auth", async () => {

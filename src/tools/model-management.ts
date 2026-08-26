@@ -31,8 +31,7 @@ import {
   type DownloadJob,
 } from "../services/download-jobs.js";
 import {
-  findResumablePartial,
-  observeStagedPartial,
+  observeStagedPartialAtPath,
   type StagedPartialObservation,
 } from "../services/download-cache.js";
 import { downloadRetryPolicy } from "../services/download-retry.js";
@@ -250,8 +249,15 @@ function stillWritingClause(route: DownloadRoute): string {
  * fact someone needs BEFORE spending the bandwidth, not after. The size is included
  * because "resumable" without a number is not something you can weigh against restarting.
  */
-function describePartial(partial: { path: string; bytes: number } | null): string {
-  if (!partial) {
+function describePartial(partial: StagedPartialObservation): string {
+  if (partial.state === "unavailable") {
+    return (
+      `the exact staged .partial could not be read${partial.path ? ` (${partial.path})` : ""}, ` +
+      `so status cannot determine whether bytes are resumable. Do not infer that it is ` +
+      `absent; re-issue only after the writer and cache path are checked.`
+    );
+  }
+  if (partial.state === "absent") {
     return (
       `no resumable partial was found for this URL, so re-issuing very likely starts from ` +
       `the beginning. That is not an error — but it is worth knowing before you re-spend ` +
@@ -308,7 +314,8 @@ function reconcileProgress(
 ): ProgressView {
   if (partial.state !== "present") {
     const staleMs = progressAgeMs(p, partial);
-    const stale = Number.isFinite(staleMs) && staleMs >= downloadRetryPolicy().stallTimeoutMs;
+    const stallTimeoutMs = downloadRetryPolicy().stallTimeoutMs;
+    const stale = stallTimeoutMs > 0 && Number.isFinite(staleMs) && staleMs >= stallTimeoutMs;
     const reason =
       partial.state === "absent"
         ? "no readable durable .partial is present yet"
@@ -326,7 +333,10 @@ function reconcileProgress(
       bytes: "",
       note:
         `\n    PROGRESS UNAVAILABLE — ${reason}; live-stream byte counts are withheld until ` +
-        `they can be reconciled to durable disk bytes.`,
+        `they can be reconciled to durable disk bytes.` +
+        (stallTimeoutMs === 0
+          ? ` The stall watchdog is disabled, so age is not treated as a stall verdict.`
+          : ""),
     };
   }
 
@@ -368,7 +378,10 @@ async function progressViewForJob(
   if (job.status === "done" || job.viaManager === true) {
     return { bytes: formatProgressBytes(p), note: "" };
   }
-  return reconcileProgress(p, await observeStagedPartial(job.url));
+  return reconcileProgress(
+    p,
+    await observeStagedPartialAtPath(job.partialPath),
+  );
 }
 
 function afterCancelAdvice(route: DownloadRoute): string {
@@ -1136,22 +1149,24 @@ async function statusAction(args: {
         // that could have one: a Manager dispatch never writes a local partial and already
         // says so.
         //
-        // Keyed by the job's URL, because that is what the WRITER keys the staged file on
-        // (cachePathForUrl). My first version searched for `.<destination filename>.partial`
-        // — what "the partial for this download" sounds like, and not what is on disk. It
-        // would have reported "no partial" for every download that had one: the same false
-        // claim inverted, and pointing the more damaging way, since the original at least
-        // erred toward "your bytes are safe".
-        const partials = new Map<string, { path: string; bytes: number } | null>();
+        // The writer persists the exact staged path after applying HF endpoint rewriting,
+        // query auth, representation headers, and cloud credentials. A legacy record has
+        // no path and is deliberately treated as unavailable; rebuilding from its original
+        // URL could inspect a different authenticated cache identity.
+        const partials = new Map<string, StagedPartialObservation>();
         await Promise.all(
           list
             .filter((j) => j.status === "cancelled" && !j.viaManager)
             .map(async (j) => {
-              partials.set(`${j.id}\n${j.trayId}\n${j.target ?? ""}`, await findResumablePartial(j.url));
+              partials.set(
+                `${j.id}\n${j.trayId}\n${j.target ?? ""}`,
+                await observeStagedPartialAtPath(j.partialPath),
+              );
             }),
         );
-        const partialFor = (j: DownloadJob): { path: string; bytes: number } | null =>
-          partials.get(`${j.id}\n${j.trayId}\n${j.target ?? ""}`) ?? null;
+        const partialFor = (j: DownloadJob): StagedPartialObservation =>
+          partials.get(`${j.id}\n${j.trayId}\n${j.target ?? ""}`) ??
+          ({ state: "unavailable", path: "" } satisfies StagedPartialObservation);
         const progressViews = new Map<string, ProgressView>();
         await Promise.all(
           list.map(async (j) => {

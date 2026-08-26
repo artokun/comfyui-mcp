@@ -1225,6 +1225,29 @@ function cachePathForUrl(
   return join(cacheDir(), `${hash}${extension}`);
 }
 
+/**
+ * The complete cache identity used by the physical writer.
+ *
+ * Keep the cache payload, resumable partial, and their callers on one derivation:
+ * the URL is already effective (HF endpoint and query auth applied), headers carry
+ * representation-affecting auth, and storageAuth carries the cloud principal.
+ * A status reader must use the resulting path, never rebuild a partial name from a
+ * job's redacted/original URL.
+ */
+export interface DownloadCacheIdentity {
+  cachePath: string;
+  partialPath: string;
+}
+
+export function downloadCacheIdentity(
+  url: string,
+  headers: Record<string, string> = {},
+  storageAuth?: CloudStorageAuth,
+): DownloadCacheIdentity {
+  const cachePath = cachePathForUrl(url, headers, storageAuth);
+  return { cachePath, partialPath: stagedPartialPathForTarget(cachePath) };
+}
+
 async function touch(path: string): Promise<void> {
   const now = new Date();
   await downloadCacheFs.utimes(path, now, now);
@@ -2482,7 +2505,9 @@ async function downloadIntoCache(
   // Representation-aware identity (#467): a same-URL download with different HTTP
   // auth headers OR different cloud (S3/Azure) credentials gets its OWN cache file,
   // partial and in-flight slot — never coalesced onto another caller's stream.
-  const target = cachePathForUrl(url, headers, storageAuth);
+  const identity = downloadCacheIdentity(url, headers, storageAuth);
+  const target = identity.cachePath;
+  const partial = stagedPartialPathForTarget(target);
   const key = target;
 
   const existing = inflight.get(key);
@@ -2536,7 +2561,6 @@ async function downloadIntoCache(
     // resumes from the byte it left off on the next call, rather than
     // restarting from zero. (See streamUrlToFile for the Range + flags
     // handshake.) Cleanup on terminal failure stays unchanged.
-    const partial = stagedPartialPathForTarget(target);
     const rejectedMarker = `${partial}.rejected`;
 
     /**
@@ -3592,7 +3616,7 @@ export function stagedPartialPathForTarget(target: string): string {
  * name", never "none exists" — and the caller must not upgrade it to the latter.
  */
 export function stagedPartialPathForUrl(url: string): string {
-  return stagedPartialPathForTarget(cachePathForUrl(url));
+  return downloadCacheIdentity(url).partialPath;
 }
 
 /**
@@ -3606,22 +3630,17 @@ export type StagedPartialObservation =
   | { state: "absent"; path: string }
   | { state: "unavailable"; path: string };
 
-/** Read the staged partial that the local downloader would use for `url`. */
-export async function observeStagedPartial(
-  url: string | undefined,
-  headers: Record<string, string> = {},
+/** Read a staged partial at the exact path selected by the local writer. */
+export async function observeStagedPartialAtPath(
+  path: string | undefined,
 ): Promise<StagedPartialObservation> {
-  if (typeof url !== "string" || !url.trim()) {
+  if (typeof path !== "string" || !path.trim()) {
     return { state: "unavailable", path: "" };
   }
 
-  let candidate: string;
-  try {
-    candidate = stagedPartialPathForTarget(cachePathForUrl(url.trim(), headers));
-  } catch {
-    return { state: "unavailable", path: "" };
-  }
-
+  // Preserve the writer's exact path. The cache root may legitimately contain
+  // whitespace, and trimming here would silently inspect a different identity.
+  const candidate = path;
   try {
     const st = await stat(candidate);
     if (!st.isFile()) return { state: "unavailable", path: candidate };
@@ -3629,12 +3648,31 @@ export async function observeStagedPartial(
   } catch (err) {
     // ENOENT is a useful observation: no resumable file exists yet. Permission,
     // sharing, and other stat failures are deliberately kept distinct so status
-    // cannot turn an unreadable file into "0 bytes".
+    // cannot turn an unreadable file into "0 bytes" or "absent".
     if ((err as NodeJS.ErrnoException)?.code === "ENOENT") {
       return { state: "absent", path: candidate };
     }
     return { state: "unavailable", path: candidate };
   }
+}
+
+/** Read the staged partial that the local downloader would use for `url`. */
+export async function observeStagedPartial(
+  url: string | undefined,
+  headers: Record<string, string> = {},
+  storageAuth?: CloudStorageAuth,
+): Promise<StagedPartialObservation> {
+  if (typeof url !== "string" || !url.trim()) {
+    return { state: "unavailable", path: "" };
+  }
+
+  let partialPath: string;
+  try {
+    partialPath = downloadCacheIdentity(url.trim(), headers, storageAuth).partialPath;
+  } catch {
+    return { state: "unavailable", path: "" };
+  }
+  return observeStagedPartialAtPath(partialPath);
 }
 
 /**
@@ -3656,8 +3694,9 @@ export async function observeStagedPartial(
 export async function findResumablePartial(
   url: string | undefined,
   headers: Record<string, string> = {},
+  storageAuth?: CloudStorageAuth,
 ): Promise<{ path: string; bytes: number } | null> {
-  const observed = await observeStagedPartial(url, headers);
+  const observed = await observeStagedPartial(url, headers, storageAuth);
   if (observed.state === "present" && observed.bytes > 0) {
     return { path: observed.path, bytes: observed.bytes };
   }

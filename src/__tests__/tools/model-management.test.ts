@@ -54,7 +54,7 @@ import { registerModelManagementTools } from "../../tools/model-management.js";
 import { setProgressDir } from "../../services/download-progress.js";
 import * as progressModule from "../../services/download-progress.js";
 import { resetDownloadJobs, startDownloadJob } from "../../services/download-jobs.js";
-import { stagedPartialPathForUrl } from "../../services/download-cache.js";
+import { downloadCacheIdentity } from "../../services/download-cache.js";
 import { spawnSync } from "node:child_process";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -133,6 +133,7 @@ describe("download_model tool", () => {
       expect.any(Function), // onTrayId callback — aligns the job trayId with the tray row id (#515)
       expect.any(Function), // onLanded callback — commits done synchronously at the destination rename (#515)
       expect.any(Function), // onDownloadRoute callback — records the download-only network route
+      expect.any(Function), // onStagedPartialPath callback — records the exact cache identity
     );
     expect(res.isError).toBeFalsy();
   });
@@ -239,7 +240,7 @@ describe("download_model tool", () => {
 });
 
 describe('download_model action:"status"', () => {
-  it("never reports live bytes ahead of the durable partial (#2356)", async () => {
+  it("uses the writer's authenticated HF-rewrite cache identity (#2356)", async () => {
     const dir = await mkdtemp(join(tmpdir(), "model-management-2356-durable-"));
     const cache = await mkdtemp(join(tmpdir(), "model-management-2356-cache-"));
     const savedCache = process.env.COMFYUI_DOWNLOAD_CACHE_DIR;
@@ -249,9 +250,14 @@ describe('download_model action:"status"', () => {
     process.env.COMFYUI_DOWNLOAD_CACHE_DIR = cache;
     setProgressDir(dir);
     try {
-      const partial = stagedPartialPathForUrl(url);
+      const partial = downloadCacheIdentity(
+        "https://hf-mirror.example/Comfy-Org/test/resolve/main/model.safetensors",
+        { Authorization: "Bearer hf-secret" },
+      ).partialPath;
+      const bareOriginal = downloadCacheIdentity(url).partialPath;
       await mkdir(dirname(partial), { recursive: true });
       await writeFile(partial, Buffer.alloc(100));
+      await writeFile(bareOriginal, Buffer.alloc(900));
       await writeFile(
         join(dir, `control-job-${id}-session.json`),
         JSON.stringify({
@@ -262,6 +268,7 @@ describe('download_model action:"status"', () => {
           target_subfolder: "text_encoders",
           status: "downloading",
           via_manager: false,
+          partialPath: partial,
           started_at: Date.now() - 60_000,
           updated: Date.now(),
         }),
@@ -306,12 +313,14 @@ describe('download_model action:"status"', () => {
     process.env.COMFYUI_DOWNLOAD_STALL_TIMEOUT_S = "1";
     setProgressDir(dir);
     try {
+      const partial = downloadCacheIdentity(url).partialPath;
       await writeFile(
         join(dir, `control-job-${id}-session.json`),
         JSON.stringify({
           id,
           trayId: "tray-2356-stalled",
           progressId,
+          partialPath: partial,
           url,
           target_subfolder: "text_encoders",
           status: "downloading",
@@ -338,6 +347,124 @@ describe('download_model action:"status"', () => {
       expect(text).toContain("PROGRESS STALLED/UNAVAILABLE");
       expect(text).toContain("no readable durable .partial is present yet");
       expect(text).toContain("does not cancel the download");
+      expect(text).not.toContain("(10%)");
+    } finally {
+      setProgressDir("");
+      if (savedCache === undefined) delete process.env.COMFYUI_DOWNLOAD_CACHE_DIR;
+      else process.env.COMFYUI_DOWNLOAD_CACHE_DIR = savedCache;
+      if (savedStall === undefined) delete process.env.COMFYUI_DOWNLOAD_STALL_TIMEOUT_S;
+      else process.env.COMFYUI_DOWNLOAD_STALL_TIMEOUT_S = savedStall;
+      await rm(dir, { recursive: true, force: true });
+      await rm(cache, { recursive: true, force: true });
+    }
+  });
+
+  it("does not call finite age stalled when the watchdog is disabled (#2356)", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "model-management-2356-disabled-"));
+    const cache = await mkdtemp(join(tmpdir(), "model-management-2356-disabled-cache-"));
+    const savedCache = process.env.COMFYUI_DOWNLOAD_CACHE_DIR;
+    const savedStall = process.env.COMFYUI_DOWNLOAD_STALL_TIMEOUT_S;
+    const url = "https://example.com/disabled.safetensors";
+    const id = "status-2356-disabled";
+    const progressId = "progress-2356-disabled";
+    process.env.COMFYUI_DOWNLOAD_CACHE_DIR = cache;
+    process.env.COMFYUI_DOWNLOAD_STALL_TIMEOUT_S = "0";
+    setProgressDir(dir);
+    try {
+      const partial = downloadCacheIdentity(url).partialPath;
+      await writeFile(
+        join(dir, `control-job-${id}-session.json`),
+        JSON.stringify({
+          id,
+          trayId: "tray-2356-disabled",
+          progressId,
+          partialPath: partial,
+          url,
+          target_subfolder: "text_encoders",
+          status: "downloading",
+          via_manager: false,
+          started_at: Date.now() - 600_000,
+          updated: Date.now() - 600_000,
+        }),
+      );
+      await writeFile(
+        join(dir, `${progressId}-snapshot.json`),
+        JSON.stringify({
+          id: progressId,
+          name: "disabled.safetensors",
+          downloaded: 100,
+          total: 1_000,
+          bytes_per_sec: 0,
+          status: "downloading",
+          updated: Date.now() - 120_000,
+        }),
+      );
+
+      const { downloadStatus } = makeServer();
+      const text = (await downloadStatus({ id })).content[0].text;
+      expect(text).toContain("PROGRESS UNAVAILABLE");
+      expect(text).toContain("stall watchdog is disabled");
+      expect(text).not.toContain("PROGRESS STALLED");
+      expect(text).not.toContain("(10%)");
+    } finally {
+      setProgressDir("");
+      if (savedCache === undefined) delete process.env.COMFYUI_DOWNLOAD_CACHE_DIR;
+      else process.env.COMFYUI_DOWNLOAD_CACHE_DIR = savedCache;
+      if (savedStall === undefined) delete process.env.COMFYUI_DOWNLOAD_STALL_TIMEOUT_S;
+      else process.env.COMFYUI_DOWNLOAD_STALL_TIMEOUT_S = savedStall;
+      await rm(dir, { recursive: true, force: true });
+      await rm(cache, { recursive: true, force: true });
+    }
+  });
+
+  it("reports a stat failure as unavailable, not absent or zero bytes (#2356)", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "model-management-2356-stat-"));
+    const cache = await mkdtemp(join(tmpdir(), "model-management-2356-stat-cache-"));
+    const savedCache = process.env.COMFYUI_DOWNLOAD_CACHE_DIR;
+    const savedStall = process.env.COMFYUI_DOWNLOAD_STALL_TIMEOUT_S;
+    const url = "https://example.com/stat-error.safetensors";
+    const id = "status-2356-stat-error";
+    const progressId = "progress-2356-stat-error";
+    process.env.COMFYUI_DOWNLOAD_CACHE_DIR = cache;
+    process.env.COMFYUI_DOWNLOAD_STALL_TIMEOUT_S = "0";
+    setProgressDir(dir);
+    try {
+      // Node rejects NUL-containing paths before reaching the filesystem. This
+      // exercises the non-ENOENT stat-error branch portably on Windows and Unix.
+      const partial = `${dir}\\partial\u0000stat-error`;
+      await writeFile(
+        join(dir, `control-job-${id}-session.json`),
+        JSON.stringify({
+          id,
+          trayId: "tray-2356-stat-error",
+          progressId,
+          partialPath: partial,
+          url,
+          target_subfolder: "text_encoders",
+          status: "downloading",
+          via_manager: false,
+          started_at: Date.now() - 600_000,
+          updated: Date.now() - 600_000,
+        }),
+      );
+      await writeFile(
+        join(dir, `${progressId}-snapshot.json`),
+        JSON.stringify({
+          id: progressId,
+          name: "stat-error.safetensors",
+          downloaded: 100,
+          total: 1_000,
+          bytes_per_sec: 0,
+          status: "downloading",
+          updated: Date.now() - 120_000,
+        }),
+      );
+
+      const { downloadStatus } = makeServer();
+      const text = (await downloadStatus({ id })).content[0].text;
+      expect(text).toContain("PROGRESS UNAVAILABLE");
+      expect(text).toContain("durable .partial could not be read");
+      expect(text).not.toContain("no readable durable .partial is present yet");
       expect(text).not.toContain("(10%)");
     } finally {
       setProgressDir("");

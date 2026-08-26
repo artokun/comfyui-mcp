@@ -19,7 +19,13 @@ import {
 import { installModelViaManager } from "./node-management.js";
 import { ModelError, ValidationError, unreachableHostMessage } from "../utils/errors.js";
 import { logger } from "../utils/logger.js";
-import { downloadWithCache, findResumablePartial, probeRemoteModelPayload } from "./download-cache.js";
+import {
+  downloadCacheIdentity,
+  downloadWithCache,
+  findResumablePartial,
+  probeRemoteModelPayload,
+} from "./download-cache.js";
+import type { CloudStorageAuth } from "./storage/index.js";
 import type { DownloadRoute } from "./download-proxy.js";
 import { reportDownloadProgress } from "./download-progress.js";
 import type { ResumeReporter } from "./download-resume-diag.js";
@@ -2814,9 +2820,11 @@ function localAuthHeadersFor(
    *  streaming path; without it a rewritten url would parse to the mirror host and drop the
    *  token → a false-negative). */
   wasHfUrl: boolean,
+  requestHeaders?: Record<string, string>,
 ): Record<string, string> {
-  const request = applyDownloadAuth(url, auth);
-  const headers: Record<string, string> = { ...request.headers };
+  const headers: Record<string, string> = {
+    ...(requestHeaders ?? applyDownloadAuth(url, auth).headers),
+  };
   // HF token: attach ONLY when the url's PARSED hostname is huggingface.co (or a subdomain),
   // or the ORIGINAL url was a HF url that HF_ENDPOINT rewrote to a trusted mirror. NEVER a
   // substring match (see isHuggingFaceHost). isCivitaiUrl is likewise hostname-parsed, so
@@ -2829,6 +2837,51 @@ function localAuthHeadersFor(
     headers["Authorization"] = `Bearer ${civitaiToken}`;
   }
   return headers;
+}
+
+/**
+ * The local writer's complete request/cache identity, derived once and reused by
+ * both the writer and status/recovery plumbing. `url` is the caller's original URL;
+ * the returned `rewrittenUrl` is the endpoint-normalized URL before query auth is
+ * applied, while `requestUrl` includes query auth and `headers` includes all
+ * representation-affecting auth headers.
+ */
+export interface LocalDownloadCacheIdentity {
+  wasHfUrl: boolean;
+  rewrittenUrl: string;
+  requestUrl: string;
+  headers: Record<string, string>;
+  storageAuth?: CloudStorageAuth;
+  progressId: string;
+  cachePath: string;
+  partialPath: string;
+}
+
+export function localDownloadCacheIdentity(
+  url: string,
+  auth?: DownloadAuth,
+): LocalDownloadCacheIdentity {
+  const wasHfUrl = /^https?:\/\/huggingface\.co([/?#]|$)/i.test(url);
+  const rewrittenUrl = applyHfEndpoint(url);
+  const request = applyDownloadAuth(rewrittenUrl, auth);
+  const headers = localAuthHeadersFor(
+    rewrittenUrl,
+    auth,
+    wasHfUrl,
+    request.headers,
+  );
+  const storageAuth = auth?.type === "s3" ? { s3: auth } : undefined;
+  const cache = downloadCacheIdentity(request.url, headers, storageAuth);
+  return {
+    wasHfUrl,
+    rewrittenUrl,
+    requestUrl: request.url,
+    headers,
+    storageAuth,
+    progressId: createHash("sha256").update(request.url).digest("hex").slice(0, 16),
+    cachePath: cache.cachePath,
+    partialPath: cache.partialPath,
+  };
 }
 
 /**
@@ -2854,9 +2907,8 @@ function localAuthHeadersFor(
 export async function findResumablePartialForLocalDownload(
   url: string,
 ): Promise<{ path: string; bytes: number } | null> {
-  const wasHfUrl = /^https?:\/\/huggingface\.co([/?#]|$)/i.test(url);
-  const rewritten = applyHfEndpoint(url);
-  return findResumablePartial(rewritten, localAuthHeadersFor(rewritten, undefined, wasHfUrl));
+  const identity = localDownloadCacheIdentity(url);
+  return findResumablePartial(identity.requestUrl, identity.headers, identity.storageAuth);
 }
 
 /**
@@ -3521,14 +3573,16 @@ export async function downloadModel(
   onLanded?: (targetPath: string) => void,
   /** Reports the effective local model-download network route to the job status record. */
   onDownloadRoute?: (route: DownloadRoute) => void,
+  /** Reports the exact cache partial selected by the local writer. */
+  onStagedPartialPath?: (partialPath: string) => void,
 ): Promise<string> {
   // Cancelled before we did anything — never start a transfer (local OR server-side).
   if (signal?.aborted) throw new DOMException("The download was cancelled.", "AbortError");
-  // Region flags (issue #127) applied at THE choke point every download path
-  // funnels through (local disk AND the remote Manager dispatch below).
-  const wasHfUrl = /^https?:\/\/huggingface\.co([/?#]|$)/i.test(url);
-  url = applyHfEndpoint(url);
-  if (isCivitaiUrl(url) && civitaiDisabled()) {
+  // Resolve the effective local request/cache identity once. This is also the
+  // source of truth for the staged partial path published to status; it includes
+  // HF endpoint rewriting, query auth, representation headers, and cloud auth.
+  const localIdentity = localDownloadCacheIdentity(url, auth);
+  if (isCivitaiUrl(localIdentity.rewrittenUrl) && civitaiDisabled()) {
     throw new ModelError(CIVITAI_DISABLED_MESSAGE);
   }
   // REMOTE mode: the MCP has no local filesystem, so a local-disk download is
@@ -3553,7 +3607,14 @@ export async function downloadModel(
     // where a flag records whether Manager was actually contacted. Matching on error text
     // from out here could not tell a Manager failure from a preflight refusal that happens
     // to mention Manager.
-    return await downloadModelViaManagerRemote(url, targetSubfolder, filename, auth, signal, wasHfUrl);
+    return await downloadModelViaManagerRemote(
+      localIdentity.rewrittenUrl,
+      targetSubfolder,
+      filename,
+      auth,
+      signal,
+      localIdentity.wasHfUrl,
+    );
   }
 
   // Root the destination at the LIVE server's models dir (its --base-directory),
@@ -3588,7 +3649,7 @@ export async function downloadModel(
     // must be live-authoritative to compare; when either is unknown there is nothing
     // to bind, and the (already never-confirmed) non-authoritative path applies.
     liveRootAtResolve: rootAtResolve,
-  } = await resolveDownloadTarget(url, targetSubfolder, filename);
+  } = await resolveDownloadTarget(localIdentity.rewrittenUrl, targetSubfolder, filename);
 
   // Ensure target directory exists
   await mkdir(targetDir, { recursive: true });
@@ -3603,32 +3664,14 @@ export async function downloadModel(
     );
   }
 
-  const request = applyDownloadAuth(url, auth);
-  const headers: Record<string, string> = { ...request.headers };
-  // HF token: attach ONLY when the url's PARSED hostname is huggingface.co (or a subdomain),
-  // or the ORIGINAL url was a HF url that HF_ENDPOINT rewrote to a trusted mirror (wasHfUrl).
-  // NEVER a substring match — `https://evil.example/m.safetensors?ref=huggingface.co` parses
-  // to evil.example and must get NO token (a credential-leak; the same parsed-host authority
-  // the remote flip probe uses).
-  const hfToken = config.huggingfaceToken;
-  const civitaiToken = config.civitaiApiToken;
-  if (!auth && hfToken && (wasHfUrl || isHuggingFaceHost(url))) {
-    headers["Authorization"] = `Bearer ${hfToken}`;
-  } else if (!auth && civitaiToken && isCivitaiUrl(url)) {
-    // CivitAI auth travels as a request header (never in the URL/query) so the
-    // token can't leak into logs, errors, or redirect URLs. fetch drops the
-    // header on the cross-origin redirect to the already-signed download host.
-    headers["Authorization"] = `Bearer ${civitaiToken}`;
-  }
-
   const sensitiveParams =
     auth?.type === "query" ? [auth.query_param] : undefined;
-  const logUrl = redactUrlForLogs(request.url, sensitiveParams);
+  const logUrl = redactUrlForLogs(localIdentity.requestUrl, sensitiveParams);
   logger.info(`Downloading model to ${targetPath}`, { url: logUrl });
 
   // Stable id for the panel tray, keyed on the (pre-redirect) URL so resumes and
   // retries map to the same row. Name is the friendly file name.
-  const progressId = createHash("sha256").update(request.url).digest("hex").slice(0, 16);
+  const progressId = localIdentity.progressId;
   // Attempt generation/epoch (panel#489): the id is URL-derived (deterministic), so a
   // retry of the SAME URL reuses it — attempt N and attempt N+1 are otherwise
   // indistinguishable. Stamp this attempt's start epoch on every row it writes so the
@@ -3641,14 +3684,17 @@ export async function downloadModel(
   // Tell the job the id the tray rows actually use, so status display + cancel
   // cleanup key on the SAME id even when auth/HF-endpoint rewrote the request URL.
   onTrayId?.(progressId);
+  // Publish the exact cache identity selected above. Status/restart recovery must
+  // inspect this path, not approximate it from the persisted original URL.
+  onStagedPartialPath?.(localIdentity.partialPath);
 
   try {
     await downloadWithCache({
-      url: request.url,
-      headers,
+      url: localIdentity.requestUrl,
+      headers: localIdentity.headers,
       targetPath,
       logUrl,
-      storageAuth: auth?.type === "s3" ? { s3: auth } : undefined,
+      storageAuth: localIdentity.storageAuth,
       progress,
       onResume,
       signal,

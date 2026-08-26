@@ -256,8 +256,10 @@ export function migrateInFlightJobs(fromDir: string, toDir: string): number {
         download_route: downloadRoute,
         // Real keys that were also being dropped. `resume` is what a re-issue
         // needs to continue a partial rather than restart it, and `progressId`
-        // links the record back to its tray row.
+        // links the record back to its tray row. `partialPath` keeps status and
+        // recovery on the writer's exact authenticated/HF-rewritten cache key.
         progressId: str("progressId"),
+        partialPath: str("partialPath"),
         resume: raw.resume,
         updated: Date.now(),
         interrupted_by_restart: true,
@@ -802,6 +804,9 @@ export interface PersistedDownloadJob {
   /** The id the physical progress rows are written under (post-auth/HF-rewrite);
    *  differs from trayId only for query-auth / mirror URLs. Optional/back-compat. */
   progressId?: string;
+  /** Exact staged partial selected by the writer's effective cache identity.
+   *  Optional for records written before status began persisting this path. */
+  partialPath?: string;
   /** Credential-free ComfyUI endpoint this job serves; legacy records may omit it. */
   target?: string;
   url: string;
