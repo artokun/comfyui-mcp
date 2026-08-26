@@ -6,6 +6,20 @@ All notable changes to this project are documented here. This project adheres to
 
 ## Unreleased
 
+## [0.52.129] - 2026-08-26
+
+### MCP
+
+#### Fixed
+- separate wording for identified vs id-less POSSIBLE REPEAT cases (#2362)
+- guard promoted container widget writes (#2323)
+- name the exception when the traceback tail has no colon (rows D and E) (#2359)
+- handle ANSI escape sequences in log pattern matching (#2357)
+
+#### Changed
+- pin generation and witness.localPath clauses in localPathRecovered (#2354)
+
+
 ## [0.52.128] - 2026-08-26
 
 ### MCP
