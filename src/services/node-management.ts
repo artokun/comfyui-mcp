@@ -3199,23 +3199,9 @@ async function cloneCustomNodeFallback(
   // established that no safe root exists, do not re-read the saved-default
   // resolver and recreate the wrong-machine clone hazard. But we CAN consult the
   // live server's root before refusing — that is a separate, authoritative answer.
-  let comfyuiBase = basePath;
-  if (!comfyuiBase && opts?.allowSharedWorkspaceFallback !== false) {
-    // Shared fallback allowed: use the sync resolver (configuration + saved default)
-    comfyuiBase = resolveEffectiveComfyUIBase();
-  } else if (!comfyuiBase && !isRemoteMode()) {
-    // No shared fallback, but local target: consult the live server's root before refusing.
-    // A separately-started portable ComfyUI running with COMFYUI_PATH unset and no saved
-    // default still has a knowable root via its argv or detected process.
-    // Use requireLive:true to NEVER fall back to config — we would be reporting success
-    // for cloning into the wrong tree if config points elsewhere than the live server.
-    try {
-      comfyuiBase = await resolveCustomNodesScanBaseLiveStrict({ requireLive: true });
-    } catch {
-      // Live root unavailable; remain undefined to trigger the refusal below.
-      comfyuiBase = undefined;
-    }
-  }
+  const comfyuiBase =
+    basePath ??
+    (opts?.allowSharedWorkspaceFallback === false ? undefined : resolveEffectiveComfyUIBase());
   // Same hazard as the CLI paths (codex gate P0): the guard below catches "no
   // path", but the dangerous case is HAVING one while connected elsewhere. A
   // clone into a stale local tree would report a successful install of a pack the
@@ -3532,12 +3518,14 @@ async function resolveInstallLocalWorkspace(
 
   // An unset COMFYUI_PATH is not permission to use the saved default. The
   // connected local server must identify a usable custom_nodes scan root, or
-  // this operation remains Manager-only. This resolver never throws for an
-  // unavailable/ambiguous live root; the Manager attempt still proceeds.
+  // this operation remains Manager-only (#2261: consult live server before refusing).
   if (!process.env.COMFYUI_PATH && !isRemoteMode()) {
     try {
-      return await resolveCustomNodesScanBaseLiveStrict({ requireLive: true });
+      const liveRoot = await resolveCustomNodesScanBaseLiveStrict({ requireLive: true });
+      if (liveRoot) return liveRoot;
+      // Live root unresolvable; fall through to sync resolver
     } catch {
+      // Live base-directory unavailable (declarative flag but dir not present); fail-closed.
       return undefined;
     }
   }
