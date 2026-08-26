@@ -1094,7 +1094,9 @@ export class PanelAgent {
         // entries remain, this render is a STEP, not an ending. Positive
         // evidence only — no checklist, or one that is finished, keeps the
         // acknowledge-and-stop wording, so nothing changes for a single render.
-        runCompletionDirective(this.tabId);
+        // #2369 — replayed completions carry no plan context, so they always get
+        // the acknowledge-and-stop wording to avoid an unbounded reply loop.
+        runCompletionDirective(this.tabId, { replayed: ev.replayed });
       // Attach the outputs inline so the agent SEES the render without a fetch —
       // up to the bound above. Past it (or for an UNDETERMINED origin) the text
       // says so and points at get_image, so a fetch is needed but never a guess.
