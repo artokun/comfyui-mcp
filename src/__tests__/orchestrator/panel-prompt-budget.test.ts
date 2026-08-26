@@ -33,6 +33,8 @@ import { fileURLToPath } from "node:url";
 import { PANEL_SYSTEM_APPEND, resolvePanelPersona } from "../../orchestrator/index.js";
 import { buildPanelToolDefs } from "../../orchestrator/panel-tools.js";
 import { registerSkillsAccessTools } from "../../tools/skills-access.js";
+import { resolveHttpLaneComfyToolMode } from "../../orchestrator/http-backend-tools.js";
+import { collectToolCatalog } from "../../tools/index.js";
 
 /**
  * The ceiling, in characters.
@@ -164,6 +166,43 @@ describe("#2234 what left the preamble is reachable through the carrier skill", 
     ["connecting MCP servers", "panel_add_mcp"],
   ])("the carrier still covers %s", (_topic, marker) => {
     expect(SKILL_BODY).toContain(marker);
+  });
+});
+
+describe("#2234 the carrier is reachable on the lane the report came from", () => {
+  // Gate P1. The preamble tells the agent to call `list_packs`, but Antigravity — the
+  // backend in the report — reaches the comfyui server through
+  // makeHttpBackendMcpServers(), whose default tool mode is COMPACT (#291: the full
+  // surface crowds panel_* out of a Codex/Gemini session's tool budget). In compact mode
+  // the server advertises only list_tools / describe_tool / call_tool, so `list_packs` is
+  // not a name the agent can call directly. That was survivable while the preamble merely
+  // SUGGESTED skills; it is not survivable once 20 topics of guidance live behind it.
+
+  it("that lane really does default to compact", () => {
+    // Measured, not assumed — this is the premise the routing note rests on.
+    expect(resolveHttpLaneComfyToolMode({} as NodeJS.ProcessEnv)).toBe("compact");
+    expect(resolveHttpLaneComfyToolMode({ COMFYUI_MCP_TOOL_MODE: "full" } as NodeJS.ProcessEnv))
+      .toBe("full");
+  });
+
+  it("the preamble names the compact route instead of assuming a direct call", () => {
+    expect(PANEL_SYSTEM_APPEND).toContain("COMPACT mode");
+    expect(PANEL_SYSTEM_APPEND).toContain("list_tools / describe_tool / call_tool");
+    expect(PANEL_SYSTEM_APPEND).toMatch(/route it as call_tool/);
+    // And it must say absence is not proof of absence — the #1398 shape, one lane over.
+    expect(PANEL_SYSTEM_APPEND).toMatch(/absent from your tool list is NOT missing/);
+  });
+
+  it("call_tool can actually reach the tool the carrier pointer names", async () => {
+    // The compact facade dispatches through this catalog, so a name present here is
+    // reachable as call_tool({ name, args }). If list_packs ever left the catalog, the
+    // routing note would be pointing at a dead end.
+    const catalog = await collectToolCatalog();
+    expect(catalog.tools.has("list_packs")).toBe(true);
+    // The other comfyui tools the preamble names by bare name, for the same reason.
+    for (const name of ["download_model", "get_system_stats", "upload_image", "get_image"]) {
+      expect(catalog.tools.has(name), `${name} is not reachable through call_tool`).toBe(true);
+    }
   });
 });
 
