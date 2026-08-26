@@ -2,6 +2,7 @@ import { mkdir, mkdtemp, readFile, readdir, rm, stat, utimes, writeFile } from "
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { createHash } from "node:crypto";
+import { spawn, spawnSync } from "node:child_process";
 import * as fsPromises from "node:fs/promises";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -24,7 +25,7 @@ vi.mock("../../config.js", () => {
 });
 
 import { config } from "../../config.js";
-import { downloadCacheFs } from "../../services/download-cache.js";
+import { downloadCacheFs, downloadCacheIdentity } from "../../services/download-cache.js";
 import { downloadModel } from "../../services/model-resolver.js";
 import type { ResumeDiagnostic } from "../../services/download-resume-diag.js";
 import { setDownloadRetryPolicyForTests } from "../../services/download-retry.js";
@@ -60,6 +61,32 @@ const fetchMock = vi.fn();
 let tempDir: string;
 let cacheDir: string;
 let comfyDir: string;
+
+interface DownloadWorkerResult {
+  code: number | null;
+  stdout: string;
+  stderr: string;
+}
+
+function runDownloadWorker(
+  scriptPath: string,
+  env: NodeJS.ProcessEnv,
+): Promise<DownloadWorkerResult> {
+  return new Promise((resolve, reject) => {
+    const child = spawn(process.execPath, ["--import", "tsx/esm", scriptPath], {
+      cwd: process.cwd(),
+      env: { ...process.env, ...env },
+      stdio: ["ignore", "pipe", "pipe"],
+      windowsHide: true,
+    });
+    let stdout = "";
+    let stderr = "";
+    child.stdout.on("data", (chunk: Buffer) => { stdout += chunk.toString(); });
+    child.stderr.on("data", (chunk: Buffer) => { stderr += chunk.toString(); });
+    child.once("error", reject);
+    child.once("close", (code) => resolve({ code, stdout, stderr }));
+  });
+}
 
 function okResponse(body: string): Response {
   return new Response(body, { status: 200, statusText: "OK" });
@@ -154,6 +181,85 @@ describe("downloadModel cache", () => {
     expect(fetchMock).not.toHaveBeenCalled();
     await expect(readFile(lock, "utf8")).resolves.toContain("other-writer");
   });
+
+  it("atomically hands off a stale claim when two processes contend (#2356)", async () => {
+    const url = "https://example.com/models/stale-race.bin";
+    const target = join(comfyDir, "stale-race.bin");
+    const partial = downloadCacheIdentity(url).partialPath;
+    const lock = `${partial}.lock`;
+    const startFile = join(tempDir, "start-workers");
+    const workerScript = join(tempDir, "download-worker.mjs");
+    const deadPid = spawnSync(process.execPath, ["-e", ""], { windowsHide: true }).pid;
+    if (!deadPid) throw new Error("could not obtain a dead worker pid");
+
+    await mkdir(dirname(partial), { recursive: true });
+    await mkdir(dirname(target), { recursive: true });
+    await writeFile(lock, JSON.stringify({ pid: deadPid, token: "stale-owner" }));
+    await writeFile(
+      workerScript,
+      `
+import { existsSync } from "node:fs";
+const moduleUrl = ${JSON.stringify(new URL("../../services/download-cache.ts", import.meta.url).href)};
+while (!existsSync(process.env.CMCP_TEST_START_FILE)) {
+  await new Promise((resolve) => setTimeout(resolve, 10));
+}
+const { downloadWithCache } = await import(moduleUrl);
+globalThis.fetch = async () => new Response(
+  new ReadableStream({
+    start(controller) {
+      controller.enqueue(new TextEncoder().encode("worker payload"));
+      setTimeout(() => controller.close(), 3_000);
+    },
+  }),
+  { status: 200, headers: { "content-type": "application/octet-stream" } },
+);
+try {
+  const result = await downloadWithCache({
+    url: process.env.CMCP_TEST_URL,
+    headers: {},
+    targetPath: process.env.CMCP_TEST_TARGET,
+  });
+  console.log(JSON.stringify({ ok: true, result }));
+} catch (error) {
+  console.log(JSON.stringify({ ok: false, error: error instanceof Error ? error.message : String(error) }));
+  process.exitCode = 1;
+}
+`.trim(),
+    );
+
+    const workerEnv = {
+      COMFYUI_DOWNLOAD_CACHE_DIR: cacheDir,
+      COMFYUI_PATH: "",
+      CMCP_TEST_START_FILE: startFile,
+      CMCP_TEST_TARGET: target,
+      CMCP_TEST_URL: url,
+      HTTP_PROXY: "",
+      HTTPS_PROXY: "",
+      http_proxy: "",
+      https_proxy: "",
+      NO_PROXY: "*",
+      no_proxy: "*",
+    };
+    const one = runDownloadWorker(workerScript, workerEnv);
+    const two = runDownloadWorker(workerScript, workerEnv);
+    await writeFile(startFile, "go");
+    const results = await Promise.all([one, two]);
+    const output = results.map((result) => {
+      const line = result.stdout.trim().split(/\r?\n/).at(-1) ?? "";
+      try {
+        return JSON.parse(line) as { ok: boolean; error?: string };
+      } catch {
+        return { ok: false, error: `${line}\n${result.stderr}` };
+      }
+    });
+    expect(output.filter((result) => result.ok)).toHaveLength(1);
+    expect(output.filter((result) => !result.ok)).toHaveLength(1);
+    expect(output.find((result) => !result.ok)?.error).toMatch(
+      /another download is writing the same staged file/i,
+    );
+    await expect(readFile(target, "utf8")).resolves.toBe("worker payload");
+    await expect(readFile(lock, "utf8")).rejects.toMatchObject({ code: "ENOENT" });
+  }, 30_000);
 
   it("#515: a cancelled COALESCED caller never materializes its destination", async () => {
     // A and B fetch the SAME url (→ one physical download, coalesced) to DIFFERENT

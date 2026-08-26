@@ -1258,9 +1258,11 @@ async function acquireStagedWriterLock(
       };
     } catch (err) {
       if ((err as NodeJS.ErrnoException)?.code !== "EEXIST") throw err;
+      let observedRaw: string;
       let owner: { pid?: unknown };
       try {
-        owner = JSON.parse(await readFile(lockPath, "utf8")) as { pid?: unknown };
+        observedRaw = await readFile(lockPath, "utf8");
+        owner = JSON.parse(observedRaw) as { pid?: unknown };
       } catch {
         throw interferenceError(
           "the staged writer lock exists but its owner identity could not be read",
@@ -1288,9 +1290,64 @@ async function acquireStagedWriterLock(
         // ESRCH is proof that the lock owner is gone; EPERM/other errors refuse.
         if ((probeErr as NodeJS.ErrnoException)?.code !== "ESRCH") throw probeErr;
       }
-      // The recorded owner is proven gone. Remove only that stale claim, then let
-      // O_EXCL decide which simultaneous recovery attempt wins the new claim.
-      await rm(lockPath, { force: true });
+      // The recorded owner is proven gone. Move the exact path aside atomically,
+      // then compare the moved bytes with the observation. A contender that got
+      // here after another contender installed a replacement will move THAT live
+      // claim instead; the comparison catches it before anything is deleted.
+      //
+      // Restore a changed claim with an O_EXCL hard link, never rename: rename can
+      // overwrite a successor that landed while the aside copy was being checked.
+      // `link` is supported on the local filesystems supported by this cache and
+      // fails with EEXIST if another contender already restored/replaced the path.
+      const claimPath = `${lockPath}.stale-${randomBytes(16).toString("hex")}`;
+      try {
+        await downloadCacheFs.rename(lockPath, claimPath);
+      } catch (err) {
+        if ((err as NodeJS.ErrnoException)?.code === "ENOENT") continue;
+        throw interferenceError(
+          "the staged writer lock changed before its stale claim could be moved",
+          "before starting",
+          logUrl,
+        );
+      }
+
+      let movedRaw: string | undefined;
+      try {
+        movedRaw = await readFile(claimPath, "utf8");
+      } catch {
+        try {
+          await downloadCacheFs.link(claimPath, lockPath);
+          await downloadCacheFs.rm(claimPath, { force: true });
+        } catch {
+          // Preserve the aside copy when restoration loses to a successor or
+          // the filesystem refuses the non-overwriting restore operation.
+        }
+        throw interferenceError(
+          "the stale writer claim could not be re-read after its atomic move",
+          "before starting",
+          logUrl,
+        );
+      }
+
+      if (movedRaw !== observedRaw) {
+        try {
+          await downloadCacheFs.link(claimPath, lockPath);
+          await downloadCacheFs.rm(claimPath, { force: true });
+        } catch {
+          // EEXIST means a successor already occupies the canonical path; any
+          // other failure leaves the aside copy intact for diagnosis. In neither
+          // case may this contender remove bytes it did not create.
+        }
+        throw interferenceError(
+          "the staged writer lock changed while its stale claim was being reclaimed",
+          "before starting",
+          logUrl,
+        );
+      }
+
+      // The exact dead claim was moved, so removing only its private aside copy
+      // cannot affect a successor that may already have claimed lockPath.
+      await downloadCacheFs.rm(claimPath, { force: true }).catch(() => undefined);
     }
   }
   throw interferenceError(
