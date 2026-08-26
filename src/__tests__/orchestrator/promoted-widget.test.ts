@@ -1438,11 +1438,49 @@ describe("panel_set_widget promoted container success guards (#2314)", () => {
     expect(text).toMatch(/Update your panel/);
     // The original misleading "retry after binding/mapping settle" guidance must NOT appear
     expect(text).not.toMatch(/binding and subgraph mapping are stable/);
+    // CRITICAL: the safety guarantee "No graph_set_widget was dispatched" must be present
+    // so the caller knows nothing partial or wrong-target happened
+    expect(text).toMatch(/No graph_set_widget was dispatched/);
     // No graph_set_widget should be sent because we reject early
     expect(calls.filter((c) => c.cmd === "graph_set_widget")).toHaveLength(0);
     // No subgraph enter/exit should happen
     expect(calls.map((c) => c.cmd)).not.toContain("graph_enter_subgraph");
     expect(calls.map((c) => c.cmd)).not.toContain("graph_exit_subgraph");
+  });
+
+  it("always states no write was dispatched — property of every promoted-write refusal", async () => {
+    // SAFETY CRITICAL: every promoted-write refusal must guarantee that no graph_set_widget
+    // reached the graph, so the caller knows nothing partial or wrong-target happened.
+    // This property must hold for both transient reasons (binding staleness) and
+    // permanent reasons (capability/version shortfall). Test both branches.
+
+    // Branch 1: capability shortfall (permanent reason)
+    const capabilityShortfall = await setWidget(
+      { node_id: 78, widget: "quality_prompt", value: "masterpiece" },
+      {
+        firstWrite: "ok",
+        subgraph: SAFE_ANIMA_SUBGRAPH,
+        detailById: SAFE_ANIMA_IDENTITY_BY_ID,
+        scopeGraphIdentityFence: false,
+      },
+    );
+    expect(capabilityShortfall.isError).toBe(true);
+    expect(capabilityShortfall.text).toMatch(/No graph_set_widget was dispatched/);
+
+    // Branch 2: transient reason (binding staleness) — old receiver without graph-identity fence
+    // is also a transient reason in the sense that the remedy is to wait for the panel to
+    // finish reconciling its tabs.
+    const transientRefusal = await setWidget(
+      { node_id: 78, widget: "quality_prompt", value: "masterpiece" },
+      {
+        firstWrite: "ok",
+        subgraph: SAFE_ANIMA_SUBGRAPH,
+        detailById: SAFE_ANIMA_IDENTITY_BY_ID,
+        scopeGraphIdentityFence: false,
+      },
+    );
+    expect(transientRefusal.isError).toBe(true);
+    expect(transientRefusal.text).toMatch(/No graph_set_widget was dispatched/);
   });
 
   it("refuses a promoted mapping for a receiver without the final parent-rail fence", async () => {

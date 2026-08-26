@@ -6572,13 +6572,13 @@ function promotedWriteRefusal(
   reason: string,
   options?: { capabilityName?: string },
 ): ToolResult {
-  const guidance =
+  const remedy =
     options?.capabilityName === "enforces_expected_scope_graph_identity_at_write"
-      ? `This session requires panel >= ${BRIDGE_CAPABILITY_MIN_PANEL_VERSION.enforces_expected_scope_graph_identity_at_write} for promoted widget writes. ` +
-        `Update your panel, then retry.`
-      : `No graph_set_widget was dispatched; retry only after the panel binding and subgraph mapping are stable.`;
+      ? `This session requires panel >= ${BRIDGE_CAPABILITY_MIN_PANEL_VERSION.enforces_expected_scope_graph_identity_at_write} for promoted widget writes. Update your panel, then retry.`
+      : `Retry only after the panel binding and subgraph mapping are stable.`;
   return fail(
-    `panel_set_widget refused the promoted "${widget}" write because ${reason}. ${guidance}`,
+    `panel_set_widget refused the promoted "${widget}" write because ${reason}. ` +
+      `No graph_set_widget was dispatched; ${remedy}`,
   );
 }
 
