@@ -1047,6 +1047,89 @@ describe("panel_set_widget promoted container success guards (#2314)", () => {
     ]);
   });
 
+  // panel#1869 — the panel's own `[canvas-root-divergence]` diagnosis, which the
+  // promoted-container wording used to swallow. These are the two remedy variants
+  // `getGraphCtx()` actually emits, copied from the panel's refuseDivergence().
+  const DIVERGENCE_ROOT_VARIANT =
+    "[canvas-root-divergence] The canvas you are looking at (31 node(s)) and the panel's bound " +
+    "root graph (0 node(s)) are two DIFFERENT graphs, so this command was NOT applied — the panel " +
+    "cannot tell which one it was meant for, and picking either could edit a graph you are not " +
+    "looking at. This usually follows a ComfyUI backend restart without a page reload. Save or " +
+    "export the canvas you want to keep, then reload the ComfyUI page (a panel-only reload does " +
+    "not rebuild this binding).";
+  const DIVERGENCE_SUBGRAPH_VARIANT =
+    "[canvas-root-divergence] The canvas you are looking at (4 node(s)) and the panel's bound " +
+    "root graph (12 node(s)) are two DIFFERENT graphs, so this command was NOT applied. Leave the " +
+    "open subgraph on the ComfyUI canvas (its breadcrumb, or double-click out) to get back to a " +
+    "graph the panel can identify; if that does not clear it, save or export anything you need " +
+    "from this view and reload the ComfyUI page.";
+
+  it("relays the panel's divergence diagnosis instead of the promoted-container wording", async () => {
+    const { text, isError, calls, mutations } = await setWidget(
+      { node_id: 78, widget: "quality_prompt", value: "masterpiece" },
+      {
+        firstWrite: "ok",
+        subgraph: new Error(DIVERGENCE_ROOT_VARIANT),
+      },
+    );
+
+    // Still fail-closed: the guard is untouched and nothing was written.
+    expect(isError).toBe(true);
+    expect(calls.map((c) => c.cmd)).toEqual(["graph_query", "graph_get_subgraph"]);
+    expect(calls.map((c) => c.cmd)).not.toContain("graph_set_widget");
+    expect(mutations).toBe(0);
+
+    // The panel's cause AND its remedy survive to the caller.
+    expect(text).toContain("[canvas-root-divergence]");
+    expect(text).toContain("are two DIFFERENT graphs");
+    expect(text).toContain("reload the ComfyUI page (a panel-only reload does not rebuild this binding)");
+
+    // The two things panel#1869 was actually about: the wrong cause, and the
+    // remedy the reporter followed into a loop with no exit.
+    expect(text).not.toContain("could not determine whether the addressed node is a promoted container");
+    expect(text).not.toContain("retry only after the panel binding and subgraph mapping are stable");
+    expect(text).not.toMatch(/Retry only after the panel binding and subgraph mapping are stable/i);
+
+    // And it rules out what the reporter tried next.
+    expect(text).toContain("panel_open_workflow");
+  });
+
+  it("relays the SUBGRAPH-stranded remedy too, rather than a hardcoded one", async () => {
+    const { text, isError, mutations } = await setWidget(
+      { node_id: 78, widget: "quality_prompt", value: "masterpiece" },
+      {
+        firstWrite: "ok",
+        subgraph: new Error(DIVERGENCE_SUBGRAPH_VARIANT),
+      },
+    );
+
+    expect(isError).toBe(true);
+    expect(mutations).toBe(0);
+    // The root-restart remedy must NOT appear for a subgraph-stranded canvas:
+    // that is the failure mode of naming a remedy here instead of relaying one.
+    expect(text).toContain("Leave the open subgraph on the ComfyUI canvas");
+    expect(text).not.toContain("This usually follows a ComfyUI backend restart");
+  });
+
+  it("leaves every NON-diagnosed indeterminate read on its original wording", async () => {
+    const { text, isError, calls, mutations } = await setWidget(
+      { node_id: 78, widget: "quality_prompt", value: "masterpiece" },
+      {
+        firstWrite: "ok",
+        subgraph: new Error("graph_get_subgraph unavailable"),
+      },
+    );
+
+    expect(isError).toBe(true);
+    expect(mutations).toBe(0);
+    expect(calls.map((c) => c.cmd)).toEqual(["graph_query", "graph_get_subgraph"]);
+    // Unchanged from before panel#1869: a transport failure IS transient, so
+    // "retry once stable" is honest advice there and must survive.
+    expect(text).toContain("could not determine whether the addressed node is a promoted container");
+    expect(text).toContain("Retry only after the panel binding and subgraph mapping are stable");
+    expect(text).not.toContain("[canvas-root-divergence]");
+  });
+
   it("keeps a definitive non-promoted write valid", async () => {
     const { isError, calls } = await setWidget(
       { node_id: 78, widget: "quality_prompt", value: "masterpiece" },

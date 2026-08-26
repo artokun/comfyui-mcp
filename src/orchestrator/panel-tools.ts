@@ -6357,6 +6357,58 @@ function isDefinitiveNonPromotedSubgraphRead(res: ToolResult): boolean {
   );
 }
 
+/**
+ * panel#1869 — the panel's `[canvas-root-divergence]` refusal is a DIAGNOSIS,
+ * and must not be replaced by the promoted-container wording.
+ *
+ * The panel's `graph_get_subgraph` opens with `getGraphCtx()`, so a diverged
+ * canvas throws there BEFORE the command can reach its own
+ * `Node <id> (<type>) is not a subgraph` line. That leaves the read genuinely
+ * indeterminate — {@link isDefinitiveNonPromotedSubgraphRead} is right to
+ * reject it, and is deliberately untouched — but indeterminate is not the same
+ * as unknown. The panel had already named the cause AND the only remedy that
+ * clears it, and we discarded both to say "retry only after the panel binding
+ * and subgraph mapping are stable". The reporter did exactly that: retried, and
+ * re-bound the tab with panel_open_workflow, and got the identical refusal every
+ * time, on three separate nodes. There was no exit from that loop.
+ */
+const CANVAS_ROOT_DIVERGENCE_MARKER = "[canvas-root-divergence]";
+
+/**
+ * The refusal for a failed `graph_get_subgraph` in the promoted-write path.
+ *
+ * Both branches are the same fail-closed refusal; the ONLY thing that varies is
+ * what the caller is told, so no reachable input to this function can authorize
+ * a write. `fallbackReason` is each call site's existing wording, kept verbatim
+ * for every error the panel did not diagnose.
+ *
+ * Keyed on the bracketed marker rather than the prose around it: the divergence
+ * message has two different remedy variants (a canvas stranded inside a subgraph
+ * the rebuilt root no longer owns, vs. two different root graphs) and is
+ * otherwise free to be reworded. Relaying the panel's text verbatim is what
+ * keeps BOTH variants correct here without this file knowing which is which.
+ */
+function promotedSubgraphReadRefusal(
+  widget: string,
+  res: ToolResult,
+  fallbackReason: string,
+): ToolResult {
+  const panelText = textOfToolResult(res);
+  if (!panelText.includes(CANVAS_ROOT_DIVERGENCE_MARKER)) {
+    return promotedWriteRefusal(widget, fallbackReason);
+  }
+  return fail(
+    `panel_set_widget refused the promoted "${widget}" write because the panel could not read ` +
+      `the addressed node at all: the canvas and the panel's bound root graph have DIVERGED. ` +
+      `No graph_set_widget was dispatched.\n` +
+      `This is not a transient binding state, and it is not about this node, this widget, or ` +
+      `promotion — every node in this tab reads the same way until the divergence is cleared. ` +
+      `Retrying, panel_open_workflow, and panel_set_workflow_target all re-bind the tab to the ` +
+      `same two diverged graphs, so on their own none of them clear it.\n` +
+      `The panel diagnosed it and named the remedy:\n${panelText}`,
+  );
+}
+
 function promotedMatchCount(payload: Record<string, unknown>, widget: string): number {
   const nodes = payload.nodes;
   if (!Array.isArray(nodes)) return 0;
@@ -6635,8 +6687,9 @@ async function preparePromotedWidgetWrite(
   const sub = await ctx.call({ cmd: "graph_get_subgraph", node_id: nodeId });
   if (sub.isError) {
     if (isDefinitiveNonPromotedSubgraphRead(sub)) return null;
-    return promotedWriteRefusal(
+    return promotedSubgraphReadRefusal(
       widget,
+      sub,
       "graph_get_subgraph could not determine whether the addressed node is a promoted container",
     );
   }
@@ -6833,8 +6886,9 @@ async function recheckPromotedOuterMapping(
     node_id: outerNodeId,
   });
   if (confirmation.isError) {
-    return promotedWriteRefusal(
+    return promotedSubgraphReadRefusal(
       widget,
+      confirmation,
       "the promoted mapping read was unavailable before the write",
     );
   }
@@ -6950,8 +7004,9 @@ async function recheckPromotedInnerTarget(
       node_id: expectedInner.innerNodeId,
     });
     if (nested.isError) {
-      return promotedWriteRefusal(
+      return promotedSubgraphReadRefusal(
         widget,
+        nested,
         "the nested promoted terminal could not be resolved in the entered graph",
       );
     }
