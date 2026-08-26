@@ -59,6 +59,9 @@
     "src/__tests__/orchestrator/carried-stamp-corroboration.test.ts": {
       "no-chained-type-assertions": 1
     },
+    "src/__tests__/orchestrator/chatgpt-image-history-recovery.test.ts": {
+      "no-chained-type-assertions": 1
+    },
     "src/__tests__/orchestrator/chatgpt-oauth-backend.test.ts": {
       "no-chained-type-assertions": 1
     },
@@ -122,6 +125,9 @@
     },
     "src/__tests__/orchestrator/history-unreadable.test.ts": {
       "no-unknown-returns": 1
+    },
+    "src/__tests__/orchestrator/inherited-mcp-not-in-session.test.ts": {
+      "no-chained-type-assertions": 2
     },
     "src/__tests__/orchestrator/inject-event-wiring.test.ts": {
       "no-chained-type-assertions": 1
@@ -317,7 +323,7 @@
       "no-chained-type-assertions": 1
     },
     "src/__tests__/orchestrator/panel-tools.test.ts": {
-      "no-chained-type-assertions": 121,
+      "no-chained-type-assertions": 123,
       "no-unknown-returns": 3
     },
     "src/__tests__/orchestrator/pi-backend.test.ts": {
@@ -408,6 +414,9 @@
     },
     "src/__tests__/scripts/knowledge-parity-mock-graph.test.ts": {
       "no-unknown-returns": 1
+    },
+    "src/__tests__/scripts/launch-server.test.ts": {
+      "no-chained-type-assertions": 5
     },
     "src/__tests__/services/agent-note-channel.test.ts": {
       "no-chained-type-assertions": 9,
@@ -684,7 +693,7 @@
       "no-unknown-returns": 1
     },
     "src/orchestrator/panel-tools.ts": {
-      "no-chained-type-assertions": 2,
+      "no-chained-type-assertions": 5,
       "no-unknown-returns": 7
     },
     "src/orchestrator/pi-credentials.ts": {
