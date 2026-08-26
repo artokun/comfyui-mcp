@@ -180,4 +180,48 @@ describe("recent_errors as a limit (#1146)", () => {
     expect(text).toMatch(/not requested/);
     expect(text).not.toMatch(/Traceback/);
   });
+
+  it("does not match normal log lines containing the word 'error' as a substring", async () => {
+    // Issue #2329: normal output like "0 errors found" or "no errors" gets matched
+    // by /error/i but should not be treated as actual error lines.
+    fetchApi.mockImplementation(async (path: string) =>
+      path === "/internal/logs"
+        ? new Response(
+            "startup ok\nImport check: 0 errors found\nModel load status: 0 errors\n[ERROR] Real error occurred here\nStartup: 0 errors during init\n",
+            { status: 200 }
+          )
+        : new Response(JSON.stringify([]), { status: 200 }),
+    );
+    const text = await runHealthCheck({ modelCategories: [], recentErrors: 10 });
+    // Should only match the real [ERROR] line, not the "0 errors" lines
+    expect(text).toMatch(/Real error occurred here/);
+    expect(text).toMatch(/Recent errors\*\* \(last 1\)/);
+    expect(text).not.toMatch(/0 errors found/);
+    expect(text).not.toMatch(/0 errors during/);
+  });
+
+  it("filters lines by actual error severity, not substring matching", async () => {
+    // Only lines with [ERROR], [EXCEPTION], or Traceback markers should be kept
+    fetchApi.mockImplementation(async (path: string) =>
+      path === "/internal/logs"
+        ? new Response(
+            [
+              "2026-08-25T20:00:00 [INFO] ComfyUI startup",
+              "2026-08-25T20:00:01 [INFO] Import successful: 0 errors",
+              "2026-08-25T20:00:02 [WARNING] Some warning message",
+              "2026-08-25T20:00:03 [ERROR] Connection error on port 8188",
+              "2026-08-25T20:00:04 [ERROR] Failed to load model",
+            ].join("\n"),
+            { status: 200 }
+          )
+        : new Response(JSON.stringify([]), { status: 200 }),
+    );
+    const text = await runHealthCheck({ modelCategories: [], recentErrors: 10 });
+    // Should only have 2 error lines
+    expect(text).toMatch(/Recent errors\*\* \(last 2\)/);
+    expect(text).toMatch(/Connection error/);
+    expect(text).toMatch(/Failed to load model/);
+    expect(text).not.toMatch(/0 errors/);
+    expect(text).not.toMatch(/Some warning/);
+  });
 });

@@ -169,17 +169,63 @@ export async function runHealthCheck(
     try {
       const res = await comfyApiFetch("/internal/logs");
       if (res.ok) {
-        const text = await res.text();
+        const rawText = await res.text();
+        // /internal/logs returns a JSON-wrapped string. Parse it to get the actual logs.
+        let text: string;
+        try {
+          text = JSON.parse(rawText);
+        } catch {
+          // If not JSON, use the raw text
+          text = rawText;
+        }
+
         // #1206 — these lines go straight into the health report, which is a
         // DIAGNOSTIC users paste into bug reports. A custom node logging the URL
         // it fetched can put a CivitAI/HF token in one, so scrub before emitting.
         // Per line, and fail-closed VISIBLY, for the same reasons as getLogs.
-        const errLines = scrubLogLines(
-          text
-            .split("\n")
-            .filter((l) => /traceback|error|exception/i.test(l))
-            .slice(-recentErrors),
-        );
+        //
+        // #2329 — match severity on the line itself, not a bare substring. A log
+        // line containing "error" in a message like "0 errors found" is not an
+        // actual error. Only lines with [ERROR]/[EXCEPTION] markers or starting
+        // with "Traceback" are errors. Keep traceback continuation lines (indented).
+        const allLines = text.split("\n");
+        const errorLines: string[] = [];
+        const processed = new Set<number>();
+
+        for (let i = 0; i < allLines.length; i++) {
+          if (processed.has(i)) continue;
+
+          const line = allLines[i];
+          // Match lines with [ERROR], [EXCEPTION] markers or Traceback/Exception starts
+          const isErrorLine = /\[ERROR\]|\[EXCEPTION\]/i.test(line) ||
+                             /^Traceback\s*\(/i.test(line) ||
+                             /^Exception\s*:/i.test(line);
+
+          if (isErrorLine) {
+            errorLines.push(line);
+            processed.add(i);
+
+            // Include continuation lines (indented or following lines that are part of traceback)
+            for (let j = i + 1; j < allLines.length; j++) {
+              const nextLine = allLines[j];
+              // Stop if we hit another error marker or a non-indented line that's not an error start
+              if (/\[ERROR\]|\[EXCEPTION\]/i.test(nextLine) ||
+                  (/^Traceback\s*\(/i.test(nextLine)) ||
+                  (/^Exception\s*:/i.test(nextLine))) {
+                break;
+              }
+              // Include indented lines and empty lines within traceback
+              if (/^[ \t]/.test(nextLine) || nextLine.trim() === "") {
+                errorLines.push(nextLine);
+                processed.add(j);
+              } else {
+                break;
+              }
+            }
+          }
+        }
+
+        const errLines = scrubLogLines(errorLines.slice(-recentErrors));
         if (errLines.length > 0) {
           lines.push(`\n**Recent errors** (last ${errLines.length}):`);
           for (const e of errLines) lines.push(`  ${e.trim()}`);
