@@ -6,6 +6,13 @@ All notable changes to this project are documented here. This project adheres to
 
 ## Unreleased
 
+## [0.52.134] - 2026-08-26
+
+### MCP
+
+#### Fixed
+- classify only panel-scoped transport failures for bounded recovery without mutation replay (#2378)
+
 ## [0.52.133] - 2026-08-26
 
 ### MCP
