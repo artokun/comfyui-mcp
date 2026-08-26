@@ -127,6 +127,7 @@ import {
   parseUnpromotedControlPersistRemedy,
   promotedScopeWitnessFromEnvelope,
   promotedViewingMatchesScope,
+  resolveLegacyInnerPromotedTarget,
   resolveInnerPromotedTarget,
   validatePromotedSubgraphEnvelope,
   type PromotedScopeWitness,
@@ -6276,15 +6277,6 @@ async function refuseKnownBadWriteBeforeDispatch(
   return refuseKnownBadWidgetWrite(ctx, nodeId, widget);
 }
 
-function mayHaveKnownBadPromotedWidget(widget: string): boolean {
-  const lower = widget.toLowerCase();
-  return (
-    [...ANIMA_REGIONAL_PROMPT_WIDGETS].some((name) => name.toLowerCase() === lower) ||
-    lower === DASIWA_STACK_WIDGET.toLowerCase() ||
-    widget.includes(".")
-  );
-}
-
 /**
  * #2314 — a promoted write can succeed on the container and propagate to an
  * unsafe inner widget without ever entering the recovery branch. Resolve the
@@ -6375,6 +6367,55 @@ function promotedTerminalAliasCount(
       typeof (entry as Record<string, unknown>).widget === "string" &&
       ((entry as Record<string, unknown>).widget as string).toLowerCase() === widget.toLowerCase(),
   ).length;
+}
+
+/** A capability-skewed receiver's witness array is not authoritative. Any
+ * malformed, duplicate, or unresolved entry also makes the whole successful
+ * subgraph response incomplete: an unrelated requested alias cannot use the
+ * remaining entries as proof that it was ordinary. Do not ignore that evidence
+ * and revive the old same-name scan into an outer write. */
+function promotedTerminalEvidenceError(
+  payload: Record<string, unknown>,
+): string | null {
+  if (!Object.prototype.hasOwnProperty.call(payload, "promoted_terminals")) return null;
+  const entries = payload.promoted_terminals;
+  if (!Array.isArray(entries)) return "the current receiver's promoted-terminal witness was unavailable";
+  const seen = new Set<string>();
+  for (const entry of entries) {
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) {
+      return "the current receiver's promoted-terminal witness was unavailable";
+    }
+    const witness = entry as Record<string, unknown>;
+    if (typeof witness.widget !== "string" || witness.widget.length === 0) {
+      return "the current receiver's promoted-terminal witness was unavailable";
+    }
+    const key = witness.widget.toLowerCase();
+    if (seen.has(key)) return "the promoted-terminal witness was ambiguous";
+    seen.add(key);
+    if (witness.error) return "the promoted-terminal witness was incomplete or unresolved";
+  }
+  return null;
+}
+
+/** Resolve a requested relation without ever treating an unadvertised
+ * witness miss as ordinary. A valid entry is safe positive evidence for this
+ * alias even during capability skew; the legacy same-name scan remains the
+ * compatibility fallback only when no witness array is present (or when its
+ * requested alias is not represented and the old envelope can positively map
+ * that exact same name). The caller handles every miss as indeterminate. */
+function resolvePromotedWriteTarget(
+  payload: Record<string, unknown> | null | undefined,
+  widget: string,
+  nodeId: number | string,
+  authoritativeWitnesses: boolean,
+) {
+  if (!payload) return null;
+  if (authoritativeWitnesses) return resolveInnerPromotedTarget(payload, widget, nodeId);
+  if (Object.prototype.hasOwnProperty.call(payload, "promoted_terminals")) {
+    const witnessed = resolveInnerPromotedTarget(payload, widget, nodeId);
+    if (witnessed) return witnessed;
+  }
+  return resolveLegacyInnerPromotedTarget(payload, widget, nodeId);
 }
 
 function currentPromotedBindingError(
@@ -6524,15 +6565,27 @@ async function preparePromotedWidgetWrite(
   nodeId: unknown,
   widget: string,
 ): Promise<PromotedWritePreflight> {
+  // Production PanelToolCtx is always backed by UiBridge, which exposes this
+  // per-hello capability getter. A few transport-only forwarding contexts (and
+  // older unit seams) intentionally have no receiver capability API at all;
+  // there is no panel response to authorize or refuse in that case, so leave
+  // their one-hop forwarding contract unchanged. A real connected receiver
+  // reaches the fail-closed `false` branch below when the getter says the
+  // complete witness capability was not advertised.
+  const receiverCapabilityApi = (ctx.bridge as unknown as BridgeProbe | undefined)
+    ?.tabPromotedTerminalWitnessCapability;
+  if (
+    typeof ctx.tabPromotedTerminalWitnessCapability !== "function" ||
+    typeof receiverCapabilityApi !== "function"
+  ) {
+    return null;
+  }
   // The recursive terminal witness is only actionable when the receiver
   // advertises that it publishes that witness. Older panels retain their
   // established known-bad recovery path rather than being mistaken for a
   // bundle that can classify renamed promotion aliases.
   const publishesCompleteTerminalWitness =
     ctx.tabPromotedTerminalWitnessCapability?.() === true;
-  if (!publishesCompleteTerminalWitness && !mayHaveKnownBadPromotedWidget(widget)) {
-    return null;
-  }
 
   const tabBefore = ctx.tabId;
   const hasIdentityApi = typeof ctx.panelConnectionIdentity === "function";
@@ -6570,16 +6623,12 @@ async function preparePromotedWidgetWrite(
     );
   }
   // The recursive alias mapping is the current receiver's proof that this
-  // graph_get_subgraph response can classify renamed promotions. Legacy
-  // envelopes have no terminal relation; leave their established refusal/
-  // recovery path in charge rather than treating a same-name inner hit as a
-  // complete authorization proof.
-  if (
-    !Object.prototype.hasOwnProperty.call(payload, "promoted_terminals") &&
-    !mayHaveKnownBadPromotedWidget(widget)
-  ) {
-    return null;
-  }
+  // graph_get_subgraph response can classify renamed promotions. A legacy
+  // envelope may still positively map an old same-name promotion, but a miss
+  // is not evidence that the request is an ordinary widget on the container.
+  // In particular, do not turn a narrow known-bad-name list into authorization
+  // for an unscoped outer write: renamed Anima, dynamic, DaSiWa, and dotted
+  // aliases are all untrusted shape inputs here.
   if (!hasIdentityApi) {
     return promotedWriteRefusal(widget, "the receiver identity was unavailable while the mapping was read");
   }
@@ -6614,12 +6663,23 @@ async function preparePromotedWidgetWrite(
       "graph_get_subgraph did not publish a verifiable workflow and viewing-scope identity",
     );
   }
-  const inner = resolveInnerPromotedTarget(payload, widget, nodeId as number | string);
+  const terminalEvidenceError = promotedTerminalEvidenceError(payload);
+  if (terminalEvidenceError) return promotedWriteRefusal(widget, terminalEvidenceError);
+  const inner = resolvePromotedWriteTarget(
+    payload,
+    widget,
+    nodeId as number | string,
+    publishesCompleteTerminalWitness,
+  );
   if (!inner) {
-    const terminalAliases = publishesCompleteTerminalWitness
-      ? promotedTerminalAliasCount(payload, widget)
-      : 0;
-    if (terminalAliases === null || terminalAliases > 0) {
+    if (publishesCompleteTerminalWitness) {
+      const terminalAliases = promotedTerminalAliasCount(payload, widget);
+      if (terminalAliases === 0) {
+        // A complete current witness is authoritative: an alias absent from it
+        // is an ordinary own-widget, even if an inner node happens to use the
+        // same spelling.
+        return null;
+      }
       return promotedWriteRefusal(
         widget,
         terminalAliases === null
@@ -6627,18 +6687,16 @@ async function preparePromotedWidgetWrite(
           : "the promoted-terminal witness was missing, ambiguous, stale, or unresolved",
       );
     }
-    // A current panel's complete witness array is authoritative: an alias
-    // absent from it is an ordinary own-widget, even if an inner concrete node
-    // happens to use the same spelling. Preserve the original outer write for
-    // that deliberate non-promoted case.
-    if (publishesCompleteTerminalWitness && terminalAliases === 0) return null;
+    // Legacy panels cannot prove that a successful subgraph read has no renamed
+    // relation. Only a definitive non-subgraph error above authorizes the
+    // original outer path; every successful legacy envelope with no positive
+    // same-name mapping is refused before graph_set_widget.
     const matches = promotedMatchCount(payload, widget);
-    if (matches === 0) return null;
     return promotedWriteRefusal(
       widget,
-      matches === 1
-        ? "the terminal promotion endpoint was missing, malformed, or unresolved"
-        : `the envelope mapped it ambiguously to ${matches} inner nodes`,
+      matches > 1
+        ? `the legacy envelope mapped this request ambiguously to ${matches} inner nodes`
+        : "the legacy receiver could not prove that this subgraph request was an ordinary widget",
     );
   }
   const scopeError = currentPromotedScopeError(ctx, scope);
@@ -6728,7 +6786,12 @@ async function recheckPromotedOuterMapping(
   const envelope = validatePromotedSubgraphEnvelope(payload, outerNodeId);
   const observedScope = envelope ? promotedScopeWitnessFromEnvelope(envelope) : null;
   const inner = envelope
-    ? resolveInnerPromotedTarget(payload, widget, outerNodeId)
+    ? resolvePromotedWriteTarget(
+        payload,
+        widget,
+        outerNodeId,
+        ctx.tabPromotedTerminalWitnessCapability?.() === true,
+      )
     : null;
   if (
     !envelope ||
@@ -6828,7 +6891,12 @@ async function recheckPromotedInnerTarget(
       expectedInner.innerNodeId,
     );
     const nestedInner = nestedEnvelope
-      ? resolveInnerPromotedTarget(nestedPayload, expectedInner.widget, expectedInner.innerNodeId)
+      ? resolvePromotedWriteTarget(
+          nestedPayload,
+          expectedInner.widget,
+          expectedInner.innerNodeId,
+          ctx.tabPromotedTerminalWitnessCapability?.() === true,
+        )
       : null;
     if (!nestedInner?.terminal || !samePromotedTerminal(nestedInner.terminal, expectedTerminal, false)) {
       return promotedWriteRefusal(
@@ -12590,6 +12658,7 @@ interface BridgeProbe {
   workflowUuidFor?: (tabId: string) => TabWorkflowUuidRead;
   promotedScopeFor?: (tabId: string) => TabPromotedScopeRead;
   readPromotedScope?: (tabId: string, innerNodeId: number | string) => Promise<TabPromotedScopeRead>;
+  tabPromotedTerminalWitnessCapability?: (tabId: string) => boolean;
   lastFenceRefusal?: (tabId: string) => string | undefined;
   isHeadless?: (tabId: string) => boolean;
   canReach?: (tabId: string) => boolean;
@@ -17719,10 +17788,11 @@ export function buildPanelToolDefs(): PanelToolDef[] {
             );
           }
         }
-        const inner = resolveInnerPromotedTarget(
+        const inner = resolvePromotedWriteTarget(
           recoveryPayload,
           refusal.widget,
           args.node_id as number | string,
+          ctx.tabPromotedTerminalWitnessCapability?.() === true,
         );
         if (!inner) {
           return appendToolResultText(

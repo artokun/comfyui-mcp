@@ -439,7 +439,7 @@ describe("panel-tools: panel_set_widget Anima regional textarea (#1658)", () => 
     const { res, cmds } = await run({ widget: "red_prompt" }, { text: "#3 KSampler" });
     expect(res.isError).toBeUndefined();
     expect(JSON.parse(res.content[0].text!).set.value).toBe("NEW");
-    expect(cmds).toEqual(["graph_query", "graph_get_subgraph", "graph_set_widget"]);
+    expect(cmds).toEqual(["graph_query", "graph_set_widget"]);
   });
 
   it("does not probe a generic widget (existing writes stay one hop)", async () => {
@@ -454,13 +454,13 @@ describe("panel-tools: panel_set_widget Anima regional textarea (#1658)", () => 
       { isError: true, content: [{ type: "text", text: "Error: no connected tab" }] },
     );
     expect(res.isError).toBeUndefined();
-    expect(cmds).toEqual(["graph_query", "graph_get_subgraph", "graph_set_widget"]);
+    expect(cmds).toEqual(["graph_query", "graph_set_widget"]);
   });
 
   it("fail-open: a probe with no type still writes", async () => {
     const { res, cmds } = await run({ widget: "negative_prompt" }, { text: "0 match(es)" });
     expect(res.isError).toBeUndefined();
-    expect(cmds).toEqual(["graph_query", "graph_get_subgraph", "graph_set_widget"]);
+    expect(cmds).toEqual(["graph_query", "graph_set_widget"]);
   });
 
   it("documents the refusal and the wired-input route on the tool itself", () => {
@@ -549,7 +549,7 @@ describe("panel-tools: panel_set_widget V3 dynamic-combo sub-widgets (#2299)", (
       { node_id: 3, widget: "lora_1.on", value: false },
     );
     expect(res.isError).toBeUndefined();
-    expect(cmds).toEqual(["graph_query", "graph_get_subgraph", "graph_set_widget"]);
+    expect(cmds).toEqual(["graph_query", "graph_set_widget"]);
   });
 
   it("keeps an ordinary dotted STRING widget writable", async () => {
@@ -567,7 +567,7 @@ describe("panel-tools: panel_set_widget V3 dynamic-combo sub-widgets (#2299)", (
       { node_id: 4, widget: "prompt.foo", value: "safe" },
     );
     expect(res.isError).toBeUndefined();
-    expect(cmds).toEqual(["graph_query", "graph_get_subgraph", "graph_set_widget"]);
+    expect(cmds).toEqual(["graph_query", "graph_set_widget"]);
   });
 
   it("keeps the V3 parent selector writable", async () => {
@@ -587,7 +587,7 @@ describe("panel-tools: panel_set_widget V3 dynamic-combo sub-widgets (#2299)", (
       value: "safe",
     });
     expect(res.isError).toBeUndefined();
-    expect(cmds).toEqual(["graph_query", "graph_get_subgraph", "graph_set_widget"]);
+    expect(cmds).toEqual(["graph_query", "graph_set_widget"]);
   });
 
   // ---- the over-refusal controls -------------------------------------------
@@ -629,7 +629,7 @@ describe("panel-tools: panel_set_widget V3 dynamic-combo sub-widgets (#2299)", (
       value: "4K",
     });
     expect(res.isError).toBeUndefined();
-    expect(cmds).toEqual(["graph_query", "graph_get_subgraph", "graph_set_widget"]);
+    expect(cmds).toEqual(["graph_query", "graph_set_widget"]);
   });
 
   it("keeps every non-STRING child of the same V3 parent writable", async () => {
@@ -639,7 +639,7 @@ describe("panel-tools: panel_set_widget V3 dynamic-combo sub-widgets (#2299)", (
     ] as Array<[string, string]>) {
       const { res, cmds } = await run(nanoBanana2Detail, { node_id: 31, widget, value });
       expect(res.isError, `${widget} must stay writable`).toBeUndefined();
-      expect(cmds).toEqual(["graph_query", "graph_get_subgraph", "graph_set_widget"]);
+      expect(cmds).toEqual(["graph_query", "graph_set_widget"]);
     }
   });
 
@@ -666,7 +666,7 @@ describe("panel-tools: panel_set_widget V3 dynamic-combo sub-widgets (#2299)", (
     ] as Array<[string, unknown]>) {
       const { res, cmds } = await run(detail, { node_id: 32, widget, value });
       expect(res.isError, `${widget} must stay writable`).toBeUndefined();
-      expect(cmds).toEqual(["graph_query", "graph_get_subgraph", "graph_set_widget"]);
+      expect(cmds).toEqual(["graph_query", "graph_set_widget"]);
     }
   });
 
@@ -687,7 +687,7 @@ describe("panel-tools: panel_set_widget V3 dynamic-combo sub-widgets (#2299)", (
       { node_id: 33, widget: "model.prompt", value: "NEW" },
     );
     expect(res.isError).toBeUndefined();
-    expect(cmds).toEqual(["graph_query", "graph_get_subgraph", "graph_set_widget"]);
+    expect(cmds).toEqual(["graph_query", "graph_set_widget"]);
   });
 
   it("names the proven child type in the refusal, so the STRING remedy always fits", async () => {
@@ -733,7 +733,7 @@ describe("panel-tools: panel_set_widget V3 dynamic-combo sub-widgets (#2299)", (
       nodes: [{ id: 23, type: "MinimaxHailuo03TextToVideoNode", title: "MiniMax" }],
     });
     expect(res.isError).toBeUndefined();
-    expect(cmds).toEqual(["graph_query", "graph_get_subgraph", "graph_set_widget"]);
+    expect(cmds).toEqual(["graph_query", "graph_set_widget"]);
   });
 
   it("documents that only a STRING child is refused", () => {
@@ -875,8 +875,8 @@ describe("panel-tools: panel_set_widget DaSiWa stack_data (#2107)", () => {
     );
     expect(res.isError).toBeUndefined();
     expect(JSON.parse(res.content[0].text!).set.value).toBe("NEW");
-    expect(cmds).toEqual(["graph_query", "graph_get_subgraph", "graph_query", "graph_set_widget"]);
-    expect(calls[3]).toMatchObject({
+    expect(cmds).toEqual(["graph_query", "graph_query", "graph_set_widget"]);
+    expect(calls[2]).toMatchObject({
       cmd: "graph_set_widget",
       expected_node_type: "OtherLoraLoader",
     });
@@ -975,7 +975,7 @@ describe("panel-tools: panel_set_widget DaSiWa stack_data (#2107)", () => {
     );
     expect(res.isError).toBe(true);
     expect(res.content[0].text).toMatch(/cannot set "stack_data"/);
-    expect(cmds).toEqual(["graph_query", "graph_get_subgraph", "graph_query"]);
+    expect(cmds).toEqual(["graph_query", "graph_query"]);
   });
 
   it("refuses if the panel tab changes during the final fence", async () => {
@@ -986,7 +986,7 @@ describe("panel-tools: panel_set_widget DaSiWa stack_data (#2107)", () => {
     );
     expect(res.isError).toBe(true);
     expect(res.content[0].text).toMatch(/final fence.*different panel tab/);
-    expect(cmds).toEqual(["graph_query", "graph_get_subgraph", "graph_query"]);
+    expect(cmds).toEqual(["graph_query", "graph_query"]);
   });
 
   it("keeps a different widget writable on the exact DaSiWa node", async () => {

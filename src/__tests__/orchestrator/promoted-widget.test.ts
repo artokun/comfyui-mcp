@@ -304,6 +304,9 @@ function bridge(opts: {
         if (inSubgraph) {
           if (opts.nestedSubgraph instanceof Error) throw opts.nestedSubgraph;
           if (opts.nestedSubgraph) return withCurrentViewing(opts.nestedSubgraph);
+          if (String(cmd.node_id) !== "78") {
+            throw new Error(`Node ${cmd.node_id} (OrdinaryNode) is not a subgraph`);
+          }
           throw new Error("No node with id 78 in the current graph");
         }
         if (opts.subgraph instanceof Error) throw opts.subgraph;
@@ -1065,7 +1068,7 @@ describe("panel_set_widget promoted container success guards (#2314)", () => {
     );
 
     expect(isError).toBe(true);
-    expect(text).toMatch(/missing, ambiguous, stale, or unresolved/);
+    expect(text).toMatch(/ambiguous|missing, stale, or unresolved/);
     expect(calls.filter((call) => call.cmd === "graph_set_widget")).toHaveLength(0);
   });
 
@@ -1104,7 +1107,28 @@ describe("panel_set_widget promoted container success guards (#2314)", () => {
     );
 
     expect(isError).toBe(true);
-    expect(text).toMatch(/missing, ambiguous, stale, or unresolved/);
+    expect(text).toMatch(/incomplete or unresolved|missing, ambiguous, stale, or unresolved/);
+    expect(calls.filter((call) => call.cmd === "graph_set_widget")).toHaveLength(0);
+  });
+
+  it("does not treat an unrelated witness error as proof that this alias is ordinary", async () => {
+    const { text, isError, calls } = await setWidget(
+      { node_id: 78, widget: "ordinary", value: "new" },
+      {
+        firstWrite: "ok",
+        promotedTerminalWitnesses: true,
+        subgraph: {
+          ...CURRENT_SAFE_PROMOTED_SUBGRAPH,
+          promoted_terminals: [
+            ...CURRENT_SAFE_PROMOTED_SUBGRAPH.promoted_terminals,
+            { widget: "<proxyWidgets>", error: "proxyWidgets could not be enumerated" },
+          ],
+        },
+      },
+    );
+
+    expect(isError).toBe(true);
+    expect(text).toMatch(/witness was incomplete or unresolved/);
     expect(calls.filter((call) => call.cmd === "graph_set_widget")).toHaveLength(0);
   });
 
@@ -1129,9 +1153,21 @@ describe("panel_set_widget promoted container success guards (#2314)", () => {
     ]);
   });
 
-  it("preserves the legacy panel path for an alias the old panel cannot witness", async () => {
+  it("keeps the legacy ordinary path only after a definitive non-subgraph response", async () => {
     const { isError, calls } = await setWidget(
-      { node_id: 78, widget: "renamed_alias", value: "new" },
+      { node_id: 78, widget: "ordinary", value: "new" },
+      { firstWrite: "ok", subgraph: DEFINITIVE_NON_PROMOTED_SUBGRAPH },
+    );
+
+    expect(isError).toBe(false);
+    expect(calls.filter((call) => call.cmd === "graph_set_widget")).toEqual([
+      expect.objectContaining({ node_id: 78, widget: "ordinary" }),
+    ]);
+  });
+
+  it("preserves the legacy same-name promoted mapping without authorizing an outer fallback", async () => {
+    const { isError, calls } = await setWidget(
+      { node_id: 78, widget: "quality_prompt", value: "new" },
       {
         firstWrite: "ok",
         subgraph: {
@@ -1143,8 +1179,58 @@ describe("panel_set_widget promoted container success guards (#2314)", () => {
 
     expect(isError).toBe(false);
     expect(calls.filter((call) => call.cmd === "graph_set_widget")).toEqual([
-      expect.objectContaining({ node_id: 78, widget: "renamed_alias" }),
+      expect.objectContaining({ node_id: 76, widget: "quality_prompt" }),
     ]);
+  });
+
+  it.each([
+    ["renamed Anima alias", "quality_alias", "AnimaRegionalCanvasInline", { quality_prompt: "old" }],
+    ["renamed dynamic alias", "dynamic_alias", "DynamicOwner", { model: "owner", "model.prompt": "old" }],
+    ["renamed DaSiWa alias", "stack_alias", "DaSiWa_LTX2LoraLoader", { stack_data: "old" }],
+    ["renamed dotted alias", "model.renamed", "DynamicOwner", { model: "owner", "model.prompt": "old" }],
+  ] as const)("fails closed for a capability-skewed %s instead of writing the outer container", async (
+    _name,
+    widget,
+    type,
+    widgets,
+  ) => {
+    const { text, isError, calls } = await setWidget(
+      { node_id: 78, widget, value: "new" },
+      {
+        firstWrite: "ok",
+        // A partial/old receiver may even return an empty witness array. It is
+        // not authoritative when hello did not advertise the complete witness
+        // capability, so the renamed relation must still refuse.
+        subgraph: {
+          ...SAFE_ANIMA_SUBGRAPH,
+          nodes: [{ id: 76, type, widgets }],
+          promoted_terminals: [],
+        },
+      },
+    );
+
+    expect(isError).toBe(true);
+    expect(text).toMatch(/legacy receiver could not prove|No graph_set_widget was dispatched/);
+    expect(calls.filter((call) => call.cmd === "graph_set_widget")).toHaveLength(0);
+  });
+
+  it("does not ignore an ambiguous unadvertised witness and revive a legacy write", async () => {
+    const entry = CURRENT_SAFE_PROMOTED_SUBGRAPH.promoted_terminals[0];
+    const { text, isError, calls } = await setWidget(
+      { node_id: 78, widget: "quality_prompt", value: "new" },
+      {
+        firstWrite: "ok",
+        subgraph: {
+          ...SAFE_ANIMA_SUBGRAPH,
+          nodes: [{ id: 76, type: "PrimitiveStringMultiline", widgets: { quality_prompt: "old" } }],
+          promoted_terminals: [entry, { ...entry }],
+        },
+      },
+    );
+
+    expect(isError).toBe(true);
+    expect(text).toMatch(/witness was ambiguous|No graph_set_widget was dispatched/);
+    expect(calls.filter((call) => call.cmd === "graph_set_widget")).toHaveLength(0);
   });
 
   it("does not compare the child graph token with a parent view before entering it", async () => {
@@ -1473,23 +1559,23 @@ describe("panel_set_widget promoted container success guards (#2314)", () => {
     expect(calls.filter((c) => c.cmd === "graph_set_widget" && c.node_id === 78)).toHaveLength(1);
   });
 
-  it("fails closed when a scope retry cannot classify the current target", async () => {
+  it("keeps a current-child ordinary write after re-entering its panel route", async () => {
     const { text, isError, calls } = await setWidget(
       { node_id: 188, widget: "quality_prompt", value: "masterpiece" },
       {
         scopeLost: true,
         preflightSubgraph: DEFINITIVE_NON_PROMOTED_SUBGRAPH,
         subgraph: new Error("outer wrapper is unavailable after navigation"),
-        detailById: {
-          "188": SAFE_ANIMA_IDENTITY_BY_ID["76"],
+        postEnterGraphQueryById: {
+          "188": new Error("the current child graph could not be classified after entry"),
         },
       },
     );
 
-    expect(isError).toBe(true);
-    expect(text).toMatch(/could not determine whether the addressed node is a promoted container/);
+    expect(isError).toBe(false);
+    expect(text).toMatch(/route was re-entered and the write was retried once/);
     const writes = calls.filter((c) => c.cmd === "graph_set_widget");
-    expect(writes).toHaveLength(1);
+    expect(writes).toHaveLength(2);
     expect(calls.map((c) => c.cmd)).toContain("graph_enter_subgraph");
   });
 
@@ -2059,6 +2145,7 @@ describe("panel_set_widget promoted-subgraph recovery (#1655)", () => {
       { node_id: 190, widget: "text", value: "hello" },
       {
         ambiguous: true,
+        preflightSubgraph: DEFINITIVE_NON_PROMOTED_SUBGRAPH,
         promotedDetail: {
           nodes: [
             {
@@ -2074,7 +2161,7 @@ describe("panel_set_widget promoted-subgraph recovery (#1655)", () => {
     );
 
     expect(isError).toBe(true);
-    expect(calls.map((c) => c.cmd)).toEqual(["graph_set_widget", "graph_query"]);
+    expect(calls.map((c) => c.cmd)).toEqual(["graph_get_subgraph", "graph_set_widget", "graph_query"]);
     expect(text).toMatch(/slot:1, name:"text", label:null/);
     expect(text).toMatch(/slot:2, name:"text_1", label:"text"/);
     expect(text).toMatch(/no second write was attempted/i);
@@ -2083,26 +2170,33 @@ describe("panel_set_widget promoted-subgraph recovery (#1655)", () => {
   it("re-enters the panel-provided scope and retries the inner write once (#2015)", async () => {
     const { text, isError, calls } = await setWidget(
       { node_id: 188, widget: "text", value: "hello" },
-      { scopeLost: true },
+      { scopeLost: true, preflightSubgraph: DEFINITIVE_NON_PROMOTED_SUBGRAPH },
     );
 
     expect(isError).toBe(false);
     expect(calls.map((c) => c.cmd)).toEqual([
+      "graph_get_subgraph",
       "graph_set_widget",
       "graph_enter_subgraph",
+      "graph_get_subgraph",
       "graph_set_widget",
     ]);
-    expect(calls[1]).toMatchObject({ node_id: "190" });
-    expect(calls[2]).toMatchObject({ node_id: 188, widget: "text", value: "hello" });
+    expect(calls[2]).toMatchObject({ node_id: "190" });
+    expect(calls[4]).toMatchObject({ node_id: 188, widget: "text", value: "hello" });
     expect(text).toMatch(/route was re-entered and the write was retried once/i);
   });
 
   it("uses the captured inner target after navigation when the outer id is unavailable", async () => {
-    const { text, isError, calls } = await setWidget({ node_id: 78, widget: "width", value: 1024 });
+    const { text, isError, calls } = await setWidget(
+      { node_id: 78, widget: "width", value: 1024 },
+      { preflightSubgraph: DEFINITIVE_NON_PROMOTED_SUBGRAPH },
+    );
 
     expect(isError).toBe(false);
     expect(calls.map((c) => c.cmd)).toEqual([
+      "graph_get_subgraph",
       "graph_set_widget",
+      "graph_get_subgraph",
       "graph_get_subgraph",
       "graph_enter_subgraph",
       "graph_query",
@@ -2110,11 +2204,12 @@ describe("panel_set_widget promoted-subgraph recovery (#1655)", () => {
       "graph_set_widget",
       "graph_exit_subgraph",
     ]);
-    expect(calls[0]).toMatchObject({ node_id: 78, widget: "width", value: 1024 });
-    expect(calls[5]).toMatchObject({ node_id: 76, widget: "width", value: 1024 });
+    const writes = calls.filter((c) => c.cmd === "graph_set_widget");
+    expect(writes[0]).toMatchObject({ node_id: 78, widget: "width", value: 1024 });
+    expect(writes[1]).toMatchObject({ node_id: 76, widget: "width", value: 1024 });
     // Production seam: the outer wrapper is queried only before entry. Both
     // post-entry fences query the captured inner receiver in the current graph.
-    expect(calls.filter((c) => c.cmd === "graph_get_subgraph")).toHaveLength(1);
+    expect(calls.filter((c) => c.cmd === "graph_get_subgraph")).toHaveLength(3);
     expect(
       calls.filter(
         (c) =>
@@ -2123,17 +2218,17 @@ describe("panel_set_widget promoted-subgraph recovery (#1655)", () => {
           String((c.ids as unknown[])[0]) === "76",
       ),
     ).toHaveLength(2);
-    expect(text).toMatch(/inner widget this promotion lists: node 76 "width"/);
+    expect(text).toMatch(/validated promoted inner widget: node 76 "width"/);
     expect(text).not.toMatch(/is not a promoted widget/);
   });
 
   it("a healthy write is untouched — one call, no enter", async () => {
     const { isError, calls } = await setWidget(
       { node_id: 3, widget: "steps", value: 20 },
-      { firstWrite: "ok" },
+      { firstWrite: "ok", preflightSubgraph: DEFINITIVE_NON_PROMOTED_SUBGRAPH },
     );
     expect(isError).toBe(false);
-    expect(calls.map((c) => c.cmd)).toEqual(["graph_set_widget"]);
+    expect(calls.map((c) => c.cmd)).toEqual(["graph_get_subgraph", "graph_set_widget"]);
   });
 
   it("a genuine miss is never retried", async () => {
@@ -2154,24 +2249,25 @@ describe("panel_set_widget promoted-subgraph recovery (#1655)", () => {
     const res = await def.handler({ node_id: 78, widget: "foo", value: 1 } as never, ctx);
 
     expect(res.isError).toBe(true);
-    expect(calls.filter((c) => c.cmd === "graph_set_widget")).toHaveLength(1);
-    expect(calls.map((c) => c.cmd)).not.toContain("graph_get_subgraph");
+    expect(calls.filter((c) => c.cmd === "graph_set_widget")).toHaveLength(0);
+    expect(calls.map((c) => c.cmd)).toContain("graph_get_subgraph");
     expect(calls.map((c) => c.cmd)).not.toContain("graph_enter_subgraph");
   });
 
   it("an UNRELATED failure is never retried", async () => {
     const { isError, calls } = await setWidget(
       { node_id: 78, widget: "width", value: 1024 },
-      { firstWrite: "fail" },
+      { firstWrite: "fail", preflightSubgraph: DEFINITIVE_NON_PROMOTED_SUBGRAPH },
     );
     expect(isError).toBe(true);
-    expect(calls.map((c) => c.cmd)).toEqual(["graph_set_widget"]);
+    expect(calls.map((c) => c.cmd)).toEqual(["graph_get_subgraph", "graph_set_widget"]);
   });
 
   it("an ambiguous inner mapping is not guessed", async () => {
     const { text, isError, calls } = await setWidget(
       { node_id: 78, widget: "width", value: 1024 },
       {
+        preflightSubgraph: DEFINITIVE_NON_PROMOTED_SUBGRAPH,
         subgraph: {
           subgraph_of: { node_id: 78, title: "Container" },
           node_count: 2,
@@ -2184,8 +2280,12 @@ describe("panel_set_widget promoted-subgraph recovery (#1655)", () => {
     );
     expect(isError).toBe(true);
     expect(text).toMatch(/is not a promoted widget/);
-    expect(text).toMatch(/did not uniquely identify/);
-    expect(calls.map((c) => c.cmd)).toEqual(["graph_set_widget", "graph_get_subgraph"]);
+    expect(text).toMatch(/ambiguously to 2 inner nodes|did not uniquely identify/);
+    expect(calls.map((c) => c.cmd)).toEqual([
+      "graph_get_subgraph",
+      "graph_set_widget",
+      "graph_get_subgraph",
+    ]);
     expect(calls.map((c) => c.cmd)).not.toContain("graph_enter_subgraph");
   });
 
@@ -2202,34 +2302,44 @@ describe("panel_set_widget promoted-subgraph recovery (#1655)", () => {
   it("a failed subgraph read keeps the original refusal", async () => {
     const { text, isError, calls } = await setWidget(
       { node_id: 78, widget: "width", value: 1024 },
-      { subgraph: new Error("Node 78 is not a subgraph") },
+      {
+        preflightSubgraph: DEFINITIVE_NON_PROMOTED_SUBGRAPH,
+        subgraph: new Error("Node 78 is not a subgraph"),
+      },
     );
     expect(isError).toBe(true);
     expect(text).toMatch(/is not a promoted widget/);
     expect(text).toMatch(/graph_get_subgraph FAILED/);
-    expect(calls.map((c) => c.cmd)).toEqual(["graph_set_widget", "graph_get_subgraph"]);
+    expect(calls.map((c) => c.cmd)).toEqual([
+      "graph_get_subgraph",
+      "graph_set_widget",
+      "graph_get_subgraph",
+      "graph_get_subgraph",
+    ]);
   });
 
   it("always exits after a successful inner write, and discloses an exit failure", async () => {
     const { text, isError, calls } = await setWidget(
       { node_id: 78, widget: "width", value: 1024 },
-      { exitFails: true },
+      { exitFails: true, preflightSubgraph: DEFINITIVE_NON_PROMOTED_SUBGRAPH },
     );
     expect(isError).toBe(false);
     expect(calls.map((c) => c.cmd)).toContain("graph_exit_subgraph");
-    expect(text).toMatch(/inner widget this promotion lists/);
+    expect(text).toMatch(/validated promoted inner widget/);
     expect(text).toMatch(/panel_exit_subgraph then FAILED/);
-    expect(text).toMatch(/Call panel_exit_subgraph/);
+    expect(text).toMatch(/call panel_exit_subgraph/);
   });
 
   it("exits even when the inner write fails, and keeps the original refusal", async () => {
     const { text, isError, calls } = await setWidget(
       { node_id: 78, widget: "width", value: 1024 },
-      { innerWrite: "fail" },
+      { innerWrite: "fail", preflightSubgraph: DEFINITIVE_NON_PROMOTED_SUBGRAPH },
     );
     expect(isError).toBe(true);
     expect(calls.map((c) => c.cmd)).toEqual([
+      "graph_get_subgraph",
       "graph_set_widget",
+      "graph_get_subgraph",
       "graph_get_subgraph",
       "graph_enter_subgraph",
       "graph_query",
@@ -2238,19 +2348,30 @@ describe("panel_set_widget promoted-subgraph recovery (#1655)", () => {
       "graph_exit_subgraph",
     ]);
     expect(text).toMatch(/is not a promoted widget/);
-    expect(text).toMatch(/Tried the inner mapping node 76 "width"/);
+    expect(text).toMatch(/Tried the promoted inner mapping node 76 "width"/);
     expect(text).toMatch(/inner write rejected/);
   });
 
   it("retries the listed spelling on the wrapper when only the case differed", async () => {
     const { text, isError, calls } = await setWidget(
       { node_id: 78, widget: "Width", value: 1024 },
-      { remappedWrite: "ok" },
+      { remappedWrite: "ok", preflightSubgraph: DEFINITIVE_NON_PROMOTED_SUBGRAPH },
     );
     expect(isError).toBe(false);
-    expect(calls.map((c) => c.cmd)).toEqual(["graph_set_widget", "graph_set_widget"]);
-    expect(calls[0]).toMatchObject({ widget: "Width" });
-    expect(calls[1]).toMatchObject({ node_id: 78, widget: "width", value: 1024 });
+    expect(calls.map((c) => c.cmd)).toEqual([
+      "graph_get_subgraph",
+      "graph_set_widget",
+      "graph_get_subgraph",
+      "graph_get_subgraph",
+      "graph_enter_subgraph",
+      "graph_query",
+      "graph_query",
+      "graph_set_widget",
+      "graph_exit_subgraph",
+    ]);
+    const writes = calls.filter((c) => c.cmd === "graph_set_widget");
+    expect(writes[0]).toMatchObject({ widget: "Width" });
+    expect(writes[1]).toMatchObject({ node_id: 76, widget: "width", value: 1024 });
     expect(text).not.toMatch(/is not a promoted widget/);
   });
 });

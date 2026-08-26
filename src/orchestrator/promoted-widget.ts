@@ -482,6 +482,23 @@ export function resolveInnerPromotedTarget(
   return hits[0];
 }
 
+/**
+ * Resolve only the legacy same-name relation. A payload from a receiver that
+ * does not advertise `promoted_terminals` is not allowed to use an unadvertised
+ * witness array as an ordinary-write proof: that array may be partial on a
+ * capability-skewed panel. Legacy compatibility is therefore limited to the
+ * old, positive inner-node/name match; a miss remains indeterminate.
+ */
+export function resolveLegacyInnerPromotedTarget(
+  subgraph: Record<string, unknown> | null | undefined,
+  displayedWidget: string,
+  ownerNodeId?: number | string,
+): InnerPromotedTarget | null {
+  if (!isRecord(subgraph)) return null;
+  const { promoted_terminals: _untrustedWitnesses, ...legacyPayload } = subgraph;
+  return resolveInnerPromotedTarget(legacyPayload, displayedWidget, ownerNodeId);
+}
+
 /** True when the refusal listed `requestedWidget` as promoted. */
 export function isContradictoryPromotedWidgetRefusal(
   text: string,
