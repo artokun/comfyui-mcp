@@ -360,120 +360,174 @@ describe("recent_errors sees ComfyUI's own failures (#2347)", () => {
   });
 });
 
-// #2355 — ColoredFormatter wraps error/warning markers in ANSI escape sequences,
-// so patterns anchored to the start of the body (after stripping timestamp) need
-// to strip ANSI first. This catches a WARNING-level gap: a custom-node import
-// failure is logged at WARNING but covered only by the `^Traceback` pattern,
-// which was dead. ANSI escapes also reach the health report, confusing diagnostics.
-describe("handles ANSI escape sequences in log lines (#2355)", () => {
-  const TS = "2026-08-26T07:00:00.000Z";
-  const ansiRed = "\x1b[1m\x1b[31m";    // bold red
-  const ansiYellow = "\x1b[1m\x1b[33m"; // bold yellow
-  const ansiReset = "\x1b[0m";           // reset
+// #2355 — the two anchors #2347 added (`^!!! Exception during processing` and
+// `^Traceback\(`) could not fire on a real server, for one layer down from the
+// reason #2329's `^Traceback` could not: ColoredFormatter.format() prepends an
+// ANSI-wrapped `[LEVEL]` tag before delegating, so it sits between the timestamp
+// prefix and the anchor.
+//
+// The fixtures below are the SHAPE MEASURED from ComfyUI 0.34.0's own logger —
+// captured by importing app/logger.py, running its setup_logger(), emitting through
+// the exact production call sites, and serialising the deque the way
+// api_server/routes/internal/internal_routes.py:24 does. #2347's table was built by
+// reconstructing the format from its description instead, which is precisely why it
+// shipped two patterns that never matched. Only the file paths are shortened here;
+// the load-bearing bytes are verbatim.
+//
+// Three facts a reconstruction gets wrong, all of which these encode:
+//   * the tag is bold+colour for WARNING and above, colour-only below it, so INFO is
+//     `\x1b[32m[INFO]\x1b[0m ` with no bold;
+//   * a record's tag and timestamp appear on its FIRST physical line only — the
+//     continuation lines of a multi-line message (every traceback frame, and the
+//     exception tail) carry neither;
+//   * `logging.x(traceback.format_exc())` leaves a trailing BLANK line, because
+//     format_exc() already ends in a newline and the handler appends its terminator.
+describe("recent_errors survives ColoredFormatter's ANSI [LEVEL] tag (#2355)", () => {
+  const TS = "2026-08-26T07:00:00.000000";
+  // app/logger.py: f"{ANSI_BOLD}{colour}[{levelname}]{ANSI_RESET} ", bold only >= WARNING.
+  const ERR = "\x1b[1m\x1b[31m[ERROR]\x1b[0m ";
+  const WARN = "\x1b[1m\x1b[33m[WARNING]\x1b[0m ";
+  const INFO = "\x1b[32m[INFO]\x1b[0m ";
 
-  const logWithAnsi = (...messages: string[]): string =>
-    JSON.stringify(messages.map((m) => TS + " - " + m + "\n").join(""));
+  /**
+   * One /internal/logs body. Each argument is ONE logging call, so the timestamp
+   * goes on its first physical line only and the handler's terminator newline ends
+   * it — which is how the next record's timestamp comes to butt straight against it.
+   */
+  const payload = (...records: string[]): string =>
+    JSON.stringify(records.map((m) => `${TS} - ${m}\n`).join(""));
 
   const healthFor = async (body: string): Promise<string> => {
     fetchApi.mockImplementation(async (path: string) => {
       if (path === "/internal/logs") return new Response(body, { status: 200 });
       return new Response(JSON.stringify([]), { status: 200 });
     });
-    return runHealthCheck({ modelCategories: [], recentErrors: 10 });
+    return runHealthCheck({ modelCategories: [], recentErrors: 20 });
   };
 
-  it("strips ANSI escape sequences and matches anchored patterns", async () => {
-    // A real ERROR line from ColoredFormatter has ANSI codes prepended
+  // Row C of #2355, and the only row with no other cover: a custom-node import
+  // failure is logged at WARNING (nodes.py:2335-2336 — the traceback FIRST, then the
+  // "Cannot import" line), so the `[ERROR]`/`[EXCEPTION]` clause does not reach it.
+  // Before the fix the backward walk stopped dead: the `[WARNING] Traceback` line was
+  // not a header, not indented and not blank, so the user got the exception name with
+  // nothing that located it.
+  it("row C: a WARNING-level traceback keeps its header and its frames", async () => {
     const text = await healthFor(
-      logWithAnsi(
-        `${ansiRed}[ERROR]${ansiReset} !!! Exception during processing !!!`,
-        "Traceback (most recent call last):",
-        '  File "x.py", line 1, in run',
-        `${ansiRed}[ERROR]${ansiReset} RuntimeError: shape is invalid`,
+      payload(
+        `${WARN}Traceback (most recent call last):\n` +
+          '  File "C:\\ComfyUI\\nodes.py", line 2313, in load_custom_node\n' +
+          "    module_spec.loader.exec_module(module)\n" +
+          '  File "C:\\ComfyUI\\custom_nodes\\comfyui_controlnet_aux\\__init__.py", line 2, in <module>\n' +
+          "    import comfyui_controlnet_aux\n" +
+          "ModuleNotFoundError: No module named 'comfyui_controlnet_aux'\n",
+        `${WARN}Cannot import C:\\ComfyUI\\custom_nodes\\comfyui_controlnet_aux module for custom nodes: No module named 'comfyui_controlnet_aux'`,
       ),
     );
     expect(text).not.toMatch(/Recent errors\*\*: none/);
-    expect(text).toContain("RuntimeError: shape is invalid");
-    expect(text).toContain("Exception during processing");
+    // The exception name alone was what #2347 set out to stop being the whole report.
     expect(text).toContain("Traceback (most recent call last):");
-  });
-
-  it("WARNING-level traceback with ANSI is caught (row C from #2355)", async () => {
-    // Custom-node import failures are logged at WARNING level with ANSI escapes
-    const text = await healthFor(
-      logWithAnsi(
-        `${ansiYellow}[WARNING]${ansiReset} Cannot import cv2 module for custom nodes`,
-        `${ansiYellow}[WARNING]${ansiReset} Traceback (most recent call last):`,
-        '  File "nodes.py", line 2336',
-        "  File in import_module",
-        `${ansiYellow}[WARNING]${ansiReset} ModuleNotFoundError: No module named 'cv2'`,
-      ),
-    );
-    expect(text).not.toMatch(/Recent errors\*\*: none/);
-    // The issue says this should show the traceback header and frames
-    expect(text).toContain("Traceback");
-    expect(text).toContain("ModuleNotFoundError");
     expect(text).toContain("nodes.py");
+    expect(text).toContain("comfyui_controlnet_aux\\__init__.py");
+    expect(text).toContain("ModuleNotFoundError: No module named 'comfyui_controlnet_aux'");
   });
 
-  it("does not emit raw ANSI escape sequences in the health report", async () => {
-    // ANSI control characters should not appear in the emitted report
+  // Rows D and E: a second, independent gap. execution.py:637 formats the header as
+  // f"!!! Exception during processing !!! {ex}", which is EMPTY for a zero-arg
+  // exception, and the traceback's tail then renders with no colon — so #2347's
+  // `/^[A-Za-z0-9_.]*(Error|Exception)\s*:/` dropped it and the report named no
+  // exception at all.
+  it("row D: a zero-arg KeyboardInterrupt is still named", async () => {
     const text = await healthFor(
-      logWithAnsi(
-        `${ansiRed}[ERROR]${ansiReset} !!! Exception during processing !!!`,
-        "Traceback (most recent call last):",
-        '  File "x.py"',
-        `${ansiRed}[ERROR]${ansiReset} RuntimeError: boom`,
+      payload(
+        `${ERR}!!! Exception during processing !!! `,
+        `${ERR}Traceback (most recent call last):\n` +
+          '  File "C:\\ComfyUI\\execution.py", line 619, in execute\n' +
+          "    output_data, output_ui, has_subgraph = get_output_data(obj, input_data_all)\n" +
+          "KeyboardInterrupt\n",
       ),
     );
-    // Should not contain the ANSI escape sequences (x1b is the ESC character)
-    expect(text).not.toContain("\x1b[");
-    expect(text).not.toContain("[0m");
-    // But should contain the actual error message
+    expect(text).not.toMatch(/Recent errors\*\*: none/);
+    // The TAIL, as its own emitted line — `toContain` alone cannot tell it apart from
+    // a frame that happens to mention the same name, which is how row E first passed
+    // under the mutation that drops the tail entirely.
+    expect(text).toMatch(/^ {2}KeyboardInterrupt$/m);
+    expect(text).toContain("execution.py");
+  });
+
+  it("row E: a bare zero-arg RuntimeError is still named", async () => {
+    const text = await healthFor(
+      payload(
+        `${ERR}!!! Exception during processing !!! `,
+        `${ERR}Traceback (most recent call last):\n` +
+          '  File "C:\\ComfyUI\\custom_nodes\\pack\\node.py", line 41, in sample\n' +
+          "    raise RuntimeError\n" +
+          "RuntimeError\n",
+      ),
+    );
+    expect(text).not.toMatch(/Recent errors\*\*: none/);
+    // Not `toContain("RuntimeError")`: the frame above the tail is `raise RuntimeError`,
+    // so that assertion is satisfied by the frame whether or not the tail survives.
+    expect(text).toMatch(/^ {2}RuntimeError$/m);
+    expect(text).toContain("node.py");
+  });
+
+  // Rows A and B keep working. They are carried by the pre-existing `[ERROR]` clause
+  // rather than by the new anchors, so they are a REGRESSION guard, not proof the
+  // anchors fire — row C is what proves that.
+  it("row A: an ERROR-level render failure reports header, frames and tail", async () => {
+    const text = await healthFor(
+      payload(
+        `${ERR}!!! Exception during processing !!! mat1 and mat2 shapes cannot be multiplied (1x768 and 1024x1024)`,
+        `${ERR}Traceback (most recent call last):\n` +
+          '  File "C:\\ComfyUI\\execution.py", line 619, in execute\n' +
+          "    raise RuntimeError(...)\n" +
+          "RuntimeError: mat1 and mat2 shapes cannot be multiplied (1x768 and 1024x1024)\n",
+      ),
+    );
+    expect(text).toContain("!!! Exception during processing !!!");
+    expect(text).toContain("RuntimeError: mat1 and mat2 shapes cannot be multiplied");
+  });
+
+  it("row B: the OOM notice is still reported", async () => {
+    const text = await healthFor(
+      payload(
+        `${ERR}!!! Exception during processing !!! Allocation on device`,
+        `${ERR}Got an OOM, unloading all loaded models.`,
+      ),
+    );
+    expect(text).toContain("Got an OOM, unloading all loaded models.");
+  });
+
+  // The report is a diagnostic users paste into bug reports. Raw escape bytes there
+  // are noise, and scrubLogLines never stripped them.
+  it("no raw ANSI escape reaches the health report", async () => {
+    const text = await healthFor(
+      payload(
+        `${ERR}!!! Exception during processing !!! boom`,
+        `${ERR}Traceback (most recent call last):\n` +
+          '  File "C:\\ComfyUI\\execution.py", line 619, in execute\n' +
+          "RuntimeError: boom\n",
+      ),
+    );
     expect(text).toContain("RuntimeError: boom");
-    expect(text).toContain("Exception during processing");
+    // eslint-disable-next-line no-control-regex
+    expect(text).not.toMatch(/\x1b/);
+    expect(text).not.toContain("[0m");
   });
 
-  it("handles OOM notice with ANSI codes", async () => {
+  // The control. A healthy log carries the SAME tags — INFO is colour-only, no bold —
+  // and "0 errors found" is the line #2329 was filed about. If this ever goes red the
+  // patterns have started matching prose, and the fix has become the bug.
+  it("control: a healthy log with the same ANSI tags still reports none", async () => {
     const text = await healthFor(
-      logWithAnsi(
-        `${ansiRed}[ERROR]${ansiReset} !!! Exception during processing !!!`,
-        `${ansiRed}[ERROR]${ansiReset} Got an OOM, unloading all loaded models.`,
-      ),
-    );
-    expect(text).not.toMatch(/Recent errors\*\*: none/);
-    expect(text).toContain("Got an OOM");
-    expect(text).not.toContain("\x1b[");
-  });
-
-  it("correctly strips ANSI while preserving indented frame lines", async () => {
-    // Frame lines are indented and should be preserved even when subsequent
-    // lines have ANSI codes
-    const text = await healthFor(
-      logWithAnsi(
-        `${ansiRed}[ERROR]${ansiReset} Traceback (most recent call last):`,
-        '  File "a.py", line 1, in <module>',
-        '  File "b.py", line 2, in func',
-        `${ansiRed}[ERROR]${ansiReset} ValueError: invalid value`,
-      ),
-    );
-    expect(text).not.toMatch(/Recent errors\*\*: none/);
-    expect(text).toContain("Traceback");
-    expect(text).toContain("a.py");
-    expect(text).toContain("b.py");
-    expect(text).toContain("ValueError");
-  });
-
-  it("control: genuinely healthy log with ANSI codes still reports none", async () => {
-    // A healthy log might have startup messages with ANSI formatting
-    const text = await healthFor(
-      logWithAnsi(
-        `${ansiYellow}[INFO]${ansiReset} ComfyUI startup`,
-        `${ansiYellow}[INFO]${ansiReset} Import successful: 0 errors`,
-        `${ansiYellow}[INFO]${ansiReset} Ready to process`,
+      payload(
+        `${INFO}Total VRAM 24564 MB, total RAM 65413 MB`,
+        `${INFO}Using pytorch attention`,
+        `${INFO}0 errors found in the model list`,
+        `${INFO}Exit code 0 from the last subprocess`,
+        `${INFO}Starting server`,
       ),
     );
     expect(text).toMatch(/Recent errors\*\*: none in \/internal\/logs/);
   });
 });
-
