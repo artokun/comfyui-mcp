@@ -209,9 +209,12 @@ function classifyAlphaRun(run: string, boundary: AlphaRunBoundary = "bare-prose"
 
 function hasExplicitAlphaIdentifierBoundary(input: string, offset: number): boolean {
   const before = input.slice(Math.max(0, offset - 64), offset);
+  const withoutJsonQuotes = before.replace(/\\?["']/g, "");
   return (
     ALPHA_IDENTIFIER_LABEL.test(before) ||
-    (DIRECT_PUNCTUATED_LABEL.test(before) && /(?:=|[\[({])\s*$/.test(before))
+    ALPHA_IDENTIFIER_LABEL.test(withoutJsonQuotes) ||
+    (DIRECT_PUNCTUATED_LABEL.test(before) && /(?:=|[\[({])\s*$/.test(before)) ||
+    (DIRECT_PUNCTUATED_LABEL.test(withoutJsonQuotes) && /(?:=|[\[({])\s*$/.test(withoutJsonQuotes))
   );
 }
 

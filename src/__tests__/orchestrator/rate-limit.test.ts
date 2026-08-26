@@ -284,6 +284,25 @@ describe("sanitizeDetail", () => {
     }
   });
 
+  it("masks prose-looking ids behind quoted JSON-like labels", () => {
+    const proseLookingId = "counterrevolutionary";
+    const cases = [
+      [`{"account_id":"${proseLookingId}"}`, `{"account_id":"<redacted>"}`],
+      [`{"user_id" : "${proseLookingId}"}`, `{"user_id" : "<redacted>"}`],
+      [`{"account_id":${proseLookingId}}`, `{"account_id":<redacted>}`],
+      [`{"outer":{"account_id":"${proseLookingId}"}}`, `{"outer":{"account_id":"<redacted>"}}`],
+      [
+        `{ "payload": { "user_id": [ "${proseLookingId}" ] } }`,
+        `{ "payload": { "user_id": [ "<redacted>" ] } }`,
+      ],
+      [`{"details":{"user_id":("${proseLookingId}")}}`, `{"details":{"user_id":("<redacted>")}}`],
+    ] as const;
+
+    for (const [input, expected] of cases) {
+      expect(sanitizeDetail(input)).toBe(expected);
+    }
+  });
+
   it("leaves long ordinary prose words readable", () => {
     expect(sanitizeDetail("compartmentalization_v2")).toBe("compartmentalization_v2");
     expect(sanitizeDetail("account compartmentalization policy")).toBe("account compartmentalization policy");
