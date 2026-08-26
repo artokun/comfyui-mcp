@@ -38,6 +38,7 @@ vi.mock("../../services/manifest.js", () => ({
 }));
 
 import { registerSkillsAccessTools } from "../../tools/skills-access.js";
+import { createPanelTemplateRelayWiring } from "../../orchestrator/index.js";
 import { startPanelTemplateRelayServer } from "../../services/panel-template-relay.js";
 
 const SECRET = "b".repeat(64);
@@ -57,10 +58,10 @@ function closeServer(server: Server): Promise<void> {
   return new Promise((resolve) => server.close(() => resolve()));
 }
 
-function listPacksHandler(): (args: Record<string, unknown>) => Promise<{ content: Array<{ text: string }> }> {
-  const tools: Array<{ handler: (args: Record<string, unknown>) => Promise<{ content: Array<{ text: string }> }> }> = [];
+function listPacksHandler(): (args: Record<string, unknown>) => Promise<{ isError?: boolean; content: Array<{ text: string }> }> {
+  const tools: Array<{ handler: (args: Record<string, unknown>) => Promise<{ isError?: boolean; content: Array<{ text: string }> }> }> = [];
   registerSkillsAccessTools({
-    tool: (_name: string, _description: string, _shape: unknown, handler: (args: Record<string, unknown>) => Promise<{ content: Array<{ text: string }> }>) => {
+    tool: (_name: string, _description: string, _shape: unknown, handler: (args: Record<string, unknown>) => Promise<{ isError?: boolean; content: Array<{ text: string }> }>) => {
       tools.push({ handler });
     },
   } as never);
@@ -71,6 +72,7 @@ function listPacksHandler(): (args: Record<string, unknown>) => Promise<{ conten
 afterEach(async () => {
   delete process.env.COMFYUI_MCP_RELAY_SECRET;
   delete process.env.COMFYUI_MCP_TEMPLATE_RELAY_URL;
+  state.baseUrl = "http://127.0.0.1:8188";
   state.headlessCalls = 0;
   for (const server of servers.splice(0)) await server.close();
   vi.restoreAllMocks();
@@ -105,6 +107,52 @@ describe("list_packs -> panel template relay production boundary (#2196)", () =>
       template_count: 1,
       templates: { "panel-pack": [{ name: "live-template" }] },
     });
+    expect(state.headlessCalls).toBe(0);
+  });
+
+  it("returns an honest refusal instead of reading stale target A after a retarget to B", async () => {
+    let panelRequests = 0;
+    const panel = createServer((_req, res) => {
+      panelRequests += 1;
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({ "target-a-pack": [{ name: "stale-template" }] }));
+    });
+    const targetAOrigin = await listen(panel);
+    servers.push({ close: () => closeServer(panel) });
+
+    // The child still carries A in its configured URL, while the orchestrator
+    // has already retargeted the live panel to B. The observed panel origin is
+    // therefore mismatched at the relay boundary and must not fall through to
+    // the stale child-side URL.
+    state.baseUrl = `${targetAOrigin}/comfyapi`;
+    let currentTarget = state.baseUrl;
+    let generation = 0;
+    const bridge = {
+      canReach: () => true,
+      resolveFailure: () => undefined,
+      resolveSharedTabId: () => "tab-1",
+      tabServerOrigin: () => targetAOrigin,
+    };
+    const relay = await startPanelTemplateRelayServer({
+      bridge,
+      ...createPanelTemplateRelayWiring({
+        bridge,
+        currentTarget: () => currentTarget,
+        currentTargetGeneration: () => generation,
+        secrets: new Map([[SECRET, "orchestrator::codex"]]),
+      }),
+    });
+    servers.push(relay);
+    process.env.COMFYUI_MCP_RELAY_SECRET = SECRET;
+    process.env.COMFYUI_MCP_TEMPLATE_RELAY_URL = relay.endpointUrl;
+
+    currentTarget = "http://127.0.0.1:1/comfyapi";
+    generation += 1;
+
+    const result = await listPacksHandler()({ action: "list_templates" });
+    expect(result.isError).toBe(true);
+    expect(result.content.map((block) => block.text).join(" ")).toContain("NO_PANEL_ORIGIN");
+    expect(panelRequests).toBe(0);
     expect(state.headlessCalls).toBe(0);
   });
 });

@@ -116,8 +116,6 @@ import {
 import {
   startPanelTemplateRelayServer,
   currentPanelTemplateOrigin,
-  classifyPanelTemplateOrigin,
-  type PanelOriginVerdict,
   verifyPanelTemplateRelayCapability,
   type PanelTemplateRelayResolvedAgent,
   type PanelTemplateRelayServer,
@@ -956,7 +954,6 @@ export interface PanelTemplateRelayWiring {
   resolveCurrentTarget: () => PanelTemplateRelayTarget;
   resolvePanelUrl: (tabId: string, currentTarget: string) => string | undefined;
   resolveAllowedPanelOrigin: (tabId: string, currentTarget: string) => string | undefined;
-  classifyAllowedPanelOrigin: (tabId: string, currentTarget: string) => PanelOriginVerdict;
 }
 
 /**
@@ -990,8 +987,6 @@ export function createPanelTemplateRelayWiring(options: {
   });
   const resolveAllowedPanelOrigin = (tabId: string, currentTarget: string): string | undefined =>
     currentPanelTemplateOrigin(options.bridge.tabServerOrigin(tabId), currentTarget);
-  const classifyAllowedPanelOrigin = (tabId: string, currentTarget: string): PanelOriginVerdict =>
-    classifyPanelTemplateOrigin(options.bridge.tabServerOrigin(tabId), currentTarget);
   const resolvePanelUrl = (tabId: string, currentTarget: string): string | undefined => {
     const origin = currentPanelTemplateOrigin(options.bridge.tabServerOrigin(tabId), currentTarget);
     if (!origin) return undefined;
@@ -1008,7 +1003,6 @@ export function createPanelTemplateRelayWiring(options: {
     resolveCurrentTarget,
     resolvePanelUrl,
     resolveAllowedPanelOrigin,
-    classifyAllowedPanelOrigin,
   };
 }
 
