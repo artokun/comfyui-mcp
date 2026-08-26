@@ -6,6 +6,14 @@ All notable changes to this project are documented here. This project adheres to
 
 ## Unreleased
 
+## [0.52.130] - 2026-08-26
+
+### MCP
+
+#### Changed
+- fix-2356-reconcile-download-status-with-durable-partial (#2358)
+
+
 ## [0.52.129] - 2026-08-26
 
 ### MCP
