@@ -359,3 +359,121 @@ describe("recent_errors sees ComfyUI's own failures (#2347)", () => {
     expect(text).toMatch(/Recent errors\*\*: none in \/internal\/logs/);
   });
 });
+
+// #2355 — ColoredFormatter wraps error/warning markers in ANSI escape sequences,
+// so patterns anchored to the start of the body (after stripping timestamp) need
+// to strip ANSI first. This catches a WARNING-level gap: a custom-node import
+// failure is logged at WARNING but covered only by the `^Traceback` pattern,
+// which was dead. ANSI escapes also reach the health report, confusing diagnostics.
+describe("handles ANSI escape sequences in log lines (#2355)", () => {
+  const TS = "2026-08-26T07:00:00.000Z";
+  const ansiRed = "\x1b[1m\x1b[31m";    // bold red
+  const ansiYellow = "\x1b[1m\x1b[33m"; // bold yellow
+  const ansiReset = "\x1b[0m";           // reset
+
+  const logWithAnsi = (...messages: string[]): string =>
+    JSON.stringify(messages.map((m) => TS + " - " + m + "\n").join(""));
+
+  const healthFor = async (body: string): Promise<string> => {
+    fetchApi.mockImplementation(async (path: string) => {
+      if (path === "/internal/logs") return new Response(body, { status: 200 });
+      return new Response(JSON.stringify([]), { status: 200 });
+    });
+    return runHealthCheck({ modelCategories: [], recentErrors: 10 });
+  };
+
+  it("strips ANSI escape sequences and matches anchored patterns", async () => {
+    // A real ERROR line from ColoredFormatter has ANSI codes prepended
+    const text = await healthFor(
+      logWithAnsi(
+        `${ansiRed}[ERROR]${ansiReset} !!! Exception during processing !!!`,
+        "Traceback (most recent call last):",
+        '  File "x.py", line 1, in run',
+        `${ansiRed}[ERROR]${ansiReset} RuntimeError: shape is invalid`,
+      ),
+    );
+    expect(text).not.toMatch(/Recent errors\*\*: none/);
+    expect(text).toContain("RuntimeError: shape is invalid");
+    expect(text).toContain("Exception during processing");
+    expect(text).toContain("Traceback (most recent call last):");
+  });
+
+  it("WARNING-level traceback with ANSI is caught (row C from #2355)", async () => {
+    // Custom-node import failures are logged at WARNING level with ANSI escapes
+    const text = await healthFor(
+      logWithAnsi(
+        `${ansiYellow}[WARNING]${ansiReset} Cannot import cv2 module for custom nodes`,
+        `${ansiYellow}[WARNING]${ansiReset} Traceback (most recent call last):`,
+        '  File "nodes.py", line 2336',
+        "  File in import_module",
+        `${ansiYellow}[WARNING]${ansiReset} ModuleNotFoundError: No module named 'cv2'`,
+      ),
+    );
+    expect(text).not.toMatch(/Recent errors\*\*: none/);
+    // The issue says this should show the traceback header and frames
+    expect(text).toContain("Traceback");
+    expect(text).toContain("ModuleNotFoundError");
+    expect(text).toContain("nodes.py");
+  });
+
+  it("does not emit raw ANSI escape sequences in the health report", async () => {
+    // ANSI control characters should not appear in the emitted report
+    const text = await healthFor(
+      logWithAnsi(
+        `${ansiRed}[ERROR]${ansiReset} !!! Exception during processing !!!`,
+        "Traceback (most recent call last):",
+        '  File "x.py"',
+        `${ansiRed}[ERROR]${ansiReset} RuntimeError: boom`,
+      ),
+    );
+    // Should not contain the ANSI escape sequences (x1b is the ESC character)
+    expect(text).not.toContain("\x1b[");
+    expect(text).not.toContain("[0m");
+    // But should contain the actual error message
+    expect(text).toContain("RuntimeError: boom");
+    expect(text).toContain("Exception during processing");
+  });
+
+  it("handles OOM notice with ANSI codes", async () => {
+    const text = await healthFor(
+      logWithAnsi(
+        `${ansiRed}[ERROR]${ansiReset} !!! Exception during processing !!!`,
+        `${ansiRed}[ERROR]${ansiReset} Got an OOM, unloading all loaded models.`,
+      ),
+    );
+    expect(text).not.toMatch(/Recent errors\*\*: none/);
+    expect(text).toContain("Got an OOM");
+    expect(text).not.toContain("\x1b[");
+  });
+
+  it("correctly strips ANSI while preserving indented frame lines", async () => {
+    // Frame lines are indented and should be preserved even when subsequent
+    // lines have ANSI codes
+    const text = await healthFor(
+      logWithAnsi(
+        `${ansiRed}[ERROR]${ansiReset} Traceback (most recent call last):`,
+        '  File "a.py", line 1, in <module>',
+        '  File "b.py", line 2, in func',
+        `${ansiRed}[ERROR]${ansiReset} ValueError: invalid value`,
+      ),
+    );
+    expect(text).not.toMatch(/Recent errors\*\*: none/);
+    expect(text).toContain("Traceback");
+    expect(text).toContain("a.py");
+    expect(text).toContain("b.py");
+    expect(text).toContain("ValueError");
+  });
+
+  it("control: genuinely healthy log with ANSI codes still reports none", async () => {
+    // A healthy log might have startup messages with ANSI formatting
+    const text = await healthFor(
+      logWithAnsi(
+        `${ansiYellow}[INFO]${ansiReset} ComfyUI startup`,
+        `${ansiYellow}[INFO]${ansiReset} Import successful: 0 errors`,
+        `${ansiYellow}[INFO]${ansiReset} Ready to process`,
+      ),
+    );
+    expect(text).toMatch(/Recent errors\*\*: none in \/internal\/logs/);
+  });
+});
+

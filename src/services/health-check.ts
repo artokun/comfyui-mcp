@@ -196,7 +196,33 @@ export async function runHealthCheck(
         // timestamp. #2329 matched `^Traceback` against the raw line, which therefore
         // could never fire: measured on a live 105-line log, 0 lines start with
         // "Traceback".
-        const bodyOf = (line: string): string => line.replace(/^\S+ - /, "");
+        //
+        // #2355 — ColoredFormatter prepends ANSI-wrapped `[LEVEL]` tags before the
+        // message, even when given ColoredFormatter("%(message)s"). After stripping
+        // the timestamp, the body still begins with `\x1b[1m\x1b[31m[ERROR]\x1b[0m `,
+        // so anchored patterns like `^!!!` or `^Traceback` need the ANSI escapes
+        // stripped first. The ColoredFormatter output has ANSI codes immediately after
+        // the timestamp prefix, so we strip ANSI, then any adjacent [LEVEL] tag that
+        // it leaves behind.
+        const ANSI_RE = /\x1b\[[0-9;]*m/g;
+        const stripAnsi = (s: string): string => s.replace(ANSI_RE, "");
+        const bodyOf = (line: string): string => {
+          // Strip timestamp prefix
+          let body = line.replace(/^\S+ - /, "");
+          // Check if ANSI escape sequences are present
+          const hasAnsi = ANSI_RE.test(body);
+          // Reset regex state for next use
+          ANSI_RE.lastIndex = 0;
+          // Strip ANSI escape sequences (ColoredFormatter wraps [LEVEL] in these)
+          body = stripAnsi(body);
+          // If ANSI was present, the [LEVEL] tag that was wrapped in escapes is now
+          // exposed. Strip it so patterns like /^Traceback/ and /^!!!/ can match at
+          // the true start of the message.
+          if (hasAnsi && /^\[(?:ERROR|WARNING|INFO|DEBUG|CRITICAL|EXCEPTION)\]\s/.test(body)) {
+            body = body.replace(/^\[(?:ERROR|WARNING|INFO|DEBUG|CRITICAL|EXCEPTION)\]\s*/, "");
+          }
+          return body;
+        };
 
         // What stock ComfyUI actually emits. #2329 keyed on `[ERROR]`/`[EXCEPTION]`,
         // which its in-memory handler never writes — app/logger.py formats the memory
@@ -267,7 +293,10 @@ export async function runHealthCheck(
         // Take the last N error groups, then flatten them into lines for scrubbing
         const recentErrorGroups = errorGroups.slice(-recentErrors);
         const errorLines = recentErrorGroups.flat();
-        const errLines = scrubLogLines(errorLines);
+        // Strip ANSI escape sequences before scrubbing secrets, so the patterns used
+        // by scrubSecretShapedText don't get confused by control bytes.
+        const ansiStripped = errorLines.map((line) => stripAnsi(line));
+        const errLines = scrubLogLines(ansiStripped);
         if (errLines.length > 0) {
           lines.push(`\n**Recent errors** (last ${errLines.length}):`);
           for (const e of errLines) lines.push(`  ${e.trim()}`);
