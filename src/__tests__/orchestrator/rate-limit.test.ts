@@ -160,9 +160,10 @@ describe("sanitizeDetail", () => {
   });
 
   it("leaves long ordinary prose words readable", () => {
-    for (const word of ["uncharacteristically", "compartmentalization"]) {
-      expect(sanitizeDetail(word)).toBe(word);
-    }
+    expect(sanitizeDetail("account compartmentalization policy")).toBe("account compartmentalization policy");
+    expect(sanitizeDetail("the user uncharacteristically exceeded the limit")).toBe(
+      "the user uncharacteristically exceeded the limit",
+    );
   });
 
   it("leaves an ordinary sentence readable", () => {
