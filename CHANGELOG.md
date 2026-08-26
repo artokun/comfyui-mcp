@@ -6,6 +6,17 @@ All notable changes to this project are documented here. This project adheres to
 
 ## Unreleased
 
+## [0.52.135] - 2026-08-26
+
+### MCP
+
+#### Fixed
+- reject localhost relay identity (#2382) (#2385)
+
+#### Changed
+- credit #2378 to 0.52.133, where it shipped, and mark 0.52.134 as a no-op (#2384)
+
+
 ## [0.52.134] - 2026-08-26
 
 ### MCP
