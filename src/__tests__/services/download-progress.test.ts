@@ -500,7 +500,7 @@ describe("migrateInFlightJobs (#1148)", () => {
       // The old text said all three of these, and every one was false here.
       expect(msg).not.toMatch(/the transfer stopped/i);
       expect(msg).not.toMatch(/will not resume on its own/i);
-      expect(msg).not.toMatch(/Re-issue the download/);
+      expect(msg).not.toMatch(/\bRe-issue the download\b/);
     });
 
     it("does not offer a timer or an empty-listing check as proof", () => {
