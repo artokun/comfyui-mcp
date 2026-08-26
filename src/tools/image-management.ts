@@ -208,7 +208,7 @@ export function registerImageManagementTools(server: McpServer): void {
     "Fetch, browse and inspect ComfyUI images and registered assets. Driven by the `action` parameter:\n" +
       '- action:"get" — Fetch a generated image from ComfyUI by FILENAME and return it as an inline image. Video/audio outputs (e.g. a VHS_VideoCombine .mp4) are saved to save_dir with their original extension instead of being rendered inline. Works with remote ComfyUI instances — does not require COMFYUI_PATH. Use get_history (action:"list") first to obtain the filename.\n' +
       '- action:"view" — Fetch a registered asset\'s bytes by ASSET ID and return them as an inline image so the agent can see the result. Use this after a render completes (asset_id is included in the completion notification) to inspect, critique, or compare generated images. Only supports image mime types (PNG/JPEG/WebP); audio/video assets must be saved to disk via action:"get".\n' +
-      '- action:"list_outputs" — List recently generated image AND video files from ComfyUI\'s output/ directory, newest-first, with each file\'s kind (\'image\' | \'video\'), subfolder, size, and modification time. Covers stills (.png/.jpg/.jpeg/.bmp) and video/animation outputs (.mp4/.webm/.mov/.mkv/.m4v/.avi/.gif/.webp). LOCAL ComfyUI (COMFYUI_PATH set): a RECURSIVE filesystem scan of output/ — includes subfolders like video/ that VHS/SaveVideo write to, and reports size + modification time. REMOTE ComfyUI: derives the list from /history over HTTP instead (size/modified are unavailable and omitted). It does NOT return the media bytes themselves — fetch those with action:"get". USE THIS TO CONFIRM A VIDEO RENDER (e.g. VHS_VideoCombine / LTX / WAN output) when get_history (action:"list") shows the prompt done but lists no output: VHS-style video nodes write the file but often do NOT register in ComfyUI\'s /history, so the local filesystem scan is the reliable way to verify the .mp4 exists — then chain it with upload_image (action:"stage"). THAT GUARANTEE IS LOCAL-ONLY AND INVERTS ON A REMOTE TARGET: with no disk to scan, this falls back to the very /history that omits those videos, so a REMOTE listing can neither confirm nor deny a VHS video render, and absence from it is NOT evidence the file is missing. Check a specific filename with action:"get" or upload_image (action:"stage") instead — both read /view, straight from the output directory. Every remote result says so in its own text. Read-only.\n' +
+      '- action:"list_outputs" — List recently generated image AND video files from ComfyUI\'s output/ directory, newest-first, with each file\'s kind (\'image\' | \'video\'), subfolder, size, and modification time. Covers stills (.png/.jpg/.jpeg/.bmp) and video/animation outputs (.mp4/.webm/.mov/.mkv/.m4v/.avi/.gif/.webp). LOCAL ComfyUI (COMFYUI_PATH set): a RECURSIVE filesystem scan of output/ — includes subfolders like video/ that VHS/SaveVideo write to, and reports size + modification time. REMOTE ComfyUI: derives the list from /history over HTTP instead (size/modified are unavailable and omitted). It does NOT return the media bytes themselves — fetch those with action:"get". USE THIS TO CONFIRM A VIDEO RENDER (e.g. VHS_VideoCombine / LTX / WAN output) when get_history (action:"list") shows the prompt done but lists no output: VHS-style video nodes write the file but often do NOT register in ComfyUI\'s /history, so the local filesystem scan is the reliable way to verify the .mp4 exists — then chain it with upload_image (action:"stage"). THAT GUARANTEE IS LOCAL-ONLY AND INVERTS ON A REMOTE TARGET: with no disk to scan, this falls back to the very /history that omits those videos, so a REMOTE listing can neither confirm nor deny a VHS video render, and absence from it is NOT evidence the file is missing. Check a specific filename with action:"get" or upload_image (action:"stage") instead — both read /view, straight from the output directory. Every remote result says so in its own text. IT ALSO HAS A SECOND HOLE, ON LOCAL: the scan reads output/ ONLY, and a VHS_VideoCombine with `save_output` unchecked writes its .mp4 (including the "-audio.mp4" the completion names) to ComfyUI\'s temp/ instead — so a finished render can be absent here and still exist. An empty local result says so and names the fix: action:"get" / upload_image (action:"stage") with type:"temp". Read-only.\n' +
       '- action:"convert" — Re-encode a generated image to PNG, JPEG, or WebP and return it inline as an image content block. Source can be a registered asset_id or a path under the local ComfyUI output directory. Optionally writes the converted image back under the output directory and reports source/output size plus bytes saved.\n' +
       '- action:"analyze_color" — Measure the color of a rendered image (not by eye): returns black/white points, contrast (luma std), saturation, per-channel means + cast, and clipping — plus heuristic flags (washedOut, lowContrast, liftedBlacks, dimHighlights, lowSaturation, colorCast) and a one-line verdict. Source = asset_id, a ComfyUI output ref (filename/subfolder/type), or an image path. Pass reference_path to shot-match against a known-good frame (target−reference deltas). Set histogram:true to also get an overlaid R/G/B/luma histogram PNG. Use this to diagnose \'washed out\' objectively and decide a color fix; for a video, extract a frame to PNG first.\n' +
       '- action:"list_assets" — List recently generated assets, newest-first. Each call first reconciles ComfyUI\'s /history, so outputs are listed even when this session did not watch the render complete (e.g. queued via panel_run, by an earlier session, or before a server restart) — those are tagged source:\'history-reconcile\', versus source:\'watched\' for renders this server saw finish. Returns count + assets (asset_id, prompt_id, filename, url, source, created_at). The registry is ephemeral and clears on server restart; records expire after COMFYUI_ASSET_TTL_HOURS (default 24h), and only the most recent completed runs are reconciled — use get_history (action:\"list\") / action:"get" by filename for anything older.\n' +
@@ -626,6 +626,34 @@ export function registerImageManagementTools(server: McpServer): void {
                   "from this list is NOT evidence the file is missing. To check a specific file, fetch " +
                   'it by name with action:"get" or upload_image (action:"stage") — both read the server\'s ' +
                   "/view endpoint, which serves straight from the output directory.";
+            // #2370 — an EMPTY local scan was silent about the one place a finished
+            // render can be that this scan never looks: ComfyUI's temp/ folder.
+            //
+            // VHS_VideoCombine writes to `folder_paths.get_temp_directory()` and
+            // tags its preview `type:"temp"` whenever `save_output` is unchecked
+            // (videohelpersuite/nodes.py) — and the file it names there is the
+            // muxed `<prefix>_00001-audio.mp4`, i.e. exactly the filename a run
+            // completion hands the agent. This scan reads the OUTPUT directory
+            // only, so that render lists as nothing at all.
+            //
+            // The reporter's agent read the empty result as proof the scan was
+            // dropping VHS videos and filed it as a filter bug. It is not: the
+            // scan returns `-audio.mp4` files fine (verified end-to-end through
+            // this handler). What was missing is any statement of what the scan
+            // could NOT see, so an empty answer looked dispositive — the same
+            // fold as #877/#899/#953, at the one source those left uncovered.
+            //
+            // Only on the EMPTY result: a listing that DID return files has not
+            // misled anyone, and hanging a caveat on it would make a trustworthy
+            // answer look doubtful (the #953 tests pin exactly that).
+            const localEmptyCaveat =
+              "This scan covers ComfyUI's OUTPUT directory only — it does NOT look in ComfyUI's " +
+              "temp/ folder. A VHS_VideoCombine with `save_output` unchecked writes its .mp4 there " +
+              'instead (including the "-audio.mp4" variant a run completion names), so a render that ' +
+              "finished can be absent here and still exist. If a completion just named the file, fetch " +
+              'it directly with get_image (action:"get", type:"temp") or re-register it with ' +
+              'upload_image (action:"stage", type:"temp") — both read /view, which serves temp/ too. ' +
+              "ComfyUI clears temp/ on restart, so do it before restarting.";
             if (args.format === "json") {
               // Machine-readable form for app clients (the mobile dataset picker):
               // same entries, no prose. Thumbs render client-side via /view URLs.
@@ -639,6 +667,21 @@ export function registerImageManagementTools(server: McpServer): void {
                       // they are relative to (#899).
                       source: source.basis,
                       ...(source.directory ? { directory: source.directory } : {}),
+                      // #2370 — the reporter used THIS shape. An empty markdown
+                      // reply at least carries `whereFrom`; the json reply carried
+                      // `{source, directory, images: []}` and nothing else, so the
+                      // caveat that makes an empty answer readable never reached
+                      // the caller who most needed it. Emitted ONLY when the list
+                      // is empty, so every populated payload stays byte-identical
+                      // for the app clients that parse it.
+                      ...(images.length === 0
+                        ? {
+                            note:
+                              source.basis === "local-scan"
+                                ? `${whereFrom} ${localEmptyCaveat}`
+                                : whereFrom,
+                          }
+                        : {}),
                       images: images.map((img) => ({
                         filename: img.filename,
                         subfolder: img.subfolder,
@@ -662,7 +705,11 @@ export function registerImageManagementTools(server: McpServer): void {
                     text:
                       (args.pattern
                         ? `No output media (images or videos) found matching "${args.pattern}".`
-                        : "No output media (images or videos) found.") + ` ${whereFrom}`,
+                        : "No output media (images or videos) found.") +
+                      ` ${whereFrom}` +
+                      // The history branch already states its own blind spot; only
+                      // the local scan was silent about temp/ (#2370).
+                      (source.basis === "local-scan" ? ` ${localEmptyCaveat}` : ""),
                   },
                 ],
               };

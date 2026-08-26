@@ -87,6 +87,43 @@ describe("listOutputImages", () => {
     expect(mp4?.modified).toBe(new Date("2026-06-26T12:00:00Z").toISOString());
   });
 
+  // #2370 — the report's stated root cause: "the local output scan is omitting a
+  // known completed video or filtering it incorrectly ... including when the
+  // filename contains `-audio`". It is not, and this pins that it stays that way.
+  //
+  // VHS_VideoCombine muxes audio into a SECOND file, `<prefix>_<counter>-audio.mp4`
+  // (videohelpersuite/nodes.py), and that is the name it hands back as the run's
+  // output — so it is the name a caller filters on. Both the bare and the muxed
+  // file must come back for a prefix pattern, at top level and from a subfolder.
+  it("#2370: returns a VHS `-audio.mp4` for a prefix pattern, top level and nested", async () => {
+    const now = new Date("2026-08-26T12:00:00Z");
+    await touch("LTX_NATIVE_CONTEXT_TEST_00001.mp4", now);
+    await touch("LTX_NATIVE_CONTEXT_TEST_00001-audio.mp4", now);
+    await touchSub("video", "LTX_NATIVE_CONTEXT_TEST_00002-audio.mp4", now);
+    // A near-miss that must NOT be swept in, so the pattern is doing real work.
+    await touch("SOMETHING_ELSE_00001-audio.mp4", now);
+
+    const hits = await listOutputImages({
+      pattern: "LTX_NATIVE_CONTEXT_TEST_00001",
+      limit: 100,
+    });
+    expect(hits.map((r) => r.filename).sort()).toEqual([
+      "LTX_NATIVE_CONTEXT_TEST_00001-audio.mp4",
+      "LTX_NATIVE_CONTEXT_TEST_00001.mp4",
+    ]);
+    expect(hits.every((r) => r.kind === "video")).toBe(true);
+
+    // The nested one is reachable by its own prefix and reports its subfolder,
+    // which is what upload_image (action:"stage") needs to chain it forward.
+    const nested = await listOutputImages({
+      pattern: "LTX_NATIVE_CONTEXT_TEST_00002",
+      limit: 100,
+    });
+    expect(nested).toHaveLength(1);
+    expect(nested[0]?.subfolder).toBe("video");
+    expect(nested[0]?.kind).toBe("video");
+  });
+
   it("classifies still images as kind:image and videos/animations as kind:video", async () => {
     const now = new Date("2026-06-26T12:00:00Z");
     await touch("pic.png", now);
