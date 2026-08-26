@@ -202,6 +202,9 @@ describe("sanitizeDetail", () => {
     expect(sanitizeDetail("account qavexidopulnertiskymtion is limited")).toBe(
       "account <redacted> is limited",
     );
+    expect(sanitizeDetail("account qavexidopulnertisktion is limited")).toBe(
+      "account <redacted> is limited",
+    );
     expect(sanitizeDetail("account qavexidopulnertiskymaeiotion is limited")).toBe(
       "account <redacted> is limited",
     );
@@ -213,6 +216,16 @@ describe("sanitizeDetail", () => {
     );
     expect(sanitizeDetail("wrapper_qavexidopulnertiskym_suffix")).toBe("wrapper_<redacted>");
     expect(sanitizeDetail("wrapper--qavexidopulnertiskym--suffix")).toBe("wrapper--<redacted>");
+  });
+
+  it("redacts punctuation, hyphen labels, and composite labels atomically", () => {
+    expect(sanitizeDetail("account, abcdefghijklmnopqrstuv")).toBe("account, <redacted>");
+    expect(sanitizeDetail("account--abcdefghijklmnopqrstuv")).toBe("account--<redacted>");
+    expect(sanitizeDetail("the-user-abcdefghijklmnopqrstuv")).toBe("the-user-<redacted>");
+    expect(sanitizeDetail("your-user-abcdefghijklmnopqrstuv")).toBe("your-user-<redacted>");
+    expect(sanitizeDetail("account_identifier=abcdefghijklmnopqrstuv")).toBe(
+      "account_identifier=<redacted>",
+    );
   });
 
   it("leaves long ordinary prose words readable", () => {
@@ -229,6 +242,8 @@ describe("sanitizeDetail", () => {
     );
     expect(sanitizeDetail("user-uncharacteristically")).toBe("user-uncharacteristically");
     expect(sanitizeDetail("account-compartmentalization")).toBe("account-compartmentalization");
+    expect(sanitizeDetail("user_uncharacteristically")).toBe("user_uncharacteristically");
+    expect(sanitizeDetail("account_compartmentalization")).toBe("account_compartmentalization");
   });
 
   it("leaves an ordinary sentence readable", () => {

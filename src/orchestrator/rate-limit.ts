@@ -185,19 +185,24 @@ function parseWaitFromProse(text: string): number | null {
  */
 const ALPHA_IDENTIFIER_LABEL =
   /\b(?:account|acct|user|workspace|token|key)(?:[_-](?:id|identifier)|\s+(?:id|identifier))\s*(?:[:=]\s*[\[({]?\s*|[\[({]\s*)?$/i;
-const DIRECT_ACCOUNT_LABEL = /(?:^|[.!?;]\s*|(?:your|the)\s+)account\s*(?:[:=]\s*|[\[({]\s*|\s+)$/i;
-const DIRECT_USER_LABEL = /(?:^|[.!?;]\s*|(?:your|the)\s+)user\s*(?:[:=]\s*|[\[({]\s*|\s+)$/i;
+const DIRECT_ACCOUNT_LABEL =
+  /(?:^|[.!?;]\s*|(?:your|the)[\s-]+)account\s*(?:[,;:=]\s*|[\[({]\s*|[-_]+\s*|\s+)$/i;
+const DIRECT_USER_LABEL =
+  /(?:^|[.!?;]\s*|(?:your|the)[\s-]+)user\s*(?:[,;:=]\s*|[\[({]\s*|[-_]+\s*|\s+)$/i;
 const DIRECT_PUNCTUATED_LABEL =
-  /(?:^|[.!?;]\s*|(?:your|the)\s+)(?:account|user)\s*(?:[:=]\s*[\[({]?|[\[({])\s*$/i;
+  /(?:^|[.!?;]\s*|(?:your|the)[\s-]+)(?:account|user)\s*(?:[,;:=]\s*[\[({]?|[-_]+\s*|[\[({])\s*$/i;
 const IDENTIFIER_STATUS = /^\s+(?:is|was|has|had|reached|exceeded|exhausted|limited|invalid|expired|blocked|disabled)\b/i;
 const NATURAL_LANGUAGE_SUFFIX =
   /(?:istically|ization|isation|tion|sion|ment|ness|ity|ically|ingly|edly|ful|less|able|ible|ive|ous|ance|ence)$/i;
 
 function looksLikeNaturalLanguageWord(value: string): boolean {
   const suffix = value.match(NATURAL_LANGUAGE_SUFFIX)?.[0];
-  // A long opaque stem followed by an English-looking suffix is still an id
-  // (for example, qavexidopulnertiskymtion), not ordinary prose.
-  return suffix !== undefined && value.length - suffix.length < 20;
+  if (suffix === undefined) return false;
+
+  const stem = value.slice(0, -suffix.length);
+  // A short stem with a non-English q-shape is an opaque id plus a prose-like
+  // suffix (for example, qavexidopulnertisktion), not ordinary prose.
+  return stem.length < 20 && !/q(?!u)/i.test(stem);
 }
 
 function hasAlphaIdentifierContext(input: string, offset: number, run: string): boolean {
@@ -238,7 +243,7 @@ export function sanitizeDetail(raw: string, max = 200): string {
     // prefixed opaque identifiers: org-…, cak-…, key_…, acct-…. Common
     // label words followed by a hyphen are prose, not vendor prefixes.
     .replace(
-      /\b(?!(?:account|user)-)([A-Za-z][A-Za-z0-9]{1,12}[-_]+)[A-Za-z0-9]{10,}(?:[-_]+[A-Za-z0-9]+)*\b/gi,
+      /\b(?!(?:(?:account|acct|user|workspace|token|key)[_-](?:id|identifier)\b))(?!(?:account|user)[-_])([A-Za-z][A-Za-z0-9]{1,12}[-_]+)[A-Za-z0-9]{10,}(?:[-_]+[A-Za-z0-9]+)*\b/gi,
       "$1<redacted>",
     )
     // bare long hex / base62 runs (an id that came without a prefix). Digits
