@@ -301,6 +301,67 @@ describe('download_model action:"status"', () => {
     }
   });
 
+  it("treats a zero-byte staged partial as unavailable and non-resumable (#2356)", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "model-management-2356-empty-partial-"));
+    const cache = await mkdtemp(join(tmpdir(), "model-management-2356-empty-partial-cache-"));
+    const savedCache = process.env.COMFYUI_DOWNLOAD_CACHE_DIR;
+    const savedStall = process.env.COMFYUI_DOWNLOAD_STALL_TIMEOUT_S;
+    const url = "https://example.com/empty-partial.safetensors";
+    const id = "status-2356-empty-partial";
+    const progressId = "progress-2356-empty-partial";
+    process.env.COMFYUI_DOWNLOAD_CACHE_DIR = cache;
+    process.env.COMFYUI_DOWNLOAD_STALL_TIMEOUT_S = "0";
+    setProgressDir(dir);
+    try {
+      const partial = downloadCacheIdentity(url).partialPath;
+      await mkdir(dirname(partial), { recursive: true });
+      await writeFile(partial, Buffer.alloc(0));
+      await writeFile(
+        join(dir, `control-job-${id}-session.json`),
+        JSON.stringify({
+          id,
+          trayId: "tray-2356-empty-partial",
+          progressId,
+          partialPath: partial,
+          url,
+          target_subfolder: "text_encoders",
+          status: "cancelled",
+          via_manager: false,
+          started_at: Date.now() - 60_000,
+          updated: Date.now(),
+        }),
+      );
+      await writeFile(
+        join(dir, `${progressId}-snapshot.json`),
+        JSON.stringify({
+          id: progressId,
+          name: "empty-partial.safetensors",
+          downloaded: 100,
+          total: 1_000,
+          bytes_per_sec: 0,
+          status: "cancelled",
+          updated: Date.now(),
+        }),
+      );
+
+      const { downloadStatus } = makeServer();
+      const text = (await downloadStatus({ id })).content[0].text;
+      expect(text).toContain("PROGRESS UNAVAILABLE");
+      expect(text).toContain("no resumable partial was found");
+      expect(text).toContain("starts from the beginning");
+      expect(text).not.toContain("0 bytes durable");
+      expect(text).not.toContain("resumes from it");
+    } finally {
+      setProgressDir("");
+      if (savedCache === undefined) delete process.env.COMFYUI_DOWNLOAD_CACHE_DIR;
+      else process.env.COMFYUI_DOWNLOAD_CACHE_DIR = savedCache;
+      if (savedStall === undefined) delete process.env.COMFYUI_DOWNLOAD_STALL_TIMEOUT_S;
+      else process.env.COMFYUI_DOWNLOAD_STALL_TIMEOUT_S = savedStall;
+      await rm(dir, { recursive: true, force: true });
+      await rm(cache, { recursive: true, force: true });
+    }
+  });
+
   it("labels byte progress stalled or unavailable instead of presenting a healthy row (#2356)", async () => {
     const dir = await mkdtemp(join(tmpdir(), "model-management-2356-stall-"));
     const cache = await mkdtemp(join(tmpdir(), "model-management-2356-stall-cache-"));

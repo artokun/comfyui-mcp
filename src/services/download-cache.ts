@@ -3644,6 +3644,10 @@ export async function observeStagedPartialAtPath(
   try {
     const st = await stat(candidate);
     if (!st.isFile()) return { state: "unavailable", path: candidate };
+    // A real zero-byte staged file carries no bytes that a re-issued download
+    // can resume. Preserve the prior bytes > 0 contract by treating it as
+    // non-resumable/absent rather than a present durable partial.
+    if (st.size <= 0) return { state: "absent", path: candidate };
     return { state: "present", path: candidate, bytes: st.size, modifiedMs: st.mtimeMs };
   } catch (err) {
     // ENOENT is a useful observation: no resumable file exists yet. Permission,
