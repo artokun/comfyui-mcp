@@ -48,6 +48,12 @@ const MCP_SERVERS = {
 const WORKER_TRANSPORT_FAILURE =
   "Transport send error: WorkerTransport<StreamableHttpClientWorker<...>> error: " +
   "HTTP request failed sending request to http://127.0.0.1:9198/orchestrator%3A%3Acodex";
+// The exact wrapper reported by panel_save_workflow -> immediate panel_run on
+// the affected EventNotificationTransport path. It is an outer HTTP-MCP client
+// failure, not a panel tool result; handling it must not retry panel_run.
+const EVENT_NOTIFICATION_TRANSPORT_FAILURE =
+  "Transport send error: EventNotificationTransport WorkerTransport StreamableHttpClientWorker error: " +
+  "Client error: HTTP request failed sending request to http://127.0.0.1:9198/orchestrator::codex";
 // Older Codex/MCP combinations scrubbed the WorkerTransport wrapper and used a
 // semicolon. This is an outer HTTP-MCP client error, not a UiBridge error from
 // inside the panel MCP handler.
@@ -86,7 +92,12 @@ interface Drive {
   pollParams: unknown[];
   turnStarts: number;
   endTurn(
-    kind?: "completed" | "worker-transport" | "worker-transport-retry" | "scrubbed-transport",
+    kind?:
+      | "completed"
+      | "worker-transport"
+      | "worker-transport-retry"
+      | "scrubbed-transport"
+      | "event-notification-transport",
   ): Promise<void>;
   releaseInterrupt(): void;
   waitForIdle(): Promise<void>;
@@ -204,7 +215,8 @@ function startDrive(opts: {
       if (
         kind === "worker-transport" ||
         kind === "worker-transport-retry" ||
-        kind === "scrubbed-transport"
+        kind === "scrubbed-transport" ||
+        kind === "event-notification-transport"
       ) {
         client.notificationHandler?.({
           method: "error",
@@ -212,7 +224,12 @@ function startDrive(opts: {
             threadId: "thread-1",
             turnId,
             error: {
-              message: kind === "scrubbed-transport" ? SCRUBBED_TRANSPORT_FAILURE : WORKER_TRANSPORT_FAILURE,
+              message:
+                kind === "scrubbed-transport"
+                  ? SCRUBBED_TRANSPORT_FAILURE
+                  : kind === "event-notification-transport"
+                    ? EVENT_NOTIFICATION_TRANSPORT_FAILURE
+                    : WORKER_TRANSPORT_FAILURE,
             },
             willRetry: kind === "worker-transport-retry",
           },
@@ -295,6 +312,27 @@ describe("Codex mid-session MCP drop reconnects panel tools (#1524)", () => {
     );
     expect(failure?.outcomeUnknown).toBe(true);
     expect(failure?.message).toMatch(/did not retry/i);
+
+    await drive.finish();
+  });
+
+  it("handles the EventNotificationTransport panel_run failure after a successful save (#2378)", async () => {
+    // The reported save -> immediate run sequence loses the outer MCP response
+    // before Codex can return a tool result. The wrapper must enter the same
+    // bounded reload path as the plain WorkerTransport form; it must not let
+    // Codex replay the mutation or claim that the render was not accepted.
+    const drive = startDrive({ listings: [PANEL_UP] });
+    await drive.endTurn("event-notification-transport");
+
+    expect(drive.reloadCalls).toBe(1);
+    expect(drive.turnStarts).toBe(1);
+    const failure = drive.events.find(
+      (e): e is Extract<AgentEvent, { type: "error" }> =>
+        e.type === "error" && !(e as { sessionNotice?: boolean }).sessionNotice,
+    );
+    expect(failure?.outcomeUnknown).toBe(true);
+    expect(failure?.message).toMatch(/did not retry/i);
+    expect(failure?.message).toMatch(/outcome as UNKNOWN/i);
 
     await drive.finish();
   });

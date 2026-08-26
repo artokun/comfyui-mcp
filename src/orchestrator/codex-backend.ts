@@ -80,7 +80,7 @@ function msgOf(err: unknown): string {
  */
 export function isCodexPanelMcpTransportFailure(message: string): boolean {
   return (
-    /Transport send error\s*(?::\s*WorkerTransport\b|;\s*)/i.test(message) &&
+    /Transport send error\s*(?::\s*(?:EventNotificationTransport\s+)?WorkerTransport\b|;\s*)/i.test(message) &&
     /HTTP request failed sending request to\s+https?:\/\//i.test(message)
   );
 }
