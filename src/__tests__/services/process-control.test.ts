@@ -1569,4 +1569,123 @@ describe("restart truthfulness + Pinokio-shaped refusal (#742)", () => {
     );
     expect(v2GetCall).toBeDefined();
   });
+  // ---- #2320 remaining half: the REPORT on the give-up path -----------------
+  //
+  // The reboot verdict itself is NOT under test here and must not move: a
+  // catchall 200 and a server that rebooted instantly are indistinguishable from
+  // the HTTP response alone, so `rebooting` stays false. Every test below asserts
+  // that too (`stopped === false`), because the failure mode of the earlier
+  // attempt at this issue was converting the false NEGATIVE into a false
+  // POSITIVE — a phantom reboot the caller then waits on.
+
+  /** Desktop/remote wiring shared by the #2320 report tests. */
+  function installRemoteRebootFixture(): void {
+    mockLivePortNoKill();
+    mockGetSystemStats.mockResolvedValue({
+      system: {
+        argv: [
+          "C:\\Users\\x\\AppData\\Local\\Programs\\Comfy Desktop\\resources\\ComfyUI\\main.py",
+          "--port",
+          "8188",
+        ],
+      },
+    });
+    installLiveDesktopSupervisor();
+    __processControlTestHooks.setRemoteRebootTimingForTests({
+      settleMs: 0,
+      budgetMs: 200,
+      intervalMs: 5,
+    });
+  }
+
+  /** The SPA/proxy catchall: HTTP 200 text/html for any unknown path. */
+  function catchall(): Response {
+    return new Response(
+      '<!doctype html><html lang="en"><head><title>ComfyUI</title>' +
+        '<meta name="version" content="1.45.21"></head><body></body></html>',
+      { status: 200, headers: { "content-type": "text/html" } },
+    );
+  }
+
+  it("does not claim LEGACY Manager 3.x when the Manager reports V4 (#2320)", async () => {
+    // The reported verdict. Every reboot candidate refuses the verb, nothing
+    // succeeds — and the old message concluded "likely runs the LEGACY Manager
+    // 3.x" and prescribed "upgrade to Manager v4+". The server answers the
+    // version question directly, and it says V4.2.2, so both are false.
+    installRemoteRebootFixture();
+    const fetchMock = vi.fn(async (url: unknown) => {
+      const u = String(url);
+      if (u.includes("/manager/version")) return new Response("V4.2.2", { status: 200 });
+      if (u.includes("/manager/reboot")) return new Response(null, { status: 405 });
+      if (u.includes("system_stats")) return new Response("{}", { status: 200 });
+      return new Response(null, { status: 404 });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await restartComfyUI();
+
+    // The verdict is unchanged — this fix words the failure, it does not invent
+    // a reboot.
+    expect(result.stopped).toBe(false);
+    expect(result.message).toMatch(/reports V4\.x/);
+    expect(result.message).not.toMatch(/LEGACY Manager 3\.x/i);
+    // The useless remedy is gone specifically for a server that already IS v4.
+    expect(result.message).not.toMatch(/upgrade to Manager v4\+/i);
+  });
+
+  it("discloses a catchall-shaped 200 as MAY-have-landed instead of a flat failure (#2320)", async () => {
+    // The reporter's host: the proxy 200s unknown paths, so the GET that really
+    // did reboot the server was written off as "frontend catchall, not a reboot
+    // route" and the caller was told the restart failed — inviting the double
+    // reboot. The version endpoint is behind the same catchall, so it cannot
+    // rescue this case; the disclosure is what does.
+    installRemoteRebootFixture();
+    const fetchMock = vi.fn(async (url: unknown, opts?: unknown) => {
+      const u = String(url);
+      const method = (opts as { method?: string } | undefined)?.method ?? "GET";
+      if (u.includes("/manager/reboot")) {
+        return method === "GET" ? catchall() : new Response(null, { status: 405 });
+      }
+      if (u.includes("/manager/version")) return catchall();
+      if (u.includes("system_stats")) return new Response("{}", { status: 200 });
+      return new Response(null, { status: 404 });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await restartComfyUI();
+
+    // Still NOT a reboot: promoting this is the regression that sank round 1.
+    expect(result.stopped).toBe(false);
+    // But the caller is told a request reached the server and warned off the
+    // blind re-issue, and is given the authoritative way to settle it.
+    expect(result.message).toMatch(/MAY have taken effect/);
+    expect(result.message).toMatch(/get_system_stats/);
+    expect(result.message).toMatch(/GET \/v2\/manager\/reboot/);
+  });
+
+  it("never reads the SPA catchall as a Manager version string (#2320)", async () => {
+    // The strict parse shared with node-management.ts is the only thing standing
+    // between a 200 page of HTML and a fabricated version claim. Pinned at THIS
+    // call site, not just in the helper: the report is built behind exactly the
+    // proxy that serves such a page, and the HTML here carries a version-shaped
+    // number ("1.45.21") that a looser parse would happily lift.
+    installRemoteRebootFixture();
+    const fetchMock = vi.fn(async (url: unknown) => {
+      const u = String(url);
+      if (u.includes("/manager/version")) return catchall();
+      if (u.includes("/manager/reboot")) return new Response(null, { status: 404 });
+      if (u.includes("system_stats")) return new Response("{}", { status: 200 });
+      return new Response(null, { status: 404 });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await restartComfyUI();
+
+    expect(result.stopped).toBe(false);
+    // No version is claimed at all, and specifically not the one embedded in the
+    // catchall page.
+    expect(result.message).not.toMatch(/reports V/);
+    expect(result.message).not.toMatch(/1\.45/);
+    expect(result.message).toMatch(/version could not be read/);
+  });
 });
