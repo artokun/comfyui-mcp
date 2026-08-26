@@ -6357,6 +6357,17 @@ function isDefinitiveNonPromotedSubgraphRead(res: ToolResult): boolean {
   );
 }
 
+/** Extract the divergence error message if the result carries a canvas-root-divergence error.
+ * Returns null if the error is not a divergence error. */
+function extractCanvasRootDivergenceError(res: ToolResult): string | null {
+  if (!res.isError) return null;
+  const text = textOfToolResult(res);
+  if (text.includes("[canvas-root-divergence]")) {
+    return text;
+  }
+  return null;
+}
+
 function promotedMatchCount(payload: Record<string, unknown>, widget: string): number {
   const nodes = payload.nodes;
   if (!Array.isArray(nodes)) return 0;
@@ -6635,6 +6646,10 @@ async function preparePromotedWidgetWrite(
   const sub = await ctx.call({ cmd: "graph_get_subgraph", node_id: nodeId });
   if (sub.isError) {
     if (isDefinitiveNonPromotedSubgraphRead(sub)) return null;
+    const divergenceError = extractCanvasRootDivergenceError(sub);
+    if (divergenceError) {
+      return promotedWriteRefusal(widget, divergenceError);
+    }
     return promotedWriteRefusal(
       widget,
       "graph_get_subgraph could not determine whether the addressed node is a promoted container",

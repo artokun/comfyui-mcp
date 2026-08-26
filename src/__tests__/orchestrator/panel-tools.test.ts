@@ -8075,3 +8075,108 @@ describe("#1593 restart refusal checks WHICH server the fallback would hit", () 
     }
   });
 });
+
+// #1869 — surface canvas-root-divergence errors instead of swallowing them behind
+// the promoted-container wording.
+describe("panel_set_widget divergence error handling", () => {
+  const SET_OK = { set: { node_id: 23, widget: "model", value: "old" } };
+  const dynamicDetail = { nodes: [{ id: 23, type: "COMFY_DYNAMICCOMBO_V3" }] };
+
+  async function runSetWidget(
+    args: Record<string, unknown> = { node_id: 23, widget: "model", value: "NEW" },
+    graphGetSubgraphError: string | null = null,
+  ): Promise<{ res: ToolResult; cmds: string[] }> {
+    const cmds: string[] = [];
+    const res = (await defByName("panel_set_widget").handler(args, {
+      call: async (cmd: Record<string, unknown>) => {
+        cmds.push(String(cmd.cmd));
+        if (cmd.cmd === "graph_query") {
+          return { content: [{ type: "text" as const, text: JSON.stringify(dynamicDetail, null, 2) }] };
+        }
+        if (cmd.cmd === "graph_get_subgraph") {
+          if (graphGetSubgraphError === null) {
+            // Should not be called in this test variant
+            throw new Error("Unexpected graph_get_subgraph call");
+          }
+          return {
+            isError: true,
+            content: [{ type: "text" as const, text: graphGetSubgraphError }],
+          };
+        }
+        return { content: [{ type: "text" as const, text: JSON.stringify(SET_OK, null, 2) }] };
+      },
+    } as unknown as PanelToolCtx)) as ToolResult;
+    return { res, cmds };
+  }
+
+  it("surfaces canvas-root-divergence errors in the refusal (production path)", async () => {
+    const divergenceMsg = "[canvas-root-divergence] The canvas you are looking at (5 node(s)) and the panel's bound root graph (3 node(s)) are two DIFFERENT graphs, so this command was NOT applied ... reload the ComfyUI page (a panel-only reload does not rebuild this binding).";
+    const { res, cmds } = await runSetWidget(undefined, divergenceMsg);
+    expect(res.isError).toBe(true);
+    // The refusal should contain the divergence error, not the generic promoted-container message
+    expect(res.content[0].text).toContain("[canvas-root-divergence]");
+    expect(res.content[0].text).toContain("The canvas you are looking at");
+    expect(res.content[0].text).toContain("reload the ComfyUI page");
+    // Should still refuse with the standard refusal structure
+    expect(res.content[0].text).toContain("No graph_set_widget was dispatched");
+    // Should only have called graph_query and graph_get_subgraph, not graph_set_widget
+    expect(cmds).toEqual(["graph_query", "graph_get_subgraph"]);
+  });
+
+  it("still refuses with promoted-container wording on indeterminate errors (control 1)", async () => {
+    const indeterminateError = "Error: Something went wrong but it is not clear what";
+    const { res, cmds } = await runSetWidget(undefined, indeterminateError);
+    expect(res.isError).toBe(true);
+    // Should use the generic promoted-container refusal for indeterminate errors
+    expect(res.content[0].text).toContain("could not determine whether the addressed node is a promoted container");
+    // Should NOT surface the indeterminate error message
+    expect(res.content[0].text).not.toContain("Something went wrong");
+    // No graph_set_widget should be dispatched
+    expect(res.content[0].text).toContain("No graph_set_widget was dispatched");
+    expect(cmds).toEqual(["graph_query", "graph_get_subgraph"]);
+  });
+
+  it("returns null for definitive 'not a subgraph' errors (control 2)", async () => {
+    const notSubgraphError = "Error: Node 23 (OrdinaryNode) is not a subgraph";
+    const { res, cmds } = await runSetWidget(undefined, notSubgraphError);
+    // Should return null (not promoted), not a refusal
+    expect(res).toBe(null);
+    // Should have called graph_query and graph_get_subgraph only
+    expect(cmds).toEqual(["graph_query", "graph_get_subgraph"]);
+  });
+
+  it("writes are still refused on all graph_get_subgraph errors (control 3)", async () => {
+    const testCases = [
+      {
+        name: "divergence",
+        error: "[canvas-root-divergence] The canvas differs",
+        shouldContainDivergence: true,
+      },
+      {
+        name: "indeterminate",
+        error: "Error: unknown failure",
+        shouldContainDivergence: false,
+      },
+    ];
+
+    for (const testCase of testCases) {
+      const { res, cmds } = await runSetWidget(undefined, testCase.error);
+
+      if (testCase.name === "divergence") {
+        // Divergence case should return null OR an error with divergence text
+        if (res !== null) {
+          expect(res.isError).toBe(true);
+          expect(res.content[0].text).toContain("[canvas-root-divergence]");
+        }
+      } else {
+        // Indeterminate case should be an error
+        expect(res).not.toBe(null);
+        expect(res.isError).toBe(true);
+      }
+
+      // In ALL error cases, graph_set_widget should NOT be dispatched
+      expect(cmds).not.toContain("graph_set_widget");
+      expect(cmds).toEqual(["graph_query", "graph_get_subgraph"]);
+    }
+  });
+});
