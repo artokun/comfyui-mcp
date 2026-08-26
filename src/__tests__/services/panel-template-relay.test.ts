@@ -46,6 +46,7 @@ describe("authenticated panel template relay (#2196)", () => {
       bridge: { canReach: () => true },
       resolvePanelAgent: () => ({ agentKey: "shared::codex", secret: SECRET }),
       resolvePanelTab: () => "tab-1",
+      resolveCurrentTarget: () => ({ url: panelOrigin, generation: 0 }),
       resolvePanelUrl: () => `${panelOrigin}/api/workflow_templates`,
       resolveAllowedPanelOrigin: () => panelOrigin,
     });
@@ -74,6 +75,7 @@ describe("authenticated panel template relay (#2196)", () => {
       bridge: { canReach: () => true },
       resolvePanelAgent: () => ({ agentKey: "shared::codex", secret: SECRET }),
       resolvePanelTab: () => "tab-1",
+      resolveCurrentTarget: () => ({ url: "https://remote.example/comfyapi", generation: 0 }),
       resolvePanelUrl: () => `${panelOrigin}/api/workflow_templates`,
       resolveAllowedPanelOrigin: () => currentPanelTemplateOrigin(panelOrigin, "https://remote.example/comfyapi"),
     });
@@ -101,6 +103,7 @@ describe("authenticated panel template relay (#2196)", () => {
       bridge: { canReach: () => true },
       resolvePanelAgent: () => ({ agentKey: "shared::codex", secret: SECRET }),
       resolvePanelTab: () => "tab-1",
+      resolveCurrentTarget: () => ({ url: "https://current.example/comfyapi", generation: 0 }),
       resolvePanelUrl: () => "https://evil.example/api/workflow_templates",
       resolveAllowedPanelOrigin: () => currentPanelTemplateOrigin("https://evil.example", "https://current.example/comfyapi"),
     });
@@ -119,6 +122,7 @@ describe("authenticated panel template relay (#2196)", () => {
       bridge: { canReach: () => true },
       resolvePanelAgent: () => ({ agentKey: "shared::codex", secret: SECRET }),
       resolvePanelTab: () => "tab-1",
+      resolveCurrentTarget: () => ({ url: "https://current.example/comfyapi", generation: 0 }),
       resolvePanelUrl: () => undefined,
       resolveAllowedPanelOrigin: () => undefined,
     });
@@ -136,6 +140,7 @@ describe("authenticated panel template relay (#2196)", () => {
       bridge: { canReach: () => false },
       resolvePanelAgent: () => ({ agentKey: "shared::codex", secret: SECRET }),
       resolvePanelTab: () => "tab-1",
+      resolveCurrentTarget: () => ({ url: "https://panel.example/comfyapi", generation: 0 }),
       resolvePanelUrl: () => {
         throw new Error("a disconnected panel has no URL to resolve");
       },
@@ -164,6 +169,7 @@ describe("authenticated panel template relay (#2196)", () => {
       bridge: { canReach: () => true },
       resolvePanelAgent: () => ({ agentKey: "shared::codex", secret: SECRET }),
       resolvePanelTab: () => "tab-1",
+      resolveCurrentTarget: () => ({ url: panelOrigin, generation: 0 }),
       resolvePanelUrl: () => `${panelOrigin}/api/workflow_templates`,
       resolveAllowedPanelOrigin: () => panelOrigin,
     });
@@ -191,6 +197,7 @@ describe("authenticated panel template relay (#2196)", () => {
       bridge: { canReach: () => true },
       resolvePanelAgent: () => ({ agentKey: "shared::codex", secret: SECRET }),
       resolvePanelTab: () => "tab-1",
+      resolveCurrentTarget: () => ({ url: "https://panel.example/comfyapi", generation: 0 }),
       resolvePanelUrl: () => "https://panel.example/api/workflow_templates",
       resolveAllowedPanelOrigin: () => currentPanelTemplateOrigin("https://panel.example", "https://panel.example/comfyapi"),
     });

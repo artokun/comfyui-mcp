@@ -89,6 +89,7 @@ describe("list_packs -> panel template relay production boundary (#2196)", () =>
       bridge: { canReach: () => true },
       resolvePanelAgent: () => ({ agentKey: "orchestrator::codex", secret: SECRET }),
       resolvePanelTab: () => "tab-1",
+      resolveCurrentTarget: () => ({ url: state.baseUrl, generation: 0 }),
       resolvePanelUrl: () => `${panelOrigin}/api/workflow_templates`,
       resolveAllowedPanelOrigin: () => panelOrigin,
     });

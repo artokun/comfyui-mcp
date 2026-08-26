@@ -64,13 +64,20 @@ export interface PanelTemplateRelayResolvedAgent {
   secret: string;
 }
 
+export interface PanelTemplateRelayTarget {
+  url: string;
+  generation: number;
+}
+
 export interface PanelTemplateRelayServerOptions {
   bridge: PanelTemplateRelayBridge;
   resolvePanelAgent: (request: PanelTemplateRelayRequest) => PanelTemplateRelayResolvedAgent | undefined;
   resolvePanelTab: (agentKey: string) => string | undefined;
-  resolvePanelUrl: (tabId: string) => string | undefined;
-  /** Must return undefined unless the tab's origin is authorized for the current target. */
-  resolveAllowedPanelOrigin: (tabId: string) => string | undefined;
+  /** Captures the authoritative target identity for this request. */
+  resolveCurrentTarget: () => PanelTemplateRelayTarget;
+  resolvePanelUrl: (tabId: string, currentTarget: string) => string | undefined;
+  /** Must return undefined unless the tab's origin is authorized for currentTarget. */
+  resolveAllowedPanelOrigin: (tabId: string, currentTarget: string) => string | undefined;
 }
 
 export interface PanelTemplateRelayServer {
@@ -219,6 +226,7 @@ function errorMessage(error: string): string {
     "NO_PANEL_ORIGIN",
     "PANEL_FETCH_FAILED",
     "STALE_REQUEST",
+    "STALE_TARGET",
     "TIMEOUT",
   ]);
   return known.has(error) ? error : "PANEL_FETCH_FAILED";
@@ -533,13 +541,14 @@ export async function startPanelTemplateRelayServer(
         if (now - request.createdAt < -5_000 || now - request.createdAt > PANEL_TEMPLATE_RELAY_STALE_MS || now >= requestDeadline(request)) {
           response = failureResponse(request.requestId, now >= requestDeadline(request) ? "TIMEOUT" : "STALE_REQUEST");
         } else {
+          const targetAtStart = options.resolveCurrentTarget();
           const panelTab = options.resolvePanelTab(auth.agentKey);
           const panelReachable = panelTab ? options.bridge.canReach(panelTab) : false;
           const allowedOrigin = panelTab && panelReachable
-            ? options.resolveAllowedPanelOrigin(panelTab)
+            ? options.resolveAllowedPanelOrigin(panelTab, targetAtStart.url)
             : undefined;
           const panelUrl = panelTab && panelReachable
-            ? safePanelTemplateUrl(options.resolvePanelUrl(panelTab), allowedOrigin)
+            ? safePanelTemplateUrl(options.resolvePanelUrl(panelTab, targetAtStart.url), allowedOrigin)
             : undefined;
           if (!panelTab || !panelReachable) {
             response = failureResponse(
@@ -550,11 +559,19 @@ export async function startPanelTemplateRelayServer(
             response = failureResponse(request.requestId, "NO_PANEL_ORIGIN");
           } else {
             try {
+              const body = await withinDeadline(fetchPanelIndex(panelUrl, requestDeadline(request)), requestDeadline(request));
+              const targetNow = options.resolveCurrentTarget();
+              if (targetNow.url !== targetAtStart.url || targetNow.generation !== targetAtStart.generation) {
+                throw new PanelTemplateRelayError(
+                  "The ComfyUI target changed while the panel template index was being fetched.",
+                  "STALE_TARGET",
+                );
+              }
               response = {
                 version: PANEL_TEMPLATE_RELAY_VERSION,
                 requestId: request.requestId,
                 ok: true,
-                body: await withinDeadline(fetchPanelIndex(panelUrl, requestDeadline(request)), requestDeadline(request)),
+                body,
                 updated: Date.now(),
               };
             } catch (error) {

@@ -120,6 +120,7 @@ import {
   type PanelTemplateRelayResolvedAgent,
   type PanelTemplateRelayServer,
   type PanelTemplateRelayRequest,
+  type PanelTemplateRelayTarget,
 } from "../services/panel-template-relay.js";
 import { logger } from "../utils/logger.js";
 import { listDownloadJobs } from "../services/download-jobs.js";
@@ -207,7 +208,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { registerAllTools } from "../tools/index.js";
 import { tryInstallRetiredNameRedirect } from "../tools/retired-redirect.js";
-import { config, isForceRemoteFlagSet, isLoopbackHost, detectLocalComfyUIPath, setComfyuiTarget, onComfyuiTargetChanged, isTargetingLocal, isTargetingLocalOrLan, isTargetingPod, getComfyUIBaseUrl, getLocalComfyuiUrl, rescopeLocalTargetFile, getComfyUIAuthHeaders } from "../config.js";
+import { config, isForceRemoteFlagSet, isLoopbackHost, detectLocalComfyUIPath, setComfyuiTarget, onComfyuiTargetChanged, isTargetingLocal, isTargetingLocalOrLan, isTargetingPod, getComfyUIBaseUrl, getComfyuiTargetGeneration, getLocalComfyuiUrl, rescopeLocalTargetFile, getComfyUIAuthHeaders } from "../config.js";
 import { normalizeInstallPathEnv } from "../utils/install-path-env.js";
 import {
   AGENT_IDENTITY_ENV,
@@ -950,8 +951,9 @@ export function armStartupDeadline(
 export interface PanelTemplateRelayWiring {
   resolvePanelAgent: (request: PanelTemplateRelayRequest) => PanelTemplateRelayResolvedAgent | undefined;
   resolvePanelTab: (agentKey: string) => string | undefined;
-  resolvePanelUrl: (tabId: string) => string | undefined;
-  resolveAllowedPanelOrigin: (tabId: string) => string | undefined;
+  resolveCurrentTarget: () => PanelTemplateRelayTarget;
+  resolvePanelUrl: (tabId: string, currentTarget: string) => string | undefined;
+  resolveAllowedPanelOrigin: (tabId: string, currentTarget: string) => string | undefined;
 }
 
 /**
@@ -962,6 +964,7 @@ export interface PanelTemplateRelayWiring {
 export function createPanelTemplateRelayWiring(options: {
   bridge: Pick<UiBridge, "resolveSharedTabId" | "tabServerOrigin">;
   currentTarget: () => string;
+  currentTargetGeneration: () => number;
   secrets: ReadonlyMap<string, string>;
 }): PanelTemplateRelayWiring {
   const resolvePanelAgent = (
@@ -978,14 +981,17 @@ export function createPanelTemplateRelayWiring(options: {
   };
   const resolvePanelTab = (tabId: string): string | undefined =>
     isScopeAddress(tabId) ? options.bridge.resolveSharedTabId(tabId) : panelTabOf(tabId);
-  const resolveAllowedPanelOrigin = (tabId: string): string | undefined =>
-    currentPanelTemplateOrigin(options.bridge.tabServerOrigin(tabId), options.currentTarget());
-  const resolvePanelUrl = (tabId: string): string | undefined => {
-    const target = options.currentTarget();
-    const origin = currentPanelTemplateOrigin(options.bridge.tabServerOrigin(tabId), target);
+  const resolveCurrentTarget = (): PanelTemplateRelayTarget => ({
+    url: options.currentTarget(),
+    generation: options.currentTargetGeneration(),
+  });
+  const resolveAllowedPanelOrigin = (tabId: string, currentTarget: string): string | undefined =>
+    currentPanelTemplateOrigin(options.bridge.tabServerOrigin(tabId), currentTarget);
+  const resolvePanelUrl = (tabId: string, currentTarget: string): string | undefined => {
+    const origin = currentPanelTemplateOrigin(options.bridge.tabServerOrigin(tabId), currentTarget);
     if (!origin) return undefined;
     try {
-      const basePath = new URL(target).pathname.replace(/\/+$/, "");
+      const basePath = new URL(currentTarget).pathname.replace(/\/+$/, "");
       return `${origin}${basePath}/api/workflow_templates`;
     } catch {
       return undefined;
@@ -994,6 +1000,7 @@ export function createPanelTemplateRelayWiring(options: {
   return {
     resolvePanelAgent,
     resolvePanelTab,
+    resolveCurrentTarget,
     resolvePanelUrl,
     resolveAllowedPanelOrigin,
   };
@@ -1847,6 +1854,7 @@ export async function runPanelOrchestrator(): Promise<void> {
   const panelTemplateRelayWiring = createPanelTemplateRelayWiring({
     bridge,
     currentTarget: getComfyUIBaseUrl,
+    currentTargetGeneration: getComfyuiTargetGeneration,
     secrets: panelImageRelaySecrets,
   });
   let panelImageRelayServer: PanelImageRelayServer | undefined;
