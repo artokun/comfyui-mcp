@@ -25,7 +25,7 @@
     "dev": "tsx src/index.ts",
     "dev:agent-poc": "tsx src/experimental/run.ts",
     "start": "node dist/index.js",
-    "test": "vitest run --passWithNoTests && npm run i18n:check && npm run check:docs-links && npm run check:docs-locale && npm run check:docs-mdx && npm run check:blog && npm run check:blog-packs && npm run check:blog-stale && npm run check:blog-structure",
+    "test": "node scripts/run-checks.mjs",
     "smoke": "npm run build && node scripts/smoke-install.mjs",
     "test:watch": "vitest",
     "test:integration": "cross-env COMFYUI_INTEGRATION=true vitest run",
