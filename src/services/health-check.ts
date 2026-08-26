@@ -204,24 +204,21 @@ export async function runHealthCheck(
         // stripped first. The ColoredFormatter output has ANSI codes immediately after
         // the timestamp prefix, so we strip ANSI, then any adjacent [LEVEL] tag that
         // it leaves behind.
-        const ANSI_RE = /\x1b\[[0-9;]*m/g;
-        const stripAnsi = (s: string): string => s.replace(ANSI_RE, "");
+        // #2355 — ColoredFormatter prepends ANSI-wrapped `[LEVEL]` tags before the
+        // message, even when given ColoredFormatter("%(message)s"). After stripping
+        // the timestamp, the body still begins with `\x1b[1m\x1b[31m[ERROR]\x1b[0m `,
+        // so anchored patterns like `^!!!` or `^Traceback` need the ANSI escapes
+        // stripped first. The ColoredFormatter output has ANSI codes immediately after
+        // the timestamp prefix: `\x1b[...m[LEVEL]\x1b[0m message`.
+        //
+        // Stripping ANSI leaves the [LEVEL] marker intact so existing patterns like
+        // `/[ERROR]/` continue to work. The anchored patterns need to account for
+        // the optional [LEVEL] tag that may precede them.
+        const stripAnsi = (s: string): string => s.replace(/\x1b\[[0-9;]*m/g, "");
         const bodyOf = (line: string): string => {
-          // Strip timestamp prefix
+          // Strip timestamp prefix and ANSI escape sequences
           let body = line.replace(/^\S+ - /, "");
-          // Check if ANSI escape sequences are AT THE START (ColoredFormatter case)
-          // ColoredFormatter outputs: \x1b[1m\x1b[31m[ERROR]\x1b[0m message
-          const startsWithAnsi = /^\x1b\[/.test(body);
-          // Strip ANSI escape sequences
           body = stripAnsi(body);
-          // If ANSI was at the start, the [LEVEL] tag that was wrapped in escapes
-          // is now exposed and adjacent to the message. Strip it so patterns like
-          // /^Traceback/ and /^!!!/ can match at the true start. This only happens
-          // for ColoredFormatter output, not for lines with ANSI elsewhere or [ERROR]
-          // markers from file handlers.
-          if (startsWithAnsi && /^\[(?:ERROR|WARNING|INFO|DEBUG|CRITICAL|EXCEPTION)\]\s/.test(body)) {
-            body = body.replace(/^\[(?:ERROR|WARNING|INFO|DEBUG|CRITICAL|EXCEPTION)\]\s*/, "");
-          }
           return body;
         };
 
@@ -236,14 +233,18 @@ export async function runHealthCheck(
         // "Got an OOM, unloading all loaded models." were all invisible, so a crashed
         // render reported byte-identically to a healthy server in the diagnostic users
         // paste into bug reports.
+        //
+        // #2355 — after stripping ANSI codes (which ColoredFormatter wraps around
+        // [LEVEL] tags), the body may be `[ERROR] !!! Exception...` instead of
+        // `!!! Exception...`. Patterns must account for this optional [LEVEL] prefix.
         const ERROR_HEADERS: readonly RegExp[] = [
-          /^!!!\s*Exception during processing/i,   // execution.py render failure
-          /^Traceback\s*\(/i,                       // a Python traceback header
+          /^(?:\[(?:ERROR|WARNING|INFO|DEBUG|CRITICAL|EXCEPTION)\]\s*)?!!!\s*Exception during processing/i,   // execution.py render failure, possibly with [LEVEL]
+          /^(?:\[(?:ERROR|WARNING|INFO|DEBUG|CRITICAL|EXCEPTION)\]\s*)?Traceback\s*\(/i,                       // traceback header, possibly with [LEVEL]
           /\[ERROR\]|\[EXCEPTION\]/i,               // ComfyUI-Manager / file handler
         ];
         const ERROR_SIGNALS: readonly RegExp[] = [
           ...ERROR_HEADERS,
-          /^[A-Za-z0-9_.]*(Error|Exception)\s*:/,          // a bare exception tail
+          /^(?:\[(?:ERROR|WARNING|INFO|DEBUG|CRITICAL|EXCEPTION)\]\s*)?[A-Za-z0-9_.]*(Error|Exception)\s*:/,          // exception tail, possibly with [LEVEL]
           /\bGot an OOM\b/i,                        // model_management OOM notice
           /\bAllocation on device\b/i,              // torch allocator OOM
           /\bCUDA out of memory\b/i,
@@ -284,7 +285,8 @@ export async function runHealthCheck(
             if (isHeader(b)) break;
             if (/^[ \t]/.test(b) || b.trim() === "") { group.push(allLines[j]); processed.add(j); continue; }
             // A bare exception tail closes the traceback it belongs to; take it and stop.
-            if (/^[A-Za-z0-9_.]*(Error|Exception)\s*:/.test(b)) {
+            // The tail may be prefixed with a [LEVEL] tag from ColoredFormatter.
+            if (/^(?:\[(?:ERROR|WARNING|INFO|DEBUG|CRITICAL|EXCEPTION)\]\s*)?[A-Za-z0-9_.]*(Error|Exception)\s*:/.test(b)) {
               group.push(allLines[j]); processed.add(j);
             }
             break;
