@@ -689,6 +689,7 @@ const CURRENT_SAFE_PROMOTED_SUBGRAPH = {
   promoted_terminals: [
     {
       widget: "quality_prompt",
+      parent_rail: { authoritative: true, widget: "quality_prompt" },
       immediate_node_id: 76,
       immediate_widget: "quality_prompt",
       terminal_node_id: 76,
@@ -721,6 +722,7 @@ function nestedTerminalSubgraph(
     promoted_terminals: [
       {
         widget,
+        parent_rail: { authoritative: true, widget },
         immediate_node_id: 188,
         immediate_widget: widget,
         terminal_node_id: terminal.nodeId,
@@ -787,6 +789,7 @@ const NESTED_SAFE_INNER_SUBGRAPH = {
   promoted_terminals: [
     {
       widget: "quality_prompt",
+      parent_rail: { authoritative: true, widget: "quality_prompt" },
       immediate_node_id: 2768,
       immediate_widget: "quality_prompt",
       terminal_node_id: 2768,
@@ -1111,6 +1114,42 @@ describe("panel_set_widget promoted container success guards (#2314)", () => {
     expect(calls.filter((call) => call.cmd === "graph_set_widget")).toHaveLength(0);
   });
 
+  it.each([
+    [
+      "missing parent-rail authority",
+      { ...CURRENT_SAFE_PROMOTED_SUBGRAPH.promoted_terminals[0], parent_rail: undefined },
+    ],
+    [
+      "externally-linked parent rail",
+      {
+        ...CURRENT_SAFE_PROMOTED_SUBGRAPH.promoted_terminals[0],
+        parent_rail: { authoritative: false, widget: "quality_prompt" },
+      },
+    ],
+    [
+      "producer refusal for an externally-linked parent rail",
+      {
+        widget: "quality_prompt",
+        immediate_node_id: 76,
+        immediate_widget: "quality_prompt",
+        error: "the promoted parent rail was missing, externally linked, or not authoritative",
+      },
+    ],
+  ])("never authorizes an inner write with %s", async (_name, entry) => {
+    const { text, isError, calls } = await setWidget(
+      { node_id: 78, widget: "quality_prompt", value: "new" },
+      {
+        firstWrite: "ok",
+        promotedTerminalWitnesses: true,
+        subgraph: { ...CURRENT_SAFE_PROMOTED_SUBGRAPH, promoted_terminals: [entry] },
+      },
+    );
+
+    expect(isError).toBe(true);
+    expect(text).toMatch(/parent rail|malformed|incomplete|unresolved/i);
+    expect(calls.filter((call) => call.cmd === "graph_set_widget")).toHaveLength(0);
+  });
+
   it("does not treat an unrelated witness error as proof that this alias is ordinary", async () => {
     const { text, isError, calls } = await setWidget(
       { node_id: 78, widget: "ordinary", value: "new" },
@@ -1271,6 +1310,30 @@ describe("panel_set_widget promoted container success guards (#2314)", () => {
             {
               ...CURRENT_SAFE_PROMOTED_SUBGRAPH.promoted_terminals[0],
               terminal_node_id: 99,
+            },
+          ],
+        },
+      },
+    );
+
+    expect(isError).toBe(true);
+    expect(text).toMatch(/mapping changed or became unverifiable/);
+    expect(calls.filter((call) => call.cmd === "graph_set_widget")).toHaveLength(0);
+  });
+
+  it("fails closed when the live parent rail relinks before dispatch", async () => {
+    const { text, isError, calls } = await setWidget(
+      { node_id: 78, widget: "quality_prompt", value: "new" },
+      {
+        firstWrite: "ok",
+        promotedTerminalWitnesses: true,
+        preflightSubgraph: CURRENT_SAFE_PROMOTED_SUBGRAPH,
+        subgraph: {
+          ...CURRENT_SAFE_PROMOTED_SUBGRAPH,
+          promoted_terminals: [
+            {
+              ...CURRENT_SAFE_PROMOTED_SUBGRAPH.promoted_terminals[0],
+              parent_rail: { authoritative: true, widget: "relinked_quality_prompt" },
             },
           ],
         },
@@ -1888,6 +1951,7 @@ describe("resolveInnerPromotedTarget", () => {
       promoted_terminals: [
         {
           widget: "width",
+          parent_rail: { authoritative: true, widget: "width" },
           immediate_node_id: 188,
           immediate_widget: "width",
           terminal_node_id: 2768,
@@ -1901,6 +1965,7 @@ describe("resolveInnerPromotedTarget", () => {
     expect(resolveInnerPromotedTarget(nested, "width", 78)).toEqual({
       innerNodeId: 188,
       widget: "width",
+      parentRail: { authoritative: true, widget: "width" },
       terminal: {
         nodeId: 2768,
         nodeType: "KSampler",
@@ -1921,6 +1986,7 @@ describe("resolveInnerPromotedTarget", () => {
       promoted_terminals: [
         {
           widget: "prompt_alias",
+          parent_rail: { authoritative: true, widget: "prompt_b" },
           immediate_node_id: 188,
           immediate_widget: "prompt_b",
           terminal_node_id: 2768,
@@ -1934,6 +2000,7 @@ describe("resolveInnerPromotedTarget", () => {
     expect(resolveInnerPromotedTarget(renamed, "prompt_alias", 78)).toEqual({
       innerNodeId: 188,
       widget: "prompt_b",
+      parentRail: { authoritative: true, widget: "prompt_b" },
       terminal: {
         nodeId: 2768,
         nodeType: "AnimaRegionalCanvasInline",
@@ -2024,6 +2091,7 @@ describe("panel_set_widget promoted-subgraph recovery (#1655)", () => {
           promoted_terminals: [
             {
               widget: "prompt_alias",
+              parent_rail: { authoritative: true, widget: "prompt_b" },
               immediate_node_id: 188,
               immediate_widget: "prompt_b",
               terminal_node_id: 2768,

@@ -28,6 +28,9 @@ export type ContradictoryPromotedWidgetRefusal = {
 export type InnerPromotedTarget = {
   innerNodeId: number | string;
   widget: string;
+  /** Current-panel witnesses must prove the exact local parent rail that
+   * serializes this promoted value. Legacy envelopes omit this proof. */
+  parentRail?: PromotedParentRailWitness;
   /** Terminal concrete endpoint supplied by a receiver that can recursively
    * resolve nested promotion chains. Omitted for legacy one-hop envelopes. */
   terminal?: PromotedTerminalWitness;
@@ -46,8 +49,14 @@ export type PromotedTerminalWitness = {
   chainDepth: number;
 };
 
+export type PromotedParentRailWitness = {
+  authoritative: true;
+  widget: string;
+};
+
 type PromotedTerminalEntry = {
   widget: string;
+  parentRail?: PromotedParentRailWitness;
   immediateNodeId?: number | string;
   immediateWidget?: string;
   terminal?: PromotedTerminalWitness;
@@ -342,9 +351,20 @@ function parsePromotedTerminalEntries(value: unknown): PromotedTerminalEntry[] |
     const terminalRaw = raw.terminal_node_id === undefined && raw.terminal_node_type === undefined
       ? undefined
       : raw;
+    const parentRailRaw = raw.parent_rail;
+    let parentRail: PromotedParentRailWitness | undefined;
     let terminal: PromotedTerminalWitness | undefined;
     if (terminalRaw) {
       if (error !== undefined || immediateNodeId === undefined || immediateWidget === undefined) return null;
+      if (
+        !isRecord(parentRailRaw) ||
+        parentRailRaw.authoritative !== true ||
+        typeof parentRailRaw.widget !== "string" ||
+        parentRailRaw.widget.length === 0
+      ) {
+        return null;
+      }
+      parentRail = { authoritative: true, widget: parentRailRaw.widget };
       if (!isNodeId(terminalRaw.terminal_node_id)) return null;
       if (typeof terminalRaw.terminal_node_type !== "string" || terminalRaw.terminal_node_type.length === 0) {
         return null;
@@ -375,6 +395,7 @@ function parsePromotedTerminalEntries(value: unknown): PromotedTerminalEntry[] |
     }
     entries.push({
       widget: raw.widget,
+      ...(parentRail ? { parentRail } : {}),
       ...(immediateNodeId !== undefined ? { immediateNodeId } : {}),
       ...(immediateWidget !== undefined ? { immediateWidget } : {}),
       ...(terminal ? { terminal } : {}),
@@ -452,6 +473,7 @@ export function resolveInnerPromotedTarget(
     if (
       entry.error ||
       !entry.terminal ||
+      !entry.parentRail ||
       entry.immediateNodeId === undefined ||
       !entry.immediateWidget
     ) {
@@ -467,6 +489,7 @@ export function resolveInnerPromotedTarget(
     return {
       innerNodeId: entry.immediateNodeId,
       widget: entry.immediateWidget,
+      parentRail: entry.parentRail,
       terminal: entry.terminal,
     };
   }

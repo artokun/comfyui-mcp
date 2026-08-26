@@ -130,6 +130,7 @@ import {
   resolveLegacyInnerPromotedTarget,
   resolveInnerPromotedTarget,
   validatePromotedSubgraphEnvelope,
+  type PromotedParentRailWitness,
   type PromotedScopeWitness,
   type PromotedTerminalWitness,
   type UnpromotedControlPersistRemedy,
@@ -6265,6 +6266,14 @@ function samePromotedTerminal(
   );
 }
 
+function samePromotedParentRail(
+  left: PromotedParentRailWitness | undefined,
+  right: PromotedParentRailWitness | undefined,
+): boolean {
+  if (!left || !right) return left === right;
+  return left.authoritative === true && right.authoritative === true && left.widget === right.widget;
+}
+
 /** Run the known-bad set against the node id that is about to be written, then
  * inspect a uniquely mapped promoted inner node when the addressed node is a
  * subgraph container. Keep promotion handling separate from the direct helper
@@ -6299,7 +6308,11 @@ type PromotedWriteBinding = {
 type PromotedWritePlan = {
   kind: "promoted-write";
   outerNodeId: number | string;
-  inner: { innerNodeId: number | string; widget: string };
+  inner: {
+    innerNodeId: number | string;
+    widget: string;
+    parentRail?: PromotedParentRailWitness;
+  };
   innerNodeType: string;
   terminal?: PromotedTerminalWitness;
   scope: PromotedScopeWitness;
@@ -6699,6 +6712,12 @@ async function preparePromotedWidgetWrite(
         : "the legacy receiver could not prove that this subgraph request was an ordinary widget",
     );
   }
+  if (publishesCompleteTerminalWitness && !inner.parentRail) {
+    return promotedWriteRefusal(
+      widget,
+      "the current promoted-terminal witness did not prove an authoritative parent rail",
+    );
+  }
   const scopeError = currentPromotedScopeError(ctx, scope);
   if (scopeError) return promotedWriteRefusal(widget, scopeError);
 
@@ -6746,7 +6765,11 @@ async function preparePromotedWidgetWrite(
 }
 
 type PromotedMappingProof = {
-  inner: { innerNodeId: number | string; widget: string };
+  inner: {
+    innerNodeId: number | string;
+    widget: string;
+    parentRail?: PromotedParentRailWitness;
+  };
   innerNodeType: string;
   terminal?: PromotedTerminalWitness;
 };
@@ -6759,7 +6782,11 @@ async function recheckPromotedOuterMapping(
   ctx: PanelToolCtx,
   outerNodeId: number | string,
   widget: string,
-  expectedInner: { innerNodeId: number | string; widget: string },
+  expectedInner: {
+    innerNodeId: number | string;
+    widget: string;
+    parentRail?: PromotedParentRailWitness;
+  },
   expectedScope: PromotedScopeWitness,
   expectedTerminal?: PromotedTerminalWitness,
 ): Promise<PromotedMappingProof | ToolResult> {
@@ -6801,6 +6828,7 @@ async function recheckPromotedOuterMapping(
     !inner ||
     canonicalQueriedNodeId(inner.innerNodeId) !== canonicalQueriedNodeId(expectedInner.innerNodeId) ||
     inner.widget !== expectedInner.widget ||
+    !samePromotedParentRail(inner.parentRail, expectedInner.parentRail) ||
     !samePromotedTerminal(inner.terminal, expectedTerminal)
   ) {
     return promotedWriteRefusal(
@@ -6836,7 +6864,11 @@ async function recheckPromotedOuterMapping(
  */
 async function recheckPromotedInnerTarget(
   ctx: PanelToolCtx,
-  expectedInner: { innerNodeId: number | string; widget: string },
+  expectedInner: {
+    innerNodeId: number | string;
+    widget: string;
+    parentRail?: PromotedParentRailWitness;
+  },
   expectedNodeType: string,
   widget: string,
   expectedScope: PromotedScopeWitness,
@@ -6898,7 +6930,11 @@ async function recheckPromotedInnerTarget(
           ctx.tabPromotedTerminalWitnessCapability?.() === true,
         )
       : null;
-    if (!nestedInner?.terminal || !samePromotedTerminal(nestedInner.terminal, expectedTerminal, false)) {
+    if (
+      !nestedInner?.terminal ||
+      (ctx.tabPromotedTerminalWitnessCapability?.() === true && !nestedInner.parentRail) ||
+      !samePromotedTerminal(nestedInner.terminal, expectedTerminal, false)
+    ) {
       return promotedWriteRefusal(
         widget,
         "the nested promoted terminal mapping changed or became unverifiable after entering",
