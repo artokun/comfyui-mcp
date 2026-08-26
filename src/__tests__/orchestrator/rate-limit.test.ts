@@ -220,9 +220,27 @@ describe("sanitizeDetail", () => {
 
   it("redacts punctuation, hyphen labels, and composite labels atomically", () => {
     expect(sanitizeDetail("account, abcdefghijklmnopqrstuv")).toBe("account, <redacted>");
+    expect(sanitizeDetail("account.abcdefghijklmnopqrstuv")).toBe("account.<redacted>");
+    expect(sanitizeDetail("account!abcdefghijklmnopqrstuv")).toBe("account!<redacted>");
+    expect(sanitizeDetail("account?abcdefghijklmnopqrstuv")).toBe("account?<redacted>");
     expect(sanitizeDetail("account--abcdefghijklmnopqrstuv")).toBe("account--<redacted>");
+    expect(sanitizeDetail("account-[abcdefghijklmnopqrstuv]")).toBe("account-[<redacted>]");
+    expect(sanitizeDetail("account_[abcdefghijklmnopqrstuv]")).toBe("account_[<redacted>]");
     expect(sanitizeDetail("the-user-abcdefghijklmnopqrstuv")).toBe("the-user-<redacted>");
+    expect(sanitizeDetail("the-user_abcdefghijklmnopqrstuv")).toBe("the-user_<redacted>");
     expect(sanitizeDetail("your-user-abcdefghijklmnopqrstuv")).toBe("your-user-<redacted>");
+    expect(sanitizeDetail("your-user_abcdefghijklmnopqrstuv")).toBe("your-user_<redacted>");
+    expect(sanitizeDetail("account_abcdefghijklmnopqrstuv")).toBe("account_<redacted>");
+    expect(sanitizeDetail("user_abcdefghijklmnopqrstuv")).toBe("user_<redacted>");
+    expect(sanitizeDetail("account_identifier_abcdefghijklmnopqrstuv")).toBe(
+      "account_identifier_<redacted>",
+    );
+    expect(sanitizeDetail("account_identifier_[abcdefghijklmnopqrstuv]")).toBe(
+      "account_identifier_[<redacted>]",
+    );
+    expect(sanitizeDetail("account_identifier-abcdefghijklmnopqrstuv")).toBe(
+      "account_identifier-<redacted>",
+    );
     expect(sanitizeDetail("account_identifier=abcdefghijklmnopqrstuv")).toBe(
       "account_identifier=<redacted>",
     );
@@ -244,6 +262,9 @@ describe("sanitizeDetail", () => {
     expect(sanitizeDetail("account-compartmentalization")).toBe("account-compartmentalization");
     expect(sanitizeDetail("user_uncharacteristically")).toBe("user_uncharacteristically");
     expect(sanitizeDetail("account_compartmentalization")).toBe("account_compartmentalization");
+    expect(sanitizeDetail("account compartmentalization_v2 is limited")).toBe(
+      "account compartmentalization_v2 is limited",
+    );
   });
 
   it("leaves an ordinary sentence readable", () => {

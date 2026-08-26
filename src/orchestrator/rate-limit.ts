@@ -184,13 +184,13 @@ function parseWaitFromProse(text: string): number | null {
  * screenshotted.
  */
 const ALPHA_IDENTIFIER_LABEL =
-  /\b(?:account|acct|user|workspace|token|key)(?:[_-](?:id|identifier)|\s+(?:id|identifier))\s*(?:[:=]\s*[\[({]?\s*|[\[({]\s*)?$/i;
+  /\b(?:account|acct|user|workspace|token|key)(?:[_-](?:id|identifier)|\s+(?:id|identifier))\s*(?:[,;.!?:=]\s*[\[({]?|[-_]+\s*[\[({]?|[\[({])?\s*$/i;
 const DIRECT_ACCOUNT_LABEL =
-  /(?:^|[.!?;]\s*|(?:your|the)[\s-]+)account\s*(?:[,;:=]\s*|[\[({]\s*|[-_]+\s*|\s+)$/i;
+  /(?:^|[.!?;]\s*|(?:your|the)[\s-]+)account\s*(?:[,;.!?:=]\s*[\[({]?|[-_]+\s*[\[({]?|[\[({]|\s+)$/i;
 const DIRECT_USER_LABEL =
-  /(?:^|[.!?;]\s*|(?:your|the)[\s-]+)user\s*(?:[,;:=]\s*|[\[({]\s*|[-_]+\s*|\s+)$/i;
+  /(?:^|[.!?;]\s*|(?:your|the)[\s-]+)user\s*(?:[,;.!?:=]\s*[\[({]?|[-_]+\s*[\[({]?|[\[({]|\s+)$/i;
 const DIRECT_PUNCTUATED_LABEL =
-  /(?:^|[.!?;]\s*|(?:your|the)[\s-]+)(?:account|user)\s*(?:[,;:=]\s*[\[({]?|[-_]+\s*|[\[({])\s*$/i;
+  /(?:^|[.!?;]\s*|(?:your|the)[\s-]+)(?:account|user)\s*(?:[,;.!?:=]\s*[\[({]?|[-_]+\s*[\[({]?|[\[({])\s*$/i;
 const IDENTIFIER_STATUS = /^\s+(?:is|was|has|had|reached|exceeded|exhausted|limited|invalid|expired|blocked|disabled)\b/i;
 const NATURAL_LANGUAGE_SUFFIX =
   /(?:istically|ization|isation|tion|sion|ment|ness|ity|ically|ingly|edly|ful|less|able|ible|ive|ous|ance|ence)$/i;
@@ -223,6 +223,11 @@ function hasAlphaIdentifierContext(input: string, offset: number, run: string): 
   );
 }
 
+function preserveNaturalLanguagePrefixedRun(run: string, prefix: string): boolean {
+  const tail = run.slice(prefix.length).split(/[-_]+/)[0];
+  return looksLikeNaturalLanguageWord(tail);
+}
+
 export function sanitizeDetail(raw: string, max = 200): string {
   const masked = redactTokens(raw)
     // E-mail addresses FIRST: the local part may itself look like a bare id,
@@ -240,22 +245,24 @@ export function sanitizeDetail(raw: string, max = 200): string {
       /\b(?:([A-Za-z][A-Za-z0-9]{1,12})[-_])?[A-Za-z0-9]{0,32}[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}[A-Za-z0-9]{0,32}\b/g,
       (_m, prefix: string | undefined) => (prefix ? `${prefix}-<redacted>` : "<redacted>"),
     )
-    // prefixed opaque identifiers: org-…, cak-…, key_…, acct-…. Common
-    // label words followed by a hyphen are prose, not vendor prefixes.
+    // prefixed opaque identifiers: org-…, cak-…, key_…, acct-…. Natural
+    // language tails such as compartmentalization_v2 remain readable.
     .replace(
-      /\b(?!(?:(?:account|acct|user|workspace|token|key)[_-](?:id|identifier)\b))(?!(?:account|user)[-_])([A-Za-z][A-Za-z0-9]{1,12}[-_]+)[A-Za-z0-9]{10,}(?:[-_]+[A-Za-z0-9]+)*\b/gi,
-      "$1<redacted>",
+      /\b(?!(?:(?:account|acct|user|workspace|token|key)[_-](?:id|identifier)(?=$|[:=\s])))((?:[A-Za-z][A-Za-z0-9]{0,12}[-_]+)+)[A-Za-z0-9]{10,}(?:[-_]+[A-Za-z0-9]+)*\b/gi,
+      (run, prefix: string) =>
+        preserveNaturalLanguagePrefixedRun(run, prefix) ? run : `${prefix}<redacted>`,
     )
     // bare long hex / base62 runs (an id that came without a prefix). Digits
     // remain a strong shape signal. Alpha-only runs are ambiguous with prose,
     // so require explicit label syntax or an account-status boundary.
     .replace(
       /\b[A-Za-z0-9]{20,}(?:[-_]+[A-Za-z0-9]+)*\b/g,
-      (run, offset, input: string) =>
-        /\d/.test(run) ||
-        hasAlphaIdentifierContext(input, offset, run)
+      (run, offset, input: string) => {
+        const naturalLanguage = looksLikeNaturalLanguageWord(run.split(/[-_]+/)[0]);
+        return !naturalLanguage && (/\d/.test(run) || hasAlphaIdentifierContext(input, offset, run))
           ? "<redacted>"
-          : run,
+          : run;
+      },
     );
   return masked.replace(/\s+/g, " ").trim().slice(0, max);
 }
