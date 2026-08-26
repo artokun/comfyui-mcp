@@ -179,3 +179,42 @@ describe("#977: the completion directive follows the plan", () => {
     expect(runCompletionDirective("t1")).toMatch(/ONE short sentence/);
   });
 });
+
+// #2369 — replayed completions break loops by conditioning the instruction.
+// A re-delivered completion has no plan context to continue — it is an ancient
+// message journaled after an MCP reconnect. Replayed completions that include
+// "CONTINUE your plan" turn a single late handoff into an unbounded loop:
+// each replay becomes a new user turn, the agent replies, and the next replay
+// cycles it again. Replayed completions always get acknowledge-and-stop, even
+// if a plan remains in flight.
+describe("#2369: replayed completions omit the CONTINUE instruction", () => {
+  it("omits CONTINUE for replayed even when a plan is in flight", () => {
+    recordTodo("t1", [item("A", "pending"), item("B", "pending")]);
+    const nreplayed = runCompletionDirective("t1");
+    const replayed = runCompletionDirective("t1", { replayed: true });
+    // Normal completion tells the agent to CONTINUE when a plan remains.
+    expect(nreplayed).toMatch(/CONTINUE your plan/);
+    // Replayed completion NEVER gets CONTINUE, even with the same plan.
+    expect(replayed).not.toMatch(/CONTINUE your plan/);
+  });
+
+  it("uses acknowledge-and-stop for replayed when plan is in flight", () => {
+    recordTodo("t1", [item("A", "pending")]);
+    const replayed = runCompletionDirective("t1", { replayed: true });
+    expect(replayed).toMatch(/you do NOT need to call any tools/);
+  });
+
+  it("still asks for the one-sentence acknowledgement when replayed", () => {
+    recordTodo("t1", [item("A", "pending")]);
+    const replayed = runCompletionDirective("t1", { replayed: true });
+    expect(replayed).toMatch(/ONE short sentence/);
+  });
+
+  it("uses the same wording for replayed as for no plan at all", () => {
+    recordTodo("t1", [item("A", "pending")]);
+    const replayed = runCompletionDirective("t1", { replayed: true });
+    __resetTodoState();
+    const noPlan = runCompletionDirective("t1");
+    expect(replayed).toBe(noPlan);
+  });
+});

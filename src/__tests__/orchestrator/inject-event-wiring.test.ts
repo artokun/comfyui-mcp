@@ -69,6 +69,55 @@ describe("#977: the completion event carries the plan-aware directive", () => {
   });
 });
 
+// #2369 — replayed completions omit CONTINUE to break loops.
+// A re-delivered completion has no plan context to continue — it is journaled
+// after an MCP reconnect. Replayed completions that include "CONTINUE your plan"
+// turn a single late handoff into an unbounded loop: each replay becomes a new
+// user turn, the agent replies, and the next replay cycles it again. Replayed
+// completions always get acknowledge-and-stop, even if a plan remains in flight.
+describe("#2369: replayed completions omit the CONTINUE instruction", () => {
+  it("omits CONTINUE for replayed even when a plan is in flight", async () => {
+    recordTodo("tab-replay-plan", [
+      { text: "variant A", status: "completed" },
+      { text: "variant B", status: "pending" },
+    ]);
+    const { agent, backend } = startAgent("tab-replay-plan");
+    // A fresh completion gets CONTINUE when a plan is in flight.
+    await agent.injectEvent({ kind: "executed", images: [{ filename: "a.png" }] } as never);
+    const [freshTurn] = await backend.waitForTurns(1);
+    expect(freshTurn.text).toMatch(/CONTINUE your plan/);
+    await agent.stop?.();
+    // Now inject the same completion as replayed. It must NOT get CONTINUE.
+    recordTodo("tab-replay-plan", [
+      { text: "variant A", status: "completed" },
+      { text: "variant B", status: "pending" },
+    ]);
+    const { agent: agent2, backend: backend2 } = startAgent("tab-replay-plan");
+    await agent2.injectEvent(
+      { kind: "executed", images: [{ filename: "a.png" }], replayed: true } as never,
+    );
+
+    const [replayTurn] = await backend2.waitForTurns(1);
+    // Replayed must NOT get CONTINUE, even with the same plan.
+    expect(replayTurn.text).not.toMatch(/CONTINUE your plan/);
+    expect(replayTurn.text).toMatch(/you do NOT need to call any tools/);
+    await agent2.stop?.();
+  });
+
+  it("uses acknowledge-and-stop for replayed when plan is in flight", async () => {
+    recordTodo("tab-replay-ack", [{ text: "step 1", status: "pending" }]);
+    const { agent, backend } = startAgent("tab-replay-ack");
+    await agent.injectEvent(
+      { kind: "executed", images: [{ filename: "a.png" }], replayed: true } as never,
+    );
+
+    const [turn] = await backend.waitForTurns(1);
+    expect(turn.text).toMatch(/you do NOT need to call any tools/);
+    expect(turn.text).toMatch(/ONE short sentence/);
+    await agent.stop?.();
+  });
+});
+
 describe("#889: the run-error notice carries the real attribution", () => {
   const ERR = "Render status for prompt 9d70fd9d-1c2b-4e3f-8a01-7c6d5e4f3a2b could not be confirmed";
 
