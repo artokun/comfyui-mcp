@@ -6655,6 +6655,24 @@ function promotedPanelBuildRefusal(
   reason: string,
   capability: string,
 ): ToolResult {
+  // A fence capability reads `false` for TWO different facts: this hello did
+  // not advertise it, or resolveTarget threw and there was no hello at all. Only
+  // the first is about the bundle on disk. If the receiver cannot be resolved,
+  // the honest answer is the transient one — telling someone whose tab just
+  // dropped to update and hard-refresh is the same unreachable advice this
+  // whole change exists to remove, and would be worse than what it replaced
+  // because the wording below is emphatic that retrying cannot help.
+  //
+  // Read in the SAME synchronous turn as the capability that sent us here, with
+  // no await between, so run-to-completion means both saw one connection.
+  if (ctx.tabReceiverResolvable?.() !== true) {
+    return promotedWriteRefusal(
+      widget,
+      "the receiving panel could not be resolved while its promoted-write fence " +
+        "capabilities were read, so whether this is a stale binding or an " +
+        "out-of-date panel build is not decidable from here",
+    );
+  }
   const floor = panelVersionForCapability(capability);
   const advertised = tabAdvertisedPanelVersion(ctx);
   const update = describeInstallPanelAction(
@@ -13000,6 +13018,11 @@ export interface PanelToolCtx {
   /** Whether the currently bound panel re-resolves the promoted parent rail
    * synchronously at the final graph_set_widget mutation boundary. */
   tabPromotedParentRailFenceCapability?: () => boolean;
+  /** panel#1859 — whether the receiver can be resolved at all, so a `false`
+   * from the three fence capabilities above can be read as "this build does not
+   * advertise it" rather than "there was no hello to read". Only used to pick
+   * the WORDING of a refusal; the refusals themselves stay fail-closed. */
+  tabReceiverResolvable?: () => boolean;
   /**
    * The same question TRI-STATE, for code that must REPORT the answer rather than
    * gate on it. `tabCanMutateGraph` fails closed (an unreadable probe becomes
@@ -14498,6 +14521,12 @@ export function makePanelToolCtx(
   ctx.tabPromotedParentRailFenceCapability = () =>
     typeof bridge.tabPromotedParentRailFenceCapability === "function" &&
     bridge.tabPromotedParentRailFenceCapability(ctx.tabId);
+  // Absent on a bridge that does not implement it, which reads as "cannot
+  // prove the receiver is there" — the conservative direction, since it only
+  // ever softens a refusal's wording away from blaming the panel build.
+  ctx.tabReceiverResolvable = () =>
+    typeof bridge.tabReceiverResolvable === "function" &&
+    bridge.tabReceiverResolvable(ctx.tabId);
   ctx.tabGraphMutationCapability = () => bridge.tabGraphMutationCapability(ctx.tabId);
   return ctx;
 }

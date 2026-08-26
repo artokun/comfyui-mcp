@@ -3681,6 +3681,32 @@ export class UiBridge {
     return r.known ? r.canMutate : false;
   }
 
+  /**
+   * panel#1859 — whether the receiver for `tabId` can be resolved AT ALL.
+   *
+   * Every capability accessor below answers `false` for two different facts:
+   * "this hello did not advertise it" and "resolveTarget threw, so there is no
+   * hello to read". Fail-closed is right for the GATE — an unreadable receiver
+   * must not be dispatched to. It is wrong for the MESSAGE: describing an
+   * unresolved tab as an out-of-date panel build tells a user to update and
+   * hard-refresh when what they need is to reconnect, which is the same class
+   * of unreachable advice panel#1859 is about.
+   *
+   * Same split the file already draws between `tabCanMutateGraph` (fail-closed
+   * boolean for readiness) and `tabGraphMutationCapability` (tri-state for
+   * callers that must DESCRIBE the state to a human). Read this in the same
+   * synchronous turn as the capability itself: with no await between them,
+   * run-to-completion guarantees both see the same connection.
+   */
+  tabReceiverResolvable(tabId: string): boolean {
+    try {
+      this.resolveTarget(tabId);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
   /** Whether THIS connected panel enforces graph_set_widget's optional
    * expected-node-type fence at the actual mutation boundary (#2107). */
   tabExpectedNodeTypeFenceCapability(tabId: string): boolean {

@@ -136,6 +136,10 @@ function bridge(opts: {
    * #2314 scope capabilities. Verified against `v0.15.85:web/js/…`, where the
    * reply is literally `subgraph_of: { node_id, title }`. */
   legacyPanelBuild?: { version?: string };
+  /** panel#1859 — the tab drops (or becomes ambiguous) between the mapping read
+   * and the fence check, so `resolveTarget` throws and every capability reads
+   * `false` without that being a fact about the panel build. */
+  receiverUnresolvable?: boolean;
 }) {
   const calls: Array<Record<string, unknown>> = [];
   let writes = 0;
@@ -442,6 +446,10 @@ function bridge(opts: {
       !legacyBuild && opts.promotedTerminalWitnesses === true,
     tabPromotedParentRailFenceCapability: () =>
       legacyBuild ? false : (opts.promotedParentRailFence ?? opts.promotedTerminalWitnesses === true),
+    // panel#1859 / codex gate — a fence capability answers `false` both for "not
+    // advertised" and for "resolveTarget threw". Only a resolvable receiver lets
+    // a refusal blame the panel BUILD.
+    tabReceiverResolvable: () => opts.receiverUnresolvable !== true,
     advertisedPanelVersion: () =>
       opts.legacyPanelBuild?.version !== undefined ? { version: opts.legacyPanelBuild.version } : {},
     tabGraphMutationCapability: () => ({ known: true, canMutate: true }),
@@ -2734,6 +2742,39 @@ describe("panel_set_widget promoted write against a pre-#2314 panel build (panel
     expect(isError).toBe(true);
     expect(text).toContain("0.15.101");
     expect(text).not.toMatch(/retry only after the panel binding and subgraph mapping are stable/);
+  });
+
+  it("an UNRESOLVABLE receiver is not blamed on the panel build (codex gate)", async () => {
+    // The gate's P1 on the first round of this change. Every fence capability
+    // answers `false` when UiBridge's resolveTarget throws, so a tab that drops
+    // between the mapping read and the fence check looks identical to a
+    // pre-0.15.101 bundle. Calling that a BUILD skew — in a message that goes
+    // out of its way to say retrying cannot help — sends someone whose tab just
+    // needs to reconnect off to update their panel instead. Fail-closed on the
+    // WRITE, honest about which fact we actually have.
+    const { text, isError, calls } = await setWidget(
+      { node_id: 78, widget: "quality_prompt", value: "masterpiece" },
+      {
+        firstWrite: "ok",
+        subgraph: SAFE_ANIMA_SUBGRAPH,
+        detailById: SAFE_ANIMA_IDENTITY_BY_ID,
+        legacyPanelBuild: { version: "0.15.85" },
+        receiverUnresolvable: true,
+      },
+    );
+
+    expect(isError).toBe(true);
+    expect(text).toMatch(/could not be resolved while its promoted-write fence capabilities were read/);
+    expect(text).toMatch(/not decidable from here/);
+    // No build claim, no version, no update instruction.
+    expect(text).not.toMatch(/BUILD skew/);
+    expect(text).not.toContain("0.15.101");
+    expect(text).not.toContain("0.15.85");
+    expect(text).not.toMatch(/HARD-REFRESH/i);
+    // The write is still refused — this only changes the wording.
+    expect(text).toMatch(/No graph_set_widget was dispatched/);
+    expect(calls.filter((c) => c.cmd === "graph_set_widget")).toHaveLength(0);
+    expect(calls.map((c) => c.cmd)).not.toContain("graph_enter_subgraph");
   });
 
   it("a receiver that DID advertise the fence but omits the identity keeps the retry advice", async () => {
