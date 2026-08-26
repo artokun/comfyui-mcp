@@ -199,6 +199,20 @@ describe("sanitizeDetail", () => {
     expect(sanitizeDetail("account qavexidopulnertiskym-extra-more is limited")).toBe(
       "account <redacted> is limited",
     );
+    expect(sanitizeDetail("account qavexidopulnertiskymtion is limited")).toBe(
+      "account <redacted> is limited",
+    );
+    expect(sanitizeDetail("account qavexidopulnertiskymaeiotion is limited")).toBe(
+      "account <redacted> is limited",
+    );
+    expect(sanitizeDetail("account qavexidopulnertiskym_extra_more is limited")).toBe(
+      "account <redacted> is limited",
+    );
+    expect(sanitizeDetail("account qavexidopulnertiskym--extra--more is limited")).toBe(
+      "account <redacted> is limited",
+    );
+    expect(sanitizeDetail("wrapper_qavexidopulnertiskym_suffix")).toBe("wrapper_<redacted>");
+    expect(sanitizeDetail("wrapper--qavexidopulnertiskym--suffix")).toBe("wrapper--<redacted>");
   });
 
   it("leaves long ordinary prose words readable", () => {
@@ -208,6 +222,10 @@ describe("sanitizeDetail", () => {
     );
     expect(sanitizeDetail("account compartmentalization is limited")).toBe(
       "account compartmentalization is limited",
+    );
+    expect(sanitizeDetail("account: compartmentalization policy")).toBe("account: compartmentalization policy");
+    expect(sanitizeDetail("the user: uncharacteristically exceeded")).toBe(
+      "the user: uncharacteristically exceeded",
     );
     expect(sanitizeDetail("user-uncharacteristically")).toBe("user-uncharacteristically");
     expect(sanitizeDetail("account-compartmentalization")).toBe("account-compartmentalization");

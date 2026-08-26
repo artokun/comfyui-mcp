@@ -194,18 +194,22 @@ const NATURAL_LANGUAGE_SUFFIX =
   /(?:istically|ization|isation|tion|sion|ment|ness|ity|ically|ingly|edly|ful|less|able|ible|ive|ous|ance|ence)$/i;
 
 function looksLikeNaturalLanguageWord(value: string): boolean {
-  return NATURAL_LANGUAGE_SUFFIX.test(value);
+  const suffix = value.match(NATURAL_LANGUAGE_SUFFIX)?.[0];
+  // A long opaque stem followed by an English-looking suffix is still an id
+  // (for example, qavexidopulnertiskymtion), not ordinary prose.
+  return suffix !== undefined && value.length - suffix.length < 20;
 }
 
 function hasAlphaIdentifierContext(input: string, offset: number, run: string): boolean {
   const before = input.slice(Math.max(0, offset - 64), offset);
   if (ALPHA_IDENTIFIER_LABEL.test(before)) return true;
-  if (DIRECT_PUNCTUATED_LABEL.test(before)) return true;
+  const explicitWrapper = DIRECT_PUNCTUATED_LABEL.test(before) && /(?:=|[\[({])\s*$/.test(before);
+  if (explicitWrapper) return true;
   if (!DIRECT_ACCOUNT_LABEL.test(before) && !DIRECT_USER_LABEL.test(before)) return false;
 
   const after = input.slice(offset + run.length);
   const afterClosingPunctuation = after.replace(/^\s*[\])}]+/, "");
-  if (looksLikeNaturalLanguageWord(run.split("-")[0])) return false;
+  if (looksLikeNaturalLanguageWord(run.split(/[-_]+/)[0])) return false;
   return (
     run.includes("-") ||
     !afterClosingPunctuation.trim() ||
@@ -233,12 +237,15 @@ export function sanitizeDetail(raw: string, max = 200): string {
     )
     // prefixed opaque identifiers: org-…, cak-…, key_…, acct-…. Common
     // label words followed by a hyphen are prose, not vendor prefixes.
-    .replace(/\b(?!(?:account|user)-)([A-Za-z][A-Za-z0-9]{1,12}[-_])[A-Za-z0-9]{10,}\b/gi, "$1<redacted>")
+    .replace(
+      /\b(?!(?:account|user)-)([A-Za-z][A-Za-z0-9]{1,12}[-_]+)[A-Za-z0-9]{10,}(?:[-_]+[A-Za-z0-9]+)*\b/gi,
+      "$1<redacted>",
+    )
     // bare long hex / base62 runs (an id that came without a prefix). Digits
     // remain a strong shape signal. Alpha-only runs are ambiguous with prose,
     // so require explicit label syntax or an account-status boundary.
     .replace(
-      /\b[A-Za-z0-9]{20,}(?:-[A-Za-z0-9]+)*\b/g,
+      /\b[A-Za-z0-9]{20,}(?:[-_]+[A-Za-z0-9]+)*\b/g,
       (run, offset, input: string) =>
         /\d/.test(run) ||
         hasAlphaIdentifierContext(input, offset, run)
