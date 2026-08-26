@@ -28,6 +28,7 @@
     "test": "node scripts/run-checks.mjs",
     "smoke": "npm run build && node scripts/smoke-install.mjs",
     "test:watch": "vitest",
+    "test:vitest": "vitest run --passWithNoTests",
     "test:integration": "cross-env COMFYUI_INTEGRATION=true vitest run",
     "test:agent": "npm run build && node scripts/test-agent.mjs",
     "test:local-llm": "npm run build && node scripts/test-local-llm.mjs",
