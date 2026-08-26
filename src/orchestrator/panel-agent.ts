@@ -1022,11 +1022,14 @@ export class PanelAgent {
         (typeof ev.dropped_completions === "number" && ev.dropped_completions > 0
           ? `⚠️ ${ev.dropped_completions} EARLIER completion(s) for this tab could not be delivered and were dropped — treat the outcome of those runs as UNDETERMINED and check get_history (action:"list") if you were waiting on one. `
           : ``) +
-        // An id-less completion whose content matches one already reported. We
-        // will NOT swallow it (identical content is not proof of identity, and a
-        // swallowed render is a silent loss), so hand the judgement to the agent.
+        // A completion whose outputs match one already reported. We will NOT
+        // swallow it (identical content is not proof of identity, and a swallowed
+        // render is a silent loss), so hand the judgement to the agent. The
+        // wording depends on whether an id is available to distinguish them.
         (ev.possible_repeat
-          ? `⚠️ POSSIBLE REPEAT: a completion with identical outputs was already reported to you recently, and this one carries no prompt id to tell them apart. It may be the same event re-sent, or a second render that produced identical filenames — do NOT count it twice without checking with get_history (action:"list"). `
+          ? ev.run_correlation === "unidentified"
+            ? `⚠️ POSSIBLE REPEAT: a completion with identical outputs was already reported to you recently, and this one carries no prompt id to tell them apart. It may be the same event re-sent, or a second render that produced identical filenames — do NOT count it twice without checking with get_history (action:"list"). `
+            : `⚠️ POSSIBLE REPEAT: a completion for this run (prompt ${ev.prompt_id}) was already reported to you recently. This may be the same render re-sent by the panel. Verify the outcome with get_history (action:"list") before acting on it. `
           : ``) +
         runIdentityPreamble(ev) +
         (note
