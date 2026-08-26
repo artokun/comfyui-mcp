@@ -1703,6 +1703,38 @@ describe("restart truthfulness + Pinokio-shaped refusal (#742)", () => {
     expect(result.message).toMatch(/version could not be read/);
   });
 
+  it("bounds the version read when HEADERS arrive but the BODY stalls (#2320)", async () => {
+    // Codex gate r2, P1: AbortSignal.timeout only cancels the exchange up to
+    // headers. Once they land, res.text() keeps the caller pending for as long as
+    // the body takes — the #1672 failure mode raceAbort exists for. The previous
+    // test stalls BEFORE headers and cannot see this; here the response is fully
+    // formed and only its body never completes.
+    installRemoteRebootFixture();
+    const fetchMock = vi.fn(async (url: unknown) => {
+      const u = String(url);
+      if (u.includes("/manager/version")) {
+        // Headers are already sent; this stream never enqueues and never closes.
+        return new Response(
+          new ReadableStream({
+            start() {
+              /* deliberately never enqueue, never close */
+            },
+          }),
+          { status: 200 },
+        );
+      }
+      if (u.includes("/manager/reboot")) return new Response(null, { status: 404 });
+      if (u.includes("system_stats")) return new Response("{}", { status: 200 });
+      return new Response(null, { status: 404 });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await restartComfyUI();
+
+    expect(result.stopped).toBe(false);
+    expect(result.message).toMatch(/version could not be read/);
+  });
+
   it("never reads the SPA catchall as a Manager version string (#2320)", async () => {
     // The strict parse shared with node-management.ts is the only thing standing
     // between a 200 page of HTML and a fabricated version claim. Pinned at THIS
