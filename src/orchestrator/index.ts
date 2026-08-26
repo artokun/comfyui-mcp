@@ -115,6 +115,7 @@ import {
 } from "../services/panel-image-relay.js";
 import {
   startPanelTemplateRelayServer,
+  currentPanelTemplateOrigin,
   verifyPanelTemplateRelayCapability,
   type PanelTemplateRelayResolvedAgent,
   type PanelTemplateRelayServer,
@@ -1816,7 +1817,7 @@ export async function runPanelOrchestrator(): Promise<void> {
     );
   }
   const panelTemplateRelayUrlFor = (tabId: string): string | undefined => {
-    const origin = bridge.tabServerOrigin(tabId);
+    const origin = currentPanelTemplateOrigin(bridge.tabServerOrigin(tabId), getComfyUIBaseUrl());
     if (!origin) return undefined;
     try {
       const configured = new URL(getComfyUIBaseUrl());
@@ -1834,6 +1835,7 @@ export async function runPanelOrchestrator(): Promise<void> {
       resolvePanelAgent: panelTemplateRelayAgentFor,
       resolvePanelTab: scopeToRealTab,
       resolvePanelUrl: panelTemplateRelayUrlFor,
+      resolveAllowedPanelOrigin: (tabId) => currentPanelTemplateOrigin(bridge.tabServerOrigin(tabId), getComfyUIBaseUrl()),
     });
     panelTemplateRelayEndpoint = panelTemplateRelayServer.endpointUrl;
   } catch (error) {
