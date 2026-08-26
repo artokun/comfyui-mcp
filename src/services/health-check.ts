@@ -202,13 +202,6 @@ export async function runHealthCheck(
         // the timestamp, the body still begins with `\x1b[1m\x1b[31m[ERROR]\x1b[0m `,
         // so anchored patterns like `^!!!` or `^Traceback` need the ANSI escapes
         // stripped first. The ColoredFormatter output has ANSI codes immediately after
-        // the timestamp prefix, so we strip ANSI, then any adjacent [LEVEL] tag that
-        // it leaves behind.
-        // #2355 — ColoredFormatter prepends ANSI-wrapped `[LEVEL]` tags before the
-        // message, even when given ColoredFormatter("%(message)s"). After stripping
-        // the timestamp, the body still begins with `\x1b[1m\x1b[31m[ERROR]\x1b[0m `,
-        // so anchored patterns like `^!!!` or `^Traceback` need the ANSI escapes
-        // stripped first. The ColoredFormatter output has ANSI codes immediately after
         // the timestamp prefix: `\x1b[...m[LEVEL]\x1b[0m message`.
         //
         // Stripping ANSI leaves the [LEVEL] marker intact so existing patterns like
