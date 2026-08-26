@@ -153,12 +153,18 @@ describe("orchestrator panel template relay wiring (#2196)", () => {
     });
     expect(wiring.resolveAllowedPanelOrigin("tab-1", target)).toBeUndefined();
     expect(wiring.resolvePanelUrl("tab-1", target)).toBeUndefined();
+    // #2382 — declined for AMBIGUITY, not disagreement: the pairing is coherent and
+    // only the host is a name. That distinction is what lets the caller fall back
+    // without risking another server's index.
+    expect(wiring.classifyAllowedPanelOrigin("tab-1", target)).toBe("ambiguous-host");
 
     const relay = await startPanelTemplateRelayServer({ bridge, ...wiring });
     servers.push(relay);
     process.env.COMFYUI_MCP_RELAY_SECRET = SECRET;
     process.env.COMFYUI_MCP_TEMPLATE_RELAY_URL = relay.endpointUrl;
-    await expect(requestPanelTemplateIndex()).rejects.toMatchObject({ code: "NO_PANEL_ORIGIN" });
+    // Declines the relay instead of throwing, so list_templates keeps its headless
+    // path. The refusal itself is unchanged: no request reaches the panel.
+    await expect(requestPanelTemplateIndex()).resolves.toBeUndefined();
     expect(panelRequests).toBe(0);
   });
 

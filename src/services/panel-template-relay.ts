@@ -25,6 +25,11 @@ const HEX_RE = /^[a-f0-9]{64}$/;
 // relay destinations pinned to literal addresses so fetch cannot independently
 // resolve `localhost` to a different process or address family.
 const LOOPBACK_HOSTS = new Set(["127.0.0.1", "::1"]);
+// The hostnames that DO resolve to loopback but name no particular listener.
+// Kept separate from LOOPBACK_HOSTS on purpose: these are never authorized to
+// fetch, but declining them is a different fact from an origin that disagrees
+// with the current target, and the two want opposite handling downstream.
+const NAMED_LOOPBACK_HOSTS = new Set(["localhost"]);
 
 export interface PanelTemplateRelayRequest {
   version: typeof PANEL_TEMPLATE_RELAY_VERSION;
@@ -81,6 +86,9 @@ export interface PanelTemplateRelayServerOptions {
   resolvePanelUrl: (tabId: string, currentTarget: string) => string | undefined;
   /** Must return undefined unless the tab's origin is authorized for currentTarget. */
   resolveAllowedPanelOrigin: (tabId: string, currentTarget: string) => string | undefined;
+  /** Why an origin was declined. Absent is treated as "unusable", so a wiring
+   *  that does not supply it keeps failing closed. */
+  classifyAllowedPanelOrigin?: (tabId: string, currentTarget: string) => PanelOriginVerdict;
 }
 
 export interface PanelTemplateRelayServer {
@@ -226,6 +234,7 @@ function errorMessage(error: string): string {
     "HTTP_ERROR",
     "MALFORMED_REPLY",
     "NO_LIVE_PANEL",
+    "AMBIGUOUS_PANEL_ORIGIN",
     "NO_PANEL_ORIGIN",
     "PANEL_FETCH_FAILED",
     "STALE_REQUEST",
@@ -435,6 +444,42 @@ export function currentPanelTemplateOrigin(
   return exactLoopbackOrigin ? observed.origin : undefined;
 }
 
+/**
+ * WHY a panel origin was declined — the reason, not just the refusal.
+ *
+ * `currentPanelTemplateOrigin` answers "may we fetch", which is the only
+ * question the fetch path needs. But a caller deciding whether to FALL BACK
+ * needs to know which decline it hit, because they are opposites:
+ *
+ *   "ambiguous-host" — the pairing is COHERENT (same protocol, port and origin
+ *     string) and the host merely names loopback instead of identifying a
+ *     listener. Nothing disagrees; we simply cannot tell which socket answered.
+ *     A caller may fall back to its own configured target, because that target
+ *     IS this origin.
+ *
+ *   "unusable" — anything else, including an observed origin that no longer
+ *     matches the current target after a retarget. Here the two genuinely
+ *     disagree, and falling back can serve a DIFFERENT server's index. Callers
+ *     must fail closed.
+ */
+export type PanelOriginVerdict = "allowed" | "ambiguous-host" | "unusable";
+
+export function classifyPanelTemplateOrigin(
+  panelOrigin: string | undefined,
+  currentTarget: string | undefined,
+): PanelOriginVerdict {
+  if (currentPanelTemplateOrigin(panelOrigin, currentTarget)) return "allowed";
+  const observed = parsedHttpOrigin(panelOrigin);
+  const target = parsedHttpOrigin(currentTarget);
+  if (!observed || !target) return "unusable";
+  const coherent =
+    observed.protocol === target.protocol &&
+    observed.port === target.port &&
+    observed.origin === target.origin;
+  const namedLoopback = NAMED_LOOPBACK_HOSTS.has(observed.host) && NAMED_LOOPBACK_HOSTS.has(target.host);
+  return coherent && namedLoopback ? "ambiguous-host" : "unusable";
+}
+
 function safePanelTemplateUrl(raw: string | undefined, allowedOrigin: string | undefined): URL | undefined {
   if (!raw) return undefined;
   try {
@@ -561,7 +606,14 @@ export async function startPanelTemplateRelayServer(
               options.bridge.resolveFailure?.(auth.agentKey) === "ambiguous" ? "AMBIGUOUS_REQUESTER" : "NO_LIVE_PANEL",
             );
           } else if (!panelUrl) {
-            response = failureResponse(request.requestId, "NO_PANEL_ORIGIN");
+            // Distinguish "cannot identify which loopback listener" from "the
+            // observed origin disagrees with the current target". Only the first
+            // is safe for a caller to fall back on — see classifyPanelTemplateOrigin.
+            const verdict = options.classifyAllowedPanelOrigin?.(panelTab, targetAtStart.url) ?? "unusable";
+            response = failureResponse(
+              request.requestId,
+              verdict === "ambiguous-host" ? "AMBIGUOUS_PANEL_ORIGIN" : "NO_PANEL_ORIGIN",
+            );
           } else {
             try {
               const body = await withinDeadline(fetchPanelIndex(panelUrl, requestDeadline(request)), requestDeadline(request));
@@ -665,6 +717,13 @@ export async function requestPanelTemplateIndex(): Promise<Record<string, unknow
     throw new PanelTemplateRelayError("The connected panel template relay is unavailable.", code, httpResponse.status >= 500);
   }
   const response = validateResponse(decoded, request.requestId, secret);
+  // #2382 — an origin we cannot AUTHORIZE because a NAME does not identify a
+  // listener is "no panel route", not a relay failure: the caller's headless path
+  // reads the user's OWN configured target, which is the very origin we declined.
+  // Every other decline — including an observed origin that no longer matches the
+  // current target — still throws, because falling back there could serve a
+  // DIFFERENT server's index.
+  if (response.ok === false && errorMessage(response.error) === "AMBIGUOUS_PANEL_ORIGIN") return undefined;
   if (response.ok === false) responseFailureMessage(response);
   const age = Date.now() - response.updated;
   if (
