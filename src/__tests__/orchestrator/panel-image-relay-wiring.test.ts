@@ -16,8 +16,9 @@ describe("panel image relay orchestrator wiring (#2149)", () => {
 
   it("wires the list_templates relay into both child spawn lanes and shutdown", () => {
     expect(SOURCE).toContain("startPanelTemplateRelayServer");
-    expect(SOURCE).toContain("currentPanelTemplateOrigin(bridge.tabServerOrigin(tabId), getComfyUIBaseUrl())");
-    expect(SOURCE).toContain("resolveAllowedPanelOrigin");
+    expect(SOURCE).toContain("createPanelTemplateRelayWiring({");
+    expect(SOURCE).toContain("currentPanelTemplateOrigin(options.bridge.tabServerOrigin(tabId), options.currentTarget())");
+    expect(SOURCE).toContain("...panelTemplateRelayWiring");
     expect(SOURCE).toContain("COMFYUI_MCP_TEMPLATE_RELAY_URL: panelTemplateRelayEndpoint");
     expect(SOURCE).toContain("if (panelTemplateRelayServer) await panelTemplateRelayServer.close()");
   });

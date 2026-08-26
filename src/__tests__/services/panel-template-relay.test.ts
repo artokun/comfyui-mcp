@@ -131,6 +131,27 @@ describe("authenticated panel template relay (#2196)", () => {
     });
   });
 
+  it("refuses a disconnected panel before resolving or fetching an origin", async () => {
+    const relay = await startPanelTemplateRelayServer({
+      bridge: { canReach: () => false },
+      resolvePanelAgent: () => ({ agentKey: "shared::codex", secret: SECRET }),
+      resolvePanelTab: () => "tab-1",
+      resolvePanelUrl: () => {
+        throw new Error("a disconnected panel has no URL to resolve");
+      },
+      resolveAllowedPanelOrigin: () => {
+        throw new Error("a disconnected panel has no origin to authorize");
+      },
+    });
+    servers.push(relay);
+    process.env.COMFYUI_MCP_RELAY_SECRET = SECRET;
+    process.env.COMFYUI_MCP_TEMPLATE_RELAY_URL = relay.endpointUrl;
+
+    await expect(requestPanelTemplateIndex()).rejects.toMatchObject<PanelTemplateRelayError>({
+      code: "NO_LIVE_PANEL",
+    });
+  });
+
   it("refuses a redirect from the panel origin", async () => {
     const panel = createServer((_req, res) => {
       res.writeHead(302, { location: "http://127.0.0.1:1/collect" });
@@ -145,6 +166,33 @@ describe("authenticated panel template relay (#2196)", () => {
       resolvePanelTab: () => "tab-1",
       resolvePanelUrl: () => `${panelOrigin}/api/workflow_templates`,
       resolveAllowedPanelOrigin: () => panelOrigin,
+    });
+    servers.push(relay);
+    process.env.COMFYUI_MCP_RELAY_SECRET = SECRET;
+    process.env.COMFYUI_MCP_TEMPLATE_RELAY_URL = relay.endpointUrl;
+
+    await expect(requestPanelTemplateIndex()).rejects.toMatchObject<PanelTemplateRelayError>({
+      code: "PANEL_FETCH_FAILED",
+    });
+  });
+
+  it("rejects a successful response whose response.url is a different origin", async () => {
+    const realFetch = globalThis.fetch;
+    vi.spyOn(globalThis, "fetch").mockImplementation((input, init) => {
+      if (String(input).startsWith("http://127.0.0.1:")) return realFetch(input, init);
+      const response = new Response(JSON.stringify({ "panel-pack": [{ name: "unexpected" }] }), { status: 200 });
+      Object.defineProperty(response, "url", {
+        value: "https://redirected.example/api/workflow_templates",
+      });
+      return Promise.resolve(response);
+    });
+
+    const relay = await startPanelTemplateRelayServer({
+      bridge: { canReach: () => true },
+      resolvePanelAgent: () => ({ agentKey: "shared::codex", secret: SECRET }),
+      resolvePanelTab: () => "tab-1",
+      resolvePanelUrl: () => "https://panel.example/api/workflow_templates",
+      resolveAllowedPanelOrigin: () => currentPanelTemplateOrigin("https://panel.example", "https://panel.example/comfyapi"),
     });
     servers.push(relay);
     process.env.COMFYUI_MCP_RELAY_SECRET = SECRET;

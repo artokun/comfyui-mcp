@@ -947,6 +947,58 @@ export function armStartupDeadline(
   return () => clearTimeout(timer);
 }
 
+export interface PanelTemplateRelayWiring {
+  resolvePanelAgent: (request: PanelTemplateRelayRequest) => PanelTemplateRelayResolvedAgent | undefined;
+  resolvePanelTab: (agentKey: string) => string | undefined;
+  resolvePanelUrl: (tabId: string) => string | undefined;
+  resolveAllowedPanelOrigin: (tabId: string) => string | undefined;
+}
+
+/**
+ * The production closures for the child template relay. Keep authorization,
+ * scope-to-tab routing, and current-target origin selection together so tests
+ * can exercise the same wiring that the orchestrator gives the relay server.
+ */
+export function createPanelTemplateRelayWiring(options: {
+  bridge: Pick<UiBridge, "resolveSharedTabId" | "tabServerOrigin">;
+  currentTarget: () => string;
+  secrets: ReadonlyMap<string, string>;
+}): PanelTemplateRelayWiring {
+  const resolvePanelAgent = (
+    request: PanelTemplateRelayRequest,
+  ): PanelTemplateRelayResolvedAgent | undefined => {
+    for (const [secret, agentKey] of options.secrets) {
+      if (verifyPanelTemplateRelayCapability(secret, request)) return { agentKey, secret };
+    }
+    return undefined;
+  };
+  const panelTabOf = (key: string): string => {
+    const i = key.lastIndexOf("::");
+    return i >= 0 ? key.slice(0, i) : key;
+  };
+  const resolvePanelTab = (tabId: string): string | undefined =>
+    isScopeAddress(tabId) ? options.bridge.resolveSharedTabId(tabId) : panelTabOf(tabId);
+  const resolveAllowedPanelOrigin = (tabId: string): string | undefined =>
+    currentPanelTemplateOrigin(options.bridge.tabServerOrigin(tabId), options.currentTarget());
+  const resolvePanelUrl = (tabId: string): string | undefined => {
+    const target = options.currentTarget();
+    const origin = currentPanelTemplateOrigin(options.bridge.tabServerOrigin(tabId), target);
+    if (!origin) return undefined;
+    try {
+      const basePath = new URL(target).pathname.replace(/\/+$/, "");
+      return `${origin}${basePath}/api/workflow_templates`;
+    } catch {
+      return undefined;
+    }
+  };
+  return {
+    resolvePanelAgent,
+    resolvePanelTab,
+    resolvePanelUrl,
+    resolveAllowedPanelOrigin,
+  };
+}
+
 export async function runPanelOrchestrator(): Promise<void> {
   const completionFence = new RunCompletionIdempotencyFence();
   /** Stable completion keys held by accepted queue items until the real turn ack. */
@@ -1778,14 +1830,6 @@ export async function runPanelOrchestrator(): Promise<void> {
     }
     return undefined;
   };
-  const panelTemplateRelayAgentFor = (
-    request: PanelTemplateRelayRequest,
-  ): PanelTemplateRelayResolvedAgent | undefined => {
-    for (const [secret, agentKey] of panelImageRelaySecrets) {
-      if (verifyPanelTemplateRelayCapability(secret, request)) return { agentKey, secret };
-    }
-    return undefined;
-  };
   // The scope/backend halves of a composite key. Neither half contains "::", so
   // split on the LAST separator.
   const panelTabOf = (key: string): string => {
@@ -1800,6 +1844,11 @@ export async function runPanelOrchestrator(): Promise<void> {
   // bridge's pinned shared-tab mapping before dispatching authenticated relay commands.
   const scopeToRealTab = (tabId: string): string | undefined =>
     isScopeAddress(tabId) ? bridge.resolveSharedTabId(tabId) : panelTabOf(tabId);
+  const panelTemplateRelayWiring = createPanelTemplateRelayWiring({
+    bridge,
+    currentTarget: getComfyUIBaseUrl,
+    secrets: panelImageRelaySecrets,
+  });
   let panelImageRelayServer: PanelImageRelayServer | undefined;
   let panelImageRelayEndpoint: string | undefined;
   try {
@@ -1816,26 +1865,12 @@ export async function runPanelOrchestrator(): Promise<void> {
       `[panel-orchestrator] authenticated panel image relay unavailable: ${error instanceof Error ? error.message : String(error)}`,
     );
   }
-  const panelTemplateRelayUrlFor = (tabId: string): string | undefined => {
-    const origin = currentPanelTemplateOrigin(bridge.tabServerOrigin(tabId), getComfyUIBaseUrl());
-    if (!origin) return undefined;
-    try {
-      const configured = new URL(getComfyUIBaseUrl());
-      const basePath = configured.pathname.replace(/\/+$/, "");
-      return `${origin}${basePath}/api/workflow_templates`;
-    } catch {
-      return undefined;
-    }
-  };
   let panelTemplateRelayServer: PanelTemplateRelayServer | undefined;
   let panelTemplateRelayEndpoint: string | undefined;
   try {
     panelTemplateRelayServer = await startPanelTemplateRelayServer({
       bridge,
-      resolvePanelAgent: panelTemplateRelayAgentFor,
-      resolvePanelTab: scopeToRealTab,
-      resolvePanelUrl: panelTemplateRelayUrlFor,
-      resolveAllowedPanelOrigin: (tabId) => currentPanelTemplateOrigin(bridge.tabServerOrigin(tabId), getComfyUIBaseUrl()),
+      ...panelTemplateRelayWiring,
     });
     panelTemplateRelayEndpoint = panelTemplateRelayServer.endpointUrl;
   } catch (error) {
