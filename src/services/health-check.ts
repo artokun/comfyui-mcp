@@ -190,46 +190,80 @@ export async function runHealthCheck(
         // line containing "error" in a message like "0 errors found" is not an
         // actual error. Only lines with [ERROR]/[EXCEPTION] markers or starting
         // with "Traceback" are errors. Keep traceback continuation lines (indented).
+        // #2347 — severity is matched on the entry BODY, after the timestamp prefix.
+        // /internal/logs joins each record as `l["t"] + " - " + l["m"]`
+        // (api_server/routes/internal/internal_routes.py), so every line begins with a
+        // timestamp. #2329 matched `^Traceback` against the raw line, which therefore
+        // could never fire: measured on a live 105-line log, 0 lines start with
+        // "Traceback".
+        const bodyOf = (line: string): string => line.replace(/^\S+ - /, "");
+
+        // What stock ComfyUI actually emits. #2329 keyed on `[ERROR]`/`[EXCEPTION]`,
+        // which its in-memory handler never writes — app/logger.py formats the memory
+        // handler with ColoredFormatter("%(message)s"), message only. The bracketed
+        // forms come from ComfyUI-Manager printing its own prefix, which is why a live
+        // test appeared to pass: it was reading Manager lines, not ComfyUI ones.
+        //
+        // The consequence was worse than the blob it replaced: execution.py's
+        // "!!! Exception during processing !!!", the traceback that follows it, and
+        // "Got an OOM, unloading all loaded models." were all invisible, so a crashed
+        // render reported byte-identically to a healthy server in the diagnostic users
+        // paste into bug reports.
+        const ERROR_HEADERS: readonly RegExp[] = [
+          /^!!!\s*Exception during processing/i,   // execution.py render failure
+          /^Traceback\s*\(/i,                       // a Python traceback header
+          /\[ERROR\]|\[EXCEPTION\]/i,               // ComfyUI-Manager / file handler
+        ];
+        const ERROR_SIGNALS: readonly RegExp[] = [
+          ...ERROR_HEADERS,
+          /^[A-Za-z0-9_.]*(Error|Exception)\s*:/,          // a bare exception tail
+          /\bGot an OOM\b/i,                        // model_management OOM notice
+          /\bAllocation on device\b/i,              // torch allocator OOM
+          /\bCUDA out of memory\b/i,
+          /\b(ERROR|EXCEPTION)\s*:/,                // an explicit level prefix
+        ];
+        const isHeader = (body: string): boolean => ERROR_HEADERS.some((re) => re.test(body));
+        const isSignal = (body: string): boolean => ERROR_SIGNALS.some((re) => re.test(body));
+
         const allLines = text.split("\n");
+        const bodies = allLines.map(bodyOf);
         const errorGroups: string[][] = [];
         const processed = new Set<number>();
 
         for (let i = 0; i < allLines.length; i++) {
-          if (processed.has(i)) continue;
+          if (processed.has(i) || !isSignal(bodies[i])) continue;
 
-          const line = allLines[i];
-          // Match actual error lines, not substrings. Accept:
-          // - [ERROR] or [EXCEPTION] markers (with brackets)
-          // - (ERROR|Exception): pattern (with colon, not substring "errors")
-          // - Traceback at start of line (Python exceptions)
-          const isErrorLine = /\[ERROR\]|\[EXCEPTION\]|(ERROR|Exception)\s*:/i.test(line) ||
-                             /^Traceback\s*\(/i.test(line);
-
-          if (isErrorLine) {
-            const group: string[] = [line];
-            processed.add(i);
-
-            // Include continuation lines (indented or following lines that are part of traceback)
-            for (let j = i + 1; j < allLines.length; j++) {
-              const nextLine = allLines[j];
-              // Stop if we hit another error marker or a non-indented line that's not an error start
-              if (/\[ERROR\]|\[EXCEPTION\]/i.test(nextLine) ||
-                  (/^Traceback\s*\(/i.test(nextLine)) ||
-                  (/^Exception\s*:/i.test(nextLine))) {
-                break;
-              }
-              // Include indented lines and empty lines within traceback
-              if (/^[ \t]/.test(nextLine) || nextLine.trim() === "") {
-                group.push(nextLine);
-                processed.add(j);
-              } else {
-                break;
-              }
+          // Walk BACKWARDS to the header this line belongs to. #2329 only extended
+          // forwards, so matching an exception TAIL ("RuntimeError: ...") dropped every
+          // frame above it and the "!!! Exception during processing !!!" header with
+          // them — the caller saw the exception name and nothing that located it.
+          let first = i;
+          if (!isHeader(bodies[i])) {
+            for (let j = i - 1; j >= 0 && i - j <= 200; j--) {
+              if (processed.has(j)) break;
+              const b = bodies[j];
+              if (isHeader(b)) { first = j; break; }
+              // Frames are indented; anything else ends the traceback above us.
+              if (!/^[ \t]/.test(b) && b.trim() !== "") break;
             }
-            errorGroups.push(group);
           }
-        }
 
+          const group: string[] = [];
+          for (let k = first; k <= i; k++) { group.push(allLines[k]); processed.add(k); }
+
+          // Then forwards through the frames and the exception tail below.
+          for (let j = i + 1; j < allLines.length; j++) {
+            const b = bodies[j];
+            if (isHeader(b)) break;
+            if (/^[ \t]/.test(b) || b.trim() === "") { group.push(allLines[j]); processed.add(j); continue; }
+            // A bare exception tail closes the traceback it belongs to; take it and stop.
+            if (/^[A-Za-z0-9_.]*(Error|Exception)\s*:/.test(b)) {
+              group.push(allLines[j]); processed.add(j);
+            }
+            break;
+          }
+          errorGroups.push(group);
+        }
         // Take the last N error groups, then flatten them into lines for scrubbing
         const recentErrorGroups = errorGroups.slice(-recentErrors);
         const errorLines = recentErrorGroups.flat();

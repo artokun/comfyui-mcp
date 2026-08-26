@@ -291,3 +291,71 @@ describe("recent_errors as a limit (#1146)", () => {
     expect(text).toMatch(/none in \/internal\/logs/);
   });
 });
+
+// #2347 — the #2329 severity predicate was keyed on two shapes stock ComfyUI never
+// emits, so the health report silently omitted real render failures and issued an
+// explicit all-clear for the commonest one. Each row here is a faithful
+// /internal/logs body: the route joins records as `l["t"] + " - " + l["m"]`, so every
+// line carries a timestamp prefix — which is why `^Traceback` could never fire, and
+// why severity must be matched on the entry BODY.
+//
+// The case that decides this issue is the OOM pair: before the fix they produced
+// output byte-identical to a healthy server, in the diagnostic users paste into bug
+// reports. "none in /internal/logs" for a crashed render is worse than the blob #2329
+// removed.
+describe("recent_errors sees ComfyUI's own failures (#2347)", () => {
+  const TS = "2026-08-26T07:00:00.000Z";
+  const logBody = (...messages: string[]): string =>
+    JSON.stringify(messages.map((m) => TS + " - " + m + "\n").join(""));
+
+  const healthFor = async (body: string): Promise<string> => {
+    fetchApi.mockImplementation(async (path: string) => {
+      if (path === "/internal/logs") return new Response(body, { status: 200 });
+      return new Response(JSON.stringify([]), { status: 200 });
+    });
+    return runHealthCheck({ modelCategories: [], recentErrors: 10 });
+  };
+
+  it("A: keeps the exception header AND the frames, not just the tail", async () => {
+    const text = await healthFor(
+      logBody(
+        "!!! Exception during processing !!!",
+        "Traceback (most recent call last):",
+        '  File "x.py", line 1, in run',
+        "RuntimeError: shape is invalid",
+      ),
+    );
+    expect(text).not.toMatch(/Recent errors\*\*: none/);
+    // The tail alone is not enough — it names the exception without locating it.
+    expect(text).toContain("RuntimeError: shape is invalid");
+    expect(text).toContain("Exception during processing");
+    expect(text).toContain("Traceback (most recent call last):");
+    expect(text).toContain("x.py");
+  });
+
+  it("B: an OOM during processing is NOT reported as a healthy server", async () => {
+    const text = await healthFor(
+      logBody(
+        "!!! Exception during processing !!! Allocation on device",
+        "Got an OOM, unloading all loaded models.",
+      ),
+    );
+    expect(text).not.toMatch(/Recent errors\*\*: none/);
+    expect(text).toContain("Got an OOM");
+  });
+
+  it("D: a bare OOM notice with no exception header still reports", async () => {
+    const text = await healthFor(logBody("Got an OOM, unloading all loaded models."));
+    expect(text).not.toMatch(/Recent errors\*\*: none/);
+    expect(text).toContain("Got an OOM");
+  });
+
+  it("E: a genuinely healthy log still reports none — the control", async () => {
+    // Without this, every assertion above is satisfiable by reporting everything,
+    // which is the #2329 blob this must not reintroduce.
+    const text = await healthFor(
+      logBody("got prompt", "Prompt executed in 3.21 seconds", "0 errors found"),
+    );
+    expect(text).toMatch(/Recent errors\*\*: none in \/internal\/logs/);
+  });
+});
