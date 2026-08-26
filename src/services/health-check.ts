@@ -173,7 +173,9 @@ export async function runHealthCheck(
         // /internal/logs returns a JSON-wrapped string. Parse it to get the actual logs.
         let text: string;
         try {
-          text = JSON.parse(rawText);
+          const parsed = JSON.parse(rawText);
+          // Ensure the parsed value is a string, not an object or other type
+          text = typeof parsed === "string" ? parsed : rawText;
         } catch {
           // If not JSON, use the raw text
           text = rawText;
@@ -189,7 +191,7 @@ export async function runHealthCheck(
         // actual error. Only lines with [ERROR]/[EXCEPTION] markers or starting
         // with "Traceback" are errors. Keep traceback continuation lines (indented).
         const allLines = text.split("\n");
-        const errorLines: string[] = [];
+        const errorGroups: string[][] = [];
         const processed = new Set<number>();
 
         for (let i = 0; i < allLines.length; i++) {
@@ -204,7 +206,7 @@ export async function runHealthCheck(
                              /^Traceback\s*\(/i.test(line);
 
           if (isErrorLine) {
-            errorLines.push(line);
+            const group: string[] = [line];
             processed.add(i);
 
             // Include continuation lines (indented or following lines that are part of traceback)
@@ -218,16 +220,20 @@ export async function runHealthCheck(
               }
               // Include indented lines and empty lines within traceback
               if (/^[ \t]/.test(nextLine) || nextLine.trim() === "") {
-                errorLines.push(nextLine);
+                group.push(nextLine);
                 processed.add(j);
               } else {
                 break;
               }
             }
+            errorGroups.push(group);
           }
         }
 
-        const errLines = scrubLogLines(errorLines.slice(-recentErrors));
+        // Take the last N error groups, then flatten them into lines for scrubbing
+        const recentErrorGroups = errorGroups.slice(-recentErrors);
+        const errorLines = recentErrorGroups.flat();
+        const errLines = scrubLogLines(errorLines);
         if (errLines.length > 0) {
           lines.push(`\n**Recent errors** (last ${errLines.length}):`);
           for (const e of errLines) lines.push(`  ${e.trim()}`);

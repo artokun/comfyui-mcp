@@ -249,4 +249,45 @@ describe("recent_errors as a limit (#1146)", () => {
     expect(text).not.toMatch(/0 errors/);
     expect(text).not.toMatch(/DEBUG/);
   });
+
+  it("groups error marker with continuation lines before slicing", async () => {
+    // Regression: if we slice the lines array after adding continuations, we might
+    // return only a continuation line without its error marker.
+    fetchApi.mockImplementation(async (path: string) =>
+      path === "/internal/logs"
+        ? new Response(
+            [
+              "2026-08-25T20:00:00 [INFO] startup",
+              "Traceback (most recent call last):",
+              "  File a.py, line 1, in module",
+              "  File b.py, line 2, in func",
+              "  ValueError: invalid value",
+              "2026-08-25T20:00:01 [ERROR] Later error",
+            ].join("\n"),
+            { status: 200 }
+          )
+        : new Response(JSON.stringify([]), { status: 200 }),
+    );
+    const text = await runHealthCheck({ modelCategories: [], recentErrors: 1 });
+    // With recent_errors:1, should get the LAST error group, which is the simple [ERROR] line.
+    // NOT the continuation line "ValueError: invalid value" without its traceback context.
+    expect(text).toMatch(/Recent errors\*\* \(last 1\)/);
+    expect(text).toMatch(/Later error/);
+    expect(text).not.toMatch(/ValueError/);
+  });
+
+  it("handles non-string JSON responses from /internal/logs", async () => {
+    // If /internal/logs returns JSON that's not a string (e.g., {"error":"failed"}),
+    // we should not crash on text.split() but fall back to raw text.
+    fetchApi.mockImplementation(async (path: string) =>
+      path === "/internal/logs"
+        ? new Response(JSON.stringify({ error: "backend failure" }), { status: 200 })
+        : new Response(JSON.stringify([]), { status: 200 }),
+    );
+    const text = await runHealthCheck({ modelCategories: [], recentErrors: 10 });
+    // Should not crash and should report none found
+    expect(text).toMatch(/Recent errors/);
+    // The raw JSON object converted to string won't have error markers, so no errors found
+    expect(text).toMatch(/none in \/internal\/logs/);
+  });
 });
