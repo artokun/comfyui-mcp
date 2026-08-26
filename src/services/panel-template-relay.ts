@@ -21,7 +21,10 @@ export const PANEL_TEMPLATE_RELAY_HTTP_PATH = "/__comfyui_mcp_panel_template_rel
 
 const ID_RE = /^[A-Za-z0-9_-]{16,80}$/;
 const HEX_RE = /^[a-f0-9]{64}$/;
-const LOOPBACK_HOSTS = new Set(["localhost", "127.0.0.1", "::1"]);
+// A hostname does not identify which loopback listener a browser reached. Keep
+// relay destinations pinned to literal addresses so fetch cannot independently
+// resolve `localhost` to a different process or address family.
+const LOOPBACK_HOSTS = new Set(["127.0.0.1", "::1"]);
 
 export interface PanelTemplateRelayRequest {
   version: typeof PANEL_TEMPLATE_RELAY_VERSION;
@@ -408,10 +411,6 @@ function parsedHttpOrigin(raw: string | undefined): { origin: string; protocol: 
   }
 }
 
-function httpOrigin(raw: string | undefined): string | undefined {
-  return parsedHttpOrigin(raw)?.origin;
-}
-
 /**
  * A panel origin is usable only when it is a loopback listener and corroborates
  * the current target. The server-observed Origin is metadata, not authentication:
@@ -440,8 +439,9 @@ function safePanelTemplateUrl(raw: string | undefined, allowedOrigin: string | u
   if (!raw) return undefined;
   try {
     const url = new URL(raw);
-    const host = url.hostname.toLowerCase().replace(/^\[|\]$/g, "");
-    const normalizedAllowedOrigin = allowedOrigin === undefined ? undefined : httpOrigin(allowedOrigin);
+    const parsedUrlOrigin = parsedHttpOrigin(url.origin);
+    const parsedAllowedOrigin = parsedHttpOrigin(allowedOrigin);
+    const normalizedAllowedOrigin = parsedAllowedOrigin?.origin;
     if (
       (url.protocol !== "http:" && url.protocol !== "https:") ||
       url.username ||
@@ -450,6 +450,9 @@ function safePanelTemplateUrl(raw: string | undefined, allowedOrigin: string | u
       url.hash ||
       !url.pathname.endsWith("/api/workflow_templates") ||
       !normalizedAllowedOrigin ||
+      !parsedUrlOrigin ||
+      !LOOPBACK_HOSTS.has(parsedUrlOrigin.host) ||
+      !LOOPBACK_HOSTS.has(parsedAllowedOrigin.host) ||
       url.origin !== normalizedAllowedOrigin
     ) return undefined;
     return url;

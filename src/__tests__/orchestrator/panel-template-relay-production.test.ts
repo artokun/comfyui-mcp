@@ -108,7 +108,7 @@ describe("orchestrator panel template relay wiring (#2196)", () => {
     expect(wiring.resolveAllowedPanelOrigin("tab-1", target)).toBeUndefined();
     expect(wiring.resolvePanelUrl("tab-1", target)).toBeUndefined();
 
-    for (const origin of ["http://127.0.0.1:8188", "http://[::1]:8188", "http://localhost:8188"]) {
+    for (const origin of ["http://127.0.0.1:8188", "http://[::1]:8188"]) {
       target = `${origin}/comfyapi`;
       observedOrigin = origin;
       expect(wiring.resolveAllowedPanelOrigin("tab-1", target)).toBe(origin);
@@ -125,6 +125,41 @@ describe("orchestrator panel template relay wiring (#2196)", () => {
     process.env.COMFYUI_MCP_RELAY_SECRET = SECRET;
     process.env.COMFYUI_MCP_TEMPLATE_RELAY_URL = relay.endpointUrl;
     await expect(requestPanelTemplateIndex()).rejects.toMatchObject({ code: "NO_PANEL_ORIGIN" });
+  });
+
+  it("refuses an exact localhost match before fetch can resolve another loopback listener", async () => {
+    let panelRequests = 0;
+    const panel = createServer((_req, res) => {
+      panelRequests += 1;
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({ "unexpected-pack": [{ name: "wrong-listener" }] }));
+    });
+    const panelOrigin = await listen(panel);
+    servers.push({ close: () => closeServer(panel) });
+    const port = new URL(panelOrigin).port;
+    const target = `http://localhost:${port}/comfyapi`;
+    const observedOrigin = `http://localhost:${port}`;
+    const bridge = {
+      canReach: () => true,
+      resolveFailure: () => undefined,
+      resolveSharedTabId: () => "tab-1",
+      tabServerOrigin: () => observedOrigin,
+    };
+    const wiring = createPanelTemplateRelayWiring({
+      bridge,
+      currentTarget: () => target,
+      currentTargetGeneration: () => 0,
+      secrets: new Map([[SECRET, "orchestrator::codex"]]),
+    });
+    expect(wiring.resolveAllowedPanelOrigin("tab-1", target)).toBeUndefined();
+    expect(wiring.resolvePanelUrl("tab-1", target)).toBeUndefined();
+
+    const relay = await startPanelTemplateRelayServer({ bridge, ...wiring });
+    servers.push(relay);
+    process.env.COMFYUI_MCP_RELAY_SECRET = SECRET;
+    process.env.COMFYUI_MCP_TEMPLATE_RELAY_URL = relay.endpointUrl;
+    await expect(requestPanelTemplateIndex()).rejects.toMatchObject({ code: "NO_PANEL_ORIGIN" });
+    expect(panelRequests).toBe(0);
   });
 
   it("rejects a stale in-flight response after retargeting and still serves the current target", async () => {

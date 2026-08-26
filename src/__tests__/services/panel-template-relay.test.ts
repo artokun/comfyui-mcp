@@ -220,7 +220,9 @@ describe("authenticated panel template relay (#2196)", () => {
     expect(currentPanelTemplateOrigin("https://remote.example:443", "https://remote.example/comfyapi")).toBeUndefined();
     expect(currentPanelTemplateOrigin("http://127.0.0.1:8188", "http://127.0.0.1:8188/comfyapi")).toBe("http://127.0.0.1:8188");
     expect(currentPanelTemplateOrigin("http://[::1]:8188", "http://[::1]:8188/comfyapi")).toBe("http://[::1]:8188");
-    expect(currentPanelTemplateOrigin("http://localhost:8188", "http://localhost:8188/comfyapi")).toBe("http://localhost:8188");
+    // `localhost` is a name, not a listener identity. Accepting an exact
+    // localhost match would let the later fetch resolve a different family.
+    expect(currentPanelTemplateOrigin("http://localhost:8188", "http://localhost:8188/comfyapi")).toBeUndefined();
     expect(currentPanelTemplateOrigin("http://localhost:8188", "http://127.0.0.1:8188/comfyapi")).toBeUndefined();
     expect(currentPanelTemplateOrigin("http://[::1]:8188", "http://127.0.0.1:8188/comfyapi")).toBeUndefined();
     expect(currentPanelTemplateOrigin("http://localhost:8188", "http://[::1]:8188/comfyapi")).toBeUndefined();
