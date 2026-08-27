@@ -22790,12 +22790,12 @@ CHECKED FOR YOU: the graph read this message prescribes was just run, and it ` +
     ),
     def(
       "panel_restart_comfyui",
-      "Restart the user's ComfyUI server via the built-in Manager — needed to load newly installed/updated custom nodes. CALL THIS DIRECTLY when a restart is needed: it pops a confirm card and only restarts on a yes (don't ask separately first). ComfyUI and this agent go down briefly, then the panel auto-reconnects and you resume. ⚠️ BUSY GUARD: a restart ABORTS any in-progress or queued generation — if ComfyUI is generating, this tool REFUSES and tells you (it does NOT restart). When that happens, tell the user a render is running and WAIT for it (poll panel_node_queue_status), or pass force:true ONLY if the user explicitly confirms they want to kill the running generation. Best practice: before restarting after an install, check the queue is idle first. Only call when a restart is actually needed. If a crash takes the panel bridge offline so the confirmation card cannot be shown, this tool falls back to a headless restart of the configured local process (or COMFYUI_RESTART_COMMAND) instead of depending on the dead bridge — it still refuses a readable busy queue without force:true, and still refuses when a relaunch cannot be proven. On an externally-managed install whose relaunch can't be proven from here (e.g. Pinokio), the restart is REFUSED before anything is stopped — restart from the launcher that owns the server instead, or set COMFYUI_RESTART_COMMAND to the exact command that restarts the instance (e.g. `docker restart <container>`): the restart then runs through that command (the busy guard above still applies) instead of needing the launch path.",
-      { force: z.boolean().optional() },
+      "Restart the user's ComfyUI server via the built-in Manager — needed to load newly installed/updated custom nodes. CALL THIS DIRECTLY when a restart is needed: it pops a confirm card and only restarts on a yes (don't ask separately first). If the user has already explicitly authorized automatic restarts in the conversation, pass already_authorized:true to skip only that card; this does NOT imply force and does not bypass any target, relaunch, or busy guard. ComfyUI and this agent go down briefly, then the panel auto-reconnects and you resume. ⚠️ BUSY GUARD: a restart ABORTS any in-progress or queued generation — if ComfyUI is generating, this tool REFUSES and tells you (it does NOT restart). When that happens, tell the user a render is running and WAIT for it (poll panel_node_queue_status), or pass force:true ONLY if the user explicitly confirms they want to kill the running generation. Best practice: before restarting after an install, check the queue is idle first. Only call when a restart is actually needed. If a crash takes the panel bridge offline so the confirmation card cannot be shown, this tool falls back to a headless restart of the configured local process (or COMFYUI_RESTART_COMMAND) instead of depending on the dead bridge — it still refuses a readable busy queue without force:true, and still refuses when a relaunch cannot be proven. On an externally-managed install whose relaunch can't be proven from here (e.g. Pinokio), the restart is REFUSED before anything is stopped — restart from the launcher that owns the server instead, or set COMFYUI_RESTART_COMMAND to the exact command that restarts the instance (e.g. `docker restart <container>`): the restart then runs through that command (the busy guard above still applies) instead of needing the launch path.",
+      { force: z.boolean().optional(), already_authorized: z.boolean().optional() },
       // panel#1554 — `note` rides WHICHEVER reply this handler returns, so a decision
       // recovered from an earlier confirmation card is disclosed on every branch, not
       // just the one that restarts. See withReplyNote / AbandonedConfirmCard.
-      withReplyNote(async ({ force }, ctx, note) => {
+      withReplyNote(async ({ force, already_authorized }, ctx, note) => {
         // Whole-handler budget (#536): confirm + dispatch + readiness — INCLUDING
         // the legacy path's UNPREEMPTIBLE synchronous execSync blocks — must ALL finish
         // under the outer ~300s tools/call limit. 255s + the legacy admission rule below
@@ -22810,12 +22810,14 @@ CHECKED FOR YOU: the graph read this message prescribes was just run, and it ` +
         // fast with an actionable message instead of dispatching a card into the void and
         // waiting out the whole budget. Points at the headless restart_comfyui fallback,
         // which needs no panel card. (A normal interactive tab returns null → proceed.)
-        const surfaceErr = askSurfaceError(ctx);
-        if (surfaceErr) {
-          return fail(
-            surfaceErr +
-              " To restart the server without a panel confirmation card, use restart_comfyui.",
-          );
+        if (already_authorized !== true) {
+          const surfaceErr = askSurfaceError(ctx);
+          if (surfaceErr) {
+            return fail(
+              surfaceErr +
+                " To restart the server without a panel confirmation card, use restart_comfyui.",
+            );
+          }
         }
         // #2118: keep the proxy proof alive across the confirmation/preflight
         // awaits. The proxy is never treated as a ComfyUI process; it only lets
@@ -22868,26 +22870,34 @@ CHECKED FOR YOU: the graph read this message prescribes was just run, and it ` +
         // dispatches is the one whose answer #404's 90s cap leaves behind; the next
         // attempt at this same question, on this same tab, claims it rather than
         // painting a second card over an answer the user already gave.
-        const decision = await ctx.confirm(
-          "Restart ComfyUI now? It (and this agent) will go down briefly, then reconnect and resume automatically.",
-          "Restart ComfyUI",
-          confirmBudget,
-          {
-            recoverAbandonedAnswer: true,
-            onRecoveredAnswer: ({ outcome, ageMs }) =>
-              note(
-                `[NOTE] NO NEW CONFIRMATION CARD WAS SHOWN for this call. The user picked ` +
-                  `"${outcome === "yes" ? "Yes, go ahead" : "No, cancel"}" on the restart card from ` +
-                  `an EARLIER attempt — the one this tool put up about ${Math.round(ageMs / 1000)}s ` +
-                  `ago (WHEN they clicked is not known here, only that it was after that). Their ` +
-                  `answer landed ` +
-                  `after this tool had stopped waiting for it, so it was claimed now instead of ` +
-                  `being discarded. This call has ALREADY acted on it — do not ask the user to ` +
-                  `confirm again, and do not present this as a pending decision. Just tell them ` +
-                  `plainly which answer it went on.`,
-              ),
-          },
-        );
+        const decision =
+          already_authorized === true
+            ? "yes"
+            : await ctx.confirm(
+                "Restart ComfyUI now? It (and this agent) will go down briefly, then reconnect and resume automatically.",
+                "Restart ComfyUI",
+                confirmBudget,
+                {
+                  recoverAbandonedAnswer: true,
+                  onRecoveredAnswer: ({ outcome, ageMs }) =>
+                    note(
+                      `[NOTE] NO NEW CONFIRMATION CARD WAS SHOWN for this call. The user picked ` +
+                        `"${outcome === "yes" ? "Yes, go ahead" : "No, cancel"}" on the restart card from ` +
+                        `an EARLIER attempt — the one this tool put up about ${Math.round(ageMs / 1000)}s ` +
+                        `ago (WHEN they clicked is not known here, only that it was after that). Their ` +
+                        `answer landed ` +
+                        `after this tool had stopped waiting for it, so it was claimed now instead of ` +
+                        `being discarded. This call has ALREADY acted on it — do not ask the user to ` +
+                        `confirm again, and do not present this as a pending decision. Just tell them ` +
+                        `plainly which answer it went on.`,
+                    ),
+                },
+              );
+        if (already_authorized === true) {
+          note(
+            "[NOTE] No confirmation card was shown: the caller supplied already_authorized:true based on prior explicit user authorization. This skipped only the card; the restart target, relaunch safety check, and busy guard still ran, and force was not implied.",
+          );
+        }
         if (decision === "timeout") {
           // #851 — the fallback used to be recommended unconditionally, and
           // `restart_comfyui` targets COMFYUI_URL, NOT the ComfyUI the panel is

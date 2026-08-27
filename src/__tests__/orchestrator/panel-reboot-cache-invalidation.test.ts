@@ -28,16 +28,23 @@ const BOOT_BASE = (getBootLocalComfyUIBaseUrl() ?? "http://127.0.0.1:8188").repl
   "",
 );
 
-function ctxReplying(reply: unknown): PanelToolCtx {
+function ctxReplying(
+  reply: unknown,
+  confirm: PanelToolCtx["confirm"] = async () => "yes" as const,
+  sends: Array<Record<string, unknown>> = [],
+): PanelToolCtx {
   // comfy_reboot is dispatched via ctx.bridge.send (pinned, no rebind); readiness
   // never certifies here (no down→up, no reconnect) — that's fine, this suite only
   // asserts cache-reset gating on the reboot CLASSIFICATION, not readiness.
   return {
     call: async () => ({ content: [{ type: "text", text: JSON.stringify(reply) }] }),
-    confirm: async () => "yes" as const,
+    confirm,
     ensureReachable: () => {},
     bridge: {
-      send: async () => reply,
+      send: async (cmd: Record<string, unknown>) => {
+        sends.push(cmd);
+        return reply;
+      },
       tabOrigin: () => undefined,
       // BOUND to our own boot instance (#814): a LOCAL target the panel cannot be
       // tied to is now refused before any dispatch, so a suite about what happens
@@ -118,5 +125,16 @@ describe("panel_restart_comfyui cache invalidation", () => {
     );
     expect(resetClient).not.toHaveBeenCalled();
     expect(resetObjectInfoCache).not.toHaveBeenCalled();
+  });
+
+  it("already_authorized skips only the card and never implies force", async () => {
+    const confirm = vi.fn(async () => "yes" as const);
+    const sends: Array<Record<string, unknown>> = [];
+    await rebootHandler()(
+      { already_authorized: true },
+      ctxReplying({ rebooting: false, blocked_busy: true, queue_running: 1 }, confirm, sends),
+    );
+    expect(confirm).not.toHaveBeenCalled();
+    expect(sends).toEqual([{ cmd: "comfy_reboot", force: false }]);
   });
 });
