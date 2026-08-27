@@ -653,6 +653,349 @@ describe("OllamaBackend", () => {
     }
   });
 
+  // #1937 — ChatGPT's multi_tool_use.parallel names each recipient's payload
+  // `parameters`, and after the first call in a batch the model copies that key
+  // inward instead of `args`. #1824 fixed the headless `call_tool` facade for
+  // exactly this; the panel router was left on `args ?? arguments` alone, so the
+  // real payload was dropped and `panel_set_widget` was invoked with `{}` —
+  // reaching the panel MCP server's strict schema as
+  // "MCP error -32602: Input validation error ... received undefined at node_id;
+  //  expected string, received undefined at widget", with the arguments the model
+  // actually wrote sitting one key away.
+  it("panel_call_tool runs the call when the payload is under `parameters` instead of `args` (#1937)", async () => {
+    const { client: comfy } = fakeMcpClient(COMFY_META);
+    const { client: panel, callTool: panelCall } = fakeMcpClient([
+      { name: "panel_set_widget", description: "Set a widget value." },
+    ]);
+    const backend = new OllamaBackend({
+      model: "gemma4:e4b",
+      connectToolClients: async () => ({ comfyui: comfy, panel }),
+    });
+    chatScript.push(
+      [
+        {
+          message: {
+            content: "",
+            tool_calls: [
+              {
+                function: {
+                  name: "panel_call_tool",
+                  arguments: {
+                    name: "panel_set_widget",
+                    parameters: { node_id: 30, widget: "frame_load_cap", value: 192 },
+                  },
+                },
+              },
+            ],
+          },
+          done: true,
+        },
+      ],
+      [{ message: { content: "set." }, done: true }],
+    );
+
+    await collect(backend, turnsOf({ text: "set frame_load_cap to 192" }));
+    expect(panelCall).toHaveBeenCalledWith(
+      { name: "panel_set_widget", arguments: { node_id: 30, widget: "frame_load_cap", value: 192 } },
+      undefined,
+      { timeout: PANEL_TOOL_MCP_TIMEOUT_MS },
+    );
+  });
+
+  // The reporter's wire shape, not a convenient one: the ChatGPT backend hands
+  // `dispatch` the Responses API's `function_call.arguments` — a JSON STRING — so
+  // the wrapper key arrives inside text that dispatch parses first. Pinned
+  // separately because a fix that only ever saw a pre-parsed object would look
+  // green while the path that actually reported the bug stayed broken.
+  it("panel_call_tool accepts a `parameters` payload arriving as a JSON string (#1937)", async () => {
+    const { client: comfy } = fakeMcpClient(COMFY_META);
+    const { client: panel, callTool: panelCall } = fakeMcpClient([
+      { name: "panel_set_widget", description: "Set a widget value." },
+    ]);
+    const backend = new OllamaBackend({
+      model: "gemma4:e4b",
+      connectToolClients: async () => ({ comfyui: comfy, panel }),
+    });
+    chatScript.push(
+      [
+        {
+          message: {
+            content: "",
+            tool_calls: [
+              {
+                function: {
+                  name: "panel_call_tool",
+                  arguments:
+                    '{"name":"panel_set_widget","parameters":{"node_id":30,"widget":"frame_load_cap","value":192}}',
+                },
+              },
+            ],
+          },
+          done: true,
+        },
+      ],
+      [{ message: { content: "set." }, done: true }],
+    );
+
+    await collect(backend, turnsOf({ text: "set frame_load_cap to 192" }));
+    expect(panelCall).toHaveBeenCalledWith(
+      { name: "panel_set_widget", arguments: { node_id: 30, widget: "frame_load_cap", value: 192 } },
+      undefined,
+      { timeout: PANEL_TOOL_MCP_TIMEOUT_MS },
+    );
+  });
+
+  it("panel_call_tool prefers `args` over a colliding `parameters` wrapper (#1937)", async () => {
+    const { client: comfy } = fakeMcpClient(COMFY_META);
+    const { client: panel, callTool: panelCall } = fakeMcpClient([
+      { name: "panel_set_widget", description: "Set a widget value." },
+    ]);
+    const backend = new OllamaBackend({
+      model: "gemma4:e4b",
+      connectToolClients: async () => ({ comfyui: comfy, panel }),
+    });
+    chatScript.push(
+      [
+        {
+          message: {
+            content: "",
+            tool_calls: [
+              {
+                function: {
+                  name: "panel_call_tool",
+                  arguments: {
+                    name: "panel_set_widget",
+                    args: { node_id: 30, widget: "from_args", value: 1 },
+                    parameters: { node_id: 99, widget: "from_parameters", value: 2 },
+                  },
+                },
+              },
+            ],
+          },
+          done: true,
+        },
+      ],
+      [{ message: { content: "set." }, done: true }],
+    );
+
+    await collect(backend, turnsOf({ text: "set it" }));
+    expect(panelCall).toHaveBeenCalledWith(
+      { name: "panel_set_widget", arguments: { node_id: 30, widget: "from_args", value: 1 } },
+      undefined,
+      { timeout: PANEL_TOOL_MCP_TIMEOUT_MS },
+    );
+  });
+
+  it("unwraps a self-nested envelope whose INNER payload is under `parameters` (#1937)", async () => {
+    const { client: comfy } = fakeMcpClient(COMFY_META);
+    const { client: panel, callTool: panelCall } = fakeMcpClient([
+      { name: "panel_set_widget", description: "Set a widget value." },
+    ]);
+    const backend = new OllamaBackend({
+      model: "gemma4:e4b",
+      connectToolClients: async () => ({ comfyui: comfy, panel }),
+    });
+    chatScript.push(
+      [
+        {
+          message: {
+            content: "",
+            tool_calls: [
+              {
+                function: {
+                  name: "panel_call_tool",
+                  arguments: {
+                    name: "panel_call_tool",
+                    args: {
+                      name: "panel_set_widget",
+                      parameters: { node_id: 30, widget: "frame_load_cap", value: 192 },
+                    },
+                  },
+                },
+              },
+            ],
+          },
+          done: true,
+        },
+      ],
+      [{ message: { content: "set." }, done: true }],
+    );
+
+    await collect(backend, turnsOf({ text: "set it" }));
+    expect(panelCall).toHaveBeenCalledWith(
+      { name: "panel_set_widget", arguments: { node_id: 30, widget: "frame_load_cap", value: 192 } },
+      undefined,
+      { timeout: PANEL_TOOL_MCP_TIMEOUT_MS },
+    );
+  });
+
+  // The same wrapper key, one hop away: the FORGIVING DIRECT DISPATCH path below
+  // the router exists because models call a panel tool by its bare name, and
+  // `multi_tool_use.parallel` names THAT payload `parameters` too. Forwarded raw
+  // it hits the panel server's strict schema as an unrecognized key AND two
+  // missing required fields.
+  it("a bare-name panel call unwraps a lone `parameters` wrapper (#1937)", async () => {
+    const { client: comfy } = fakeMcpClient(COMFY_META);
+    const { client: panel, callTool: panelCall } = fakeMcpClient([
+      { name: "panel_set_widget", description: "Set a widget value." },
+    ]);
+    const backend = new OllamaBackend({
+      model: "gemma4:e4b",
+      connectToolClients: async () => ({ comfyui: comfy, panel }),
+    });
+    chatScript.push(
+      [
+        {
+          message: {
+            content: "",
+            tool_calls: [
+              {
+                function: {
+                  name: "panel_set_widget",
+                  arguments: { parameters: { node_id: 30, widget: "frame_load_cap", value: 192 } },
+                },
+              },
+            ],
+          },
+          done: true,
+        },
+      ],
+      [{ message: { content: "set." }, done: true }],
+    );
+
+    await collect(backend, turnsOf({ text: "set frame_load_cap to 192" }));
+    expect(panelCall).toHaveBeenCalledWith(
+      { name: "panel_set_widget", arguments: { node_id: 30, widget: "frame_load_cap", value: 192 } },
+      undefined,
+      { timeout: PANEL_TOOL_MCP_TIMEOUT_MS },
+    );
+  });
+
+  // The unwrap must never eat a payload the tool actually declares. panel_add_mcp
+  // takes a real `args` array today, and a tool taking `parameters` must reach its
+  // handler with that key intact — otherwise the recovery silently deletes a
+  // legitimate argument.
+  it("does NOT unwrap `parameters` when the panel tool declares it (#1937)", async () => {
+    const { client: comfy } = fakeMcpClient(COMFY_META);
+    const { client: panel, callTool: panelCall } = fakeMcpClient([
+      {
+        name: "panel_takes_parameters",
+        description: "A tool whose own schema has a parameters field.",
+        inputSchema: { type: "object", properties: { parameters: { type: "object" } } },
+      },
+    ]);
+    const backend = new OllamaBackend({
+      model: "gemma4:e4b",
+      connectToolClients: async () => ({ comfyui: comfy, panel }),
+    });
+    chatScript.push(
+      [
+        {
+          message: {
+            content: "",
+            tool_calls: [
+              {
+                function: {
+                  name: "panel_takes_parameters",
+                  arguments: { parameters: { depth: 3 } },
+                },
+              },
+            ],
+          },
+          done: true,
+        },
+      ],
+      [{ message: { content: "ok." }, done: true }],
+    );
+
+    await collect(backend, turnsOf({ text: "run it" }));
+    expect(panelCall).toHaveBeenCalledWith(
+      { name: "panel_takes_parameters", arguments: { parameters: { depth: 3 } } },
+      undefined,
+      { timeout: PANEL_TOOL_MCP_TIMEOUT_MS },
+    );
+  });
+
+  // The headless surface has the same bare-name hole. #1824 fixed the `call_tool`
+  // FACADE, which is all a compact-mode client can reach — but in full mode every
+  // comfy tool is registered directly, so the wrapper lands on the tool itself and
+  // the facade's alias never runs.
+  it("a bare-name comfy call unwraps a lone `parameters` wrapper (#1937)", async () => {
+    const { client: comfy, callTool: comfyCall } = fakeMcpClient([
+      { name: "download_model", description: "Download a model." },
+    ]);
+    const backend = new OllamaBackend({
+      model: "gemma4:e4b",
+      connectToolClients: async () => ({ comfyui: comfy }),
+    });
+    chatScript.push(
+      [
+        {
+          message: {
+            content: "",
+            tool_calls: [
+              {
+                function: {
+                  name: "download_model",
+                  arguments: { parameters: { action: "status", id: "dl-7" } },
+                },
+              },
+            ],
+          },
+          done: true,
+        },
+      ],
+      [{ message: { content: "checked." }, done: true }],
+    );
+
+    await collect(backend, turnsOf({ text: "check the download" }));
+    expect(comfyCall).toHaveBeenCalledWith({
+      name: "download_model",
+      arguments: { action: "status", id: "dl-7" },
+    });
+  });
+
+  // A wrapper key alongside real fields is NOT a wrapper — it is a model that
+  // spelled most of the call correctly. Unwrapping there would throw the sibling
+  // fields away, so the payload must pass through untouched and let the tool's
+  // own schema speak.
+  it("does NOT unwrap `parameters` when it sits alongside other keys (#1937)", async () => {
+    const { client: comfy } = fakeMcpClient(COMFY_META);
+    const { client: panel, callTool: panelCall } = fakeMcpClient([
+      { name: "panel_set_widget", description: "Set a widget value." },
+    ]);
+    const backend = new OllamaBackend({
+      model: "gemma4:e4b",
+      connectToolClients: async () => ({ comfyui: comfy, panel }),
+    });
+    chatScript.push(
+      [
+        {
+          message: {
+            content: "",
+            tool_calls: [
+              {
+                function: {
+                  name: "panel_set_widget",
+                  arguments: { node_id: 30, parameters: { widget: "frame_load_cap", value: 192 } },
+                },
+              },
+            ],
+          },
+          done: true,
+        },
+      ],
+      [{ message: { content: "ok." }, done: true }],
+    );
+
+    await collect(backend, turnsOf({ text: "set it" }));
+    expect(panelCall).toHaveBeenCalledWith(
+      { name: "panel_set_widget", arguments: { node_id: 30, parameters: { widget: "frame_load_cap", value: 192 } } },
+      undefined,
+      { timeout: PANEL_TOOL_MCP_TIMEOUT_MS },
+    );
+  });
+
   it("panel_call_tool without a name field says what is missing instead of 'Unknown panel tool '''", async () => {
     const { client: comfy } = fakeMcpClient(COMFY_META);
     const { client: panel, callTool: panelCall } = fakeMcpClient([

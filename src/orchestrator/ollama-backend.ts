@@ -487,6 +487,42 @@ function firstSentence(text: string, maxLen = 160): string {
   return line.length <= maxLen ? line : `${line.slice(0, maxLen - 1).trimEnd()}…`;
 }
 
+/**
+ * #1937 — undo ChatGPT's `multi_tool_use.parallel` payload wrapper on a call that
+ * named its tool DIRECTLY (no router envelope to hold the alias).
+ *
+ * The wrapper names each recipient's payload `parameters`, and after the first
+ * call in a batch the model copies that key inward. `panel_call_tool` can absorb
+ * that as an alias for `args` because the payload is a field of the envelope; a
+ * bare-name call has no envelope, so `{parameters: {...}}` IS the whole argument
+ * object and reaches the tool's own schema — where panel_* tools are `.strict()`
+ * (#754) and answer with an unrecognized key plus every required field missing.
+ * That is #1824's defect at the one call site its fix could not reach.
+ *
+ * Deliberately narrow, because the cost of over-reaching is deleting a real
+ * argument rather than surfacing a confusing error:
+ *  - the payload's ONLY key must be `parameters` — a wrapper key beside real
+ *    fields is a call the model mostly spelled right, and unwrapping would throw
+ *    those siblings away;
+ *  - its value must be a plain object, never an array or scalar;
+ *  - the target tool must not declare `parameters` itself. No tool in either
+ *    surface does today (only `panel_add_mcp` claims one of these names, `args`,
+ *    which this never touches), so the check is a latch against a future one.
+ * Anything else passes through untouched and lets the tool's schema speak.
+ */
+function unwrapParametersWrapper(
+  args: Record<string, unknown>,
+  inputSchema: unknown,
+): Record<string, unknown> {
+  const keys = Object.keys(args);
+  if (keys.length !== 1 || keys[0] !== "parameters") return args;
+  const inner = args.parameters;
+  if (inner === null || typeof inner !== "object" || Array.isArray(inner)) return args;
+  const props = (inputSchema as { properties?: Record<string, unknown> } | null | undefined)?.properties;
+  if (props && Object.prototype.hasOwnProperty.call(props, "parameters")) return args;
+  return inner as Record<string, unknown>;
+}
+
 /** Does this id look like a model this backend can run? PanelAgent
  *  unconditionally passes the panel's Claude model as opts.model — this guard
  *  keeps the configured model in charge unless the panel explicitly picked one
@@ -808,9 +844,10 @@ export class OllamaBackend implements AgentBackend {
     }
 
     try {
-      if (this.comfyTools.some((t) => t.name === name)) {
+      const comfyTool = this.comfyTools.find((t) => t.name === name);
+      if (comfyTool) {
         if (!this.comfy) return { text: "comfyui tools are unavailable in this session.", isError: true };
-        const res = await this.comfy.callTool({ name, arguments: args });
+        const res = await this.comfy.callTool({ name, arguments: unwrapParametersWrapper(args, comfyTool.inputSchema) });
         return { text: textOf(res), isError: !!res.isError };
       }
       if (name === "panel_list_tools") {
@@ -842,7 +879,15 @@ export class OllamaBackend implements AgentBackend {
       if (name === "panel_call_tool") {
         if (!this.panel) return { text: "panel tools are unavailable in this session.", isError: true };
         let wanted = typeof args.name === "string" ? args.name : typeof args.tool_name === "string" ? (args.tool_name as string) : "";
-        let inner: unknown = args.args ?? args.arguments ?? {};
+        // #1937 — `parameters` is the THIRD accepted spelling of the payload, for
+        // the same reason #1824 added it to the headless `call_tool`: ChatGPT's
+        // multi_tool_use.parallel names each recipient's payload `parameters`, and
+        // after the first call in a batch the model copies that key inward. With
+        // only `args ?? arguments` here the real payload was dropped and the panel
+        // tool ran with `{}` — surfacing as `MCP error -32602: Input validation
+        // error … received undefined at node_id`, an error about arguments the
+        // model had in fact written, one key away. `args` still wins a collision.
+        let inner: unknown = args.args ?? args.arguments ?? args.parameters ?? {};
         // #1297 — ROUTER SELF-NESTING: a malformed call wraps the real invocation
         // in a second router envelope (panel_call_tool {"name": "panel_call_tool",
         // "args": {"name": "<tool>", "args": {...}}}). The old reply — "Unknown
@@ -868,7 +913,7 @@ export class OllamaBackend implements AgentBackend {
           const nestedName = nested && typeof nested.name === "string" ? nested.name : "";
           if (wanted === "panel_call_tool" && nested && this.panelTools.some((t) => t.name === nestedName)) {
             wanted = nestedName;
-            inner = nested.args ?? nested.arguments ?? {};
+            inner = nested.args ?? nested.arguments ?? nested.parameters ?? {};
             unwrapped = true;
           } else {
             return {
@@ -925,11 +970,14 @@ export class OllamaBackend implements AgentBackend {
       // real panel tool, run it on the panel client; anything else is handed to
       // the compact server's call_tool, whose unknown-name error carries
       // close-match suggestions the model can recover from.
-      if (this.panel && this.panelTools.some((t) => t.name === name)) {
+      const panelTool = this.panel ? this.panelTools.find((t) => t.name === name) : undefined;
+      if (this.panel && panelTool) {
         // Same #325 timeout as the panel_call_tool router path above.
-        const res = await this.panel.callTool({ name, arguments: args }, undefined, {
-          timeout: PANEL_TOOL_MCP_TIMEOUT_MS,
-        });
+        const res = await this.panel.callTool(
+          { name, arguments: unwrapParametersWrapper(args, panelTool.inputSchema) },
+          undefined,
+          { timeout: PANEL_TOOL_MCP_TIMEOUT_MS },
+        );
         return { text: textOf(res), isError: !!res.isError };
       }
       if (this.comfy && this.comfyTools.some((t) => t.name === "call_tool")) {
