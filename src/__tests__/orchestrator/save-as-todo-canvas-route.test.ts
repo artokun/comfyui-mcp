@@ -127,7 +127,7 @@ function bridgeFor(opts?: { keepOldTab?: boolean }): PanelToolCtx["bridge"] {
       scopePin = NEW_TAB;
       return NEW_TAB;
     },
-  } as unknown as PanelToolCtx["bridge"];
+  } as PanelToolCtx["bridge"];
 }
 
 beforeEach(() => {
@@ -227,8 +227,8 @@ describe("#2419 Save-As re-points a dead SCOPE pin onto the dest canvas", () => 
 describe("#2419 Save-As routing recovery stays fail-closed when dest is ambiguous", () => {
   it("leaves routing on the old address when two live tabs match the dest path", async () => {
     const b = bridgeFor();
-    const origSend = (b as unknown as { send: PanelToolCtx["bridge"]["send"] }).send;
-    (b as unknown as { send: PanelToolCtx["bridge"]["send"] }).send = async (c, extra) => {
+    const origSend = b.send;
+    b.send = async (c, extra) => {
       const out = await origSend(c, extra);
       if (c.cmd === "workflow_save_as") {
         liveTabs = [
