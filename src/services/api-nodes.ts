@@ -147,6 +147,28 @@ const EXTERNAL_SERVICE_PACKS: readonly ExternalServicePack[] = [
   // the user's balance. The category prefix carries the match through a directory
   // rename the way the fal entries do.
   { module: "poyo-comfyui", categoryPrefixes: ["poyo ai"], provider: "PoYo" },
+  // #2416 — FloyoAI/ComfyUI-Seed-API, direct BytePlus ModelArk nodes. Same shape as
+  // PoYo above: the key lives in config.ini or BYTEPLUS_API_KEY, never in a workflow
+  // input, so declaresCredentialInput() sees nothing and api_node is false — and
+  // check_runtime answered `local` / free for nodes spending the user`s BytePlus balance.
+  //
+  // `Seed/Video` is EXEMPT and is not a typo for Seed/VideoGeneration. It holds one node,
+  // VideoToFrames, which takes a video_url, requests.get()s it and shells out to ffmpeg —
+  // no credential, no ModelArk call, so billing it would report a free node as paid. The
+  // reported fix listed only the three paid prefixes and would have swept this one in
+  // through the `module` match, which catches the whole pack on its own.
+  //
+  // The two prefixes cannot collide: the exemption test is `category === p ||
+  // category.startsWith(`${p}/`)`, and "seed/videogeneration" is neither equal to
+  // "seed/video" nor prefixed by "seed/video/". Verified against the pack`s own sources,
+  // not the report: CATEGORY is Seed/ImageGeneration, Seed/VideoGeneration, Seed/Chat and
+  // Seed/Video.
+  {
+    module: "comfyui-seed-api",
+    categoryPrefixes: ["seed/imagegeneration", "seed/videogeneration", "seed/chat"],
+    localCategoryPrefixes: ["seed/video"],
+    provider: "BytePlus",
+  },
 ];
 
 /**

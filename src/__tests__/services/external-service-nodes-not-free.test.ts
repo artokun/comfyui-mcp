@@ -287,3 +287,87 @@ describe("a paid external-service node is never reported as local/free (#1483)",
     expect(out.externalProviders).toBeUndefined();
   });
 });
+
+// ---------------------------------------------------------------------------
+// #2416 — FloyoAI/ComfyUI-Seed-API. Same shape as PoYo: the BytePlus key lives in
+// config.ini or BYTEPLUS_API_KEY, never in a workflow input, so every generic signal
+// says free while the node spends the user's ModelArk balance.
+//
+// The fixtures are the pack's OWN categories, read from its sources rather than from
+// the report: Seed/ImageGeneration, Seed/VideoGeneration, Seed/Chat — and Seed/Video,
+// which the report did not mention and which must stay FREE.
+// ---------------------------------------------------------------------------
+
+/** The reported paid nodes. No credential input; api_node absent. */
+const SEED_IMAGE = def({
+  name: "Seedream4Unified",
+  category: "Seed/ImageGeneration",
+  python_module: "custom_nodes.ComfyUI-Seed-API",
+  input: { required: { prompt: ["STRING", {}] } },
+});
+const SEED_VIDEO = def({
+  name: "SeedancePro15Video",
+  category: "Seed/VideoGeneration",
+  python_module: "custom_nodes.ComfyUI-Seed-API",
+  input: { required: { prompt: ["STRING", {}] } },
+});
+const SEED_CHAT = def({
+  name: "SeedChatNode",
+  category: "Seed/Chat",
+  python_module: "custom_nodes.ComfyUI-Seed-API",
+  input: { required: { prompt: ["STRING", {}] } },
+});
+
+/** The pack's LOCAL helper: takes a video_url, requests.get()s it, shells out to
+ *  ffmpeg. No credential, no ModelArk call — billing it would report a free node as
+ *  paid. It matches the pack by `module`, so only the exemption keeps it free. */
+const SEED_FRAMES = def({
+  name: "VideoToFrames",
+  category: "Seed/Video",
+  python_module: "custom_nodes.ComfyUI-Seed-API",
+  input: { required: { video_url: ["STRING", {}] } },
+});
+
+describe("#2416 ComfyUI-Seed-API BytePlus nodes are not free", () => {
+  it("the three paid categories are external-service nodes", () => {
+    for (const d of [SEED_IMAGE, SEED_VIDEO, SEED_CHAT]) {
+      expect(isExternalServiceNode(d), `${d.name} must not read as free`).toBe(true);
+      expect(isApiNode(d), `${d.name} is not a Comfy partner node`).toBe(false);
+    }
+  });
+
+  it("Seed/Video stays FREE — the report's own diff would have billed it", () => {
+    // The reported fix listed only the three paid prefixes, but `module` matches the
+    // whole pack on its own, so without an exemption this local helper is swept in.
+    expect(isExternalServiceNode(SEED_FRAMES)).toBe(false);
+  });
+
+  it("the seed/video exemption does NOT swallow seed/videogeneration", () => {
+    // The exemption test is `category === p || category.startsWith(`${p}/`)`, so
+    // "seed/videogeneration" is neither equal to "seed/video" nor prefixed by
+    // "seed/video/". If that ever loosens, the paid video nodes silently go free.
+    expect(isExternalServiceNode(SEED_VIDEO)).toBe(true);
+    expect(isExternalServiceNode(SEED_FRAMES)).toBe(false);
+  });
+
+  it("THE REPORTED GRAPH: runtime is mixed, not local", async () => {
+    const out = await runtimeOf(
+      ["Seedream4Unified", "SeedancePro15Video", "SaveImage"],
+      {
+        Seedream4Unified: SEED_IMAGE,
+        SeedancePro15Video: SEED_VIDEO,
+        SaveImage: def({ name: "SaveImage", category: "image", python_module: "nodes" }),
+      },
+    );
+    expect(out.runtime).toBe("mixed");
+    expect(out.externalApiNodes).toEqual(
+      expect.arrayContaining(["Seedream4Unified", "SeedancePro15Video"]),
+    );
+  });
+
+  it("a graph of only the LOCAL helper is still local", async () => {
+    const out = await runtimeOf(["VideoToFrames"], { VideoToFrames: SEED_FRAMES });
+    expect(out.runtime).toBe("local");
+    expect(out.externalApiNodes).toEqual([]);
+  });
+});
