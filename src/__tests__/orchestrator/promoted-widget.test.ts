@@ -72,6 +72,9 @@ function bridge(opts: {
   remappedWrite?: Outcome;
   innerWrite?: Outcome;
   subgraph?: Record<string, unknown> | Error;
+  /** #2393: successive graph_get_subgraph replies, used to model a witness
+   * that is incomplete immediately after an official template load. */
+  subgraphSequence?: Array<Record<string, unknown> | Error>;
   nestedSubgraph?: Record<string, unknown> | Error;
   enterFails?: boolean;
   exitFails?: boolean;
@@ -130,6 +133,8 @@ function bridge(opts: {
   };
   omitWorkflowUuid?: boolean;
   workflowUuid?: string;
+  /** The outer node id used by the current fake viewing scope. */
+  ownerNodeId?: number;
   /** panel#1859 — a real pre-0.15.101 panel build. It publishes no
    * `graph_identity` anywhere (neither on `viewing` nor on `subgraph_of`) and
    * its hello advertises `enforces_expected_node_type_at_write` but none of the
@@ -149,7 +154,7 @@ function bridge(opts: {
   let authoritativeScopeReads = 0;
   let inSubgraph = false;
   const workflowUuid = opts.workflowUuid ?? "workflow-a";
-  let currentOwnerNodeId = 78;
+  let currentOwnerNodeId = opts.ownerNodeId ?? 78;
   let currentGraphIdentity = "graph:workflow-a-root";
   const targetGraphIdentity = "graph:workflow-a-container-a";
   let connectionIdentity = { generation: 1, tabSessionId: "browser-tab-a" };
@@ -335,10 +340,15 @@ function bridge(opts: {
           if (opts.recoveryPreflightSubgraph instanceof Error) throw opts.recoveryPreflightSubgraph;
           return withCurrentViewing(opts.recoveryPreflightSubgraph);
         }
+        if (opts.subgraphSequence && opts.subgraphSequence.length > 0) {
+          const selected = opts.subgraphSequence[Math.min(subgraphReads - 1, opts.subgraphSequence.length - 1)];
+          if (selected instanceof Error) throw selected;
+          return withCurrentViewing(selected);
+        }
         if (inSubgraph) {
           if (opts.nestedSubgraph instanceof Error) throw opts.nestedSubgraph;
           if (opts.nestedSubgraph) return withCurrentViewing(opts.nestedSubgraph);
-          if (String(cmd.node_id) !== "78") {
+          if (String(cmd.node_id) !== String(currentOwnerNodeId)) {
             throw new Error(`Node ${cmd.node_id} (OrdinaryNode) is not a subgraph`);
           }
           throw new Error("No node with id 78 in the current graph");
@@ -747,6 +757,98 @@ const CURRENT_SAFE_PROMOTED_SUBGRAPH = {
   ],
 };
 
+const QWEN_EDIT_PROMOTED_SUBGRAPH = {
+  subgraph_of: { node_id: 170, title: "Qwen Image Edit 2511 INT8" },
+  node_count: 1,
+  nodes: [
+    {
+      id: 168,
+      type: "PrimitiveBoolean",
+      widgets: { value: false },
+      inputs: [{ name: "value", type: "BOOLEAN" }],
+    },
+  ],
+  promoted_terminals: [
+    {
+      widget: "enable_turbo_mode",
+      parent_rail: { authoritative: true, widget: "enable_turbo_mode" },
+      immediate_node_id: 168,
+      immediate_widget: "value",
+      terminal_node_id: 168,
+      terminal_node_type: "PrimitiveBoolean",
+      terminal_widget: "value",
+      terminal_inputs: [{ name: "value", type: "BOOLEAN" }],
+      chain_depth: 0,
+    },
+  ],
+};
+
+const QWEN_EDIT_INCOMPLETE_PROMOTED_SUBGRAPH = {
+  ...QWEN_EDIT_PROMOTED_SUBGRAPH,
+  promoted_terminals: [
+    {
+      widget: "enable_turbo_mode",
+      error: "promoted terminal _subgraphSlot is not resolved yet",
+    },
+  ],
+};
+
+describe("panel_set_widget coordinated promoted-widget fixes (#2393, #2394)", () => {
+  it("refreshes one incomplete post-template terminal witness before the guarded inner write (#2393)", async () => {
+    const { isError, calls, mutations } = await setWidget(
+      { node_id: 170, widget: "enable_turbo_mode", value: true },
+      {
+        ownerNodeId: 170,
+        firstWrite: "ok",
+        promotedTerminalWitnesses: true,
+        promotedDetail: {
+          text:
+            '1 match(es) of 1 in scope (viewing: 1 nodes)\n' +
+            '{"id":170,"type":"SubgraphNode","is_subgraph":true}',
+        },
+        subgraph: QWEN_EDIT_PROMOTED_SUBGRAPH,
+        subgraphSequence: [
+          QWEN_EDIT_INCOMPLETE_PROMOTED_SUBGRAPH,
+          QWEN_EDIT_PROMOTED_SUBGRAPH,
+        ],
+      },
+    );
+
+    expect(isError).toBe(false);
+    expect(mutations).toBe(1);
+    expect(calls.filter((call) => call.cmd === "graph_get_subgraph")).toHaveLength(3);
+    expect(calls.filter((call) => call.cmd === "graph_set_widget")).toEqual([
+      expect.objectContaining({ node_id: 168, widget: "value", value: true }),
+    ]);
+  });
+
+  it("allows a missing root-level Power Lora Loader lora_N row without entering promoted mapping (#2394)", async () => {
+    const value = '{"on":true,"lora":"turbo.safetensors","strength":1,"strengthTwo":null}';
+    const { isError, calls, mutations } = await setWidget(
+      { node_id: 82, widget: "lora_1", value },
+      {
+        ownerNodeId: 82,
+        firstWrite: "ok",
+        // If the classifier regresses to graph_get_subgraph first, this is the
+        // refusal observed for a fresh root loader rather than a safe write.
+        subgraph: new Error("Node 82 (Power Lora Loader (rgthree)) is not a subgraph"),
+        promotedDetail: {
+          text:
+            '1 match(es) of 1 in scope (viewing: 1 nodes)\n' +
+            '{"id":82,"type":"Power Lora Loader (rgthree)","is_subgraph":false}',
+        },
+      },
+    );
+
+    expect(isError).toBe(false);
+    expect(mutations).toBe(1);
+    expect(calls.filter((call) => call.cmd === "graph_get_subgraph")).toHaveLength(0);
+    expect(calls.filter((call) => call.cmd === "graph_set_widget")).toEqual([
+      expect.objectContaining({ node_id: 82, widget: "lora_1", value }),
+    ]);
+  });
+});
+
 /** The outer read lists only B. The receiver's terminal witness proves that
  * B's own promoted rail continues to the concrete endpoint, so MCP can apply
  * the three known-bad guards to the node the panel will actually mutate. */
@@ -1064,6 +1166,7 @@ describe("panel_set_widget promoted container success guards (#2314)", () => {
     expect(text).toMatch(/could not determine whether the addressed node is a promoted container/);
     expect(calls.map((c) => c.cmd)).toEqual([
       "graph_query",
+      "graph_query",
       "graph_get_subgraph",
     ]);
   });
@@ -1096,7 +1199,7 @@ describe("panel_set_widget promoted container success guards (#2314)", () => {
 
     // Still fail-closed: the guard is untouched and nothing was written.
     expect(isError).toBe(true);
-    expect(calls.map((c) => c.cmd)).toEqual(["graph_query", "graph_get_subgraph"]);
+    expect(calls.map((c) => c.cmd)).toEqual(["graph_query", "graph_query", "graph_get_subgraph"]);
     expect(calls.map((c) => c.cmd)).not.toContain("graph_set_widget");
     expect(mutations).toBe(0);
 
@@ -1143,7 +1246,7 @@ describe("panel_set_widget promoted container success guards (#2314)", () => {
 
     expect(isError).toBe(true);
     expect(mutations).toBe(0);
-    expect(calls.map((c) => c.cmd)).toEqual(["graph_query", "graph_get_subgraph"]);
+    expect(calls.map((c) => c.cmd)).toEqual(["graph_query", "graph_query", "graph_get_subgraph"]);
     // Unchanged from before panel#1869: a transport failure IS transient, so
     // "retry once stable" is honest advice there and must survive.
     expect(text).toContain("could not determine whether the addressed node is a promoted container");
@@ -1162,6 +1265,7 @@ describe("panel_set_widget promoted container success guards (#2314)", () => {
 
     expect(isError).toBe(false);
     expect(calls.map((c) => c.cmd)).toEqual([
+      "graph_query",
       "graph_query",
       "graph_get_subgraph",
       "graph_set_widget",
@@ -1240,6 +1344,7 @@ describe("panel_set_widget promoted container success guards (#2314)", () => {
 
     expect(isError).toBe(true);
     expect(text).toMatch(/incomplete or unresolved|missing, ambiguous, stale, or unresolved/);
+    expect(calls.filter((call) => call.cmd === "graph_get_subgraph")).toHaveLength(2);
     expect(calls.filter((call) => call.cmd === "graph_set_widget")).toHaveLength(0);
   });
 
@@ -2366,9 +2471,11 @@ describe("panel_set_widget promoted-subgraph recovery (#1655)", () => {
     expect(isError).toBe(false);
     expect(calls.map((c) => c.cmd)).toEqual([
       "graph_query",
+      "graph_query",
       "graph_get_subgraph",
       "graph_query",
       "graph_set_widget",
+      "graph_query",
       "graph_get_subgraph",
       "graph_get_subgraph",
       "graph_enter_subgraph",
@@ -2378,8 +2485,8 @@ describe("panel_set_widget promoted-subgraph recovery (#1655)", () => {
       "graph_set_widget",
       "graph_exit_subgraph",
     ]);
-    expect(calls[3]).toMatchObject({ expected_node_type: "OtherLoraLoader" });
-    expect(calls[10]).toMatchObject({ expected_node_type: "OtherLoraLoader" });
+    expect(calls[4]).toMatchObject({ expected_node_type: "OtherLoraLoader" });
+    expect(calls[12]).toMatchObject({ expected_node_type: "OtherLoraLoader" });
     expect(text).toMatch(/validated promoted inner widget/);
   });
 
@@ -2401,9 +2508,11 @@ describe("panel_set_widget promoted-subgraph recovery (#1655)", () => {
     expect(isError).toBe(true);
     expect(calls.map((c) => c.cmd)).toEqual([
       "graph_query",
+      "graph_query",
       "graph_get_subgraph",
       "graph_query",
       "graph_set_widget",
+      "graph_query",
       "graph_get_subgraph",
       "graph_get_subgraph",
       "graph_enter_subgraph",
@@ -2432,9 +2541,11 @@ describe("panel_set_widget promoted-subgraph recovery (#1655)", () => {
     expect(isError).toBe(true);
     expect(calls.map((c) => c.cmd)).toEqual([
       "graph_query",
+      "graph_query",
       "graph_get_subgraph",
       "graph_query",
       "graph_set_widget",
+      "graph_query",
       "graph_get_subgraph",
       "graph_get_subgraph",
       "graph_enter_subgraph",
@@ -2468,7 +2579,7 @@ describe("panel_set_widget promoted-subgraph recovery (#1655)", () => {
     );
 
     expect(isError).toBe(true);
-    expect(calls.map((c) => c.cmd)).toEqual(["graph_get_subgraph", "graph_set_widget", "graph_query"]);
+    expect(calls.map((c) => c.cmd)).toEqual(["graph_query", "graph_get_subgraph", "graph_set_widget", "graph_query"]);
     expect(text).toMatch(/slot:1, name:"text", label:null/);
     expect(text).toMatch(/slot:2, name:"text_1", label:"text"/);
     expect(text).toMatch(/no second write was attempted/i);
@@ -2482,14 +2593,16 @@ describe("panel_set_widget promoted-subgraph recovery (#1655)", () => {
 
     expect(isError).toBe(false);
     expect(calls.map((c) => c.cmd)).toEqual([
+      "graph_query",
       "graph_get_subgraph",
       "graph_set_widget",
       "graph_enter_subgraph",
+      "graph_query",
       "graph_get_subgraph",
       "graph_set_widget",
     ]);
-    expect(calls[2]).toMatchObject({ node_id: "190" });
-    expect(calls[4]).toMatchObject({ node_id: 188, widget: "text", value: "hello" });
+    expect(calls[3]).toMatchObject({ node_id: "190" });
+    expect(calls[6]).toMatchObject({ node_id: 188, widget: "text", value: "hello" });
     expect(text).toMatch(/route was re-entered and the write was retried once/i);
   });
 
@@ -2501,8 +2614,10 @@ describe("panel_set_widget promoted-subgraph recovery (#1655)", () => {
 
     expect(isError).toBe(false);
     expect(calls.map((c) => c.cmd)).toEqual([
+      "graph_query",
       "graph_get_subgraph",
       "graph_set_widget",
+      "graph_query",
       "graph_get_subgraph",
       "graph_get_subgraph",
       "graph_enter_subgraph",
@@ -2535,7 +2650,7 @@ describe("panel_set_widget promoted-subgraph recovery (#1655)", () => {
       { firstWrite: "ok", preflightSubgraph: DEFINITIVE_NON_PROMOTED_SUBGRAPH },
     );
     expect(isError).toBe(false);
-    expect(calls.map((c) => c.cmd)).toEqual(["graph_get_subgraph", "graph_set_widget"]);
+    expect(calls.map((c) => c.cmd)).toEqual(["graph_query", "graph_get_subgraph", "graph_set_widget"]);
   });
 
   it("a genuine miss is never retried", async () => {
@@ -2567,7 +2682,7 @@ describe("panel_set_widget promoted-subgraph recovery (#1655)", () => {
       { firstWrite: "fail", preflightSubgraph: DEFINITIVE_NON_PROMOTED_SUBGRAPH },
     );
     expect(isError).toBe(true);
-    expect(calls.map((c) => c.cmd)).toEqual(["graph_get_subgraph", "graph_set_widget"]);
+    expect(calls.map((c) => c.cmd)).toEqual(["graph_query", "graph_get_subgraph", "graph_set_widget"]);
   });
 
   it("an ambiguous inner mapping is not guessed", async () => {
@@ -2589,8 +2704,10 @@ describe("panel_set_widget promoted-subgraph recovery (#1655)", () => {
     expect(text).toMatch(/is not a promoted widget/);
     expect(text).toMatch(/ambiguously to 2 inner nodes|did not uniquely identify/);
     expect(calls.map((c) => c.cmd)).toEqual([
+      "graph_query",
       "graph_get_subgraph",
       "graph_set_widget",
+      "graph_query",
       "graph_get_subgraph",
     ]);
     expect(calls.map((c) => c.cmd)).not.toContain("graph_enter_subgraph");
@@ -2618,8 +2735,10 @@ describe("panel_set_widget promoted-subgraph recovery (#1655)", () => {
     expect(text).toMatch(/is not a promoted widget/);
     expect(text).toMatch(/graph_get_subgraph FAILED/);
     expect(calls.map((c) => c.cmd)).toEqual([
+      "graph_query",
       "graph_get_subgraph",
       "graph_set_widget",
+      "graph_query",
       "graph_get_subgraph",
       "graph_get_subgraph",
     ]);
@@ -2644,8 +2763,10 @@ describe("panel_set_widget promoted-subgraph recovery (#1655)", () => {
     );
     expect(isError).toBe(true);
     expect(calls.map((c) => c.cmd)).toEqual([
+      "graph_query",
       "graph_get_subgraph",
       "graph_set_widget",
+      "graph_query",
       "graph_get_subgraph",
       "graph_get_subgraph",
       "graph_enter_subgraph",
@@ -2666,8 +2787,10 @@ describe("panel_set_widget promoted-subgraph recovery (#1655)", () => {
     );
     expect(isError).toBe(false);
     expect(calls.map((c) => c.cmd)).toEqual([
+      "graph_query",
       "graph_get_subgraph",
       "graph_set_widget",
+      "graph_query",
       "graph_get_subgraph",
       "graph_get_subgraph",
       "graph_enter_subgraph",
