@@ -97,37 +97,80 @@ describe("a blocked sharp does not break module loading (#2411)", () => {
   });
 });
 
+/**
+ * Run `fn` as if on `platform`, then put the real one back.
+ *
+ * The remedy paragraph branches on `process.platform`, so a test that just reads
+ * the ambient one asserts a different thing on every runner. That is not
+ * hypothetical: the first version of this file guarded the Windows assertions
+ * behind `if (process.platform === "win32")`, so they never ran on CI — and CI
+ * then failed on the OTHER branch, which was echoing sharp's misdirecting
+ * install advice. Both branches are pinned explicitly now.
+ */
+function asPlatform(platform: NodeJS.Platform, fn: () => void): void {
+  const real = Object.getOwnPropertyDescriptor(process, "platform")!;
+  Object.defineProperty(process, "platform", { ...real, value: platform });
+  try {
+    fn();
+  } finally {
+    Object.defineProperty(process, "platform", real);
+  }
+}
+
 describe("the message names sharp, the library and a remedy (#2411)", () => {
   it("a real dlopen failure is diagnosed as the NATIVE library, not a missing package", async () => {
-    const msg = sharpUnavailableMessage("Image conversion", REAL_SHARP_DLOPEN_ERROR);
-    expect(msg).toContain("Image conversion is unavailable");
-    expect(msg).toContain("libvips");
-    expect(msg).toContain("sharp");
-    // The cause is quoted, so the message is diagnosable and not just a
-    // category. This is the line the reporter never saw.
-    expect(msg).toContain("ERR_DLOPEN_FAILED: The specified module could not be found.");
-    // On Windows the remedy has to name where the block is visible, and has to
-    // say NOT to reach for the switch that looks like it would fix it.
-    if (process.platform === "win32") {
-      expect(msg).toContain("Smart App Control");
-      expect(msg).toMatch(/Do NOT disable Smart App Control/);
+    for (const platform of ["win32", "darwin", "linux"] as NodeJS.Platform[]) {
+      asPlatform(platform, () => {
+        const msg = sharpUnavailableMessage("Image conversion", REAL_SHARP_DLOPEN_ERROR);
+        expect(msg).toContain("Image conversion is unavailable");
+        expect(msg).toContain("libvips");
+        expect(msg).toContain("sharp");
+        // The cause is quoted, so the message is diagnosable and not just a
+        // category. This is the line the reporter never saw.
+        expect(msg).toContain("ERR_DLOPEN_FAILED: The specified module could not be found.");
+      });
     }
   });
 
-  it("the message does NOT repeat sharp's install advice, which misdirects here", async () => {
-    const msg = sharpUnavailableMessage("Image conversion", REAL_SHARP_DLOPEN_ERROR);
-    // sharp's own help says "npm install --include=optional sharp" — advice
-    // about an ABSENT package. Here the package is present and the binary is
-    // being refused, so echoing that sends the user to fix the wrong thing.
-    // The classifier has to reach the native branch for this to mean anything,
-    // which the assertions above establish.
-    expect(msg).not.toContain("npm install --include=optional sharp");
-    expect(msg).not.toContain("sharp.pixelplumbing.com");
+  it("names Smart App Control on Windows, and does NOT elsewhere", async () => {
+    asPlatform("win32", () => {
+      const msg = sharpUnavailableMessage("Image conversion", REAL_SHARP_DLOPEN_ERROR);
+      // The remedy has to name where the block is visible, and has to say NOT to
+      // reach for the switch that looks like it would fix it — disabling SAC is
+      // a one-way door.
+      expect(msg).toContain("Smart App Control");
+      expect(msg).toMatch(/Do NOT disable Smart App Control/);
+    });
+    for (const platform of ["darwin", "linux"] as NodeJS.Platform[]) {
+      asPlatform(platform, () => {
+        // A Windows-only remedy on macOS is noise that costs the reader trust in
+        // the rest of the message.
+        expect(sharpUnavailableMessage("Image conversion", REAL_SHARP_DLOPEN_ERROR)).not.toContain(
+          "Smart App Control",
+        );
+      });
+    }
+  });
+
+  // CI caught this on macOS while Windows hid it: the non-Windows branch used to
+  // say "npm install --include=optional sharp", which is precisely the advice
+  // this test exists to keep out. A conditional assertion had let it through.
+  it("no platform repeats sharp's install advice, which misdirects on a LOAD failure", async () => {
+    for (const platform of ["win32", "darwin", "linux"] as NodeJS.Platform[]) {
+      asPlatform(platform, () => {
+        const msg = sharpUnavailableMessage("Image conversion", REAL_SHARP_DLOPEN_ERROR);
+        // sharp's own help says "npm install --include=optional sharp" — advice
+        // about an ABSENT package. Here the package is present and the binary is
+        // being refused, so echoing that sends the user to fix the wrong thing.
+        expect(msg).not.toContain("npm install --include=optional sharp");
+        expect(msg).not.toContain("sharp.pixelplumbing.com");
+      });
+    }
   });
 
   // Caught by running this repo's own review taxonomy (class 6, "prose overstates
   // what the code does") against the diff. The first wording was "Everything that
-  // does not resize or re-encode images is unaffected" — but `analyze_color`
+  // does not resize or re-encode images is unaffected" — but analysing colour
   // neither resizes nor re-encodes (it decodes to raw pixels via `.raw()`), so a
   // reader would have concluded it still worked. It does not.
   it("does not tell the user that colour analysis is unaffected — it is affected", async () => {

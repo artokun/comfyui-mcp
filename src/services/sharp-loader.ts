@@ -143,8 +143,11 @@ export function sharpUnavailableMessage(feature: string, err: unknown): string {
         "`npm install -g comfyui-mcp@latest` in case the extraction was interrupted. " +
         "Do NOT disable Smart App Control to work around this — on Windows that is a one-way switch " +
         "you cannot turn back on without reinstalling the OS."
-      : "Reinstall sharp's platform binaries with `npm install --include=optional sharp`, or " +
-        "reinstall with `npm install -g comfyui-mcp@latest`."
+      : "The package is present and its binary is being refused or is unusable, so check in this " +
+        "order: a quarantine flag or security policy on the .node/dylib (macOS Gatekeeper, SELinux, " +
+        "an endpoint agent); an architecture mismatch between Node and the prebuilt (arm64 vs x64); " +
+        "then reinstall with `npm install -g comfyui-mcp@latest` in case the extraction was " +
+        "interrupted."
     : "sharp's optional platform package is probably absent — `--omit=optional` removes it. " +
       "Reinstall with `npm install -g comfyui-mcp@latest`.";
   return (
