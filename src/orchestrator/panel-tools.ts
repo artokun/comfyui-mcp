@@ -6556,17 +6556,21 @@ function promotedTerminalEvidenceError(
       return "the current receiver's promoted-terminal witness was unavailable";
     }
   }
-  // Decide on the requested alias's OWN entries when it has any. Duplicated or
-  // errored evidence for this alias is still a hard refusal for this write.
+  // ONE entry for the requested alias is the only case this narrows: that entry
+  // is complete evidence about this write, and it decides it.
   const own = (entries as Array<Record<string, unknown>>).filter(
     (entry) => (entry.widget as string).toLowerCase() === wanted,
   );
-  if (own.length > 1) return "the promoted-terminal witness was ambiguous";
   if (own.length === 1) {
     return own[0].error ? "the promoted-terminal witness was incomplete or unresolved" : null;
   }
-  // A MISS. Only a whole array can prove that absence means "ordinary widget",
-  // so the original whole-array rule stands unchanged here.
+  // Everything else falls to the ORIGINAL whole-array rule, unchanged:
+  //   - a MISS (own.length === 0), because absence is read as "ordinary widget,
+  //     write it outer" and only a whole array can prove that absence is real;
+  //   - a requested alias appearing MORE THAN ONCE, which the loop below refuses
+  //     when it reaches the repeat. An explicit `own.length > 1` branch here was
+  //     tried and removed: mutating it away left every test green, because the
+  //     loop already covers it. Redundant guards read as load-bearing.
   const seen = new Set<string>();
   for (const entry of entries as Array<Record<string, unknown>>) {
     const key = (entry.widget as string).toLowerCase();
