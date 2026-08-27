@@ -6,11 +6,20 @@ All notable changes to this project are documented here. This project adheres to
 
 ## Unreleased
 
+## [0.52.144] - 2026-08-27
+
 ### MCP
 
 #### Fixed
 - apply_manifest counts a GGUF as installed when ComfyUI-GGUF lists it under clip_gguf/unet_gguf (#2447)
 - panel_list_nodes lists installed packs from host Manager HTTP when the panel tab is gone (#2459)
+
+### MCP
+
+#### Fixed
+- list installed packs from host Manager HTTP when the panel tab is gone (#2465)
+- count GGUF files listed under clip_gguf/unet_gguf as installed (#2463)
+
 
 ## [0.52.143] - 2026-08-27
 
