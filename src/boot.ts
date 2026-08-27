@@ -29,6 +29,7 @@ import {
 import { banner, labelRows, numberedSteps } from "./i18n/terminal-layout.js";
 import { STDIO_HANDSHAKE_INSTRUCTIONS } from "./handshake-instructions.js";
 import { orchestratorLogPath } from "./services/orchestrator-log.js";
+import { probeSharp } from "./services/sharp-loader.js";
 
 /** A RunPod proxy can only reach a listener exposed beyond loopback. */
 function advertisedOriginForBind(host: string, port: number): string | undefined {
@@ -49,6 +50,30 @@ function advertisedOriginForBind(host: string, port: number): string | undefined
  * never block or crash startup. Opt out with COMFYUI_MCP_PANEL_AUTOINSTALL=0.
  * The explicit `install_comfyui(action:'panel', panel_action:'update')` tool refreshes nightly on demand.
  */
+/**
+ * #2411 — SAY IT AT STARTUP, NOT ON THE FIRST RENDER OF A LONG SESSION.
+ *
+ * Before this, a `sharp` whose native library would not load crashed the process
+ * during module evaluation; now it degrades, which means it can also go unnoticed
+ * until someone asks for a preview an hour in. One warning at boot is what turns
+ * that into a fact the user already has.
+ *
+ * Deliberately after the transport is up and deliberately non-blocking: this is
+ * diagnostics, and a diagnostic that can delay or fail startup is a worse defect
+ * than the one it reports.
+ */
+function probeSharpOnLoad(): void {
+  void probeSharp()
+    .then((warning) => {
+      if (warning) logger.warn(warning);
+    })
+    .catch(() => {
+      // probeSharp() already swallows the load failure and returns it as text;
+      // reaching here means the probe ITSELF broke, which is not worth a second
+      // warning about a feature the user may never touch.
+    });
+}
+
 function ensurePanelOnLoad(): void {
   if (!isLocalMode()) return;
   void ensurePanelInstalled()
@@ -675,6 +700,8 @@ async function main() {
   // After the server is up deliberately: adoption re-issues real transfers, so it
   // must not delay or endanger the transport coming up.
   adoptOrphanedDownloadsOnLoad();
+  // ...and say ONCE, at startup, if sharp's native library will not load (#2411).
+  probeSharpOnLoad();
 }
 
 main().catch((err) => {

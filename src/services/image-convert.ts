@@ -1,6 +1,6 @@
 import { lstat, mkdir, readFile, realpath, stat, writeFile } from "node:fs/promises";
 import { dirname, isAbsolute, relative, resolve, sep } from "node:path";
-import sharp from "sharp";
+import { requireSharp, type SharpModule } from "./sharp-loader.js";
 import { AssetRegistry } from "./asset-registry.js";
 import { getOutputImage } from "./image-management.js";
 import { resolveOutputDir } from "./output-dir.js";
@@ -219,10 +219,15 @@ async function resolveSource(opts: ConvertImageOptions): Promise<SourceImage> {
   };
 }
 
+// #2411 — the sharp factory arrives as an ARGUMENT rather than a module binding,
+// so this file no longer loads a native library while it evaluates. `convertImage`
+// is the one caller and does the loading, which keeps the refusal message next to
+// the action the user actually asked for.
 function buildEncoder(
+  sharp: SharpModule,
   input: Buffer,
   opts: ConvertImageOptions,
-): ReturnType<typeof sharp> {
+): ReturnType<SharpModule> {
   const image = sharp(input, { limitInputPixels: limitInputPixels() });
   if (opts.format === "png") {
     return image.png({ quality: opts.quality });
@@ -263,8 +268,9 @@ export async function convertImage(
   }
   validateEncodeOptions(opts);
 
+  const sharp = await requireSharp("Image conversion");
   const source = await resolveSource(opts);
-  const converted = await buildEncoder(source.bytes, opts).toBuffer();
+  const converted = await buildEncoder(sharp, source.bytes, opts).toBuffer();
   const mimeType = MIME_BY_FORMAT[opts.format];
   const outPath = opts.out_path
     ? await resolveWritableOutputPath(opts.out_path)

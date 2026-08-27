@@ -1,5 +1,5 @@
-import sharp from "sharp";
 import type { Metadata } from "sharp";
+import { sharpUnavailableReason, tryLoadSharp } from "./sharp-loader.js";
 
 /**
  * #1495 — BOUND WHAT GOES ON THE WIRE, NOT WHAT GOES ON DISK.
@@ -144,6 +144,36 @@ export async function boundInlineImage(
   const limitInputPixels = Math.max(1, opts.maxInputPixels ?? DEFAULT_MAX_INPUT_PIXELS);
   const maxDecodedBytes = Math.max(1, opts.maxDecodedBytes ?? DEFAULT_MAX_DECODED_BYTES);
   const originalEncodedBytes = base64.length;
+
+  // #2411 — RESOLVE SHARP BEFORE TOUCHING IT, AND DEGRADE RATHER THAN DIE.
+  //
+  // This used to be a module-scope `import sharp from "sharp"`, so a native
+  // library Windows refused to load threw while the file evaluated and took the
+  // whole tool registry with it. Loading here makes the failure catchable, and
+  // this function is the one sharp caller that can still do something useful
+  // without it: an image already under budget goes out untouched.
+  const loaded = await tryLoadSharp();
+  if (!loaded.ok) {
+    if (originalEncodedBytes <= budget) {
+      // Identical to the `metadata()`-threw branch below, which has always
+      // delivered an under-budget image rather than withhold it. What is lost is
+      // the DIMENSION check — a long thin image can encode small and still
+      // exceed a consumer's dimension limit — but that check was already best
+      // effort, and refusing a payload that fits in order to enforce it would
+      // withhold pixels over a cap we cannot measure.
+      return { base64, mimeType, preview: null, refused: null };
+    }
+    // Over budget with no way to resize. Refusing is honest: emitting ~267 MB of
+    // base64 is what #1495 established fails in transport, where the error names
+    // a byte count and not the image.
+    return {
+      base64,
+      mimeType,
+      preview: null,
+      refused: { reason: sharpUnavailableReason(loaded.err), originalEncodedBytes },
+    };
+  }
+  const sharp = loaded.sharp;
 
   let width: number | null = null;
   let height: number | null = null;

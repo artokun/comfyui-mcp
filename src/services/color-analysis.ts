@@ -1,6 +1,6 @@
 import { readFile } from "node:fs/promises";
 import { isAbsolute, resolve, sep } from "node:path";
-import sharp from "sharp";
+import { requireSharp } from "./sharp-loader.js";
 import { AssetRegistry } from "./asset-registry.js";
 import { getOutputImage } from "./image-management.js";
 import { resolveOutputDir } from "./output-dir.js";
@@ -134,6 +134,9 @@ async function resolveSafePath(path: string): Promise<string> {
 }
 
 async function toRaw(bytes: Buffer): Promise<RawPixels> {
+  // #2411 — loaded HERE, not at module scope. A blocked libvips used to throw
+  // while this file evaluated, which took every tool registration down with it.
+  const sharp = await requireSharp("Colour analysis");
   const { data, info } = await sharp(bytes, { limitInputPixels: 100_000_000 })
     .removeAlpha()
     .toColourspace("srgb")
@@ -327,6 +330,7 @@ async function renderHistogram(raw: RawPixels): Promise<{ data: string; mimeType
   draw(rHist, 220, 60, 60);
   draw(gHist, 60, 200, 80);
   draw(bHist, 80, 130, 240);
+  const sharp = await requireSharp("Colour analysis");
   const png = await sharp(buf, { raw: { width: W, height: H, channels: 3 } })
     .png()
     .toBuffer();
