@@ -11,6 +11,7 @@ All notable changes to this project are documented here. This project adheres to
 #### Fixed
 - Ollama names the cause of a 0-tool ready and logs recovery when the surface appears (#2428)
 - disclose unreindexed host links after panel_unexpose_subgraph_input/output (#2437)
+- a blocked repeat tool call returns the earlier payload instead of an error-string-only nudge (#2430)
 
 ## [0.52.142] - 2026-08-27
 

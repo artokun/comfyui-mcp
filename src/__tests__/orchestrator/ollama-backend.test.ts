@@ -253,18 +253,70 @@ describe("OllamaBackend", () => {
     chatScript.push(sameCall, sameCall, sameCall, sameCall, sameCall, sameCall);
 
     const events = await collect(backend, turnsOf({ text: "find krea" }));
-    // Dispatched exactly once — repeats got the corrective nudge, not a re-run.
+    // Dispatched exactly once — repeats replay the first payload, not a re-run.
     expect(callTool).toHaveBeenCalledTimes(1);
-    // Repeat calls receive the nudge as their tool result on the wire.
-    const nudges = chatRequests
+    // Repeat calls receive the earlier result on the wire (#2430), not an
+    // error-string-only "use the earlier result" nudge.
+    const toolMsgs = chatRequests
       .flatMap((r) => r.messages)
-      .filter((m) => m.role === "tool" && String(m.content).startsWith("REPEAT CALL BLOCKED"));
-    expect(nudges.length).toBeGreaterThanOrEqual(1);
+      .filter((m) => m.role === "tool")
+      .map((m) => String(m.content));
+    const replays = toolMsgs.filter((c) => c.includes("identical call already made this turn"));
+    expect(replays.length).toBeGreaterThanOrEqual(1);
+    for (const c of replays) {
+      expect(c).toContain("result-of-list_tools");
+      expect(c.startsWith("REPEAT CALL BLOCKED")).toBe(false);
+    }
     // Turn ends with the loop-breaker, not max_tool_rounds (32 rounds later).
     expect(events.filter((e) => e.type === "result")).toEqual([
       { type: "result", ok: false, subtype: "tool_loop", turn: 1 },
     ]);
     expect(chatRequests.length).toBeLessThanOrEqual(5);
+  });
+
+  it("#2430 a blocked repeat replays the earlier payload instead of an error-string-only nudge", async () => {
+    const payload = JSON.stringify({
+      vram_total_gb: 31.84,
+      argv: "--feature-flag show_signin_button=true --enable-manager --listen 127.0.0.1,169.254.41.48 --port 8188 --fast",
+    });
+    const callTool = vi.fn(async () => ({
+      content: [{ type: "text", text: payload }],
+    }));
+    const tools = [
+      ...COMFY_META,
+      { name: "get_system_stats", description: "Stats.", inputSchema: { type: "object", properties: {} } },
+    ];
+    const client: McpToolClient = {
+      listTools: async () => ({ tools }),
+      callTool: callTool as unknown as McpToolClient["callTool"],
+      close: async () => {},
+    };
+    const backend = new OllamaBackend({ model: "gemma4:e4b", connectToolClients: async () => ({ comfyui: client }) });
+    const statsCall = [
+      {
+        message: {
+          content: "",
+          tool_calls: [{ function: { name: "get_system_stats", arguments: {} } }],
+        },
+        done: true,
+      },
+    ];
+    chatScript.push(statsCall, statsCall, [{ message: { content: "VRAM is 31.84 GB." }, done: true }]);
+
+    const events = await collect(backend, turnsOf({ text: "Get the ComfyUI system stats." }));
+    expect(callTool).toHaveBeenCalledTimes(1);
+    const toolMsgs = chatRequests
+      .flatMap((r) => r.messages)
+      .filter((m) => m.role === "tool")
+      .map((m) => String(m.content));
+    expect(toolMsgs[0]).toBe(payload);
+    expect(toolMsgs[1]).toContain(payload);
+    expect(toolMsgs[1]).toContain("31.84");
+    expect(toolMsgs[1].startsWith("REPEAT CALL BLOCKED")).toBe(false);
+    expect(toolMsgs[1]).not.toMatch(/Use the earlier result/);
+    const ends = events.filter((e) => e.type === "tool_call" && (e as { phase: string }).phase === "end");
+    expect(ends[1]).toMatchObject({ detail: { isError: false } });
+    expect(events.filter((e) => e.type === "result")).toMatchObject([{ type: "result", ok: true }]);
   });
 
   it("recovers an EMPTY final after tool rounds with one summarize nudge (never loops)", async () => {
@@ -384,8 +436,10 @@ describe("OllamaBackend", () => {
     expect(limitNudges).toEqual([]);
     const repeats = chatRequests
       .flatMap((r) => r.messages)
-      .filter((m) => m.role === "tool" && String(m.content).startsWith("REPEAT CALL BLOCKED"));
+      .filter((m) => m.role === "tool" && String(m.content).includes("identical call already made this turn"));
     expect(repeats).toHaveLength(1);
+    expect(String(repeats[0].content)).toContain("result-of-list_tools");
+    expect(String(repeats[0].content).startsWith("REPEAT CALL BLOCKED")).toBe(false);
     expect(events.filter((e) => e.type === "result")).toEqual([
       { type: "result", ok: true, turn: 1, usage: expect.anything() },
     ]);

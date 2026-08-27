@@ -535,6 +535,44 @@ function stringField(args: unknown, key: "action" | "search"): string | undefine
   return typeof value === "string" ? value : undefined;
 }
 
+/** Per-turn exact-repeat record: count plus the first dispatch's payload. */
+export type RepeatCallRecord = { count: number; result?: string };
+
+/**
+ * #2430 — answer a blocked identical tool call.
+ *
+ * The previous path returned `isError: true` and a corrective string that
+ * told the model to "use the earlier result" while carrying none of it.
+ * Small models then invent plausible numbers (observed on
+ * artokun/gemma4-comfyui-mcp:12b: 24.1 GB VRAM vs the real 31.84 GB).
+ *
+ * When the first dispatch's payload is on the record, replay it with
+ * `isError: false` so the model sees data, not a failure to recover from.
+ * The tool is still not re-executed; `maxRepeats` still drives the loop
+ * breaker. The no-payload fallback keeps the old nudge so a repeat before
+ * anything was stored does not pretend there is data.
+ */
+export function blockedRepeatResult(
+  name: string,
+  priorResult: string | undefined,
+): { text: string; isError: boolean } {
+  if (priorResult !== undefined) {
+    return {
+      text:
+        `(cached — identical call already made this turn, result unchanged)\n\n${priorResult}`,
+      isError: false,
+    };
+  }
+  return {
+    text:
+      `REPEAT CALL BLOCKED: you already called ${name} with these exact arguments this turn — the result has not changed. ` +
+      `Do not call it again. Use the earlier result, or try DIFFERENT arguments or a different tool. ` +
+      `Model families like krea2 / qwen-image-edit / wan / ltxv are installer PACKS, not tools: call_tool {"name":"list_packs"} to find them, then load one. ` +
+      `If you are stuck, tell the user what you found and ask how to proceed.`,
+    isError: true,
+  };
+}
+
 function textOf(result: McpCallResult): string {
   return (result.content ?? [])
     .filter((c) => c.type === "text")
@@ -1837,10 +1875,10 @@ export class OllamaBackend implements AgentBackend {
     // Loop-breaker: small models (especially stock ones) can wedge into
     // re-issuing the SAME tool call verbatim for dozens of rounds (field:
     // 30+ identical list_tools searches hunting a pack name). Track exact
-    // (name, args) repeats per turn: 2nd+ identical call is blocked with a
-    // corrective tool result instead of dispatched; at 4 repeats the turn is
-    // ended outright.
-    const seenCalls = new Map<string, number>();
+    // (name, args) repeats per turn: 2nd+ identical call is not re-executed
+    // — it replays the first payload via blockedRepeatResult (#2430);
+    // at 4 repeats the turn is ended outright.
+    const seenCalls = new Map<string, RepeatCallRecord>();
     let maxRepeats = 0;
     // Second wedge shape (field: Discord "circles" report): the model spams a
     // DISCOVERY meta-tool with a DIFFERENT search each round (list_tools
@@ -2046,8 +2084,8 @@ export class OllamaBackend implements AgentBackend {
           const name = tc.function?.name ?? "?";
           const args = tc.function?.arguments ?? {};
           const callKey = `${name}:${typeof args === "string" ? args : JSON.stringify(args)}`;
-          const repeats = (seenCalls.get(callKey) ?? 0) + 1;
-          seenCalls.set(callKey, repeats);
+          const prior = seenCalls.get(callKey);
+          const repeats = (prior?.count ?? 0) + 1;
           maxRepeats = Math.max(maxRepeats, repeats);
           // The consolidated form first, then a catalog lister only when it
           // actually searches — so a tool whose whole surface is discovery
@@ -2061,17 +2099,7 @@ export class OllamaBackend implements AgentBackend {
           yield { type: "tool_call", name, phase: "start", detail: tc.function?.arguments };
           const { text, isError } =
             repeats >= 2
-              ? {
-                  // Every emitted tool_call still needs a paired tool result
-                  // (the wire format breaks otherwise) — answer the repeat
-                  // with a corrective nudge instead of re-running it.
-                  text:
-                    `REPEAT CALL BLOCKED: you already called ${name} with these exact arguments this turn — the result has not changed. ` +
-                    `Do not call it again. Use the earlier result, or try DIFFERENT arguments or a different tool. ` +
-                    `Model families like krea2 / qwen-image-edit / wan / ltxv are installer PACKS, not tools: call_tool {"name":"list_packs"} to find them, then load one. ` +
-                    `If you are stuck, tell the user what you found and ask how to proceed.`,
-                  isError: true,
-                }
+              ? blockedRepeatResult(name, prior?.result)
               : discoveryHits >= 4
                 ? {
                     // Searched the catalog 4+ times with no hit — the capability
@@ -2086,6 +2114,10 @@ export class OllamaBackend implements AgentBackend {
                     isError: true,
                   }
                 : await this.dispatch(name, args);
+          // Keep the first payload on the record so a later identical call
+          // can replay it (#2430). Count always advances so maxRepeats still
+          // trips the loop breaker; the cached text is never overwritten.
+          seenCalls.set(callKey, { count: repeats, result: prior?.result ?? text });
           opts.onActivity?.();
           yield { type: "tool_call", name, phase: "end", detail: { isError } };
           this.history.push({
