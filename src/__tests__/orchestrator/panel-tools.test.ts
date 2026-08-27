@@ -39,6 +39,11 @@ import {
   BRIDGE_READ_DEFAULT_TIMEOUT_MS,
   markReplyTimeout,
 } from "../../services/ui-bridge.js";
+import {
+  HOST_HTTP_LIST_NOTE,
+  setListInstalledNodesForTests,
+} from "../../services/manager-node-list.js";
+import type { InstalledNode } from "../../services/node-management.js";
 import { RunCompletions } from "../../orchestrator/run-completion-journal.js";
 import { QueueMonitor } from "../../services/queue-monitor.js";
 import { AskAnswers } from "../../orchestrator/ask-answer-journal.js";
@@ -2575,6 +2580,98 @@ describe("panel-tools: single authoritative pin resolution (#259 wrong-tab)", ()
     const ctx = makePanelToolCtx(bridge, "test-tab", store);
     await defByName("panel_screenshot").handler({}, ctx);
     expect(sent[0]).toMatchObject({ cmd: "graph_screenshot", workflow_path: "wf-pinned-key" });
+  });
+});
+
+describe("panel_list_nodes host Manager HTTP fallback (#2459)", () => {
+  afterEach(() => setListInstalledNodesForTests(undefined));
+
+  const REPORTER_WRAP =
+    `nodes_list could not be dispatched to this session's panel tab — nothing was applied. ` +
+    `The tab may be disconnected, still reconnecting after a restart/reload, or the ` +
+    `session's binding is stale (e.g. another workflow tab is now active). Retry in a ` +
+    `moment, or rebind with panel_set_workflow_target({mode:"current"}) to follow the ` +
+    `tab that's live now. (no connected tab with id "orchestrator::claude". Connected: none)`;
+
+  const PACKS: InstalledNode[] = [
+    {
+      module: "ComfyUI-Impact-Pack",
+      cnrId: "comfyui-impact-pack",
+      version: "8.0.0",
+      enabled: true,
+    },
+  ];
+
+  function replyText(res: ToolResult): string {
+    return res.content.map((c) => (c.type === "text" ? c.text : "")).join("\n");
+  }
+
+  it("disconnected tab + live Manager HTTP → inventory, source host_http", async () => {
+    let hostCalls = 0;
+    setListInstalledNodesForTests(async () => {
+      hostCalls += 1;
+      return PACKS;
+    });
+    const { ctx, calls } = makeFakeCtx();
+    ctx.call = async (cmd) => {
+      calls.push(cmd);
+      return {
+        isError: true,
+        content: [{ type: "text", text: `Error: ${REPORTER_WRAP}` }],
+      };
+    };
+    const res = await defByName("panel_list_nodes").handler({}, ctx);
+    expect(res.isError).toBeFalsy();
+    expect(hostCalls).toBe(1);
+    const body: unknown = JSON.parse(replyText(res));
+    expect(body).toMatchObject({
+      source: "host_http",
+      note: HOST_HTTP_LIST_NOTE,
+      installed: {
+        "ComfyUI-Impact-Pack": {
+          ver: "8.0.0",
+          cnr_id: "comfyui-impact-pack",
+          enabled: true,
+        },
+      },
+    });
+    expect(replyText(res)).not.toMatch(/could not be dispatched/);
+    expect(replyText(res)).toMatch(/not a Manager outage/i);
+    expect(replyText(res)).not.toMatch(/Manager down/i);
+    expect(calls[0]).toMatchObject({ cmd: "nodes_list" });
+  });
+
+  it("connected tab → still panel path (no host call)", async () => {
+    let hostCalls = 0;
+    setListInstalledNodesForTests(async () => {
+      hostCalls += 1;
+      throw new Error("fallback must not run");
+    });
+    const { ctx, calls } = makeFakeCtx();
+    const res = await defByName("panel_list_nodes").handler({}, ctx);
+    expect(res.isError).toBeFalsy();
+    expect(hostCalls).toBe(0);
+    expect(calls[0]).toMatchObject({ cmd: "nodes_list" });
+    expect(JSON.parse(replyText(res))).toMatchObject({ cmd: "nodes_list" });
+  });
+
+  it("disconnected tab + host HTTP failure → honest dual cause, not Manager down", async () => {
+    setListInstalledNodesForTests(async () => {
+      throw new Error("Manager customnode/installed: HTTP 503");
+    });
+    const { ctx } = makeFakeCtx();
+    ctx.call = async () => ({
+      isError: true,
+      content: [{ type: "text", text: `Error: ${REPORTER_WRAP}` }],
+    });
+    const res = await defByName("panel_list_nodes").handler({}, ctx);
+    expect(res.isError).toBe(true);
+    const text = replyText(res);
+    expect(text).toMatch(/could not be dispatched/i);
+    expect(text).toMatch(/no connected tab|Connected:\s*none/i);
+    expect(text).toMatch(/HTTP 503/);
+    expect(text).toMatch(/not a Manager outage inferred from tab loss/i);
+    expect(text).not.toMatch(/Manager down/i);
   });
 });
 

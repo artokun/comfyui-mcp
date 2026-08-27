@@ -10,6 +10,7 @@ All notable changes to this project are documented here. This project adheres to
 
 #### Fixed
 - apply_manifest counts a GGUF as installed when ComfyUI-GGUF lists it under clip_gguf/unet_gguf (#2447)
+- panel_list_nodes lists installed packs from host Manager HTTP when the panel tab is gone (#2459)
 
 ## [0.52.143] - 2026-08-27
 

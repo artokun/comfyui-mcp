@@ -67,6 +67,7 @@ import {
   getManifestPartialLeftover,
 } from "../services/manifest-partial.js";
 import { searchPanelNodes } from "../services/manager-node-search.js";
+import { listPanelNodes } from "../services/manager-node-list.js";
 import { isPanelAnsweredError } from "../services/panel-answered.js";
 import {
   readWorkflowListReadiness,
@@ -22541,9 +22542,20 @@ CHECKED FOR YOU: the graph read this message prescribes was just run, and it ` +
     ),
     def(
       "panel_list_nodes",
-      "List the custom-node PACKS currently installed in the user's ComfyUI (via the built-in Manager). Takes no arguments — it returns the whole installed set. Read-only. This lists packs, NOT node classes: to find out whether a specific node type is available (e.g. LTXVContextWindowsGuideAware), use comfy_cli action:\"search_nodes\", which fuzzy-searches real node classes and falls back to the connected server's live /object_info. panel_search_nodes is a third thing again — it searches INSTALLABLE packs in the registry, not what is already here.",
+      "List the custom-node PACKS currently installed in the user's ComfyUI (via the built-in Manager). Takes no arguments — it returns the whole installed set. Read-only. This lists packs, NOT node classes: to find out whether a specific node type is available (e.g. LTXVContextWindowsGuideAware), use comfy_cli action:\"search_nodes\", which fuzzy-searches real node classes and falls back to the connected server's live /object_info. panel_search_nodes is a third thing again — it searches INSTALLABLE packs in the registry, not what is already here. If the panel tab is gone, the listing is served from the ComfyUI host's Manager HTTP instead of failing as a dispatch error.",
       {},
-      async (_args, ctx) => ctx.call({ cmd: "nodes_list" }, 20000),
+      async (_args, ctx) => {
+        // #2459 — pack listing is a Manager / object_info server-state read.
+        // Try the live tab first (Manager dialect + /object_info + #1496
+        // filter). When dispatch never reaches the tab, serve the same
+        // inventory from host Manager HTTP instead of dying as tab-loss.
+        const out = await listPanelNodes({
+          panelList: () => ctx.call({ cmd: "nodes_list" }, 20000),
+        });
+        if (out.via === "panel") return out.value;
+        if (out.via === "fallback") return ok(out.value);
+        return fail(out.message);
+      },
     ),
     def(
       "panel_install_node",
