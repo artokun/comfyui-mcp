@@ -12,13 +12,13 @@ All notable changes to this project are documented here. This project adheres to
 - Ollama names the cause of a 0-tool ready and logs recovery when the surface appears (#2428)
 - disclose unreindexed host links after panel_unexpose_subgraph_input/output (#2437)
 - a blocked repeat tool call returns the earlier payload instead of an error-string-only nudge (#2430)
+- restart_comfyui treats a Manager dependency-reapply exit 0 as a handoff and replays the saved launch once (#2427)
 
 ## [0.52.142] - 2026-08-27
 
 ### MCP
 
 #### Fixed
-- restart_comfyui treats a Manager dependency-reapply exit 0 as a handoff and replays the saved launch once (#2427)
 - compact-mode `list_tools` / `panel_list_tools` enumeration is not a catalog hunt (#2429)
 - Save-As re-points session routing so panel_set_todo and panel_canvas follow the dest tab (#2419)
 - #971 legacy rebind recovers a workflows/ path, and a later canvas move drops the proof (#2415)
