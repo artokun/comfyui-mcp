@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { createServer, type Server } from "node:http";
+import { createServer as createSocketServer } from "node:net";
 import { createPanelTemplateRelayWiring } from "../../orchestrator/index.js";
 import { requestPanelTemplateIndex, startPanelTemplateRelayServer } from "../../services/panel-template-relay.js";
 
@@ -369,5 +370,94 @@ describe("orchestrator panel template relay wiring (#2196)", () => {
 
     // NOT the v4 index, even though v4 answered perfectly well.
     await expect(requestPanelTemplateIndex()).rejects.toMatchObject({ code: "AMBIGUOUS_PANEL_LISTENER" });
+  });
+
+  // #2392. The relay may be configured over https, so the question that issue
+  // asks is whether an https `localhost` still re-resolves at request time. It
+  // does not: the production origin gate declines an ambiguous NAME over TLS,
+  // so no destination URL is ever produced and no socket is ever opened.
+  //
+  // These two drive the REAL orchestrator wiring. The existing https coverage
+  // does not: the unit test calls currentPanelTemplateOrigin directly, and the
+  // dns-pin test hands the relay a pre-authorized origin, which bypasses the
+  // gate being asserted here. Nothing until now proved that PRODUCTION reaches
+  // the refusal.
+  it("refuses an https localhost origin through the production wiring, without opening a socket (#2392)", async () => {
+    // Counting CONNECTIONS, not HTTP requests, is deliberate. A TLS fetch
+    // against this plaintext listener would fail the handshake and never become
+    // a request, so a request counter would read zero even if the fetch HAD
+    // been issued -- it would pin nothing. A connection attempt cannot hide.
+    let connections = 0;
+    const listener = createSocketServer((socket) => {
+      connections += 1;
+      socket.destroy();
+    });
+    await new Promise<void>((resolve, reject) => {
+      listener.once("error", reject);
+      listener.listen({ host: "127.0.0.1", port: 0 }, () => resolve());
+    });
+    const addr = listener.address();
+    if (!addr || typeof addr === "string") throw new Error("no bind");
+    const port = addr.port;
+    servers.push({ close: () => new Promise<void>((resolve) => { listener.close(() => resolve()); }) });
+
+    const observedOrigin = `https://localhost:${port}`;
+    const target = `${observedOrigin}/comfyapi`;
+    const bridge = {
+      canReach: () => true,
+      resolveFailure: () => undefined,
+      resolveSharedTabId: () => "tab-1",
+      tabServerOrigin: () => observedOrigin,
+    };
+    const wiring = createPanelTemplateRelayWiring({
+      bridge,
+      currentTarget: () => target,
+      currentTargetGeneration: () => 0,
+      secrets: new Map([[SECRET, "orchestrator::codex"]]),
+    });
+    const relay = await startPanelTemplateRelayServer({ bridge, ...wiring });
+    servers.push(relay);
+    process.env.COMFYUI_MCP_RELAY_SECRET = SECRET;
+    process.env.COMFYUI_MCP_TEMPLATE_RELAY_URL = relay.endpointUrl;
+
+    // Ordered so that each assertion below can be the one that fails. Asserting
+    // the error code first would mask the socket count: both refusal clauses
+    // raise NO_PANEL_ORIGIN, so the code is identical whether the request was
+    // declined at the gate or after a second resolution.
+    const outcome = await requestPanelTemplateIndex().then(() => undefined, (error: unknown) => error);
+    // Load-bearing: nothing was contacted, so there was no second resolution.
+    // Fails if BOTH refusal clauses go -- the fetch then reaches this listener.
+    expect(connections).toBe(0);
+    expect(outcome).toMatchObject({ code: "NO_PANEL_ORIGIN" });
+    // Load-bearing: the gate itself, through the production closures. Fails if
+    // the origin-gate clause goes, even while the deeper one still refuses.
+    expect(wiring.resolveAllowedPanelOrigin("tab-1", target)).toBeUndefined();
+    expect(wiring.resolvePanelUrl("tab-1", target)).toBeUndefined();
+  });
+
+  it("still authorizes an https LITERAL loopback origin, which has no name to re-resolve (#2392)", async () => {
+    // The refusal above is about the ambiguous NAME, not about TLS. A literal
+    // host is pinned by construction -- there is no second resolution to
+    // disagree with -- so https stays a permitted relay configuration. Without
+    // this, the refusal test above would also pass if https were banned
+    // outright, which is a different and wrong behaviour.
+    const observedOrigin = "https://127.0.0.1:8188";
+    const target = `${observedOrigin}/comfyapi`;
+    const bridge = {
+      canReach: () => true,
+      resolveFailure: () => undefined,
+      resolveSharedTabId: () => "tab-1",
+      tabServerOrigin: () => observedOrigin,
+    };
+    const wiring = createPanelTemplateRelayWiring({
+      bridge,
+      currentTarget: () => target,
+      currentTargetGeneration: () => 0,
+      secrets: new Map([[SECRET, "orchestrator::codex"]]),
+    });
+    expect(wiring.resolveAllowedPanelOrigin("tab-1", target)).toBe(observedOrigin);
+    expect(wiring.resolvePanelUrl("tab-1", target)).toBe(
+      `${observedOrigin}/comfyapi/api/workflow_templates`,
+    );
   });
 });
