@@ -6172,7 +6172,13 @@ export async function runPanelOrchestrator(): Promise<void> {
     return live.length === 1 ? live[0] : null;
   };
   /** Boolean URL probe with a timeout — readiness checks for pending pod connects. */
-  const probeOk = async (url: string, timeoutMs = 8_000): Promise<boolean> => {
+  // #2425 — a FUNCTION DECLARATION, not a const arrow. The hello-retarget path builds
+  // `probe: (u) => probeOk(u, 3_000)` ~2000 lines above this, inside an unawaited async
+  // IIFE. With a const the call landed in the temporal dead zone and threw
+  // `Cannot access 'probeOk' before initialization`, which the process-level handler
+  // swallowed as an ignored unhandled rejection — so the retarget silently did not
+  // happen, across four releases. A declaration hoists, so the order cannot regress.
+  async function probeOk(url: string, timeoutMs = 8_000): Promise<boolean> {
     const ctl = new AbortController();
     const t = setTimeout(() => ctl.abort(), timeoutMs);
     try {
@@ -6186,7 +6192,7 @@ export async function runPanelOrchestrator(): Promise<void> {
     } finally {
       clearTimeout(t);
     }
-  };
+  }
   // Genuinely-in-flight download rows (set by pollDownloads) — read by the pod
   // idle-stop veto, SCOPED per pod via each row's stamped target (#269).
   let downloadingRows: Array<Record<string, unknown>> = [];
