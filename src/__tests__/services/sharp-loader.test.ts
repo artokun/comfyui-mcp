@@ -22,6 +22,9 @@
 // So message content is pinned against REAL sharp errors instead, reproduced
 // verbatim from an observed failure on this machine. That is the stronger test:
 // it is the actual string the detection has to classify.
+import { mkdtempSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   sharpUnavailableMessage,
@@ -237,6 +240,18 @@ describe("degrade vs refuse (#2411)", () => {
     await expect(
       convertImage({ path: "does-not-exist.png", format: "png" }),
     ).rejects.toThrow(/Image conversion is unavailable/);
+  });
+
+  it("colour analysis REFUSES rather than returning an empty success", async () => {
+    blockSharp();
+    const path = join(mkdtempSync(join(tmpdir(), "cmcp-2411-color-")), "pixel.png");
+    writeFileSync(path, "not-an-image");
+    const { analyzeColor } = await import("../../services/color-analysis.js");
+    // Colour analysis has to decode pixels; without sharp it has nothing to
+    // hand back, so a refusal naming the library beats an empty success. The
+    // file is only here so the path resolver does not fail first — convert
+    // loads sharp before resolving the source; this path does not.
+    await expect(analyzeColor({ path })).rejects.toThrow(/Colour analysis is unavailable/);
   });
 });
 
