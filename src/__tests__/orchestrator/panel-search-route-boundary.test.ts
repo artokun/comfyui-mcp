@@ -29,6 +29,7 @@ function parseResult(res: ToolResult): Record<string, unknown> {
 
 function routeBridge(opts: {
   tabs: string[];
+  liveTabs?: Set<string>;
   clientOrigins?: Record<string, string | undefined>;
   serverOrigins?: Record<string, string | undefined>;
   send: (tabId: string, cmd: Record<string, unknown>, timeoutMs: number) => Promise<Record<string, unknown>>;
@@ -38,20 +39,31 @@ function routeBridge(opts: {
   probes: { tabs: ReturnType<typeof vi.fn>; tabServerOrigin: ReturnType<typeof vi.fn> };
 } {
   const sent: Array<{ tabId?: string; cmd: Record<string, unknown>; timeoutMs?: number }> = [];
-  const tabs = vi.fn(() => opts.tabs.map((tab_id) => ({ tab_id, title: tab_id, connected_at: "now" })));
+  const liveTabIds = () => [...(opts.liveTabs ?? new Set(opts.tabs))];
+  const tabs = vi.fn(() => liveTabIds().map((tab_id) => ({ tab_id, title: tab_id, connected_at: "now" })));
   const tabServerOrigin = vi.fn((tabId: string) => opts.serverOrigins?.[tabId]);
+  const resolveActiveTabId = vi.fn(() => {
+    const live = liveTabIds();
+    if (live.length !== 1) throw new Error("active tab is ambiguous");
+    return live[0];
+  });
   // Keep the tempting, weaker proof surfaces in the seam. The route must not
   // consult them: tabServerOrigin is pathless and cannot prove instance identity.
   // oxlint-disable-next-line anti-slop/no-chained-type-assertions -- the fake implements only the route-boundary surface under test
   const bridge = {
-    send: async (cmd: Record<string, unknown>, sendOpts?: { tabId?: string; timeoutMs?: number }) => {
+    send: async (
+      cmd: Record<string, unknown>,
+      sendOpts?: { tabId?: string; timeoutMs?: number; beforeDispatch?: () => void },
+    ) => {
+      sendOpts?.beforeDispatch?.();
       sent.push({ tabId: sendOpts?.tabId, cmd, timeoutMs: sendOpts?.timeoutMs });
       return opts.send(sendOpts?.tabId ?? "", cmd, sendOpts?.timeoutMs ?? 0);
     },
     tabs,
     isHeadless: () => false,
-    canReach: (tabId: string) => opts.tabs.includes(tabId),
-    liveTabIdFor: (tabId: string) => (opts.tabs.includes(tabId) ? tabId : undefined),
+    canReach: (tabId: string) => liveTabIds().includes(tabId),
+    liveTabIdFor: (tabId: string) => (liveTabIds().includes(tabId) ? tabId : undefined),
+    resolveActiveTabId,
     tabOrigin: (tabId: string) => opts.clientOrigins?.[tabId],
     tabServerOrigin,
   } as unknown as PanelToolCtx["bridge"];
@@ -60,6 +72,7 @@ function routeBridge(opts: {
 
 afterEach(() => {
   __panelToolsTestHooks.setPanelSearchRouteTiming(null);
+  __panelToolsTestHooks.setRetrySettleMs(null);
 });
 
 describe("panel_search_nodes MCP route boundary (#1908)", () => {
@@ -176,4 +189,67 @@ describe("panel_search_nodes MCP route boundary (#1908)", () => {
       }
     },
   );
+
+  it("uses the retry-safe ctx.call envelope to rebind after a bound-tab drop", async () => {
+    __panelToolsTestHooks.setPanelSearchRouteTiming({ budgetMs: 200 });
+    __panelToolsTestHooks.setRetrySettleMs(0);
+    const liveTabs = new Set([BOUND]);
+    let attempts = 0;
+    const { bridge, sent } = routeBridge({
+      tabs: [BOUND, ALTERNATE],
+      liveTabs,
+      send: async (tabId) => {
+        attempts += 1;
+        if (attempts === 1) {
+          expect(tabId).toBe(BOUND);
+          liveTabs.delete(BOUND);
+          liveTabs.add(ALTERNATE);
+          throw new Error("no connected tab: bound transport dropped");
+        }
+        return { count: 1, results: [{ id: "rebound" }] };
+      },
+    });
+    const ctx = makePanelToolCtx(bridge, BOUND, new WorkflowTargetStore());
+
+    const result = await searchDef().handler({ query: "rebind" }, ctx);
+
+    expect(parseResult(result)).toMatchObject({ count: 1, results: [{ id: "rebound" }] });
+    expect(sent.map((entry) => entry.tabId)).toEqual([BOUND, ALTERNATE]);
+    expect(sent.every((entry) => entry.cmd.cmd === "nodes_search")).toBe(true);
+    expect(ctx.tabId).toBe(ALTERNATE);
+  });
+
+  it("does not issue a retry after the MCP route deadline", async () => {
+    __panelToolsTestHooks.setPanelSearchRouteTiming({ budgetMs: 20 });
+    __panelToolsTestHooks.setRetrySettleMs(0);
+    const liveTabs = new Set([BOUND]);
+    let attempts = 0;
+    const { bridge, sent } = routeBridge({
+      tabs: [BOUND, ALTERNATE],
+      liveTabs,
+      send: async () => {
+        attempts += 1;
+        if (attempts === 1) {
+          await new Promise((resolve) => setTimeout(resolve, 40));
+          liveTabs.delete(BOUND);
+          liveTabs.add(ALTERNATE);
+          throw new Error("no connected tab: late transport drop");
+        }
+        throw new Error("unexpected post-deadline retry");
+      },
+    });
+    const ctx = makePanelToolCtx(bridge, BOUND, new WorkflowTargetStore());
+
+    const result = await searchDef().handler({ query: "deadline" }, ctx);
+    expect(parseResult(result)).toMatchObject({
+      query: "deadline",
+      timed_out: true,
+      panel_unresponsive: true,
+      panel_route: "bound_tab_timeout",
+    });
+
+    await new Promise((resolve) => setTimeout(resolve, 80));
+    expect(attempts).toBe(1);
+    expect(sent.map((entry) => entry.tabId)).toEqual([BOUND]);
+  });
 });

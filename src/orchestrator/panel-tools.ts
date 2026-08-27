@@ -15523,59 +15523,6 @@ async function dispatchToTab(
   }
 }
 
-type PanelSearchAttempt =
-  | { kind: "reply"; value: unknown }
-  | { kind: "error"; error: unknown }
-  | { kind: "timeout" };
-
-/**
- * #1908 — bound a `nodes_search` send at the MCP route, independently of the
- * Panel listener. The Panel's own timer is installed by that listener, so it
- * cannot help when the bound browser tab is frozen before it handles the frame.
- * This timer is deliberately external and every promise settles locally, so a
- * late reply from the abandoned read cannot hold the tool open or become an
- * unhandled rejection.
- */
-function panelSearchAttempt(
-  ctx: PanelToolCtx,
-  tabId: string,
-  cmd: Record<string, unknown>,
-  timeoutMs: number,
-): Promise<PanelSearchAttempt> {
-  const budget = Math.max(1, Math.floor(timeoutMs));
-  return new Promise((resolve) => {
-    let settled = false;
-    let timer: ReturnType<typeof setTimeout>;
-    const finish = (attempt: PanelSearchAttempt): void => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timer);
-      resolve(attempt);
-    };
-    timer = setTimeout(() => finish({ kind: "timeout" }), budget);
-
-    // `bridge.send` normally rejects its own bounded timeout. The route timer
-    // above is still authoritative: it also covers a frozen-listener test seam
-    // or any future transport that never settles its send promise.
-    void Promise.resolve()
-      .then(() => ctx.bridge.send(cmd as { cmd: string }, { tabId, timeoutMs: budget }))
-      .then(
-        (value) => finish({ kind: "reply", value }),
-        (error) => finish(isReplyTimeoutTagged(error) ? { kind: "timeout" } : { kind: "error", error }),
-      );
-  });
-}
-
-function panelSearchBoundTab(ctx: PanelToolCtx): string | undefined {
-  const b: BridgeProbe = ctx.bridge;
-  try {
-    if (isScopeAddress(ctx.tabId)) return b.resolveSharedTabId?.(ctx.tabId);
-    return b.liveTabIdFor?.(ctx.tabId) ?? ctx.tabId;
-  } catch {
-    return undefined;
-  }
-}
-
 function panelSearchTimeoutResult(
   query: string,
   budgetMs: number,
@@ -15597,21 +15544,18 @@ function panelSearchTimeoutResult(
   };
 }
 
-function panelSearchAttemptResult(
-  attempt: PanelSearchAttempt,
-  query: string,
-  budgetMs: number,
-): ToolResult {
-  if (attempt.kind === "reply") return ok(attempt.value);
-  if (attempt.kind === "error") return fail(attempt.error);
-  return ok(panelSearchTimeoutResult(query, budgetMs));
-}
-
 /**
  * Route the Manager read with an MCP-owned deadline. Lightweight test bridges
- * and older compatibility contexts keep the existing `ctx.call` path when no
- * concrete bound tab can be resolved. No alternate tab is eligible here: the
+ * and older compatibility contexts keep the existing `ctx.call` path when they
+ * cannot expose the live-tab inventory. No alternate tab is eligible here: the
  * available bridge origin fields do not prove a path-aware ComfyUI instance.
+ *
+ * The bounded call deliberately stays inside `makePanelToolCtx`. That preserves
+ * its `liveTabIdFor`/`ensureReachable` resolution and the existing retry-safe
+ * reconnect/rebind envelope for `nodes_search`. The synchronous guard is passed
+ * through to UiBridge's final dispatch boundary, so a retry that wakes after the
+ * MCP deadline is refused before it can write a second frame. The call promise is
+ * observed on both outcomes after the route returns, consuming a late settlement.
  */
 async function panelSearchAtRouteBoundary(
   ctx: PanelToolCtx,
@@ -15628,16 +15572,36 @@ async function panelSearchAtRouteBoundary(
     typeof b.canReach === "function";
   if (!supportsRouteBoundary) return ctx.call(cmd, 20000);
 
-  const boundTab = panelSearchBoundTab(ctx);
-  if (!boundTab) return ctx.call(cmd, 20000);
-
   const timing = panelSearchRouteTiming();
   const budgetMs = Math.max(1, Math.floor(timing.budgetMs));
-  return panelSearchAttemptResult(
-    await panelSearchAttempt(ctx, boundTab, cmd, budgetMs),
-    query,
-    budgetMs,
-  );
+  const deadline = Date.now() + budgetMs;
+
+  return new Promise<ToolResult>((resolve) => {
+    let settled = false;
+    const finish = (result: ToolResult): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve(result);
+    };
+    const timer = setTimeout(
+      () => finish(ok(panelSearchTimeoutResult(query, budgetMs))),
+      budgetMs,
+    );
+
+    // Start the ctx.call promise before yielding to the event loop. Its internal
+    // retry/rebind path remains active even if this route promise times out, but
+    // the guard below prevents any post-deadline retry from reaching the socket.
+    const call = ctx.call(cmd, budgetMs, undefined, () => {
+      if (Date.now() >= deadline) {
+        throw new Error("panel_search_nodes route deadline expired before dispatch");
+      }
+    });
+    void call.then(
+      (result) => finish(result),
+      (error) => finish(fail(error)),
+    );
+  });
 }
 
 /** Re-resolve the desktop redirect target after a transient drop — returns the fresh
