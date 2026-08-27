@@ -6,8 +6,13 @@ import {
   acceptsModelId,
   isOllamaModel,
   ollamaSystemPrompt,
+  ollamaZeroToolCause,
+  ollamaZeroToolCauseMessage,
+  ollamaToolSurfaceRecoveredMessage,
+  __resetOllamaToolSurfaceAnnouncementForTests,
   type McpToolClient,
 } from "../../orchestrator/ollama-backend.js";
+import { logger } from "../../utils/logger.js";
 import { PANEL_TOOL_MCP_TIMEOUT_MS, __panelAskTestHooks } from "../../orchestrator/panel-tools.js";
 import type { AgentEvent, NeutralTurn } from "../../orchestrator/agent-backend.js";
 
@@ -1585,5 +1590,106 @@ describe("panel-router retraction rides the mode-varying prompt (main↔#788 mer
     await collect(backend, turnsOf({ text: "hello" }));
     sys = chatRequests.at(-1)!.messages[0] as { role: string; content: string };
     expect(sys.content).not.toContain("CORRECTION");
+  });
+});
+
+describe("#2428 — a tool-less ollama ready names its cause", () => {
+  const infos: string[] = [];
+  const warns: string[] = [];
+
+  beforeEach(() => {
+    infos.length = 0;
+    warns.length = 0;
+    __resetOllamaToolSurfaceAnnouncementForTests();
+    vi.spyOn(logger, "info").mockImplementation((msg: string) => {
+      infos.push(msg);
+    });
+    vi.spyOn(logger, "warn").mockImplementation((msg: string) => {
+      warns.push(msg);
+    });
+  });
+
+  afterEach(() => {
+    vi.mocked(logger.info).mockRestore();
+    vi.mocked(logger.warn).mockRestore();
+    __resetOllamaToolSurfaceAnnouncementForTests();
+  });
+
+  it("ollamaZeroToolCause names never-connected vs empty-catalog and is silent only when tools exist", () => {
+    expect(ollamaZeroToolCause(null, 0)).toBe("never-connected");
+    expect(ollamaZeroToolCause(fakeMcpClient([]).client, 0)).toBe("empty-catalog");
+    expect(ollamaZeroToolCause(fakeMcpClient(COMFY_META).client, 3)).toBeNull();
+  });
+
+  it("prepare with no MCP clients is WARN degraded + never-connected, not a silent ready", async () => {
+    const backend = new OllamaBackend({
+      model: "gemma4:e4b",
+      connectToolClients: async () => ({}),
+      mcpServers: { panel: { transport: "http", url: "http://127.0.0.1:9198/orchestrator::ollama" } },
+    });
+    await backend.prepare();
+
+    expect(warns).toContain(ollamaZeroToolCauseMessage("never-connected", "comfyui"));
+    expect(warns).toContain(ollamaZeroToolCauseMessage("never-connected", "panel"));
+    expect(
+      warns.some(
+        (line) =>
+          line.includes("degraded") &&
+          line.includes("0 comfyui tools") &&
+          line.includes("0 panel tools") &&
+          line.includes("cause: never-connected"),
+      ),
+    ).toBe(true);
+    expect(
+      infos.some((line) => line.includes("[ollama-backend] ready (") && line.includes("0 comfyui tools")),
+    ).toBe(false);
+  });
+
+  it("prepare with a connected empty catalog names empty-catalog on the degraded line", async () => {
+    const { client } = fakeMcpClient([]);
+    const backend = new OllamaBackend({
+      model: "gemma4:e4b",
+      connectToolClients: async () => ({ comfyui: client }),
+    });
+    await backend.prepare();
+
+    expect(warns).toContain(ollamaZeroToolCauseMessage("empty-catalog", "comfyui"));
+    expect(
+      warns.some(
+        (line) =>
+          line.includes("degraded") && line.includes("0 comfyui tools") && line.includes("cause: empty-catalog"),
+      ),
+    ).toBe(true);
+    expect(
+      infos.some((line) => line.includes("[ollama-backend] ready (") && line.includes("0 comfyui tools")),
+    ).toBe(false);
+  });
+
+  it("a later prepare that gains tools logs tool surface recovered", async () => {
+    const empty = new OllamaBackend({
+      model: "gemma4:e4b",
+      connectToolClients: async () => ({}),
+    });
+    await empty.prepare();
+
+    const { client: comfy } = fakeMcpClient(COMFY_META);
+    const { client: panel } = fakeMcpClient([{ name: "panel_run", description: "Run." }]);
+    const live = new OllamaBackend({
+      model: "gemma4:e4b",
+      connectToolClients: async () => ({ comfyui: comfy, panel }),
+    });
+    await live.prepare();
+
+    expect(infos).toContain(
+      ollamaToolSurfaceRecoveredMessage({ comfy: 0, panel: 0 }, { comfy: COMFY_META.length, panel: 1 }),
+    );
+    expect(
+      infos.some(
+        (line) =>
+          line.includes("[ollama-backend] ready (") &&
+          line.includes(`${COMFY_META.length} comfyui tools`) &&
+          line.includes("1 panel tools"),
+      ),
+    ).toBe(true);
   });
 });

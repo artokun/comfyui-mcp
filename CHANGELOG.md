@@ -6,6 +6,11 @@ All notable changes to this project are documented here. This project adheres to
 
 ## Unreleased
 
+### MCP
+
+#### Fixed
+- Ollama names the cause of a 0-tool ready and logs recovery when the surface appears (#2428)
+
 ## [0.52.142] - 2026-08-27
 
 ### MCP

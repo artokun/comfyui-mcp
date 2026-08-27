@@ -629,6 +629,59 @@ export function acceptsModelId(id: string, api: "ollama" | "openai"): boolean {
   return true;
 }
 
+/** Why a session has 0 comfyui tools. Compact mode still yields 3, so 0 is never
+ *  a valid working surface — the ready line must name one of these (#2428). */
+export type OllamaZeroToolCause = "never-connected" | "empty-catalog";
+
+export function ollamaZeroToolCause(
+  comfy: McpToolClient | null,
+  comfyToolCount: number,
+): OllamaZeroToolCause | null {
+  if (comfyToolCount > 0) return null;
+  return comfy ? "empty-catalog" : "never-connected";
+}
+
+export function ollamaZeroToolCauseMessage(
+  cause: OllamaZeroToolCause,
+  surface: "comfyui" | "panel",
+): string {
+  if (cause === "empty-catalog") {
+    return surface === "comfyui"
+      ? "[ollama-backend] the comfyui MCP client connected but enumerated 0 tools (cause: empty-catalog)"
+      : "[ollama-backend] the panel MCP client connected but enumerated 0 tools (cause: empty-catalog)";
+  }
+  return surface === "comfyui"
+    ? "[ollama-backend] the comfyui MCP client was never connected — this session has NO comfyui tools (cause: never-connected)"
+    : "[ollama-backend] the panel MCP client was never connected — this session has NO live-canvas tools (cause: never-connected)";
+}
+
+export function ollamaToolSurfaceRecoveredMessage(
+  from: { comfy: number; panel: number },
+  to: { comfy: number; panel: number },
+): string {
+  return `[ollama-backend] tool surface recovered: ${from.comfy} comfyui tools, ${from.panel} panel tools → ${to.comfy} comfyui tools, ${to.panel} panel tools`;
+}
+
+/** Last (comfy, panel) counts this process announced. A later instance that
+ *  gains tools after a 0/0 announcement must say so — that is the silent
+ *  recovery in #2428. */
+let lastAnnouncedOllamaToolSurface: { comfy: number; panel: number } | null = null;
+
+export function __resetOllamaToolSurfaceAnnouncementForTests(): void {
+  lastAnnouncedOllamaToolSurface = null;
+}
+
+function logOllamaToolSurfaceRecovery(comfy: number, panel: number): void {
+  const prev = lastAnnouncedOllamaToolSurface;
+  if (!prev || prev.comfy !== 0 || prev.panel !== 0) return;
+  if (comfy === 0 && panel === 0) return;
+  logger.info(ollamaToolSurfaceRecoveredMessage(prev, { comfy, panel }));
+}
+
+function rememberOllamaToolSurface(comfy: number, panel: number): void {
+  lastAnnouncedOllamaToolSurface = { comfy, panel };
+}
+
 export class OllamaBackend implements AgentBackend {
   readonly id: BackendId;
   readonly capabilities = OLLAMA_CAPABILITIES;
@@ -752,10 +805,7 @@ export class OllamaBackend implements AgentBackend {
     }
     await this.connectTools();
     this.prepared = true;
-    logger.info(
-      `[ollama-backend] ready (${this.api === "openai" ? `openai-compatible @ ${this.host}` : `ollama ${version}`}, model ${this.model}, ${this.comfyTools.length} comfyui tools, ${this.panelTools.length} panel tools behind the router)` +
-        (this.toolModeDecision ? ` — ${this.toolModeDecision.explain}` : ""),
-    );
+    this.announcePreparedToolSurface(version);
   }
 
   protected async connectTools(): Promise<void> {
@@ -823,6 +873,43 @@ export class OllamaBackend implements AgentBackend {
       await this.panel?.close().catch(() => {});
       this.panel = null;
       this.panelTools = [];
+    }
+    // Connect failures and listing failures already warn. The never-connected
+    // path does not throw, so without this a 0/0 ready had no cause at all (#2428).
+    this.warnIfToolClientsMissing();
+    logOllamaToolSurfaceRecovery(this.comfyTools.length, this.panelTools.length);
+    rememberOllamaToolSurface(this.comfyTools.length, this.panelTools.length);
+  }
+
+  /** Name the missing surface instead of letting 0/0 look like a healthy ready. */
+  private warnIfToolClientsMissing(): void {
+    if (!this.comfy) {
+      logger.warn(ollamaZeroToolCauseMessage("never-connected", "comfyui"));
+    } else if (this.comfyTools.length === 0) {
+      logger.warn(ollamaZeroToolCauseMessage("empty-catalog", "comfyui"));
+    }
+    if (!this.panel) {
+      if (this.deps.mcpServers?.panel) {
+        logger.warn(ollamaZeroToolCauseMessage("never-connected", "panel"));
+      }
+    } else if (this.panelTools.length === 0) {
+      logger.warn(ollamaZeroToolCauseMessage("empty-catalog", "panel"));
+    }
+  }
+
+  /** 0 comfyui tools is never a valid working state (compact still yields 3).
+   *  Emit that at WARN with `degraded` + a named cause so it is greppable. */
+  private announcePreparedToolSurface(version: string): void {
+    const comfy = this.comfyTools.length;
+    const panel = this.panelTools.length;
+    const summary =
+      `${this.api === "openai" ? `openai-compatible @ ${this.host}` : `ollama ${version}`}, model ${this.model}, ${comfy} comfyui tools, ${panel} panel tools behind the router` +
+      (this.toolModeDecision ? ` — ${this.toolModeDecision.explain}` : "");
+    const cause = ollamaZeroToolCause(this.comfy, comfy);
+    if (cause) {
+      logger.warn(`[ollama-backend] degraded (${summary}) — cause: ${cause}`);
+    } else {
+      logger.info(`[ollama-backend] ready (${summary})`);
     }
   }
 
