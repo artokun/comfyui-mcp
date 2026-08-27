@@ -125,6 +125,20 @@ describe("the message names sharp, the library and a remedy (#2411)", () => {
     expect(msg).not.toContain("sharp.pixelplumbing.com");
   });
 
+  // Caught by running this repo's own review taxonomy (class 6, "prose overstates
+  // what the code does") against the diff. The first wording was "Everything that
+  // does not resize or re-encode images is unaffected" — but `analyze_color`
+  // neither resizes nor re-encodes (it decodes to raw pixels via `.raw()`), so a
+  // reader would have concluded it still worked. It does not.
+  it("does not tell the user that colour analysis is unaffected — it is affected", async () => {
+    const msg = sharpUnavailableMessage("Image conversion", REAL_SHARP_DLOPEN_ERROR);
+    expect(msg).toMatch(/colour analysis/i);
+    expect(msg).not.toMatch(/does not resize or re-encode/i);
+    // The reassuring half has to stay true too: nothing here touches generation
+    // or files already on disk.
+    expect(msg).toMatch(/untouched|intact/i);
+  });
+
   it("an ABSENT sharp gets the install remedy instead of the blocked-binary one", async () => {
     const msg = sharpUnavailableMessage("Image conversion", REAL_SHARP_MISSING_ERROR);
     expect(msg).toContain("Image conversion is unavailable");

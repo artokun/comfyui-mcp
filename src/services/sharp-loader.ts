@@ -136,7 +136,7 @@ export function sharpUnavailableMessage(feature: string, err: unknown): string {
     : "the `sharp` module could not be loaded";
   const advice = native
     ? process.platform === "win32"
-      ? "On Windows this is usually the binary being REFUSED rather than missing. Check, in order: " +
+      ? "On Windows the binary is as often REFUSED as it is missing, so check both. In order: " +
         'Windows Security > App & browser control for a "Part of this app has been blocked" entry ' +
         "naming libvips-cpp-<version>.dll (Smart App Control refuses binaries it cannot attribute to " +
         "a known publisher); then your antivirus quarantine; then reinstall with " +
@@ -151,8 +151,9 @@ export function sharpUnavailableMessage(feature: string, err: unknown): string {
     `${feature} is unavailable: ${cause}.\n` +
     `  ${detail}\n` +
     `${advice}\n` +
-    "Everything that does not resize or re-encode images is unaffected, and files already written " +
-    `to disk are intact. Set ${SHARP_DISABLE_ENV}=1 to skip these features quietly instead.`
+    "Only the features that DECODE image pixels are affected — inline previews, conversion and " +
+    "colour analysis. Generation, queueing and every file already written to disk are untouched. " +
+    `Set ${SHARP_DISABLE_ENV}=1 to skip the affected features quietly instead.`
   );
 }
 
@@ -193,11 +194,6 @@ export function sharpUnavailableReason(err: unknown): string {
  */
 let cached: { ok: true; sharp: SharpModule } | { ok: false; err: unknown } | null = null;
 
-/** Drop the memoised outcome. Exists for tests; production loads once. */
-export function resetSharpLoaderForTests(): void {
-  cached = null;
-}
-
 /**
  * The sharp factory, or the reason it is unavailable.
  *
@@ -235,10 +231,12 @@ export async function requireSharp(feature: string): Promise<SharpModule> {
 /**
  * One line for the startup log when sharp cannot load, or `null` when it can.
  *
- * A probe exists because the alternative is finding out during the first render
- * of a long session, which is exactly how #2411 cost an hour. It deliberately
- * returns the line instead of logging it, so the caller owns the level and the
- * tests do not have to capture a logger.
+ * A probe exists because this change makes the failure SURVIVABLE, and a
+ * survivable failure is one nobody notices until the first operation that needs
+ * it. (Not because it explains #2411's lost hour — see the header: a blocked
+ * sharp yields no server at all, so it cannot have.) It deliberately returns the
+ * line instead of logging it, so the caller owns the level and the tests do not
+ * have to capture a logger.
  */
 export async function probeSharp(): Promise<string | null> {
   const result = await tryLoadSharp();
