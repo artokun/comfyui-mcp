@@ -225,6 +225,10 @@ describe("authenticated panel template relay (#2196)", () => {
     // the LOOPBACK_HOSTS comment for the Happy-Eyeballs measurement and for why
     // neither pinning the fetch nor declining to the headless path works here.
     expect(currentPanelTemplateOrigin("http://localhost:8188", "http://localhost:8188/comfyapi")).toBe("http://localhost:8188");
+    // Over TLS the name is refused: the address cannot be pinned without
+    // breaking verification of a cert issued to it. Literal hosts are fine.
+    expect(currentPanelTemplateOrigin("https://localhost:8188", "https://localhost:8188/comfyapi")).toBeUndefined();
+    expect(currentPanelTemplateOrigin("https://127.0.0.1:8188", "https://127.0.0.1:8188/comfyapi")).toBe("https://127.0.0.1:8188");
     expect(currentPanelTemplateOrigin("http://localhost:8188", "http://127.0.0.1:8188/comfyapi")).toBeUndefined();
     expect(currentPanelTemplateOrigin("http://[::1]:8188", "http://127.0.0.1:8188/comfyapi")).toBeUndefined();
     expect(currentPanelTemplateOrigin("http://localhost:8188", "http://[::1]:8188/comfyapi")).toBeUndefined();
