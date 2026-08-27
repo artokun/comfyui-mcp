@@ -6,6 +6,11 @@ All notable changes to this project are documented here. This project adheres to
 
 ## Unreleased
 
+### MCP
+
+#### Fixed
+- a restart confirmation approval is delivered to the pending restart instead of only the next call (#2440)
+
 ## [0.52.144] - 2026-08-27
 
 ### MCP
