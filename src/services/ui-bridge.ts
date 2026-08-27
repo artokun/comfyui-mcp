@@ -1598,6 +1598,16 @@ export interface BridgeCommand {
   [key: string]: unknown;
 }
 
+function commandAskId(command: BridgeCommand): string | undefined {
+  const id = command.ask_id;
+  return typeof id === "string" && id.length > 0 ? id : undefined;
+}
+
+function messageAskId(msg: Record<string, unknown>): string | undefined {
+  const id = msg.ask_id;
+  return typeof id === "string" && id.length > 0 ? id : undefined;
+}
+
 /** panel#1859 — the floor comes from the table the gate itself reads, so the
  * two can never disagree. With no parseable entry the sentence still names a
  * remedy; it just cannot name a number, which beats naming a wrong one. */
@@ -2215,6 +2225,13 @@ export class UiBridge {
    * caller required — after which it is durable and can be replayed or pushed.
    */
   private lateAskSink: ((askId: string, result: unknown, tabId: string) => void) | null = null;
+  /**
+   * In-flight confirm/ask waiters keyed by `ask_id` (#2440). A card approval that
+   * lands without the original command rid used to be cached only for a later
+   * takeLateAskReply(); if a restart was still waiting, that waiter timed out and
+   * the next call consumed the click. These fire first, before the late buffer.
+   */
+  private lateAskWaiters = new Map<string, Set<(result: unknown) => void>>();
   /** See setTabGoneListener. */
   private onTabGone: ((tabId: string, incarnation: string) => void) | null = null;
   /** See setTabTakenOverListener. */
@@ -3297,7 +3314,22 @@ export class UiBridge {
           // caller may still be within the MCP tools/call budget, BUFFER the
           // validated answer keyed by its ask_id so the caller can retrieve it via
           // takeLateAskReply() instead of losing it (#486). Everything else drops.
+          //
+          // #2440 — deliver to a STILL-WAITING restart/confirm first. A reply can
+          // miss `pending` (rid rewritten, timer already fired) while the tool
+          // call that painted the card is still blocked on it. Caching only for
+          // the next call left that waiter to time out after the user clicked.
           const entry = this.askRidToId.get(rid);
+          const askId = entry?.askId ?? messageAskId(msg);
+          if (askId && msg.ok) {
+            const live = this.findPendingForAskId(askId);
+            if (live) {
+              this.askRidToId.delete(rid);
+              this.settlePendingAskSuccess(live.rid, live.pending, msg.result, sock);
+              return;
+            }
+            this.wakeLateAskWaiters(askId, msg.result);
+          }
           if (entry) {
             this.askRidToId.delete(rid);
             if (msg.ok) {
@@ -3383,6 +3415,34 @@ export class UiBridge {
             rejected = attachWorkflowListReadiness(rejected, workflowListReadiness);
           }
           p.reject(rejected);
+        }
+        return;
+      }
+
+      // #2440 — a card approval that names its ask_id but not the command rid
+      // still belongs to the in-flight confirm. Deliver it to that waiter
+      // before caching it for a subsequent call.
+      const ridlessAskId = messageAskId(msg);
+      if (
+        ridlessAskId &&
+        msg.ok === true &&
+        "result" in msg &&
+        typeof msg.type !== "string"
+      ) {
+        const live = this.findPendingForAskId(ridlessAskId);
+        if (live) {
+          this.settlePendingAskSuccess(live.rid, live.pending, msg.result, sock);
+          return;
+        }
+        this.wakeLateAskWaiters(ridlessAskId, msg.result);
+        this.pruneLateAsk();
+        this.lateAskReplies.set(ridlessAskId, { result: msg.result, ts: Date.now() });
+        try {
+          if (tabId) this.lateAskSink?.(ridlessAskId, msg.result, tabId);
+        } catch (err) {
+          logger.warn(
+            `[ui-bridge] late ask-answer sink threw (the answer is still buffered): ${err instanceof Error ? err.message : String(err)}`,
+          );
         }
         return;
       }
@@ -4871,6 +4931,67 @@ export class UiBridge {
     if (!e) return undefined;
     this.lateAskReplies.delete(askId);
     return e.result;
+  }
+
+  /**
+   * #2440 — subscribe to a card approval for `askId` so an in-flight confirm can
+   * resolve as soon as the click lands, rather than only when a later call drains
+   * the late-reply buffer. Returns an unsubscribe function.
+   */
+  subscribeLateAskReply(askId: string, onReply: (result: unknown) => void): () => void {
+    let set = this.lateAskWaiters.get(askId);
+    if (!set) {
+      set = new Set();
+      this.lateAskWaiters.set(askId, set);
+    }
+    set.add(onReply);
+    return () => {
+      const live = this.lateAskWaiters.get(askId);
+      if (!live) return;
+      live.delete(onReply);
+      if (live.size === 0) this.lateAskWaiters.delete(askId);
+    };
+  }
+
+  private wakeLateAskWaiters(askId: string, result: unknown): boolean {
+    const waiters = this.lateAskWaiters.get(askId);
+    if (!waiters || waiters.size === 0) return false;
+    this.lateAskWaiters.delete(askId);
+    for (const onReply of waiters) {
+      try {
+        onReply(result);
+      } catch (err) {
+        logger.warn(
+          `[ui-bridge] late-ask waiter threw: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
+    }
+    return true;
+  }
+
+  private findPendingForAskId(askId: string): { rid: string; pending: Pending } | undefined {
+    for (const [rid, pending] of this.pending) {
+      if (commandAskId(pending.ctx.command) === askId) return { rid, pending };
+      const mapped = this.askRidToId.get(rid);
+      if (mapped?.askId === askId) return { rid, pending };
+    }
+    return undefined;
+  }
+
+  private settlePendingAskSuccess(
+    rid: string,
+    pending: Pending,
+    result: unknown,
+    sock: BridgeSocket,
+  ): void {
+    clearTimeout(pending.timer);
+    this.pending.delete(rid);
+    this.askRidToId.delete(rid);
+    const served = this.liveConnForTab(pending.ctx.tabId, sock);
+    served?.provenSupportedCmds.add(pending.cmd);
+    this.notePromotedScope(pending.ctx.tabId, result);
+    this.noteSiblingSuccess(pending.ctx, rid);
+    pending.resolve(result);
   }
 
   /** The incarnation currently holding `tabId` — the identity every structure

@@ -5303,6 +5303,58 @@ describe("UiBridge (late ask_user answer buffer — #486)", () => {
     expect(bridge.takeLateAskReply("ask-xyz")).toBeUndefined(); // drained once
   });
 
+  it("delivers a same-ask_id approval to the in-flight send even when the rid does not match (#2440)", async () => {
+    const sock = await connectPanel("tab-ask-rid", "wf");
+    await waitFor(() => expect(bridge.tabs().some((t) => t.tab_id === "tab-ask-rid")).toBe(true));
+    sock.on("message", (buf) => {
+      const msg = JSON.parse(buf.toString());
+      if (msg.rid && msg.cmd === "ask_user") {
+        sock.send(
+          JSON.stringify({
+            rid: "not-the-command-rid",
+            ask_id: msg.ask_id,
+            ok: true,
+            result: "Yes, go ahead",
+          }),
+        );
+      }
+    });
+
+    await expect(
+      bridge.send(
+        { cmd: "ask_user", ask_id: "ask-live", question: "Restart?", options: [] },
+        { tabId: "tab-ask-rid", timeoutMs: 400 },
+      ),
+    ).resolves.toBe("Yes, go ahead");
+    // Delivered to the waiter: not left solely for a later takeLateAskReply.
+    expect(bridge.takeLateAskReply("ask-live")).toBeUndefined();
+    sock.close();
+  });
+
+  it("wakes a subscribeLateAskReply waiter when the approval is buffered (#2440)", async () => {
+    const sock = await connectPanel("tab-ask-wake", "wf");
+    await waitFor(() => expect(bridge.tabs().some((t) => t.tab_id === "tab-ask-wake")).toBe(true));
+    sock.on("message", (buf) => {
+      const msg = JSON.parse(buf.toString());
+      if (msg.rid && msg.cmd === "ask_user") {
+        setTimeout(() => {
+          sock.send(JSON.stringify({ rid: msg.rid, ok: true, result: "Yes, go ahead" }));
+        }, 80);
+      }
+    });
+
+    const sendP = bridge.send(
+      { cmd: "ask_user", ask_id: "ask-wake", question: "Restart?", options: [] },
+      { tabId: "tab-ask-wake", timeoutMs: 30 },
+    );
+    const woken = new Promise<unknown>((resolve) => {
+      bridge.subscribeLateAskReply("ask-wake", resolve);
+    });
+    await expect(sendP).rejects.toThrow(/did not reply/i);
+    await expect(woken).resolves.toBe("Yes, go ahead");
+    sock.close();
+  });
+
   // #1352 — the same recovery for a CREDENTIAL, minus the one property that makes it
   // durable. A secret card's late answer must be claimable in memory, because a user who
   // finishes typing a moment late should still have their token applied — and it must

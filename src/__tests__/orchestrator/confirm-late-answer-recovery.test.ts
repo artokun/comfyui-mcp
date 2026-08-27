@@ -27,6 +27,7 @@
 import { readFileSync } from "node:fs";
 
 import { beforeEach, describe, expect, it } from "vitest";
+import { waitFor } from "../helpers/wait-for.js";
 
 import {
   appendReplyNote,
@@ -69,22 +70,32 @@ interface Harness {
   late: Map<string, unknown>;
   /** Every takeLateAskReply(id) this run made — proves WHICH id was claimed. */
   drained: string[];
+  /** Deliver a card click to the live waiter, the way the bridge does on approval. */
+  approve: (askId: string, result: unknown) => void;
 }
 
-function harness(tabId = TAB, opts: { answerCards?: boolean } = {}): Harness {
+function harness(
+  tabId = TAB,
+  opts: { answerCards?: boolean; hangMs?: number } = {},
+): Harness {
   const cards: Array<Record<string, unknown>> = [];
   const late = new Map<string, unknown>();
   const drained: string[] = [];
+  const waiters = new Map<string, Set<(result: unknown) => void>>();
   const bridge = {
     send: async (cmd: Record<string, unknown>) => {
       if (cmd.cmd === "ask_user") {
         cards.push(cmd);
+        if (opts.answerCards) return "Yes, go ahead";
+        if (opts.hangMs != null) {
+          const hangMs = opts.hangMs;
+          return new Promise<never>((_resolve, reject) => {
+            setTimeout(() => reject(replyTimeout(tabId)), hangMs);
+          });
+        }
         // The reporter's case: the card is dispatched and painted, and no answer comes
         // back inside the caller's budget.
-        if (!opts.answerCards) throw replyTimeout(tabId);
-        // bridge.send resolves with the REPLY'S RESULT — for a card, the label the
-        // user picked — which is what isAffirmative is handed.
-        return "Yes, go ahead";
+        throw replyTimeout(tabId);
       }
       return { ok: true };
     },
@@ -94,6 +105,20 @@ function harness(tabId = TAB, opts: { answerCards?: boolean } = {}): Harness {
       const v = late.get(askId);
       late.delete(askId); // the real buffer is one-shot too
       return v;
+    },
+    subscribeLateAskReply: (askId: string, onReply: (result: unknown) => void) => {
+      let set = waiters.get(askId);
+      if (!set) {
+        set = new Set();
+        waiters.set(askId, set);
+      }
+      set.add(onReply);
+      return () => {
+        const live = waiters.get(askId);
+        if (!live) return;
+        live.delete(onReply);
+        if (live.size === 0) waiters.delete(askId);
+      };
     },
     push: () => 1,
     canReach: () => true,
@@ -110,6 +135,13 @@ function harness(tabId = TAB, opts: { answerCards?: boolean } = {}): Harness {
     cards,
     late,
     drained,
+    approve: (askId, result) => {
+      late.set(askId, result);
+      const live = waiters.get(askId);
+      if (!live) return;
+      waiters.delete(askId);
+      for (const onReply of live) onReply(result);
+    },
   };
 }
 
@@ -337,6 +369,57 @@ describe("panel#1554 a late confirmation is claimed, not discarded", () => {
     // A private "5 minutes" over in panel-tools would be a bound deciding a correctness
     // question in two places, free to drift. Pin that it is the same value.
     expect(confirmAnswerRecoveryWindowMs()).toBe(LATE_ASK_TTL_MS);
+  });
+});
+
+describe("panel#2440 an in-flight restart claims the approval, not the next call", () => {
+  beforeEach(() => resetAbandonedConfirmCards());
+
+  it("an Approve that lands while confirm is still waiting resolves THIS call", async () => {
+    const h = harness(TAB, { hangMs: 400 });
+    const pending = h.ctx.confirm(QUESTION, HEADER, 400, RECOVER);
+    await waitFor(() => expect(h.cards).toHaveLength(1));
+    const askId = String(h.cards[0].ask_id);
+    h.approve(askId, "Yes, go ahead");
+
+    expect(await pending).toBe("yes");
+    expect(h.cards).toHaveLength(1);
+    // One-shot: the same click must not satisfy a later restart.
+    expect(await h.ctx.confirm(QUESTION, HEADER, 50, RECOVER)).toBe("timeout");
+    expect(h.cards).toHaveLength(2);
+  });
+
+  it("a late DECLINE on the live card is this call's no, not a cached next-call no", async () => {
+    const h = harness(TAB, { hangMs: 400 });
+    const pending = h.ctx.confirm(QUESTION, HEADER, 400, RECOVER);
+    await waitFor(() => expect(h.cards).toHaveLength(1));
+    h.approve(String(h.cards[0].ask_id), "No, cancel");
+
+    expect(await pending).toBe("no");
+    expect(h.cards).toHaveLength(1);
+  });
+
+  it("END TO END: approving the live restart card restarts this call, not the next", async () => {
+    __panelToolsTestHooks.setHealthProbe(async () => false);
+    __panelToolsTestHooks.setPanelRebootTiming({
+      settleMs: 0,
+      budgetMs: 30,
+      intervalMs: 5,
+      probeTimeoutMs: 10,
+    });
+    try {
+      const h = harness(TAB, { hangMs: 400 });
+      const first = restartDef().handler({} as never, h.ctx);
+      await waitFor(() => expect(h.cards).toHaveLength(1));
+      h.approve(String(h.cards[0].ask_id), "Yes, go ahead");
+
+      const out = textOf(await first);
+      expect(out).not.toContain("No confirmation received within");
+      expect(h.cards).toHaveLength(1);
+    } finally {
+      __panelToolsTestHooks.setHealthProbe(null);
+      __panelToolsTestHooks.setPanelRebootTiming(null);
+    }
   });
 });
 

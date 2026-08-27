@@ -13576,6 +13576,7 @@ interface BridgeProbe {
   resolveActiveTabId?: () => string;
   resolveSharedTabId?: (scopeId?: string) => string | undefined;
   takeLateAskReply?: (askId: string) => unknown;
+  subscribeLateAskReply?: (askId: string, onReply: (result: unknown) => void) => () => void;
 }
 
 /** The only compatibility proof accepted for a legacy bare workflow open. */
@@ -15079,7 +15080,7 @@ export function makePanelToolCtx(
     const askId = randomUUID();
     try {
       ensureReachable();
-      const reply = await bridge.send(
+      const sendP = bridge.send(
         {
           cmd: "ask_user",
           ask_id: askId,
@@ -15092,26 +15093,23 @@ export function makePanelToolCtx(
         } as { cmd: string },
         { tabId: ctx.tabId, timeoutMs: timing.deadlineMs },
       );
-      return isAffirmative(reply) ? "yes" : "no";
-    } catch (err) {
-      // Only a card-reply TIMEOUT is recoverable/honest-as-timeout: poll the late
-      // buffer, then report "timeout" if still unanswered. Any other error (no
-      // panel, transport failure) still SKIPS the destructive op — but it is reported
-      // as `unreachable`, not `no` (#1332). The user did not decline; we never got to
-      // ask them, and a caller that says "cancelled" on this is describing a decision
-      // nobody made.
-      if (isReplyTimeoutError(err)) {
-        const late = await pollLateAskReply(bridge, askId, timing, budgetEnd);
-        if (late !== undefined) return isAffirmative(late) ? "yes" : "no";
-        // panel#1554 — the card is STILL on screen and still answerable (the panel
-        // retires a card on a replaced connection, never on our timeout), and the
-        // bridge will buffer whatever the user clicks. Remember the id so the next
-        // attempt at this same confirmation drains it instead of asking again.
-        if (opts?.recoverAbandonedAnswer) {
-          rememberAbandonedConfirmCard(journalTabFor(ctx), header, question, askId);
-        }
-        return "timeout";
+      // #2440 — race the in-flight send against a late-buffer/waiter delivery so
+      // an approval that misses the original rid still resolves THIS confirm,
+      // instead of sitting in the cache for a subsequent call.
+      const outcome = await awaitConfirmReply(sendP, bridge, askId);
+      if (outcome.ok) return isAffirmative(outcome.reply) ? "yes" : "no";
+      if (!isReplyTimeoutError(outcome.err)) return "unreachable";
+      const late = await pollLateAskReply(bridge, askId, timing, budgetEnd);
+      if (late !== undefined) return isAffirmative(late) ? "yes" : "no";
+      // panel#1554 — the card is STILL on screen and still answerable (the panel
+      // retires a card on a replaced connection, never on our timeout), and the
+      // bridge will buffer whatever the user clicks. Remember the id so the next
+      // attempt at this same confirmation drains it instead of asking again.
+      if (opts?.recoverAbandonedAnswer) {
+        rememberAbandonedConfirmCard(journalTabFor(ctx), header, question, askId);
       }
+      return "timeout";
+    } catch {
       return "unreachable";
     }
   };
@@ -16228,6 +16226,50 @@ async function pollLateAskReply(
     const left = deadline - Date.now();
     if (left <= 0) return undefined;
     await sleep(Math.max(1, Math.min(timing.pollMs, left)));
+  }
+}
+
+/**
+ * #2440 — wait for THIS card's answer on every channel that can carry it, not
+ * only the rid-matched send.
+ *
+ * `bridge.send` resolves when the panel echoes the command rid. A sidebar
+ * Approve can land without that rid: the bridge then buffers it for a later
+ * takeLateAskReply / recoverAbandonedAnswer, and the original restart timed
+ * out after 90s even though the user had already clicked. Racing the send
+ * against a live waiter and the late-reply buffer delivers the click to the
+ * call that painted the card.
+ */
+async function awaitConfirmReply(
+  sendP: Promise<unknown>,
+  bridge: PanelToolCtx["bridge"],
+  askId: string,
+): Promise<{ ok: true; reply: unknown } | { ok: false; err: unknown }> {
+  const probe: BridgeProbe = bridge;
+  let done = false;
+  let unsub: (() => void) | undefined;
+
+  const fromSend = sendP.then(
+    (reply): { ok: true; reply: unknown } => ({ ok: true, reply }),
+    (err: unknown): { ok: false; err: unknown } => ({ ok: false, err }),
+  );
+
+  const fromWaiter = new Promise<{ ok: true; reply: unknown }>((resolve) => {
+    const sub = probe.subscribeLateAskReply;
+    if (typeof sub !== "function") return;
+    unsub = sub.call(bridge, askId, (reply) => {
+      if (done) return;
+      done = true;
+      resolve({ ok: true, reply });
+    });
+  });
+
+  try {
+    const winner = await Promise.race([fromSend, fromWaiter]);
+    done = true;
+    return winner;
+  } finally {
+    unsub?.();
   }
 }
 
