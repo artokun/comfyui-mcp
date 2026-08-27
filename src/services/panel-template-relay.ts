@@ -512,9 +512,9 @@ function safePanelTemplateUrl(raw: string | undefined, allowedOrigin: string | u
  * off-box would previously have been fetched, because only the ORIGIN STRING
  * was ever checked against the loopback set, never the address it resolves to.
  */
-async function pinnedLoopbackUrls(url: URL): Promise<URL[]> {
+async function pinnedLoopbackUrls(url: URL): Promise<{ primary: URL | undefined; corroborate: URL[] }> {
   const host = url.hostname.toLowerCase().replace(/^\[|\]$/g, "");
-  if (LOOPBACK_LITERALS.has(host)) return [url];
+  if (LOOPBACK_LITERALS.has(host)) return { primary: url, corroborate: [] };
   if (!AMBIGUOUS_LOOPBACK_NAMES.has(host)) {
     throw new PanelTemplateRelayError("The panel template relay refused a non-loopback destination.", "NO_PANEL_ORIGIN");
   }
@@ -539,18 +539,18 @@ async function pinnedLoopbackUrls(url: URL): Promise<URL[]> {
   if (literals.length === 0) {
     throw new PanelTemplateRelayError("The connected panel could not fetch the workflow-template index.", "PANEL_FETCH_FAILED");
   }
-  // HTTPS keeps the NAME, once the addresses are known to be local. Rewriting
-  // the host to a literal breaks certificate verification for a cert issued to
-  // `localhost`, and TLS already binds the response to the name -- a stronger
-  // listener check than pinning gives. Only cleartext needs the second
-  // resolution removed. Keeping the name and validating where it points are
-  // separate decisions; only the first is scheme-dependent.
-  if (url.protocol === "https:") return [url];
-  return literals.map((literal) => {
+  const asLiteral = (literal: string): URL => {
     const pinned = new URL(url.href);
     pinned.hostname = literal.includes(":") ? `[${literal}]` : literal;
     return pinned;
-  });
+  };
+  // HTTPS keeps the NAME as the request it actually serves from, once the
+  // addresses are known to be local. Rewriting the host to a literal breaks
+  // certificate verification for a cert issued to `localhost`. The literals are
+  // still returned, as CORROBORATION rather than as the destination -- see
+  // fetchPinnedPanelIndex.
+  if (url.protocol === "https:") return { primary: url, corroborate: literals.map(asLiteral) };
+  return { primary: undefined, corroborate: literals.map(asLiteral) };
 }
 
 /**
@@ -566,7 +566,37 @@ async function pinnedLoopbackUrls(url: URL): Promise<URL[]> {
  * is refused rather than resolved by guessing.
  */
 async function fetchPinnedPanelIndex(url: URL, deadlineAt: number): Promise<string> {
-  const candidates = await pinnedLoopbackUrls(url);
+  const { primary, corroborate } = await pinnedLoopbackUrls(url);
+
+  // HTTPS (and a literal host) serve from `primary`. For a literal there is
+  // nothing to corroborate. For an https NAME the certificate is the listener
+  // check, so the literals are fetched only to CONTRADICT it: any that answers
+  // successfully must agree. A literal that fails -- refused, or a cert not
+  // issued to that IP, which is the normal case -- proves nothing and is
+  // ignored, so an ordinary https localhost is never broken by this. A second
+  // listener with a trusted certificate and a different index is caught.
+  if (primary) {
+    const body = await fetchPanelIndex(primary, deadlineAt);
+    if (corroborate.length <= 1) return body;
+    const others = await Promise.all(
+      corroborate.map(async (candidate) => {
+        try {
+          return await fetchPanelIndex(candidate, deadlineAt);
+        } catch {
+          return undefined;
+        }
+      }),
+    );
+    if (others.some((other) => other !== undefined && other !== body)) {
+      throw new PanelTemplateRelayError(
+        "Two different loopback listeners answered the panel's address with different template indexes.",
+        "AMBIGUOUS_PANEL_LISTENER",
+      );
+    }
+    return body;
+  }
+
+  const candidates = corroborate;
   if (candidates.length === 1) return fetchPanelIndex(candidates[0], deadlineAt);
   const settled = await Promise.all(
     candidates.map(async (candidate) => {
@@ -596,8 +626,6 @@ async function fetchPinnedPanelIndex(url: URL, deadlineAt: number): Promise<stri
     if (only.state === "ok") return only.body;
     throw only.error;
   }
-  // More than one listener answered the panel's address. Every one of them must
-  // have produced the SAME index, or we cannot say what the panel would see.
   const bodies: string[] = [];
   for (const result of present) {
     if (result.state !== "ok") {
