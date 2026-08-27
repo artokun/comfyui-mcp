@@ -79,6 +79,9 @@ function bridge(opts: {
    * ordinary-node scope probe has produced its result, before the caller can
    * take the fast path. */
   scopeProbeIdentityChange?: "tab" | "connection";
+  /** #2409: the same, one exit lower — change identity after the async
+   * graph_get_subgraph read, before the definitive-non-subgraph exit returns. */
+  subgraphReadIdentityChange?: "tab" | "connection";
   nestedSubgraph?: Record<string, unknown> | Error;
   enterFails?: boolean;
   exitFails?: boolean;
@@ -176,6 +179,7 @@ function bridge(opts: {
   };
   const beforeWrite = { mutate: undefined as (() => void) | undefined };
   const afterScopeProbe = { mutate: undefined as (() => void) | undefined };
+  const afterSubgraphRead = { mutate: undefined as (() => void) | undefined };
   const legacyBuild = opts.legacyPanelBuild !== undefined;
   const currentViewing = () => ({
     scope: inSubgraph ? "subgraph" : "root",
@@ -339,6 +343,14 @@ function bridge(opts: {
       }
       if (cmd.cmd === "graph_get_subgraph") {
         subgraphReads += 1;
+        // #2409 — this read is the await the definitive-non-subgraph exit returns
+        // across. Rebind here so that exit sees a receiver that moved under it.
+        if (opts.subgraphReadIdentityChange === "connection") {
+          connectionIdentity = { generation: 2, tabSessionId: "browser-tab-a" };
+        }
+        const subgraphMutation = afterSubgraphRead.mutate;
+        afterSubgraphRead.mutate = undefined;
+        subgraphMutation?.();
         if (subgraphReads === 1 && opts.preflightSubgraph !== undefined) {
           if (opts.preflightSubgraph instanceof Error) throw opts.preflightSubgraph;
           return withCurrentViewing(opts.preflightSubgraph);
@@ -515,6 +527,7 @@ function bridge(opts: {
       return postEnterGraphQueries;
     },
     afterScopeProbe,
+    afterSubgraphRead,
     get writesApplied() {
       return writes;
     },
@@ -529,10 +542,15 @@ async function setWidget(
   opts: Parameters<typeof bridge>[0] = {},
 ) {
   const harness = bridge(opts);
-  const { b, calls, beforeWrite, afterScopeProbe } = harness;
+  const { b, calls, beforeWrite, afterScopeProbe, afterSubgraphRead } = harness;
   const ctx = makePanelToolCtx(b, TAB, new WorkflowTargetStore());
   if (opts.scopeProbeIdentityChange === "tab") {
     afterScopeProbe.mutate = () => {
+      ctx.tabId = `${TAB}:rebound`;
+    };
+  }
+  if (opts.subgraphReadIdentityChange === "tab") {
+    afterSubgraphRead.mutate = () => {
       ctx.tabId = `${TAB}:rebound`;
     };
   }
@@ -897,6 +915,52 @@ describe("panel_set_widget coordinated promoted-widget fixes (#2393, #2394)", ()
     expect(calls.filter((call) => call.cmd === "graph_set_widget")).toEqual([
       expect.objectContaining({ node_id: 82, widget: "lora_1", value }),
     ]);
+  });
+});
+
+describe("panel_set_widget definitive-non-subgraph exit fence (#2409)", () => {
+  const value = '{"on":true,"lora":"turbo.safetensors","strength":1,"strengthTwo":null}';
+  const ordinaryRootDetail = {
+    text:
+      '1 match(es) of 1 in scope (viewing: 1 nodes)\n' +
+      '{"id":82,"type":"Power Lora Loader (rgthree)","is_subgraph":false}',
+  };
+
+  // The scope probe cannot take the fast path here (the active view is a subgraph),
+  // so the write reaches graph_get_subgraph and leaves through the definitive
+  // non-subgraph exit — the one #2405 did not fence.
+  const conservative = {
+    firstWrite: "ok" as const,
+    ownerNodeId: 78,
+    startInSubgraph: true,
+    promotedDetail: ordinaryRootDetail,
+    subgraph: new Error("Node 82 (Power Lora Loader (rgthree)) is not a subgraph"),
+  };
+
+  it.each(["tab", "connection"] as const)(
+    "refuses the definitive non-subgraph exit when the %s identity changes after the subgraph read",
+    async (identity) => {
+      const { text, isError, writesApplied, mutations } = await setWidget(
+        { node_id: 82, widget: "lora_1", value },
+        { ...conservative, subgraphReadIdentityChange: identity },
+      );
+
+      expect(isError).toBe(true);
+      expect(text).toMatch(/after the subgraph read/);
+      expect(writesApplied).toBe(0);
+      expect(mutations).toBe(0);
+    },
+  );
+
+  it("still writes through that exit when the binding is stable", async () => {
+    const { isError, writesApplied, mutations } = await setWidget(
+      { node_id: 82, widget: "lora_1", value },
+      conservative,
+    );
+
+    expect(isError).toBe(false);
+    expect(writesApplied).toBe(1);
+    expect(mutations).toBe(1);
   });
 });
 

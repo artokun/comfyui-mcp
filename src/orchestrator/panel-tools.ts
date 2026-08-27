@@ -6884,6 +6884,46 @@ function promotedPanelBuildRefusal(
  * indeterminate read fails closed because the panel can resolve a promoted
  * container to its unsafe inner node.
  */
+/**
+ * Why the panel binding is no longer the one we captured, or undefined when it is.
+ *
+ * WHY THIS IS A FUNCTION AND NOT A THIRD COPY. An early `return null` out of the
+ * promoted pre-dispatch check does not mean "refuse" — it means "this is not a promoted
+ * write, proceed on the ordinary path". So every exit that crosses an `await` is a WRITE
+ * AUTHORIZATION issued against a binding that may have moved underneath it, and each one
+ * needs the same re-read. There were two hand-written copies of these five checks; a third
+ * exit was then added between them without one, which is #2401, and fixing that exit alone
+ * left the next one bare, which is #2409. One copy, called by each exit, so the next early
+ * return has one obvious thing to call.
+ *
+ * `where` is appended to each message so the caller keeps naming its own await.
+ */
+function panelBindingDriftReason(
+  ctx: PanelToolCtx,
+  where: string,
+  hasIdentityApi: boolean,
+  identityBefore: { generation: number; tabSessionId: string } | undefined,
+  tabBefore: string,
+): string | undefined {
+  if (!hasIdentityApi) return `the receiver identity was unavailable ${where}`;
+  if (!isUsablePanelConnectionIdentity(identityBefore)) {
+    return `the panel connection identity was unavailable ${where}`;
+  }
+  let identityAfter: { generation: number; tabSessionId: string } | undefined;
+  try {
+    identityAfter = ctx.panelConnectionIdentity?.();
+  } catch {
+    return `the panel connection identity became unreadable ${where}`;
+  }
+  if (ctx.tabId !== tabBefore || !isUsablePanelConnectionIdentity(identityAfter)) {
+    return `the panel tab or connection changed ${where}`;
+  }
+  if (!samePanelConnectionIdentity(identityBefore, identityAfter)) {
+    return `the panel session or connection changed ${where}`;
+  }
+  return undefined;
+}
+
 async function preparePromotedWidgetWrite(
   ctx: PanelToolCtx,
   nodeId: unknown,
@@ -6932,30 +6972,18 @@ async function preparePromotedWidgetWrite(
     // The scope probe crossed an await. Re-read the binding before taking the
     // ordinary fast path; otherwise a tab/connection rebind can make this
     // probe's ordinary classification authorize a write on the new receiver.
-    if (!hasIdentityApi) {
-      return promotedWriteRefusal(widget, "the receiver identity was unavailable after the scope probe");
-    }
-    if (!isUsablePanelConnectionIdentity(identityBefore)) {
-      return promotedWriteRefusal(widget, "the panel connection identity was unavailable after the scope probe");
-    }
-    let identityAfterScope: { generation: number; tabSessionId: string } | undefined;
-    try {
-      identityAfterScope = ctx.panelConnectionIdentity?.();
-    } catch {
-      return promotedWriteRefusal(widget, "the panel connection identity became unreadable after the scope probe");
-    }
-    if (ctx.tabId !== tabBefore || !isUsablePanelConnectionIdentity(identityAfterScope)) {
-      return promotedWriteRefusal(widget, "the panel tab or connection changed after the scope probe");
-    }
-    if (!samePanelConnectionIdentity(identityBefore, identityAfterScope)) {
-      return promotedWriteRefusal(widget, "the panel session or connection changed after the scope probe");
-    }
+    const drift = panelBindingDriftReason(ctx, "after the scope probe", hasIdentityApi, identityBefore, tabBefore);
+    if (drift) return promotedWriteRefusal(widget, drift);
     return null;
   }
 
   const sub = await ctx.call({ cmd: "graph_get_subgraph", node_id: nodeId });
   if (sub.isError) {
-    if (isDefinitiveNonPromotedSubgraphRead(sub)) return null;
+    if (isDefinitiveNonPromotedSubgraphRead(sub)) {
+      const drift2 = panelBindingDriftReason(ctx, "after the subgraph read", hasIdentityApi, identityBefore, tabBefore);
+      if (drift2) return promotedWriteRefusal(widget, drift2);
+      return null;
+    }
     return promotedSubgraphReadRefusal(
       widget,
       sub,
