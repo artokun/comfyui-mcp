@@ -4032,14 +4032,27 @@ export class UiBridge {
   /** Return the latest structured current-view owner observed for this tab.
    * Reads which carry no `viewing` field do not overwrite it; a malformed
    * structured identity is retained as unknown so a promoted write cannot use
-   * an earlier owner proof after the current-view witness became unreadable. */
+   * an earlier owner proof after the current-view witness became unreadable.
+   *
+   * Look up through {@link resolveTarget} (exact id, prefix, same-socket
+   * migration alias, or scope address), not `Map.get(tabId)`. `notePromotedScope`
+   * stores under the canonical live tab id from send(); panel sessions bind
+   * `ctx.tabId` to `orchestrator::<backend>` (#884). A direct get on that
+   * address never hits the cache, so a hello-cleared then re-queried witness
+   * still read as unknown and `panel_set_widget` refused a promoted write
+   * after a confirmed current-workflow rebind (#2435, panel#1925). */
   promotedScopeFor(tabId: string): TabPromotedScopeRead {
-    return (
-      this.promotedScopes.get(tabId) ?? {
-        known: false,
-        reason: "no current panel graph-scope witness has been observed",
-      }
-    );
+    const unknown: TabPromotedScopeRead = {
+      known: false,
+      reason: "no current panel graph-scope witness has been observed",
+    };
+    let key = tabId;
+    try {
+      key = this.resolveTarget(tabId).tabId;
+    } catch {
+      return unknown;
+    }
+    return this.promotedScopes.get(key) ?? unknown;
   }
 
   /** Read the current panel view from the live graph immediately before a

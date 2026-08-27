@@ -733,6 +733,218 @@ describe("UiBridge (typed dispatch outcome — panel #442 defect 4)", () => {
     expect(bridge.promotedScopeFor("tab-scope-read-2314")).toMatchObject({ ownerNodeId: "79" });
     a.close();
   });
+
+  const PROMOTED_VIEWING = {
+    scope: "root" as const,
+    workflow_uuid: "11111111-1111-4111-8111-111111111111",
+    graph_identity: "graph:scope-root",
+  };
+
+  function replyGraphQueryWithViewing(sock: WebSocket, viewing = PROMOTED_VIEWING): void {
+    sock.on("message", (buf) => {
+      const msg = JSON.parse(buf.toString());
+      if (msg.rid && msg.cmd === "graph_query") {
+        sock.send(
+          JSON.stringify({
+            rid: msg.rid,
+            ok: true,
+            result: { viewing, nodes: [{ id: 92, type: "SubgraphNode" }] },
+          }),
+        );
+      }
+    });
+  }
+
+  it("promotedScopeFor resolves a scope-addressed session onto the live tab's witness (#2435)", async () => {
+    // Panel sessions bind ctx.tabId to orchestrator::<backend>. send() stores
+    // the viewing reply under the canonical live tab id; the fence used to
+    // Map.get the scope address and treat a populated cache as unknown.
+    const a = await connectPanel("wf:flux-klein.json", "flux");
+    replyGraphQueryWithViewing(a);
+    await waitFor(() => expect(bridge.connected()).toBe(true));
+    await bridge.send(
+      { cmd: "graph_query", ids: [92], fields: "compact", limit: 1 },
+      { tabId: SHARED_SESSION_SCOPE },
+    );
+    expect(bridge.promotedScopeFor(SHARED_SESSION_SCOPE)).toEqual({
+      known: true,
+      scope: "root",
+      ownerNodeId: null,
+      workflowUuid: PROMOTED_VIEWING.workflow_uuid,
+      graphIdentity: PROMOTED_VIEWING.graph_identity,
+    });
+    expect(bridge.promotedScopeFor(`${SHARED_SESSION_SCOPE}::codex`)).toMatchObject({
+      known: true,
+      graphIdentity: PROMOTED_VIEWING.graph_identity,
+    });
+    a.close();
+  });
+
+  it("promotedScopeFor follows a tmp:→wf: migration alias after load (#2435)", async () => {
+    const sock = await connectPanel("tmp:unsaved", "Untitled");
+    replyGraphQueryWithViewing(sock);
+    await waitFor(() => expect(bridge.tabs().some((t) => t.tab_id === "tmp:unsaved")).toBe(true));
+    sock.send(
+      JSON.stringify({
+        type: "hello",
+        tab_id: "wf:flux-klein.json",
+        title: "flux",
+        enforces_workflow_stamp: true,
+        enforces_workflow_stamp_at_write: true,
+        enforces_expected_node_type_at_write: true,
+        enforces_expected_scope_at_write: true,
+        enforces_expected_scope_graph_identity_at_write: true,
+        enforces_promoted_parent_rail_at_write: true,
+        tab_session_id: "browser-tab-a",
+      }),
+    );
+    await waitFor(() => expect(bridge.tabs().some((t) => t.tab_id === "wf:flux-klein.json")).toBe(true));
+    await bridge.send(
+      { cmd: "graph_query", ids: [92], fields: "compact", limit: 1 },
+      { tabId: "tmp:unsaved" },
+    );
+    expect(bridge.promotedScopeFor("tmp:unsaved")).toMatchObject({
+      known: true,
+      graphIdentity: PROMOTED_VIEWING.graph_identity,
+    });
+    expect(bridge.promotedScopeFor("wf:flux-klein.json")).toMatchObject({ known: true });
+    expect(bridge.promotedScopeFor(SHARED_SESSION_SCOPE)).toMatchObject({ known: true });
+    sock.close();
+  });
+
+  it("a hello still drops the prior canvas witness so a later promoted write cannot reuse it (#2435)", async () => {
+    const sock = await connectPanel("wf:flux-klein.json", "flux");
+    replyGraphQueryWithViewing(sock);
+    await waitFor(() => expect(bridge.connected()).toBe(true));
+    await bridge.send(
+      { cmd: "graph_query", ids: [92], fields: "compact", limit: 1 },
+      { tabId: SHARED_SESSION_SCOPE },
+    );
+    expect(bridge.promotedScopeFor(SHARED_SESSION_SCOPE).known).toBe(true);
+
+    sock.send(
+      JSON.stringify({
+        type: "hello",
+        tab_id: "wf:flux-klein.json",
+        title: "flux",
+        enforces_workflow_stamp: true,
+        enforces_workflow_stamp_at_write: true,
+        enforces_expected_node_type_at_write: true,
+        enforces_expected_scope_at_write: true,
+        enforces_expected_scope_graph_identity_at_write: true,
+        enforces_promoted_parent_rail_at_write: true,
+      }),
+    );
+    await waitFor(() => expect(bridge.promotedScopeFor(SHARED_SESSION_SCOPE).known).toBe(false));
+    expect(bridge.promotedScopeFor("wf:flux-klein.json")).toEqual({
+      known: false,
+      reason: "no current panel graph-scope witness has been observed",
+    });
+    sock.close();
+  });
+
+  it("panel_set_widget on a scope-bound session does not treat a hello-cleared cache as unverifiable (#2435)", async () => {
+    // Production panel agents bind ctx.tabId to orchestrator::<backend>. Loading
+    // a workflow hellos (clears the cache) and set_workflow_target already_current
+    // does not change that address. The write's own graph_query carries viewing
+    // and must be visible to the synchronous fence under the scope address.
+    const sock = await connectPanel("wf:flux-klein.json", "flux", { tabSessionId: "browser-tab-a" });
+    const viewingRoot = {
+      scope: "root",
+      workflow_uuid: "11111111-1111-4111-8111-111111111111",
+      graph_identity: "graph:flux-root",
+    };
+    const viewingChild = {
+      scope: "subgraph",
+      owner_node_id: 92,
+      workflow_uuid: "11111111-1111-4111-8111-111111111111",
+      graph_identity: "graph:flux-child",
+    };
+    let inSubgraph = false;
+    sock.on("message", (buf) => {
+      const msg = JSON.parse(buf.toString());
+      if (!msg.rid || !msg.cmd) return;
+      const viewing = inSubgraph ? viewingChild : viewingRoot;
+      if (msg.cmd === "graph_query") {
+        const want = Array.isArray(msg.ids) && msg.ids.length ? String(msg.ids[0]) : "92";
+        const node =
+          want === "1"
+            ? { id: 1, type: "CLIPTextEncode", widgets: { text: "old" } }
+            : { id: 92, type: "SubgraphNode", is_subgraph: true, widgets: { text: "old" } };
+        sock.send(
+          JSON.stringify({
+            rid: msg.rid,
+            ok: true,
+            result: { viewing, truncated: false, nodes: [node] },
+          }),
+        );
+        return;
+      }
+      if (msg.cmd === "graph_get_subgraph") {
+        sock.send(
+          JSON.stringify({
+            rid: msg.rid,
+            ok: true,
+            result: {
+              viewing,
+              subgraph_of: { node_id: 92, title: "Edit", graph_identity: "graph:flux-child" },
+              node_count: 1,
+              truncated: false,
+              nodes: [{ id: 1, type: "CLIPTextEncode", widgets: { text: "old" } }],
+            },
+          }),
+        );
+        return;
+      }
+      if (msg.cmd === "graph_enter_subgraph") {
+        inSubgraph = true;
+        sock.send(JSON.stringify({ rid: msg.rid, ok: true, result: { entered: 92, viewing: viewingChild } }));
+        return;
+      }
+      if (msg.cmd === "graph_exit_subgraph") {
+        inSubgraph = false;
+        sock.send(JSON.stringify({ rid: msg.rid, ok: true, result: { viewing: viewingRoot } }));
+        return;
+      }
+      if (msg.cmd === "graph_set_widget") {
+        sock.send(
+          JSON.stringify({
+            rid: msg.rid,
+            ok: true,
+            result: { set: { node_id: msg.node_id, widget: msg.widget, value: msg.value } },
+          }),
+        );
+        return;
+      }
+      sock.send(JSON.stringify({ rid: msg.rid, ok: true, result: { ok: true } }));
+    });
+    await waitFor(() => expect(bridge.connected()).toBe(true));
+    sock.send(
+      JSON.stringify({
+        type: "hello",
+        tab_id: "wf:flux-klein.json",
+        title: "flux",
+        enforces_workflow_stamp: true,
+        enforces_workflow_stamp_at_write: true,
+        enforces_expected_node_type_at_write: true,
+        enforces_expected_scope_at_write: true,
+        enforces_expected_scope_graph_identity_at_write: true,
+        enforces_promoted_parent_rail_at_write: true,
+        tab_session_id: "browser-tab-a",
+      }),
+    );
+    await waitFor(() => expect(bridge.promotedScopeFor(SHARED_SESSION_SCOPE).known).toBe(false));
+
+    const ctx = makePanelToolCtx(bridge, SHARED_SESSION_SCOPE, new WorkflowTargetStore());
+    const def = buildPanelToolDefs().find((d) => d.name === "panel_set_widget");
+    if (!def) throw new Error("panel_set_widget is not registered");
+    const res = await def.handler({ node_id: 92, widget: "text", value: "a cat" }, ctx);
+    const text = res.content.map((c) => (c.type === "text" ? c.text : "")).join(" ");
+    // The #2435 predicate is the cache-miss refusal. Later fences in this
+    // harness (connection identity, terminal witnesses) are out of scope.
+    expect(text).not.toMatch(/current-view scope became unverifiable/);
+    sock.close();
+  });
 });
 
 describe("UiBridge (multi-tab)", () => {

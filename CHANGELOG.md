@@ -13,6 +13,7 @@ All notable changes to this project are documented here. This project adheres to
 - disclose unreindexed host links after panel_unexpose_subgraph_input/output (#2437)
 - a blocked repeat tool call returns the earlier payload instead of an error-string-only nudge (#2430)
 - restart_comfyui treats a Manager dependency-reapply exit 0 as a handoff and replays the saved launch once (#2427)
+- panel_set_widget finds the promoted-write scope witness on a scope-bound session after a hello-cleared rebind (#2435)
 
 ## [0.52.142] - 2026-08-27
 
