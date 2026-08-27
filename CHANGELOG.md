@@ -6,6 +6,15 @@ All notable changes to this project are documented here. This project adheres to
 
 ## Unreleased
 
+## [0.52.138] - 2026-08-26
+
+### MCP
+
+#### Fixed
+- retry active panel reads once (#2398)
+- reconcile promoted-widget writes (#2399)
+
+
 ## [0.52.137] - 2026-08-26
 
 ### MCP
