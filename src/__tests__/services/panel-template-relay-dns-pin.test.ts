@@ -72,16 +72,16 @@ async function driveLocalhostRelay(
 }
 
 describe("panel template relay pins an ambiguous name to loopback literals (#2382)", () => {
-  it("does NOT pin an https origin, so a cert issued to the name still verifies", async () => {
-    // Rewriting https://localhost to https://127.0.0.1 would fail certificate
-    // verification for an ordinary localhost cert. HTTPS therefore keeps the
-    // name — TLS is already the listener check. Proven by the ERROR CODE: an
-    // off-loopback resolution refuses an http origin outright (NO_PANEL_ORIGIN,
-    // below), but an https origin never reaches that guard and instead fails at
-    // the transport, because nothing is speaking TLS on the test server.
+  it("refuses an off-loopback https localhost too, not just http", async () => {
+    // HTTPS keeps the NAME so a cert issued to `localhost` still verifies, but
+    // it must NOT skip the address check on the way: a trusted cert for a
+    // `localhost` pointed off-box by a hosts entry would otherwise be fetched
+    // and relayed. Keeping the name and validating where it points are separate
+    // decisions, and only the first is scheme-dependent.
     dnsState.addresses = [{ address: "203.0.113.7", family: 4 }];
-    await driveLocalhostRelay({ scheme: "https" });
-    await expect(requestPanelTemplateIndex()).rejects.toMatchObject({ code: "PANEL_FETCH_FAILED" });
+    const state = await driveLocalhostRelay({ scheme: "https" });
+    await expect(requestPanelTemplateIndex()).rejects.toMatchObject({ code: "NO_PANEL_ORIGIN" });
+    expect(state.panelRequests).toBe(0);
   });
 
 

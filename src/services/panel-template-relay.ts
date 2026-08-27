@@ -515,12 +515,6 @@ function safePanelTemplateUrl(raw: string | undefined, allowedOrigin: string | u
 async function pinnedLoopbackUrls(url: URL): Promise<URL[]> {
   const host = url.hostname.toLowerCase().replace(/^\[|\]$/g, "");
   if (LOOPBACK_LITERALS.has(host)) return [url];
-  // HTTPS keeps the NAME, deliberately. Rewriting the host to a literal breaks
-  // certificate verification for a cert issued to `localhost`, and there is
-  // nothing to gain by it: TLS already binds the response to the name, which is
-  // a stronger listener check than pinning can give us. Only cleartext needs
-  // the second resolution removed.
-  if (url.protocol === "https:") return [url];
   if (!AMBIGUOUS_LOOPBACK_NAMES.has(host)) {
     throw new PanelTemplateRelayError("The panel template relay refused a non-loopback destination.", "NO_PANEL_ORIGIN");
   }
@@ -530,25 +524,33 @@ async function pinnedLoopbackUrls(url: URL): Promise<URL[]> {
   } catch {
     throw new PanelTemplateRelayError("The connected panel could not fetch the workflow-template index.", "PANEL_FETCH_FAILED");
   }
-  const urls: URL[] = [];
-  const seen = new Set<string>();
+  const literals: string[] = [];
   for (const { address } of resolved) {
     const literal = address.toLowerCase();
-    // A name that resolves ANYWHERE off loopback is refused outright rather
-    // than partially honoured — the pair must be entirely local.
+    // A name that resolves ANYWHERE off loopback is refused whole rather than
+    // partially honoured -- the pair must be entirely local. This runs for https
+    // too: skipping it once let a `localhost` pointed off-box by a hosts entry
+    // be fetched, because only the ORIGIN STRING was ever checked.
     if (!LOOPBACK_LITERALS.has(literal)) {
       throw new PanelTemplateRelayError("The panel template relay refused a non-loopback destination.", "NO_PANEL_ORIGIN");
     }
-    if (seen.has(literal)) continue;
-    seen.add(literal);
-    const pinned = new URL(url.href);
-    pinned.hostname = literal.includes(":") ? `[${literal}]` : literal;
-    urls.push(pinned);
+    if (!literals.includes(literal)) literals.push(literal);
   }
-  if (urls.length === 0) {
+  if (literals.length === 0) {
     throw new PanelTemplateRelayError("The connected panel could not fetch the workflow-template index.", "PANEL_FETCH_FAILED");
   }
-  return urls;
+  // HTTPS keeps the NAME, once the addresses are known to be local. Rewriting
+  // the host to a literal breaks certificate verification for a cert issued to
+  // `localhost`, and TLS already binds the response to the name -- a stronger
+  // listener check than pinning gives. Only cleartext needs the second
+  // resolution removed. Keeping the name and validating where it points are
+  // separate decisions; only the first is scheme-dependent.
+  if (url.protocol === "https:") return [url];
+  return literals.map((literal) => {
+    const pinned = new URL(url.href);
+    pinned.hostname = literal.includes(":") ? `[${literal}]` : literal;
+    return pinned;
+  });
 }
 
 /**
