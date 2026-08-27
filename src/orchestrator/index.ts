@@ -59,6 +59,7 @@ import {
 } from "../services/bridge-port-reclaim.js";
 import { unclassifiedOwnership, type ListenerOwnership } from "../services/listener-ownership.js";
 import { judgeHelloRetarget, canonComfyuiTargetUrl } from "../services/hello-retarget.js";
+import { probeOk } from "./probe-ok.js";
 import { startQuickTunnel } from "../services/tunnel.js";
 import { advertisedWebSocketOrigin } from "../services/advertised-origin.js";
 import { detectInstallMode } from "../services/self-update.js";
@@ -208,7 +209,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { registerAllTools } from "../tools/index.js";
 import { tryInstallRetiredNameRedirect } from "../tools/retired-redirect.js";
-import { config, isForceRemoteFlagSet, isLoopbackHost, detectLocalComfyUIPath, setComfyuiTarget, onComfyuiTargetChanged, isTargetingLocal, isTargetingLocalOrLan, isTargetingPod, getComfyUIBaseUrl, getComfyuiTargetGeneration, getLocalComfyuiUrl, rescopeLocalTargetFile, getComfyUIAuthHeaders } from "../config.js";
+import { config, isForceRemoteFlagSet, isLoopbackHost, detectLocalComfyUIPath, setComfyuiTarget, onComfyuiTargetChanged, isTargetingLocal, isTargetingLocalOrLan, isTargetingPod, getComfyUIBaseUrl, getComfyuiTargetGeneration, getLocalComfyuiUrl, rescopeLocalTargetFile } from "../config.js";
 import { normalizeInstallPathEnv } from "../utils/install-path-env.js";
 import {
   AGENT_IDENTITY_ENV,
@@ -6171,28 +6172,6 @@ export async function runPanelOrchestrator(): Promise<void> {
     const live = manager.liveKeys();
     return live.length === 1 ? live[0] : null;
   };
-  /** Boolean URL probe with a timeout — readiness checks for pending pod connects. */
-  // #2425 — a FUNCTION DECLARATION, not a const arrow. The hello-retarget path builds
-  // `probe: (u) => probeOk(u, 3_000)` ~2000 lines above this, inside an unawaited async
-  // IIFE. With a const the call landed in the temporal dead zone and threw
-  // `Cannot access 'probeOk' before initialization`, which the process-level handler
-  // swallowed as an ignored unhandled rejection — so the retarget silently did not
-  // happen, across four releases. A declaration hoists, so the order cannot regress.
-  async function probeOk(url: string, timeoutMs = 8_000): Promise<boolean> {
-    const ctl = new AbortController();
-    const t = setTimeout(() => ctl.abort(), timeoutMs);
-    try {
-      // Carry configured auth (COMFYUI_AUTH_TOKEN / custom header) — a
-      // protected pod's ComfyUI 401s otherwise and connect:true always times
-      // out (codex finding).
-      const res = await fetch(url, { signal: ctl.signal, headers: getComfyUIAuthHeaders() });
-      return res.ok;
-    } catch {
-      return false;
-    } finally {
-      clearTimeout(t);
-    }
-  }
   // Genuinely-in-flight download rows (set by pollDownloads) — read by the pod
   // idle-stop veto, SCOPED per pod via each row's stamped target (#269).
   let downloadingRows: Array<Record<string, unknown>> = [];
