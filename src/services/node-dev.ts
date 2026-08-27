@@ -1199,7 +1199,7 @@ export function applyNodePatch(
         `git apply exited 0 but every file the patch names is byte-identical to before ` +
         `it ran (${unchanged.join(", ")}), so NOTHING was applied. Reporting success here ` +
         `would have you build on an edit that is not on disk (#2422). Re-read the file ` +
-        `with node_pack (action:"read") and regenerate the patch against what it ` +
+        `with node_pack (action:"read") and rebuild the patch against what it ` +
         `actually contains — a hunk whose context has drifted is the usual cause.`,
     };
   }
