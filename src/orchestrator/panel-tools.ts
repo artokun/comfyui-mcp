@@ -6510,14 +6510,43 @@ function promotedTerminalAliasCount(
  * malformed, duplicate, or unresolved entry also makes the whole successful
  * subgraph response incomplete: an unrelated requested alias cannot use the
  * remaining entries as proof that it was ordinary. Do not ignore that evidence
- * and revive the old same-name scan into an outer write. */
+ * and revive the old same-name scan into an outer write.
+ *
+ * #2393 — that reasoning is sound for a requested alias the witness MISSES, and
+ * only for that case. A miss is read as "ordinary, write it outer", so a miss
+ * can only be trusted from an array that is whole. But when the array carries
+ * COMPLETE, error-free evidence for the requested alias itself, the write is
+ * decided by that entry alone; evidence about some OTHER alias is not evidence
+ * about this one, and vetoing on it refuses a promotion the receiver resolved.
+ *
+ * The official Qwen-Image-Edit-2511 INT8 template is the reported instance and
+ * it is structural, not transient. Subgraph node 170 carries the proxyWidgets
+ * relations ["151","prompt"] and ["149","prompt"] — two inner nodes whose inner
+ * widget is named `prompt` — while exactly one host input (`prompt`/
+ * `positive_prompt`) claims that alias. `promotedHostAliasRecords` binds the
+ * first relation onto the existing unbound record and APPENDS for the second,
+ * and `promotedTerminalWitnesses` publishes one entry per record with no
+ * de-duplication, so the array always repeats `prompt`. Node 170 also declares
+ * `lora_name`, `seed` and `control_after_generate` in proxyWidgets with no
+ * matching host input, which adds error entries in the shape where the parent's
+ * rails are not projected. Under the old whole-array rule EITHER of those
+ * vetoed `enable_turbo_mode`, whose own entry resolves cleanly — and re-reading
+ * returns the identical array, so no retry could clear it.
+ *
+ * Structural damage still fails closed globally: an array that is not an array,
+ * or an entry that is not an object or has no usable widget name, means nothing
+ * in it can be trusted to name what it is about — including the entry that
+ * appears to be the requested one. */
 function promotedTerminalEvidenceError(
   payload: Record<string, unknown>,
+  widget: string,
 ): string | null {
   if (!Object.prototype.hasOwnProperty.call(payload, "promoted_terminals")) return null;
   const entries = payload.promoted_terminals;
   if (!Array.isArray(entries)) return "the current receiver's promoted-terminal witness was unavailable";
-  const seen = new Set<string>();
+  const wanted = widget.toLowerCase();
+  // Structural pass first: a malformed array cannot be narrowed, because the
+  // requested alias may be exactly the entry that failed to parse.
   for (const entry of entries) {
     if (!entry || typeof entry !== "object" || Array.isArray(entry)) {
       return "the current receiver's promoted-terminal witness was unavailable";
@@ -6526,10 +6555,24 @@ function promotedTerminalEvidenceError(
     if (typeof witness.widget !== "string" || witness.widget.length === 0) {
       return "the current receiver's promoted-terminal witness was unavailable";
     }
-    const key = witness.widget.toLowerCase();
+  }
+  // Decide on the requested alias's OWN entries when it has any. Duplicated or
+  // errored evidence for this alias is still a hard refusal for this write.
+  const own = (entries as Array<Record<string, unknown>>).filter(
+    (entry) => (entry.widget as string).toLowerCase() === wanted,
+  );
+  if (own.length > 1) return "the promoted-terminal witness was ambiguous";
+  if (own.length === 1) {
+    return own[0].error ? "the promoted-terminal witness was incomplete or unresolved" : null;
+  }
+  // A MISS. Only a whole array can prove that absence means "ordinary widget",
+  // so the original whole-array rule stands unchanged here.
+  const seen = new Set<string>();
+  for (const entry of entries as Array<Record<string, unknown>>) {
+    const key = (entry.widget as string).toLowerCase();
     if (seen.has(key)) return "the promoted-terminal witness was ambiguous";
     seen.add(key);
-    if (witness.error) return "the promoted-terminal witness was incomplete or unresolved";
+    if (entry.error) return "the promoted-terminal witness was incomplete or unresolved";
   }
   return null;
 }
@@ -6966,7 +7009,7 @@ async function preparePromotedWidgetWrite(
       "graph_get_subgraph did not publish a verifiable workflow and viewing-scope identity",
     );
   }
-  const terminalEvidenceError = promotedTerminalEvidenceError(payload);
+  const terminalEvidenceError = promotedTerminalEvidenceError(payload, widget);
   if (terminalEvidenceError) return promotedWriteRefusal(widget, terminalEvidenceError);
   const inner = resolvePromotedWriteTarget(
     payload,

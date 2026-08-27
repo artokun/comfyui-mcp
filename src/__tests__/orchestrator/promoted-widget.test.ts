@@ -2970,3 +2970,197 @@ describe("panel_set_widget promoted write against a pre-#2314 panel build (panel
     expect(calls.filter((c) => c.cmd === "graph_set_widget")).toHaveLength(0);
   });
 });
+
+/**
+ * #2393 — the promoted-terminal witness veto was WHOLE-ARRAY.
+ *
+ * `promotedTerminalEvidenceError` refused a write when ANY entry in
+ * `promoted_terminals` repeated a widget name or carried an error, even when the
+ * alias being written had its own complete, error-free entry. The official
+ * Qwen-Image-Edit-2511 INT8 template hits that on every promoted write to
+ * subgraph node 170, and it is structural rather than transient:
+ *
+ *   - node 170's proxyWidgets carries ["151","prompt"] AND ["149","prompt"] —
+ *     two inner nodes whose inner widget is named `prompt` — while exactly one
+ *     host input (`prompt`/`positive_prompt`) claims that alias. The panel's
+ *     `promotedHostAliasRecords` binds the first relation onto the existing
+ *     unbound record and APPENDS a record for the second, and
+ *     `promotedTerminalWitnesses` publishes one entry per record with no
+ *     de-duplication. The array therefore always repeats `prompt`.
+ *   - node 170 also names `lora_name`, `seed` and `control_after_generate` in
+ *     proxyWidgets with no matching host input, which adds error entries.
+ *
+ * Neither depends on timing, so re-reading `graph_get_subgraph` returns the
+ * identical array — the write has to be decided on the requested alias's own
+ * evidence or it can never succeed.
+ *
+ * The fixtures below use `quality_prompt` as the requested alias because that is
+ * what this file's shared subgraph harness resolves; the SHAPE (one clean entry
+ * for the requested alias, damage on a different alias) is node 170's.
+ */
+describe("#2393 promoted-terminal witness is judged on the requested alias", () => {
+  const ownEntry = CURRENT_SAFE_PROMOTED_SUBGRAPH.promoted_terminals[0];
+  const withTerminals = (promoted_terminals: unknown[]) => ({
+    ...CURRENT_SAFE_PROMOTED_SUBGRAPH,
+    promoted_terminals,
+  });
+
+  it("writes when a DIFFERENT alias is duplicated (node 170's two `prompt` relations)", async () => {
+    const { isError, calls } = await setWidget(
+      { node_id: 78, widget: "quality_prompt", value: "masterpiece" },
+      {
+        firstWrite: "ok",
+        promotedTerminalWitnesses: true,
+        subgraph: withTerminals([
+          ownEntry,
+          { ...ownEntry, widget: "prompt" },
+          { ...ownEntry, widget: "prompt" },
+        ]),
+        detailById: SAFE_ANIMA_IDENTITY_BY_ID,
+      },
+    );
+
+    expect(isError).toBe(false);
+    expect(calls.filter((c) => c.cmd === "graph_set_widget").length).toBeGreaterThan(0);
+  });
+
+  it("writes when a DIFFERENT alias carries an error (node 170's `control_after_generate`)", async () => {
+    const { isError, calls } = await setWidget(
+      { node_id: 78, widget: "quality_prompt", value: "masterpiece" },
+      {
+        firstWrite: "ok",
+        promotedTerminalWitnesses: true,
+        subgraph: withTerminals([
+          ownEntry,
+          {
+            widget: "control_after_generate",
+            error:
+              "properties.proxyWidgets named a promoted relation that had no live " +
+              "node.widgets/_subgraphSlot projection",
+          },
+        ]),
+        detailById: SAFE_ANIMA_IDENTITY_BY_ID,
+      },
+    );
+
+    expect(isError).toBe(false);
+    expect(calls.filter((c) => c.cmd === "graph_set_widget").length).toBeGreaterThan(0);
+  });
+
+  it("still refuses when the REQUESTED alias is the duplicated one", async () => {
+    const { text, isError, calls } = await setWidget(
+      { node_id: 78, widget: "quality_prompt", value: "masterpiece" },
+      {
+        firstWrite: "ok",
+        promotedTerminalWitnesses: true,
+        subgraph: withTerminals([ownEntry, { ...ownEntry }]),
+        detailById: SAFE_ANIMA_IDENTITY_BY_ID,
+      },
+    );
+
+    expect(isError).toBe(true);
+    expect(text).toMatch(/witness was ambiguous/);
+    expect(calls.filter((c) => c.cmd === "graph_set_widget")).toHaveLength(0);
+  });
+
+  it("still refuses when the REQUESTED alias's own entry carries the error", async () => {
+    const { text, isError, calls } = await setWidget(
+      { node_id: 78, widget: "quality_prompt", value: "masterpiece" },
+      {
+        firstWrite: "ok",
+        promotedTerminalWitnesses: true,
+        subgraph: withTerminals([
+          { widget: "quality_prompt", error: "the immediate promotion was unresolved" },
+        ]),
+        detailById: SAFE_ANIMA_IDENTITY_BY_ID,
+      },
+    );
+
+    expect(isError).toBe(true);
+    expect(text).toMatch(/witness was incomplete or unresolved/);
+    expect(calls.filter((c) => c.cmd === "graph_set_widget")).toHaveLength(0);
+  });
+
+  it("still refuses a MISS against a damaged array — the P0 the whole-array rule protected", async () => {
+    // `ordinary` is absent from the witness. Absence is read as "not promoted,
+    // write it outer", and only a WHOLE array can prove that absence is real —
+    // so an unrelated error must still veto here, exactly as before. This is the
+    // control for the two allow-cases above: same damage, different question.
+    const { text, isError, calls } = await setWidget(
+      { node_id: 78, widget: "ordinary", value: "new" },
+      {
+        firstWrite: "ok",
+        promotedTerminalWitnesses: true,
+        subgraph: withTerminals([
+          ownEntry,
+          { widget: "control_after_generate", error: "no live projection" },
+        ]),
+      },
+    );
+
+    expect(isError).toBe(true);
+    expect(text).toMatch(/witness was incomplete or unresolved/);
+    expect(calls.filter((c) => c.cmd === "graph_set_widget")).toHaveLength(0);
+  });
+
+  it("still refuses a MISS against a duplicated array", async () => {
+    const { text, isError, calls } = await setWidget(
+      { node_id: 78, widget: "ordinary", value: "new" },
+      {
+        firstWrite: "ok",
+        promotedTerminalWitnesses: true,
+        subgraph: withTerminals([
+          ownEntry,
+          { ...ownEntry, widget: "prompt" },
+          { ...ownEntry, widget: "prompt" },
+        ]),
+      },
+    );
+
+    expect(isError).toBe(true);
+    expect(text).toMatch(/witness was ambiguous/);
+    expect(calls.filter((c) => c.cmd === "graph_set_widget")).toHaveLength(0);
+  });
+
+  // Structural damage must not become writable just because the requested alias
+  // reads clean. It does not — but the refusal comes from FURTHER UP than the
+  // narrowed check: `parsePromotedTerminalEntries` returns null for a non-record
+  // entry or an empty widget name, so `validatePromotedSubgraphEnvelope` rejects
+  // the whole envelope before `promotedTerminalEvidenceError` is ever reached.
+  // These two pin the OBSERVED refusal rather than the one the narrowed function
+  // would have produced, so they stay true if that ordering is ever revisited.
+  // (The structural pass inside `promotedTerminalEvidenceError` is retained as
+  // defence in depth for direct callers; on this path it is unreachable, and
+  // these tests deliberately do not claim otherwise.)
+  it("refuses on STRUCTURAL damage even though the requested alias looks clean", async () => {
+    const { text, isError, calls } = await setWidget(
+      { node_id: 78, widget: "quality_prompt", value: "masterpiece" },
+      {
+        firstWrite: "ok",
+        promotedTerminalWitnesses: true,
+        subgraph: withTerminals([ownEntry, "not-an-object"]),
+        detailById: SAFE_ANIMA_IDENTITY_BY_ID,
+      },
+    );
+
+    expect(isError).toBe(true);
+    expect(text).toMatch(/malformed, stale, or incomplete ownership envelope/);
+    expect(calls.filter((c) => c.cmd === "graph_set_widget")).toHaveLength(0);
+  });
+
+  it("refuses when an entry has no usable widget name, requested alias notwithstanding", async () => {
+    const { text, isError, calls } = await setWidget(
+      { node_id: 78, widget: "quality_prompt", value: "masterpiece" },
+      {
+        firstWrite: "ok",
+        promotedTerminalWitnesses: true,
+        subgraph: withTerminals([ownEntry, { widget: "" }]),
+        detailById: SAFE_ANIMA_IDENTITY_BY_ID,
+      },
+    );
+
+    expect(isError).toBe(true);
+    expect(text).toMatch(/malformed, stale, or incomplete ownership envelope/);
+    expect(calls.filter((c) => c.cmd === "graph_set_widget")).toHaveLength(0);
+  });
+});
