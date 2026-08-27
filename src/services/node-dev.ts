@@ -84,6 +84,23 @@ export const READ_MAX_CHARS = 24_000;
 export const LONG_LINE_CHUNK = 1_000;
 /** Per-match line cap for search results. */
 export const SEARCH_LINE_MAX = 600;
+/**
+ * #2418 — what ripgrep is allowed to PRINT for one line, before we ever see it.
+ *
+ * `--max-count` is per FILE, so a single minified one-line workflow JSON under
+ * custom_nodes can put its whole self on stdout: measured 33 MB of output from one
+ * 42 MB file, which overflows spawnSync's 32 MB maxBuffer and fails the whole search
+ * with ENOBUFS. SEARCH_LINE_MAX cannot help — it is applied by clipMatchLine AFTER
+ * spawnSync has already returned, which is far too late.
+ *
+ * Set to SEARCH_LINE_MAX so ripgrep prints a preview no larger than what we display.
+ * With `--max-columns-preview` it emits that many columns plus its own
+ * ` [... omitted end of long line]` marker, so the field still arrives LONGER than
+ * SEARCH_LINE_MAX and clipMatchLine still marks it — the #809 disclosure survives.
+ */
+export const SEARCH_MAX_COLUMNS = SEARCH_LINE_MAX;
+/** ripgrep's own elision suffix under `--max-columns-preview` (#2418). */
+export const RIPGREP_LONG_LINE_MARKER = " [... omitted end of long line]";
 /** Bound on any subprocess (git / patch) stdout+stderr surfaced to the caller. */
 export const CMD_OUTPUT_MAX = 12_000;
 /**
@@ -750,8 +767,25 @@ export interface SearchResult {
 }
 
 /** #809: a hard 600-char slice with no marker read as if the line simply ended there.
- *  Mark it, and say the cap is fixed so nobody retries a parameter that can't move it. */
+ *  Mark it, and say the cap is fixed so nobody retries a parameter that can't move it.
+ *
+ *  #2418 — when ripgrep already truncated the line (`--max-columns`), the text we hold
+ *  is a PREVIEW, not the line. Its length says nothing about the real one, so the
+ *  `+N chars` count would be a fabricated number: on the reported 42 MB line it would
+ *  have claimed roughly +31. State that the line is longer than the cap, which is all
+ *  that was actually observed. Detected from ripgrep's own elision suffix rather than
+ *  from a flag threaded through the call, so a preview reaching this from any path is
+ *  described correctly. */
 export function clipMatchLine(text: string): string {
+  const sourceTruncated = text.endsWith(RIPGREP_LONG_LINE_MARKER);
+  if (sourceTruncated) {
+    const preview = text.slice(0, text.length - RIPGREP_LONG_LINE_MARKER.length);
+    const note =
+      `…(line continues past the fixed ${SEARCH_LINE_MAX}-char per-line cap; its full ` +
+      `length was not measured — read more of it with node_pack (action:"read"), itself ` +
+      `bounded by its own max_chars, max ${READ_MAX_CHARS})`;
+    return preview.slice(0, Math.max(0, SEARCH_LINE_MAX - note.length)) + note;
+  }
   if (text.length <= SEARCH_LINE_MAX) return text;
   // The marker is spent from the SAME cap it describes (codex gate), so reserve its
   // worst-case size — the emitted field still honours SEARCH_LINE_MAX.
@@ -831,6 +865,13 @@ function searchWithRipgrep(
     // same +1.
     "--max-count",
     String(cap + 1),
+    // #2418 — bound each printed line AT THE SOURCE. Without this a minified
+    // one-line JSON overflows spawnSync's maxBuffer and the whole search dies
+    // ENOBUFS before a single match is returned. `--max-columns-preview` keeps a
+    // usable prefix instead of ripgrep's bare `[Omitted long matching line]`.
+    "--max-columns",
+    String(SEARCH_MAX_COLUMNS),
+    "--max-columns-preview",
   ];
   if (!options.caseSensitive) args.push("-i");
   if (options.glob) args.push("-g", options.glob);

@@ -53,6 +53,7 @@ import {
   // #809
   MIN_OUTPUT_CHARS,
   SEARCH_LINE_MAX,
+  SEARCH_MAX_COLUMNS,
   SEARCH_MAX_RESULTS,
   LIST_MAX_ENTRIES,
   defaultDeps,
@@ -332,6 +333,29 @@ describe("searchNodePacks", () => {
     });
     searchNodePacks({ query: "x", maxResults: 5 }, deps);
     expect(seen[0][seen[0].indexOf("--max-count") + 1]).toBe("6");
+  });
+
+  // #2418 — `--max-count` is per FILE, so ONE minified one-line workflow JSON can put
+  // its whole self on stdout. Measured against real ripgrep 15.0.0: a 42 MB single-line
+  // file produced 33 MB of output, past spawnSync's 32 MB maxBuffer, and the search died
+  // ENOBUFS before returning a single match. SEARCH_LINE_MAX cannot help — clipMatchLine
+  // runs after spawnSync has already returned, so the bound has to be asked of ripgrep.
+  it("bounds each printed line AT THE SOURCE so one minified file cannot ENOBUFS it", () => {
+    const seen: string[][] = [];
+    const { deps } = makeDeps({
+      hasRipgrep: () => true,
+      runRipgrep: (args) => {
+        seen.push(args);
+        return { status: 0, stdout: "", stderr: "" };
+      },
+    });
+    searchNodePacks({ query: "x" }, deps);
+    expect(seen[0]).toContain("--max-columns");
+    expect(seen[0][seen[0].indexOf("--max-columns") + 1]).toBe(String(SEARCH_MAX_COLUMNS));
+    // PREVIEW, not bare --max-columns: bare yields "[Omitted long matching line]" (28
+    // chars), which is UNDER SEARCH_LINE_MAX, so clipMatchLine would skip its marker and
+    // the caller would get neither the content nor any disclosure that it was cut.
+    expect(seen[0]).toContain("--max-columns-preview");
   });
 
   it("does NOT claim truncation when the match count is exactly max_results", () => {
