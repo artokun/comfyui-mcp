@@ -39,16 +39,22 @@ afterEach(async () => {
   for (const server of servers.splice(0)) await server.close();
 });
 
-async function driveLocalhostRelay(): Promise<{ readonly panelRequests: number }> {
+async function driveLocalhostRelay(
+  options: { scheme?: string; handler?: (res: import("node:http").ServerResponse) => void } = {},
+): Promise<{ readonly panelRequests: number }> {
   let panelRequests = 0;
   const panel = createServer((_req, res) => {
     panelRequests += 1;
+    if (options.handler) {
+      options.handler(res);
+      return;
+    }
     res.writeHead(200, { "content-type": "application/json" });
     res.end(JSON.stringify({ "panel-pack": [{ name: "served" }] }));
   });
   const port = await listen(panel);
   servers.push({ close: () => new Promise<void>((resolve) => { panel.close(() => resolve()); }) });
-  const origin = `http://localhost:${port}`;
+  const origin = `${options.scheme ?? "http"}://localhost:${port}`;
   const target = `${origin}/comfyapi`;
   const relay = await startPanelTemplateRelayServer({
     bridge: { canReach: () => true },
@@ -66,6 +72,19 @@ async function driveLocalhostRelay(): Promise<{ readonly panelRequests: number }
 }
 
 describe("panel template relay pins an ambiguous name to loopback literals (#2382)", () => {
+  it("does NOT pin an https origin, so a cert issued to the name still verifies", async () => {
+    // Rewriting https://localhost to https://127.0.0.1 would fail certificate
+    // verification for an ordinary localhost cert. HTTPS therefore keeps the
+    // name — TLS is already the listener check. Proven by the ERROR CODE: an
+    // off-loopback resolution refuses an http origin outright (NO_PANEL_ORIGIN,
+    // below), but an https origin never reaches that guard and instead fails at
+    // the transport, because nothing is speaking TLS on the test server.
+    dnsState.addresses = [{ address: "203.0.113.7", family: 4 }];
+    await driveLocalhostRelay({ scheme: "https" });
+    await expect(requestPanelTemplateIndex()).rejects.toMatchObject({ code: "PANEL_FETCH_FAILED" });
+  });
+
+
   it("refuses a localhost that resolves off-loopback, without issuing the fetch", async () => {
     dnsState.addresses = [{ address: "203.0.113.7", family: 4 }];
     const state = await driveLocalhostRelay();

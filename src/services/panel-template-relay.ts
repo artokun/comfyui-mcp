@@ -515,6 +515,12 @@ function safePanelTemplateUrl(raw: string | undefined, allowedOrigin: string | u
 async function pinnedLoopbackUrls(url: URL): Promise<URL[]> {
   const host = url.hostname.toLowerCase().replace(/^\[|\]$/g, "");
   if (LOOPBACK_LITERALS.has(host)) return [url];
+  // HTTPS keeps the NAME, deliberately. Rewriting the host to a literal breaks
+  // certificate verification for a cert issued to `localhost`, and there is
+  // nothing to gain by it: TLS already binds the response to the name, which is
+  // a stronger listener check than pinning can give us. Only cleartext needs
+  // the second resolution removed.
+  if (url.protocol === "https:") return [url];
   if (!AMBIGUOUS_LOOPBACK_NAMES.has(host)) {
     throw new PanelTemplateRelayError("The panel template relay refused a non-loopback destination.", "NO_PANEL_ORIGIN");
   }
@@ -563,28 +569,67 @@ async function fetchPinnedPanelIndex(url: URL, deadlineAt: number): Promise<stri
   const settled = await Promise.all(
     candidates.map(async (candidate) => {
       try {
-        return { ok: true as const, body: await fetchPanelIndex(candidate, deadlineAt) };
+        return { state: "ok" as const, body: await fetchPanelIndex(candidate, deadlineAt) };
       } catch (error) {
-        return { ok: false as const, error };
+        // A REFUSED CONNECTION IS THE ONLY SAFE THING TO IGNORE. It proves
+        // nothing is listening on that address, so it cannot be the panel. Any
+        // other failure means something IS there and merely answered badly --
+        // possibly the real panel returning 503 -- and preferring whichever
+        // address happened to succeed would then serve the OTHER listener's
+        // index, which is the defect this function exists to prevent.
+        return isConnectionRefused(error)
+          ? { state: "absent" as const }
+          : { state: "failed" as const, error };
       }
     }),
   );
-  const answered = settled.filter((r): r is { ok: true; body: string } => r.ok);
-  // Nothing answered: surface the first real failure rather than inventing one.
-  if (answered.length === 0) {
-    const firstFailure = settled.find((r) => !r.ok);
-    throw firstFailure && !firstFailure.ok
-      ? firstFailure.error
-      : new PanelTemplateRelayError("The connected panel could not fetch the workflow-template index.", "PANEL_FETCH_FAILED");
+  const present = settled.filter((r) => r.state !== "absent");
+  if (present.length === 0) {
+    throw new PanelTemplateRelayError("The connected panel could not fetch the workflow-template index.", "PANEL_FETCH_FAILED");
   }
-  const first = answered[0].body;
-  if (answered.some((r) => r.body !== first)) {
+  // Exactly one listener exists, so there is nothing for it to disagree with:
+  // report its outcome verbatim, success or failure.
+  if (present.length === 1) {
+    const only = present[0];
+    if (only.state === "ok") return only.body;
+    throw only.error;
+  }
+  // More than one listener answered the panel's address. Every one of them must
+  // have produced the SAME index, or we cannot say what the panel would see.
+  const bodies: string[] = [];
+  for (const result of present) {
+    if (result.state !== "ok") {
+      throw new PanelTemplateRelayError(
+        "Another loopback listener answered the panel's address and could not be read.",
+        "AMBIGUOUS_PANEL_LISTENER",
+      );
+    }
+    bodies.push(result.body);
+  }
+  if (bodies.some((body) => body !== bodies[0])) {
     throw new PanelTemplateRelayError(
       "Two different loopback listeners answered the panel's address with different template indexes.",
       "AMBIGUOUS_PANEL_LISTENER",
     );
   }
-  return first;
+  return bodies[0];
+}
+
+/** True only for a refused CONNECTION, i.e. nothing is listening on that address. */
+function isConnectionRefused(error: unknown): boolean {
+  const seen = new Set<unknown>();
+  let current: unknown = error;
+  while (current && typeof current === "object" && !seen.has(current)) {
+    seen.add(current);
+    const code = (current as { code?: unknown }).code;
+    // ECONNREFUSED is the loopback case. The rest cover a resolvable address
+    // with no route -- equally "nothing is listening here".
+    if (code === "ECONNREFUSED" || code === "EHOSTUNREACH" || code === "ENETUNREACH" || code === "EADDRNOTAVAIL") return true;
+    const aggregate = (current as { errors?: unknown }).errors;
+    if (Array.isArray(aggregate) && aggregate.some((inner) => isConnectionRefused(inner))) return true;
+    current = (current as { cause?: unknown }).cause;
+  }
+  return false;
 }
 
 async function fetchPanelIndex(url: URL, deadlineAt: number): Promise<string> {
@@ -597,8 +642,12 @@ async function fetchPanelIndex(url: URL, deadlineAt: number): Promise<string> {
       redirect: "manual",
       signal: AbortSignal.timeout(remaining),
     });
-  } catch {
-    throw new PanelTemplateRelayError("The connected panel could not fetch the workflow-template index.", "PANEL_FETCH_FAILED");
+  } catch (error) {
+    const failure = new PanelTemplateRelayError("The connected panel could not fetch the workflow-template index.", "PANEL_FETCH_FAILED");
+    // Preserve the connect-level cause so a multi-address fetch can tell "no
+    // listener" from "a listener that failed" -- see fetchPinnedPanelIndex.
+    (failure as { cause?: unknown }).cause = error;
+    throw failure;
   }
   if (response.url) {
     const finalUrl = safePanelTemplateUrl(response.url, url.origin);

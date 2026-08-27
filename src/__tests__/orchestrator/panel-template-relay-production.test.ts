@@ -316,4 +316,58 @@ describe("orchestrator panel template relay wiring (#2196)", () => {
     expect(hits.length).toBeGreaterThan(0);
     for (const host of hits) expect(host).not.toContain("localhost");
   });
+  // #2382 — a listener that answers BADLY is still a listener. The pinned fetch
+  // must not quietly prefer whichever address happened to return valid JSON:
+  // the erroring one could be the real panel, and then we would be serving the
+  // other process's index — the exact bug pinning exists to prevent.
+  it("refuses when one loopback listener 503s and another returns a valid index", async () => {
+    const v4 = createServer((_req, res) => {
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({ "v4-pack": [{ name: "from-127" }] }));
+    });
+    await new Promise<void>((resolve, reject) => {
+      v4.once("error", reject);
+      v4.listen({ host: "127.0.0.1", port: 0 }, () => resolve());
+    });
+    const addr = v4.address();
+    if (!addr || typeof addr === "string") throw new Error("no bind");
+    const port = addr.port;
+    servers.push({ close: () => closeServer(v4) });
+
+    const v6 = createServer((_req, res) => {
+      res.writeHead(503);
+      res.end("unavailable");
+    });
+    let v6Bound = true;
+    await new Promise<void>((resolve) => {
+      v6.once("error", () => { v6Bound = false; resolve(); });
+      v6.listen({ host: "::1", port, ipv6Only: true }, () => resolve());
+    });
+    if (!v6Bound) return; // No IPv6 loopback here; nothing to disagree with.
+    servers.push({ close: () => closeServer(v6) });
+
+    const target = `http://localhost:${port}/comfyapi`;
+    const observedOrigin = `http://localhost:${port}`;
+    const bridge = {
+      canReach: () => true,
+      resolveFailure: () => undefined,
+      resolveSharedTabId: () => "tab-1",
+      tabServerOrigin: () => observedOrigin,
+    };
+    const relay = await startPanelTemplateRelayServer({
+      bridge,
+      ...createPanelTemplateRelayWiring({
+        bridge,
+        currentTarget: () => target,
+        currentTargetGeneration: () => 0,
+        secrets: new Map([[SECRET, "orchestrator::codex"]]),
+      }),
+    });
+    servers.push(relay);
+    process.env.COMFYUI_MCP_RELAY_SECRET = SECRET;
+    process.env.COMFYUI_MCP_TEMPLATE_RELAY_URL = relay.endpointUrl;
+
+    // NOT the v4 index, even though v4 answered perfectly well.
+    await expect(requestPanelTemplateIndex()).rejects.toMatchObject({ code: "AMBIGUOUS_PANEL_LISTENER" });
+  });
 });
