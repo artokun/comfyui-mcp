@@ -28,6 +28,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import {
   auditReleaseSection,
+  main,
   parseCommitSubjects,
   parseReleaseSections,
 } from "../../scripts/check-changelog.mjs";
@@ -44,6 +45,13 @@ function commitOf(sha: string, subject: string) {
 
 function section(...body: string[]) {
   return ["# Changelog", "", "## Unreleased", "", "## [1.1.0] - 2026-08-26", "", ...body, ""].join("\n");
+}
+
+function gitFailure(status: number, stderr: string) {
+  const error = new Error(stderr) as Error & { status: number; stderr: string };
+  error.status = status;
+  error.stderr = stderr;
+  return error;
 }
 
 describe("#2407 half B: everything REACHABLE must be CITED", () => {
@@ -607,6 +615,20 @@ describe("#2407 end to end: the guard blocks the cut that shipped 0.52.138", () 
       env: { ...process.env, COMFYUI_MCP_CHANGELOG_ROOT: dir },
     });
 
+  const runCli = (args: string[], fail: (gitArgs: string[]) => boolean) => {
+    const calls: string[][] = [];
+    const result = main(["node", GUARD, ...args], {
+      root: dir,
+      changelog: join(dir, "CHANGELOG.md"),
+      runGit: (...gitArgs: string[]) => {
+        calls.push(gitArgs);
+        if (fail(gitArgs)) throw gitFailure(128, "fatal: injected git failure");
+        return git(...gitArgs);
+      },
+    });
+    return { result, calls };
+  };
+
   beforeEach(() => {
     dir = mkdtempSync(join(tmpdir(), "clguard-"));
     git("init", "-q", "-b", "main");
@@ -798,6 +820,46 @@ describe("#2407 end to end: the guard blocks the cut that shipped 0.52.138", () 
     }
   });
 
+  it("FAILS closed when the shallow-history probe fails", () => {
+    const { result, calls } = runCli([], (args) =>
+      args.length === 2 && args[0] === "rev-parse" && args[1] === "--is-shallow-repository",
+    );
+
+    expect(result).toBe(1);
+    expect(calls.some((args) => args[0] === "describe")).toBe(false);
+  });
+
+  it("FAILS closed when the target-tag lookup fails", () => {
+    const { result, calls } = runCli([], (args) =>
+      args.length === 3 &&
+      args[0] === "rev-parse" &&
+      args[1] === "--verify" &&
+      args[2] === "v1.0.0^{commit}",
+    );
+
+    expect(result).toBe(1);
+    expect(calls.some((args) => args[0] === "log")).toBe(false);
+  });
+
+  it("FAILS closed on an unexpected release-tag describe failure", () => {
+    commit("fix: a later change (#901)");
+    const { result, calls } = runCli(["1.1.0", "--ref", "HEAD"], (args) => args[0] === "describe");
+
+    expect(result).toBe(1);
+    expect(calls.some((args) => args[0] === "tag")).toBe(false);
+  });
+
+  it("FAILS closed when the release-range git log fails", () => {
+    commit("fix: a later change (#901)");
+    const { result, calls } = runCli(
+      ["1.1.0", "--ref", "HEAD"],
+      (args) => args[0] === "log" && args[1] === "v1.0.0..HEAD",
+    );
+
+    expect(result).toBe(1);
+    expect(calls.some((args) => args[0] === "describe")).toBe(true);
+  });
+
   it("FAILS a release with no section at all, instead of auditing its predecessor", () => {
     // Review round 4. Defaulting to the newest SECTION meant a cut that wrote no
     // notes was audited as the previous version — and passed, because the previous
@@ -829,7 +891,7 @@ describe("#2407 end to end: the guard blocks the cut that shipped 0.52.138", () 
     expect(existsSync(join(dir, ".git"))).toBe(true);
     const result = runGuard();
     expect(result.status).toBe(1);
-    expect(result.stderr).toContain("git failed inside a repository");
+    expect(result.stderr).toContain("target tag v1.0.0 lookup failed");
     expect(result.stdout).not.toContain("structurally sound");
   });
 

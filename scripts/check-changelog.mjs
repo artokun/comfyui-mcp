@@ -64,12 +64,13 @@ const ROOT = resolve(
 );
 const CHANGELOG = join(ROOT, "CHANGELOG.md");
 
-const git = (...gitArgs) =>
-  execFileSync("git", ["-C", ROOT, ...gitArgs], {
+const gitAt = (root, ...gitArgs) =>
+  execFileSync("git", ["-C", root, ...gitArgs], {
     encoding: "utf8",
     maxBuffer: 64 * 1024 * 1024,
     stdio: ["ignore", "pipe", "pipe"],
   }).trim();
+const git = (...gitArgs) => gitAt(ROOT, ...gitArgs);
 
 // ── parsing ──────────────────────────────────────────────────────────────────
 
@@ -366,12 +367,60 @@ export const checkChangelog = auditReleaseSection;
 
 // ── CLI ──────────────────────────────────────────────────────────────────────
 
-function readCommits(ref) {
-  const commit = git("rev-parse", "--verify", `${ref}^{commit}`);
-  return parseCommitSubjects(git("log", "--format=%H%x1f%s%x1e", commit));
+function readCommits(ref, runGit = git) {
+  const commit = runGit("rev-parse", "--verify", ref + "^{commit}");
+  return parseCommitSubjects(runGit("log", "--format=%H%x1f%s%x1e", commit));
 }
 
-export function main(argv) {
+function gitErrorMessage(error) {
+  const detail = error?.stderr || error?.message || error;
+  return String(detail).trim().split(/\r?\n/, 1)[0];
+}
+
+function classifiedGitError(phase, error) {
+  const classified = new Error(phase + ": " + gitErrorMessage(error), { cause: error });
+  classified.phase = phase;
+  return classified;
+}
+
+function isMissingPreviousReleaseTag(error) {
+  return (
+    error?.status === 128 &&
+    /No names found, cannot describe anything|No tags can describe/i.test(gitErrorMessage(error))
+  );
+}
+
+function resolveTargetRef({ version, explicitRef = null, runGit = git }) {
+  if (explicitRef) return explicitRef;
+
+  const tag = "v" + version;
+  try {
+    runGit("show-ref", "--verify", "--quiet", "refs/tags/" + tag);
+  } catch (error) {
+    if (error?.status === 1) return "HEAD";
+    throw classifiedGitError("target tag " + tag + " lookup failed", error);
+  }
+
+  try {
+    runGit("rev-parse", "--verify", tag + "^{commit}");
+  } catch (error) {
+    throw classifiedGitError("target tag " + tag + " lookup failed", error);
+  }
+  return tag;
+}
+
+function probeShallowRepository({ runGit = git } = {}) {
+  try {
+    return {
+      status: "ok",
+      shallow: runGit("rev-parse", "--is-shallow-repository") === "true",
+    };
+  } catch (error) {
+    return { status: "error", error: classifiedGitError("git shallow-history probe failed", error) };
+  }
+}
+
+export function main(argv, { runGit = git, root = ROOT, changelog = CHANGELOG } = {}) {
   const args = argv.slice(2);
   const refIndex = args.indexOf("--ref");
   const refValueIndex = refIndex >= 0 ? refIndex + 1 : -1;
@@ -393,8 +442,8 @@ export function main(argv) {
   let markdown;
   if (explicitRef) {
     try {
-      git("rev-parse", "--verify", `${explicitRef}^{commit}`);
-      markdown = git("show", `${explicitRef}:CHANGELOG.md`);
+      runGit("rev-parse", "--verify", `${explicitRef}^{commit}`);
+      markdown = runGit("show", `${explicitRef}:CHANGELOG.md`);
     } catch (error) {
       console.error(
         `changelog: could not read CHANGELOG.md at ${explicitRef}: ${String(error.message).split("\n")[0]}`,
@@ -402,7 +451,7 @@ export function main(argv) {
       return 1;
     }
   } else {
-    markdown = readFileSync(CHANGELOG, "utf8");
+    markdown = readFileSync(changelog, "utf8");
   }
 
   let version;
@@ -428,7 +477,7 @@ export function main(argv) {
     let fromPackage = null;
     if (!fromRef) {
       try {
-        fromPackage = JSON.parse(readFileSync(join(ROOT, "package.json"), "utf8")).version;
+        fromPackage = JSON.parse(readFileSync(join(root, "package.json"), "utf8")).version;
       } catch {
         fromPackage = null;
       }
@@ -442,19 +491,6 @@ export function main(argv) {
   if (!version) {
     console.error("usage: node scripts/check-changelog.mjs [version] [--ref <git-ref>]");
     return 2;
-  }
-
-  // The tag when it exists; HEAD while the cut is still in flight, since both
-  // `npm version` and the release PR run before the tag is pushed.
-  let targetRef = explicitRef;
-  if (!targetRef) {
-    const tag = `v${version}`;
-    try {
-      git("rev-parse", "--verify", `${tag}^{commit}`);
-      targetRef = tag;
-    } catch {
-      targetRef = "HEAD";
-    }
   }
 
   let commits = [];
@@ -475,16 +511,34 @@ export function main(argv) {
   // even though the checkout plainly is one. `.git` is a directory in a normal
   // clone and a FILE in a git worktree; existsSync answers both.
   const repositoryPresent =
-    existsSync(join(ROOT, ".git")) ||
+    existsSync(join(root, ".git")) ||
     (() => {
       try {
-        return git("rev-parse", "--is-inside-work-tree") === "true";
+        return runGit("rev-parse", "--is-inside-work-tree") === "true";
       } catch {
         return false;
       }
     })();
+
+  // Only a proven missing target tag may use HEAD. A failed lookup means the
+  // target commit was not reliably identified and must fail closed.
+  let targetRef = explicitRef;
+  if (!targetRef && repositoryPresent) {
+    try {
+      targetRef = resolveTargetRef({ version, runGit });
+    } catch (error) {
+      console.error(
+        "changelog: " + error.message + ". Refusing to report a pass on a check " +
+          "that could not identify its target commit.",
+      );
+      return 1;
+    }
+  } else if (!targetRef) {
+    targetRef = "HEAD";
+  }
+
   try {
-    commits = readCommits(targetRef);
+    commits = readCommits(targetRef, runGit);
   } catch (error) {
     if (repositoryPresent) {
       console.error(
@@ -503,13 +557,19 @@ export function main(argv) {
   }
 
   // A shallow clone cannot answer "what shipped since the last release". It can
-  // only answer it WRONG, by reporting every PR as missing. Skip, and say so.
-  let shallow = false;
-  try {
-    shallow = git("rev-parse", "--is-shallow-repository") === "true";
-  } catch {
-    shallow = false;
+  // only answer it WRONG, by reporting every PR as missing. Probe failure is not
+  // evidence of a full clone, so it fails closed instead of claiming verification.
+  const shallowResult = repositoryPresent
+    ? probeShallowRepository({ runGit })
+    : { status: "ok", shallow: false };
+  if (shallowResult.status === "error") {
+    console.error(
+      "changelog: " + shallowResult.error.message + ". Refusing to report a pass on a " +
+        "history check that could not run.",
+    );
+    return 1;
   }
+  const shallow = shallowResult.shallow;
   // A truncated history cannot answer EITHER question — not just coverage. Both
   // ci.yml and release.yml check out at fetch-depth: 0 precisely so this branch is
   // never taken where it matters; a developer's shallow clone gets the honest
@@ -541,8 +601,15 @@ export function main(argv) {
       // non-release one (`backup/570-prerebase`). Selecting a stray tag as the
       // previous release narrows the range, and everything before it then passes
       // uncited — a silent gap, which is the failure this whole guard exists for.
-      previousRef = git("describe", "--tags", "--abbrev=0", "--match", "v[0-9]*", `${targetRef}^`);
-    } catch {
+      previousRef = runGit("describe", "--tags", "--abbrev=0", "--match", "v[0-9]*", `${targetRef}^`);
+    } catch (error) {
+      if (!isMissingPreviousReleaseTag(error)) {
+        console.error(
+          "changelog: " + classifiedGitError("git describe failed", error).message +
+            ". Refusing to report a pass on a coverage check that could not run.",
+        );
+        return 1;
+      }
       // `describe` fails for two very different reasons, and the round-2 fix to the
       // history read left this sibling exit behind: no tag is REACHABLE (the first
       // release — legitimate, skip), or the tag refs cannot be read at all (broken —
@@ -550,7 +617,7 @@ export function main(argv) {
       // look). Listing tags separates them: it succeeds in the first case and throws
       // in the second.
       try {
-        git("tag", "--list");
+        runGit("tag", "--list");
       } catch (error) {
         console.error(
           `changelog: git could not read tags (${String(error.message).split("\n")[0]}). ` +
@@ -572,7 +639,7 @@ export function main(argv) {
     if (previousRef) {
       try {
         rangeCommits = parseCommitSubjects(
-          git("log", `${previousRef}..${targetRef}`, "--format=%H%x1f%s%x1e"),
+          runGit("log", `${previousRef}..${targetRef}`, "--format=%H%x1f%s%x1e"),
         );
       } catch (error) {
         console.error(
@@ -595,7 +662,7 @@ export function main(argv) {
     historyComplete,
     isAncestor: (sha, ref) => {
       try {
-        git("merge-base", "--is-ancestor", sha, ref);
+        runGit("merge-base", "--is-ancestor", sha, ref);
         return true;
       } catch {
         return false;
