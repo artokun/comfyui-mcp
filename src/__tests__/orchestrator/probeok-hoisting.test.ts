@@ -10,7 +10,7 @@ const SRC = readFileSync(
 /**
  * #2425 — `probeOk` was a `const` arrow declared ~2000 lines BELOW the hello-retarget
  * path that calls it, in the same function scope. A hello arriving while
- * runPanelOrchestrator was still executing between the two reached the call first and
+ * the panel orchestrator entry function was still executing between the two reached the call first and
  * threw "Cannot access probeOk before initialization". The process-level handler
  * swallowed it as an ignored unhandled rejection, so the retarget silently did not
  * happen — it survived four releases that way.
