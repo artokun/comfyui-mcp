@@ -6,12 +6,20 @@ All notable changes to this project are documented here. This project adheres to
 
 ## Unreleased
 
+## [0.52.142] - 2026-08-27
+
 ### MCP
 
 #### Fixed
 - compact-mode `list_tools` / `panel_list_tools` enumeration is not a catalog hunt (#2429)
 - Save-As re-points session routing so panel_set_todo and panel_canvas follow the dest tab (#2419)
 - #971 legacy rebind recovers a workflows/ path, and a later canvas move drops the proof (#2415)
+- bound panel_search_nodes at MCP route (#2417)
+- a deferral request that does not qualify says which requirement it missed (#2434)
+
+#### Changed
+- panel_list_nodes says it lists PACKS, and names the tool that finds a node class (#2443)
+
 
 ## [0.52.141] - 2026-08-27
 
