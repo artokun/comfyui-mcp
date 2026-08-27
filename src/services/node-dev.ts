@@ -1127,6 +1127,23 @@ export function applyNodePatch(
     }
   }
 
+  // #2422 — what the touched files hold BEFORE the apply. `git apply`'s exit code is
+  // the ONLY thing this used to report, and a 0 from it was taken to mean the content
+  // changed. The report is two one-line hunks that came back {success:true,
+  // stage:"apply"} while an immediate readback still returned the original lines.
+  //
+  // Compared by CONTENT rather than by re-running the patch in reverse: `git apply
+  // --check -R` looks like the natural verifier and is wrong here, because
+  // `apply.whitespace=fix` (a git CONFIG, so ambient and per-machine) rewrites the
+  // added line, after which the reverse check fails on a patch that legitimately
+  // landed. Measured both ways before choosing. A byte comparison cannot be fooled by
+  // that: whitespace-fixed content still differs from what was there before.
+  const before = new Map<string, string | null | undefined>();
+  for (const p of touched) {
+    const { abs } = resolveInJail(p, deps, resolvedBase);
+    before.set(p, readIfPresent(abs, deps));
+  }
+
   const input = patch.endsWith("\n") ? patch : patch + "\n";
 
   // Phase 2a: git apply --check (dry run).
@@ -1151,13 +1168,56 @@ export function applyNodePatch(
     timeoutMs: GIT_TIMEOUT_MS,
     input,
   });
-  return {
-    success: apply.status === 0,
-    stage: "apply",
-    touched,
-    stdout: boundText(apply.stdout, CMD_OUTPUT_MAX, patchBoundNotice).text,
-    stderr: boundText(apply.stderr, CMD_OUTPUT_MAX, patchBoundNotice).text,
-  };
+  const applyStdout = boundText(apply.stdout, CMD_OUTPUT_MAX, patchBoundNotice).text;
+  const applyStderr = boundText(apply.stderr, CMD_OUTPUT_MAX, patchBoundNotice).text;
+  if (apply.status !== 0) {
+    return { success: false, stage: "apply", touched, stdout: applyStdout, stderr: applyStderr };
+  }
+
+  // #2422 — a 0 exit is not evidence the file moved. Say what was OBSERVED rather than
+  // what git returned: if every touched file is byte-identical to its pre-apply state,
+  // nothing was applied, and reporting success sends the caller on to build on an edit
+  // that is not there. Only an ENTIRELY unchanged set is refused: a partial apply is
+  // not possible here (git apply is all-or-nothing without --reject), and a file that
+  // changed to something other than the caller's exact intent is a different claim than
+  // this check can make.
+  const unchanged = touched.filter((p) => {
+    const { abs } = resolveInJail(p, deps, resolvedBase);
+    const was = before.get(p);
+    const now = readIfPresent(abs, deps);
+    // undefined = unreadable. Never counts as evidence that nothing happened.
+    return was !== undefined && now !== undefined && was === now;
+  });
+  if (unchanged.length === touched.length) {
+    return {
+      success: false,
+      stage: "apply",
+      touched,
+      stdout: applyStdout,
+      stderr:
+        (applyStderr ? applyStderr + "\n\n" : "") +
+        `git apply exited 0 but every file the patch names is byte-identical to before ` +
+        `it ran (${unchanged.join(", ")}), so NOTHING was applied. Reporting success here ` +
+        `would have you build on an edit that is not on disk (#2422). Re-read the file ` +
+        `with node_pack (action:"read") and regenerate the patch against what it ` +
+        `actually contains — a hunk whose context has drifted is the usual cause.`,
+    };
+  }
+
+  return { success: true, stage: "apply", touched, stdout: applyStdout, stderr: applyStderr };
+}
+
+/** #2422 — file contents, or null when absent. A patch that CREATES a file has no
+ *  before-state, and null vs a string is exactly the change that proves it landed. */
+function readIfPresent(abs: string, deps: NodeDevDeps): string | null | undefined {
+  try {
+    return deps.existsSync(abs) ? deps.readFileBuffer(abs).toString("base64") : null;
+  } catch {
+    // UNREADABLE is not UNCHANGED. undefined is incomparable by the filter above, so a
+    // file we cannot read never becomes evidence that the apply did nothing — this
+    // check only ever refuses what it positively observed.
+    return undefined;
+  }
 }
 
 // ---------------------------------------------------------------------------

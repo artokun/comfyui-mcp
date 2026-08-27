@@ -677,3 +677,108 @@ describe("nodePackGit", () => {
     );
   });
 });
+
+// ---------------------------------------------------------------------------
+// #2422 — node_pack action:"patch" returned {success:true, stage:"apply"} for two
+// one-line hunks while an immediate readback still showed the original lines.
+//
+// `success` was `apply.status === 0` and nothing else: git's exit code, taken as
+// proof the content moved. These pin that a 0 exit alone can no longer report success.
+// ---------------------------------------------------------------------------
+
+describe("patch verifies the file actually moved (#2422)", () => {
+  const PATCH = [
+    "--- a/Pack/h3.py",
+    "+++ b/Pack/h3.py",
+    "@@ -1,1 +1,1 @@",
+    "-frame_count=5",
+    "+frame_count=9",
+    "",
+  ].join("\n");
+
+  function seed(contents: string) {
+    const pack = join(customNodes, "Pack");
+    mkdirSync(pack, { recursive: true });
+    writeFileSync(join(pack, "h3.py"), contents);
+  }
+
+  it("REFUSES when git exits 0 but every touched file is byte-identical", () => {
+    seed("frame_count=5\n");
+    // git says it worked; the disk says otherwise. This is the reported shape.
+    const { deps } = makeDeps({
+      runGit: () => ({ status: 0, stdout: "", stderr: "" }),
+    });
+    const res = applyNodePatch(PATCH, deps);
+    expect(res.success).toBe(false);
+    expect(res.stage).toBe("apply");
+    expect(res.stderr).toContain("byte-identical");
+    expect(res.stderr).toContain("NOTHING was applied");
+  });
+
+  it("REPORTS SUCCESS when the file really changed", () => {
+    seed("frame_count=5\n");
+    const { deps } = makeDeps({
+      runGit: (args) => {
+        // Only the real apply mutates; --check must not.
+        if (args[0] === "apply" && !args.includes("--check")) {
+          writeFileSync(join(customNodes, "Pack", "h3.py"), "frame_count=9\n");
+        }
+        return { status: 0, stdout: "", stderr: "" };
+      },
+    });
+    const res = applyNodePatch(PATCH, deps);
+    expect(res.success).toBe(true);
+    expect(res.stderr).not.toContain("byte-identical");
+  });
+
+  it("counts a CREATED file as changed — absent before, present after", () => {
+    mkdirSync(join(customNodes, "Pack"), { recursive: true });
+    const { deps } = makeDeps({
+      runGit: (args) => {
+        if (args[0] === "apply" && !args.includes("--check")) {
+          writeFileSync(join(customNodes, "Pack", "h3.py"), "frame_count=9\n");
+        }
+        return { status: 0, stdout: "", stderr: "" };
+      },
+    });
+    const res = applyNodePatch(PATCH, deps);
+    expect(res.success).toBe(true);
+  });
+
+  it("an UNREADABLE file is never counted as evidence that nothing happened", () => {
+    seed("frame_count=5\n");
+    const { deps } = makeDeps({
+      runGit: () => ({ status: 0, stdout: "", stderr: "" }),
+      readFileBuffer: () => {
+        throw new Error("EACCES");
+      },
+    });
+    // Unverifiable is not refutable: the check only refuses what it positively saw.
+    expect(applyNodePatch(PATCH, deps).success).toBe(true);
+  });
+
+  it("a non-zero apply still fails at stage apply, unchanged by this check", () => {
+    seed("frame_count=5\n");
+    const { deps } = makeDeps({
+      runGit: (args) =>
+        args.includes("--check")
+          ? { status: 0, stdout: "", stderr: "" }
+          : { status: 1, stdout: "", stderr: "patch does not apply" },
+    });
+    const res = applyNodePatch(PATCH, deps);
+    expect(res.success).toBe(false);
+    expect(res.stage).toBe("apply");
+    expect(res.stderr).toContain("patch does not apply");
+    expect(res.stderr).not.toContain("byte-identical");
+  });
+
+  it("a failing --check is still reported at stage check, never reaching the verify", () => {
+    seed("frame_count=5\n");
+    const { deps } = makeDeps({
+      runGit: () => ({ status: 1, stdout: "", stderr: "does not apply" }),
+    });
+    const res = applyNodePatch(PATCH, deps);
+    expect(res.success).toBe(false);
+    expect(res.stage).toBe("check");
+  });
+});
