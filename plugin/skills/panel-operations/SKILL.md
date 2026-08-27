@@ -58,6 +58,16 @@ rail and you will get it wrong. Use:
 Read `panel_query_graph`'s `rails` field (present when viewing a subgraph) to see the
 current boundary slots — what is already exposed and what still needs it.
 
+**Unexposing a boundary slot.** `panel_unexpose_subgraph_input` / `_output` remove a
+named rail slot. Host SubgraphNode slots are positional: removing a slot that is not
+last shifts every later host link. `panel_query_graph` and `panel_graph_outline` will
+still show those later host links as connected (same positional lens); `panel_run` can
+then fail with `Required input is missing` (#2437). Do not trust that connectedness.
+Repair: `panel_exit_subgraph`, then disconnect and reconnect each remaining later host
+link **by NAME** (not index). Reconnecting by name re-resolves the index. Then re-enter
+if you still need the interior. Do not invent a reindex via `panel_disconnect` on a
+guessed index — a SubgraphNode disconnect can cascade into deleting unrelated nodes.
+
 **Dissolving one.** `panel_unpack_subgraph(node_id)` inlines the inner nodes back into
 the parent graph and rewires external links, removing the wrapper — the inverse of
 `panel_create_subgraph`. All of these are undoable with Ctrl+Z.
@@ -373,4 +383,4 @@ restarts that process, so never claim such a change is live after a `panel_reloa
 ## Sources
 
 - **Official:** the panel and comfyui MCP tool descriptions in comfyui-mcp (this repo) — each tool named above is the authority on its own parameters.
-- **Empirical:** the panel agent system preamble these procedures were moved out of, plus the failure modes they were written for (issues #1398, #1551, #1708, #2234).
+- **Empirical:** the panel agent system preamble these procedures were moved out of, plus the failure modes they were written for (issues #1398, #1551, #1708, #2234, #2437).

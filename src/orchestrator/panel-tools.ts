@@ -74,6 +74,7 @@ import {
   type WorkflowListReadinessRefusal,
 } from "../services/panel-workflow-readiness.js";
 import { isPreExecutorRefusal } from "../services/panel-refusal.js";
+import { unexposeHostLinkShiftNote } from "../services/unexpose-host-link-shift.js";
 import { createSdkMcpServer, tool } from "@anthropic-ai/claude-agent-sdk";
 import { parse as parseYaml } from "yaml";
 import type { McpSdkServerConfigWithInstance } from "@anthropic-ai/claude-agent-sdk";
@@ -562,6 +563,18 @@ function fail(err: unknown): ToolResult {
 export function appendReplyNote(res: ToolResult, note: string): ToolResult {
   if (!note) return res;
   return { ...res, content: [...res.content, { type: "text", text: note }] };
+}
+
+/**
+ * #2437 — remaining host links after unexpose are positional and not re-pointed.
+ * A post-removal snapshot of `node.inputs[i].link` cannot see the bug, so this
+ * attaches the a-priori repair (reconnect by name) to a landed `removed` reply.
+ * Refusals and unparseable bodies are left alone.
+ */
+function withUnexposeHostLinkShiftNote(res: ToolResult): ToolResult {
+  if (res.isError) return res;
+  const note = unexposeHostLinkShiftNote(parseToolResultJson(res));
+  return note ? appendReplyNote(res, note) : res;
 }
 
 /**
@@ -22477,21 +22490,25 @@ CHECKED FOR YOU: the graph read this message prescribes was just run, and it ` +
     ),
     def(
       "panel_unexpose_subgraph_output",
-      "REMOVE a subgraph's OUTPUT boundary slot — UN-expose it (the inverse of panel_expose_subgraph_output), so the PARENT graph's subgraph node loses that output slot. You MUST be INSIDE the subgraph first (panel_enter_subgraph). Identify the slot by the string `name` only — the boundary slot name exactly as panel_query_graph lists it under `rails.output.accepts_inputs`. A rail_node_id string such as \"-20\" is forwarded to the panel, which REFUSES it: that is the synthetic id of the whole rail, not of a slot on it. DESTRUCTIVE: the interior wire feeding the slot and any parent-graph wires on host subgraph nodes' matching slot are dropped with it — the reply's `removed.interior_links_dropped` / `removed.host_links_dropped` say how many went. An unknown name refuses and lists the slots that DO exist; nothing is removed on a refusal. Undoable with Ctrl+Z.",
+      "REMOVE a subgraph's OUTPUT boundary slot — UN-expose it (the inverse of panel_expose_subgraph_output), so the PARENT graph's subgraph node loses that output slot. You MUST be INSIDE the subgraph first (panel_enter_subgraph). Identify the slot by the string `name` only — the boundary slot name exactly as panel_query_graph lists it under `rails.output.accepts_inputs`. A rail_node_id string such as \"-20\" is forwarded to the panel, which REFUSES it: that is the synthetic id of the whole rail, not of a slot on it. DESTRUCTIVE: the interior wire feeding the slot and any parent-graph wires on host subgraph nodes' matching slot are dropped with it — the reply's `removed.interior_links_dropped` / `removed.host_links_dropped` say how many went. An unknown name refuses and lists the slots that DO exist; nothing is removed on a refusal. KNOWN HAZARD (#2437): remaining LATER host links are not reindexed. panel_query_graph / panel_graph_outline may still show them connected; panel_run can then fail with Required input is missing. After a landed removal, exit the subgraph and reconnect remaining later host links by NAME (not index). Undoable with Ctrl+Z.",
       {
         name: z.string().describe("Boundary output slot name (e.g. 'IMAGE') exactly as panel_query_graph lists it under rails.output.accepts_inputs — NOT a rail_node_id."),
       },
-      async (args: A, ctx) =>
-        ctx.call({ cmd: "graph_unexpose_subgraph_output", name: args.name }, 15000),
+      async (args: A, ctx) => {
+        const res = await ctx.call({ cmd: "graph_unexpose_subgraph_output", name: args.name }, 15000);
+        return withUnexposeHostLinkShiftNote(res);
+      },
     ),
     def(
       "panel_unexpose_subgraph_input",
-      "REMOVE a subgraph's INPUT boundary slot — UN-expose it (the inverse of panel_expose_subgraph_input), so the PARENT graph's subgraph node loses that input slot. You MUST be INSIDE the subgraph first (panel_enter_subgraph). Identify the slot by the string `name` only — the boundary slot name exactly as panel_query_graph lists it under `rails.input.provides_outputs`. A rail_node_id string such as \"-10\" is forwarded to the panel, which REFUSES it: that is the synthetic id of the whole rail, not of a slot on it. DESTRUCTIVE: the interior wire the slot fed and any parent-graph wires on host subgraph nodes' matching slot are dropped with it — the reply's `removed.interior_links_dropped` / `removed.host_links_dropped` say how many went. An unknown name refuses and lists the slots that DO exist; nothing is removed on a refusal. Undoable with Ctrl+Z.",
+      "REMOVE a subgraph's INPUT boundary slot — UN-expose it (the inverse of panel_expose_subgraph_input), so the PARENT graph's subgraph node loses that input slot. You MUST be INSIDE the subgraph first (panel_enter_subgraph). Identify the slot by the string `name` only — the boundary slot name exactly as panel_query_graph lists it under `rails.input.provides_outputs`. A rail_node_id string such as \"-10\" is forwarded to the panel, which REFUSES it: that is the synthetic id of the whole rail, not of a slot on it. DESTRUCTIVE: the interior wire the slot fed and any parent-graph wires on host subgraph nodes' matching slot are dropped with it — the reply's `removed.interior_links_dropped` / `removed.host_links_dropped` say how many went. An unknown name refuses and lists the slots that DO exist; nothing is removed on a refusal. KNOWN HAZARD (#2437): remaining LATER host links are not reindexed. panel_query_graph / panel_graph_outline may still show them connected; panel_run can then fail with Required input is missing. After a landed removal, exit the subgraph and reconnect remaining later host links by NAME (not index). Undoable with Ctrl+Z.",
       {
         name: z.string().describe("Boundary input slot name (e.g. 'model') exactly as panel_query_graph lists it under rails.input.provides_outputs — NOT a rail_node_id."),
       },
-      async (args: A, ctx) =>
-        ctx.call({ cmd: "graph_unexpose_subgraph_input", name: args.name }, 15000),
+      async (args: A, ctx) => {
+        const res = await ctx.call({ cmd: "graph_unexpose_subgraph_input", name: args.name }, 15000);
+        return withUnexposeHostLinkShiftNote(res);
+      },
     ),
     def(
       "panel_unpack_subgraph",
