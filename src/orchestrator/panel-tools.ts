@@ -107,7 +107,7 @@ import {
   isScopeAddress,
   shortTabId,
 } from "../services/session-scope.js";
-import type { ScopeRepinOutcome } from "./turn-origins.js";
+import { tabRouteCarriesPath, type ScopeRepinOutcome } from "./turn-origins.js";
 import {
   NODE_ID_MESSAGE,
   NODE_ID_PATTERN,
@@ -9810,6 +9810,89 @@ function refreshFenceFromOwnReply(ctx: PanelToolCtx, reply: ToolResult): Workflo
   } catch {
     return null; // never surface a throw here as worse than the existing fallback
   }
+}
+
+/**
+ * #2419 — the PATH the save reply names as the dest canvas.
+ *
+ * `routing_key` is the precise identity (`wf:<path>` handle, or a full
+ * `wf:<route>:<path>` tab id). `path` / `workflow` / `filename` are fallbacks
+ * for older replies that only named the new file. Empty / unreadable →
+ * undefined, so the caller leaves routing alone rather than guessing.
+ */
+function saveDestWorkflowPath(parsed: Record<string, unknown>): string | undefined {
+  const routing = parsed.routing_key;
+  if (typeof routing === "string" && routing.startsWith("wf:")) {
+    const rest = routing.slice(3);
+    const sep = rest.indexOf(":");
+    const pathPart =
+      sep >= 0 && rest.slice(sep + 1).includes("/") ? rest.slice(sep + 1) : rest;
+    const fromRouting = canonicalSavedWorkflowPath(pathPart);
+    if (fromRouting) return fromRouting;
+  }
+  for (const v of [parsed.path, parsed.workflow, parsed.filename]) {
+    if (typeof v !== "string") continue;
+    const trimmed = v.trim();
+    if (!trimmed) continue;
+    return canonicalSavedWorkflowPath(trimmed) ?? trimmed;
+  }
+  return undefined;
+}
+
+/** The unique live canvas tab whose route carries `destPath`, or undefined. */
+function uniqueLiveTabForSaveDest(ctx: PanelToolCtx, destPath: string): string | undefined {
+  const tabs = ctx.bridge.tabs;
+  if (typeof tabs !== "function") return undefined;
+  const live = tabs.call(ctx.bridge);
+  if (!Array.isArray(live)) return undefined;
+  const isHeadless = (id: string): boolean =>
+    typeof ctx.bridge.isHeadless === "function" && ctx.bridge.isHeadless(id);
+  const matches = live
+    .map((t) => t.tab_id)
+    .filter((id): id is string => typeof id === "string" && id.length > 0 && !isHeadless(id))
+    .filter((id) => id === destPath || tabRouteCarriesPath(id, destPath));
+  return matches.length === 1 ? matches[0] : undefined;
+}
+
+/**
+ * #2419 — after Save-As (or a first save) mints a new tab id, the command
+ * fence is already refreshed from the reply, but session-scoped commands
+ * (`panel_set_todo`, `panel_canvas`) still address the old id.
+ *
+ * Re-point ONLY when the current routing address is dead. A live pin
+ * elsewhere is left alone — that is #1917 / #884: this recovery must not
+ * take a routing target out from under a pin another command in the same
+ * turn is relying on. Matching is on the dest path the save reply proved,
+ * and only when exactly one live canvas carries it, so this cannot silently
+ * redirect to a different workflow.
+ *
+ * Best-effort by construction: the file WAS written. A re-point that cannot
+ * happen must not retract the save.
+ */
+function repointRoutingAfterSave(ctx: PanelToolCtx, reply: ToolResult): void {
+  const parsed = parseToolResultJson(reply);
+  if (!parsed) return;
+  const destPath = saveDestWorkflowPath(parsed);
+  if (!destPath) return;
+  if (typeof ctx.bridge.canReach === "function" && ctx.bridge.canReach(ctx.tabId)) return;
+  const destTab = uniqueLiveTabForSaveDest(ctx, destPath);
+  if (!destTab) return;
+  if (isScopeAddress(ctx.tabId)) {
+    try {
+      ctx.bridge.repinScopeToWorkflow?.(ctx.tabId, destPath);
+    } catch {
+      // never worse than the pre-#2419 silence; the save already succeeded
+    }
+    return;
+  }
+  if (destTab === ctx.tabId) return;
+  const previous = ctx.tabId;
+  const pinned = ctx.workflowTarget?.get(previous);
+  if (ctx.workflowTarget && pinned?.mode === "pinned") {
+    ctx.workflowTarget.clear(previous);
+    ctx.workflowTarget.set(destTab, pinned);
+  }
+  ctx.tabId = destTab;
 }
 
 /**
@@ -21164,6 +21247,14 @@ export function buildPanelToolDefs(): PanelToolDef[] {
         // #814 — trust THIS reply's own proven uuid first (#800), before ever
         // attempting rebindWorkflowFence's independent workflow_list round trip,
         // which can be refused by the exact fence this repairs.
+        //
+        // #2419 — BEFORE the fence refresh so the stamp lands on the dest
+        // address. Save-As mints a new tab id; the fence repair re-stamps
+        // graph commands, but session-scoped commands (set_todo, graph_canvas)
+        // still address the old id unless routing is re-pointed. Only when
+        // the current address is dead — a live pin elsewhere is left alone
+        // (#1917 / #884).
+        repointRoutingAfterSave(ctx, res);
         const fenceRebind = refreshFenceFromOwnReply(ctx, res) ?? (await rebindWorkflowFence(ctx));
         let canMutateNow: boolean | undefined;
         let refusalCause: "unroutable" | "disconnected" | "no_identity" | "capability" | "target_disagreement" | undefined;
