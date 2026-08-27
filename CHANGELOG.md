@@ -6,6 +6,17 @@ All notable changes to this project are documented here. This project adheres to
 
 ## Unreleased
 
+## [0.52.141] - 2026-08-27
+
+### MCP
+
+#### Fixed
+- hoist probeOk out of the temporal dead zone (#2426)
+- a blocked sharp native library stops taking the whole server down, and says what broke (#2423)
+- a patch that changed nothing on disk is no longer reported as applied (#2432)
+- the panel router runs the call when its payload is under `parameters` (#2441)
+
+
 ## [0.52.140] - 2026-08-27
 
 ### MCP
