@@ -161,17 +161,17 @@ pack is CI-validated for reachability and size, so a link never quietly rots
 
 ANIMA's inpainting isn't a bolt-on — it's a dedicated **Anima-LLLite ControlNet**.
 LLLite ("LoRA-Lite") patches the **MODEL** directly rather than feeding standard
-ControlNet conditioning, so the pack uses a special `AnimaLLLiteApply` node from
+ControlNet conditioning, so the pack uses a special `AnimaLLLiteApply_sdscripts` node from
 `ComfyUI-Anima-LLLite` (kohya-ss). The inpaint flow is clean:
 
 1. Load an image and paint a mask over the region you want to redraw.
 2. `VAEEncode` the source image, then `SetLatentNoiseMask` with the mask.
 3. Patch the model with `anima-lllite-inpainting-v1.safetensors` via
-   `AnimaLLLiteApply`, fed the same image + mask.
+   `AnimaLLLiteApply_sdscripts`, fed the same image + mask.
 4. Sample. The masked area is regenerated from your prompt while everything
    outside it is preserved.
 
-The same `AnimaLLLiteApply` node powers ANIMA's other control modes — just swap
+The same `AnimaLLLiteApply_sdscripts` node powers ANIMA's other control modes — just swap
 the `lllite_name` and feed a preprocessed control image:
 
 | LLLite | Control source |
@@ -181,8 +181,10 @@ the `lllite_name` and feed a preprocessed control image:
 | `anima-lllite-lineart-1` | Lineart |
 | `anima-lllite-inpainting-v1` | Painted mask |
 
-> **Gotcha:** `AnimaLLLiteApply` is **not** a standard ControlNet node. If it's
-> missing, install `ComfyUI-Anima-LLLite` (the pack does this for you).
+> **Gotcha:** `AnimaLLLiteApply_sdscripts` is **not** a standard ControlNet node, and
+> it is not the core `AnimaLLLiteApply` ID (ComfyUI now owns that name with a
+> different signature). If it's missing, install `ComfyUI-Anima-LLLite` (the pack
+> does this for you).
 
 ## Train your own anime LoRA (under 6 GB)
 
@@ -277,13 +279,13 @@ painterly.
   896x1152, 832x1216, 768x1344, 640x1536).
 - **Turbo output looks washed/flat.** That's turbo at CFG 1. Switch to base mode
   (drop the turbo LoRA, 30–50 steps, CFG 4–5) for max quality.
-- **`AnimaLLLiteApply` missing.** Install `ComfyUI-Anima-LLLite` — it is not a
-  standard ControlNet node.
+- **`AnimaLLLiteApply_sdscripts` missing.** Install `ComfyUI-Anima-LLLite` — it is not a
+  standard ControlNet node, and it is not core `AnimaLLLiteApply`.
 - **CLIP loads but output is garbage.** Confirm the `CLIPLoader` `type` is
   `stable_diffusion` and the file is `qwen_3_06b_base.safetensors` (the Qwen3-0.6B
   *base*, not a chat/edit Qwen).
 - **Inpainting ignores the mask.** Make sure both `SetLatentNoiseMask` *and* the
-  inpainting `AnimaLLLiteApply` receive the painted mask.
+  inpainting `AnimaLLLiteApply_sdscripts` receive the painted mask.
 - **OOM while training.** Drop to `network_dim 8` and/or `resolution 512`, keep
   batch 1, use AdamW8bit.
 

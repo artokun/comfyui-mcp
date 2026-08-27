@@ -1,7 +1,7 @@
 # ANIMA 1.0 inpainting install manifest — consumable by apply_manifest.
 # Sliced from the anima monolith's "INPAINTING CONTROLNET" pipeline (groups
 # un-bypassed into a standalone graph). Static-check: CONVERT-OK (one unknown
-# node, AnimaLLLiteApply, needs its custom-node pack installed).
+# node, AnimaLLLiteApply_sdscripts, needs its custom-node pack installed).
 # Mirror base: https://huggingface.co/Aitrepreneur/FLX/resolve/main  (third-party)
 # Official weights: https://huggingface.co/circlestone-labs/Anima
 

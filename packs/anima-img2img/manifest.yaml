@@ -1,7 +1,7 @@
 # ANIMA 1.0 img2img install manifest — consumable by apply_manifest.
 # Sliced from the anima monolith's "IMAGE TO IMAGE TURBO CONTROLNET" pipeline
 # (groups un-bypassed into a standalone graph). Static-check: CONVERT-OK (unknown
-# nodes DepthAnythingV2Preprocessor / DWPreprocessor / ttN seed / AnimaLLLiteApply
+# nodes DepthAnythingV2Preprocessor / DWPreprocessor / ttN seed / AnimaLLLiteApply_sdscripts
 # need their custom-node packs installed). The depth/openpose preprocessor weights
 # (depth_anything_v2_vitl.pth, dw-ll_ucoco_384_bs5.torchscript.pt) are fetched
 # automatically by comfyui_controlnet_aux on first run.

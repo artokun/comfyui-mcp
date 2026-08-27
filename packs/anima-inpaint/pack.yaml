@@ -20,7 +20,7 @@ notes:
   - Run the generated installer from your ComfyUI root (folder with custom_nodes/
     and models/).
   - Sliced + un-bypassed from the monolith's "INPAINTING CONTROLNET".
-  - Uses the kohya-ss ComfyUI-Anima-LLLite node (AnimaLLLiteApply) with the
+  - Uses the kohya-ss ComfyUI-Anima-LLLite node (AnimaLLLiteApply_sdscripts) with the
     anima-lllite-inpainting-v1 ControlNet.
   - Turbo LoRA preset is the shipped default — 12 steps, CFG 1.0, er_sde/simple.
 post_install:

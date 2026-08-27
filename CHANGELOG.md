@@ -11,6 +11,7 @@ All notable changes to this project are documented here. This project adheres to
 #### Fixed
 - a restart confirmation approval is delivered to the pending restart instead of only the next call (#2440)
 - panel_screenshot writes a PNG to a caller-specified save_path/output_path and refuses an existing file unless overwrite is true (#2439)
+- bundled anima-inpaint ships AnimaLLLiteApply_sdscripts so apply_manifest / node install does not miss the kohya-ss node (#2442)
 
 ## [0.52.144] - 2026-08-27
 

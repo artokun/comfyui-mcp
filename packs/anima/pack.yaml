@@ -17,7 +17,7 @@ sources:
 notes:
   - Run the generated installer from your ComfyUI root (the folder containing
     custom_nodes/ and models/).
-  - Anime inpainting uses the kohya-ss ComfyUI-Anima-LLLite node (AnimaLLLiteApply).
+  - Anime inpainting uses the kohya-ss ComfyUI-Anima-LLLite node (AnimaLLLiteApply_sdscripts).
   - Turbo LoRA preset is the shipped default — 12 steps, CFG 1.0, er_sde/simple.
 post_install:
   - Restart ComfyUI (or use ComfyUI-Manager → Install missing custom nodes for

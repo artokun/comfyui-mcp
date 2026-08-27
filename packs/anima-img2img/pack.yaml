@@ -20,7 +20,7 @@ notes:
   - Run the generated installer from your ComfyUI root (folder with custom_nodes/
     and models/).
   - Sliced + un-bypassed from the monolith's "IMAGE TO IMAGE TURBO CONTROLNET".
-  - Uses the kohya-ss ComfyUI-Anima-LLLite node (AnimaLLLiteApply) for ControlNet.
+  - Uses the kohya-ss ComfyUI-Anima-LLLite node (AnimaLLLiteApply_sdscripts) for ControlNet.
   - Depth/openpose preprocessor weights (depth_anything_v2_vitl,
     dw-ll_ucoco_384) are auto-downloaded by comfyui_controlnet_aux on first run.
   - Turbo LoRA preset is the shipped default — 12 steps, CFG 1.0, er_sde/simple.

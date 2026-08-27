@@ -1053,7 +1053,7 @@
     },
     {
       "id": 918,
-      "type": "AnimaLLLiteApply",
+      "type": "AnimaLLLiteApply_sdscripts",
       "pos": [
         7358.7574558388515,
         -3.442160522033436
@@ -1096,13 +1096,14 @@
       "properties": {
         "aux_id": "kohya-ss/ComfyUI-Anima-LLLite",
         "ver": "b5d431c1f7b5b35e7f0f688a71cb701cc3d018aa",
-        "Node name for S&R": "AnimaLLLiteApply"
+        "Node name for S&R": "AnimaLLLiteApply_sdscripts"
       },
       "widgets_values": [
         "anima-lllite-pose-1.safetensors",
-        1,
-        0,
-        1
+        1.0,
+        0.0,
+        1.0,
+        true
       ]
     },
     {

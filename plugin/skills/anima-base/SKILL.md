@@ -42,7 +42,7 @@ The "Anima Base Ultra" pack (by Aitrepreneur) installs custom nodes and download
 | ComfyUI_UltimateSDUpscale | `https://github.com/ssitu/ComfyUI_UltimateSDUpscale` | tiled upscaling |
 | ComfyUI_tinyterraNodes | `https://github.com/TinyTerra/ComfyUI_tinyterraNodes` | ttN seed |
 | comfyui_controlnet_aux | `https://github.com/Fannovel16/comfyui_controlnet_aux` | DWPreprocessor, DepthAnythingV2 |
-| **ComfyUI-Anima-LLLite** | `https://github.com/kohya-ss/ComfyUI-Anima-LLLite` | **`AnimaLLLiteApply`** (ControlNet + inpainting) |
+| **ComfyUI-Anima-LLLite** | `https://github.com/kohya-ss/ComfyUI-Anima-LLLite` | **`AnimaLLLiteApply_sdscripts`** (ControlNet + inpainting) |
 
 ### Models (download URLs from the pack's .bat / .sh)
 
@@ -91,17 +91,18 @@ The pack applies it with rgthree `Power Lora Loader`. The plain ComfyUI equivale
 ```
 The pack ships three other LoRAs you can toggle in Power Lora Loader: `anima-highres-aesthetic-boost`, `anima-preview-3-masterpieces-v5`, `anima_p3_rdbt_v0.29.b.122`. In the non-turbo groups these three are enabled and the turbo LoRA is off; in the turbo groups only the turbo LoRA is on.
 
-### AnimaLLLiteApply (ControlNet + inpainting — from ComfyUI-Anima-LLLite)
-Patches the MODEL. Anima uses LLLite-style control, not standard `ControlNetApply` conditioning. Inputs: `model`, `image`, `mask`; widget order `[lllite_name, strength, start_percent, end_percent]`; output: patched `MODEL`.
+### AnimaLLLiteApply_sdscripts (ControlNet + inpainting — from ComfyUI-Anima-LLLite)
+Patches the MODEL. Anima uses LLLite-style control, not standard `ControlNetApply` conditioning. Inputs: `model`, `image`, `mask`; widget order `[lllite_name, strength, start_percent, end_percent, preserve_wrapper]`; output: patched `MODEL`. ComfyUI core now owns the old ID `AnimaLLLiteApply` (different signature: a `MODEL_PATCH` from `ModelPatchLoader`, no mask), so this pack uses the kohya-ss node ID `AnimaLLLiteApply_sdscripts`.
 ```json
 {
-  "class_type": "AnimaLLLiteApply",
+  "class_type": "AnimaLLLiteApply_sdscripts",
   "inputs": {
     "model": ["<model>", 0],
     "image": ["<control_or_source_image>", 0],
     "mask": ["<mask>", 0],
     "lllite_name": "anima-lllite-pose-1.safetensors",
-    "strength": 1.0, "start_percent": 0.0, "end_percent": 1.0
+    "strength": 1.0, "start_percent": 0.0, "end_percent": 1.0,
+    "preserve_wrapper": true
   }
 }
 ```
@@ -191,10 +192,11 @@ The pack's "INPAINTING CONTROLNET" group loads an image with a painted mask, `VA
   "3": { "class_type": "VAELoader", "inputs": { "vae_name": "qwen_image_vae.safetensors" }},
   "4": { "class_type": "LoraLoaderModelOnly", "inputs": { "model": ["1", 0], "lora_name": "anima-turbo-lora-v0.1.safetensors", "strength_model": 1.0 }},
   "5": { "class_type": "LoadImage", "inputs": { "image": "<masked_image.png>" }},
-  "6": { "class_type": "AnimaLLLiteApply", "inputs": {
+  "6": { "class_type": "AnimaLLLiteApply_sdscripts", "inputs": {
     "model": ["4", 0], "image": ["5", 0], "mask": ["5", 1],
     "lllite_name": "anima-lllite-inpainting-v1.safetensors",
-    "strength": 1.0, "start_percent": 0.0, "end_percent": 1.0
+    "strength": 1.0, "start_percent": 0.0, "end_percent": 1.0,
+    "preserve_wrapper": true
   }},
   "7": { "class_type": "CLIPTextEncode", "inputs": { "clip": ["2", 0], "text": "<what to paint into the masked area>" }},
   "8": { "class_type": "CLIPTextEncode", "inputs": { "clip": ["2", 0], "text": "worst quality, low quality, bad anatomy, text, watermark" }},
@@ -212,7 +214,7 @@ The pack's "INPAINTING CONTROLNET" group loads an image with a painted mask, `VA
 }
 ```
 
-The other LLLite ControlNets use the same `AnimaLLLiteApply` node. Swap `lllite_name` and feed a preprocessed control image; the mask can be a full-white/blank mask when not inpainting:
+The other LLLite ControlNets use the same `AnimaLLLiteApply_sdscripts` node. Swap `lllite_name` and feed a preprocessed control image; the mask can be a full-white/blank mask when not inpainting:
 - `anima-lllite-pose-1.safetensors` ← `DWPreprocessor` (OpenPose)
 - `anima-lllite-depth-1.safetensors` ← `DepthAnythingV2Preprocessor`
 - `anima-lllite-lineart-1.safetensors` / `anima-lllite-any-test-like-1-step2000.safetensors` ← lineart / generic control
@@ -231,9 +233,9 @@ The pack upscales with `UltimateSDUpscale` (`4x_foolhardy_Remacri.pth`, 2x, deno
 
 1. **Weird/distorted images.** Use a recommended resolution (1024x1024, 896x1152, 832x1216, 768x1344, 640x1536).
 2. **Turbo result looks washed/flat.** That's turbo at CFG 1. For max quality switch to base mode (drop turbo LoRA, 30 to 50 steps, CFG 4 to 5).
-3. **`AnimaLLLiteApply` missing.** Install `ComfyUI-Anima-LLLite`; it is not a standard ControlNet node.
+3. **`AnimaLLLiteApply_sdscripts` missing.** Install `ComfyUI-Anima-LLLite`; it is not a standard ControlNet node. Do not add core `AnimaLLLiteApply` — that ID now belongs to ComfyUI and has a different input signature.
 4. **CLIP loads but output is garbage.** Confirm `CLIPLoader` `type` is `stable_diffusion` and the file is `qwen_3_06b_base.safetensors` (the Qwen3-0.6B *base*, not the chat/edit Qwen models).
-5. **Inpainting ignores the mask.** Ensure both `SetLatentNoiseMask` and the inpainting `AnimaLLLiteApply` receive the painted mask, and encode the *source* image with `VAEEncode`. Denoise 1.0 is fine because the noise mask preserves unmasked pixels.
+5. **Inpainting ignores the mask.** Ensure both `SetLatentNoiseMask` and the inpainting `AnimaLLLiteApply_sdscripts` receive the painted mask, and encode the *source* image with `VAEEncode`. Denoise 1.0 is fine because the noise mask preserves unmasked pixels.
 
 ## Training custom LoRAs
 
@@ -241,5 +243,5 @@ To train your own Anima LoRA (character/style) on <6GB VRAM, use the Citron Anim
 
 ## Sources
 
-- **Official:** model weights at https://huggingface.co/circlestone-labs/Anima; no vendor prompting guide cited.
+- **Official:** model weights at https://huggingface.co/circlestone-labs/Anima; ComfyUI-Anima-LLLite README documents the node ID `AnimaLLLiteApply_sdscripts` after the core `AnimaLLLiteApply` collision. No vendor prompting guide cited.
 - **Empirical:** tag-order / @artist prompting and sampler wiring from working graphs; Anima Style Explorer is community, not vendor docs.
