@@ -351,6 +351,9 @@ describe("#2416 ComfyUI-Seed-API BytePlus nodes are not free", () => {
   });
 
   it("THE REPORTED GRAPH: runtime is mixed, not local", async () => {
+    // Exact unfixed output from #2416:
+    // {"runtime":"local","usesApiNodes":false,"apiNodes":[],"externalApiNodes":[],
+    //  "classTypes":["Seedream4Unified","SeedancePro15Video","SaveImage"],"unknownNodes":[]}
     const out = await runtimeOf(
       ["Seedream4Unified", "SeedancePro15Video", "SaveImage"],
       {
@@ -360,14 +363,33 @@ describe("#2416 ComfyUI-Seed-API BytePlus nodes are not free", () => {
       },
     );
     expect(out.runtime).toBe("mixed");
-    expect(out.externalApiNodes).toEqual(
-      expect.arrayContaining(["Seedream4Unified", "SeedancePro15Video"]),
-    );
+    expect(out.usesApiNodes).toBe(true);
+    // Exact, not arrayContaining: SaveImage must stay off the paid list.
+    expect(out.externalApiNodes).toEqual(["Seedream4Unified", "SeedancePro15Video"]);
+    expect(out.externalProviders).toEqual(["BytePlus"]);
+    expect(out.apiNodes).toEqual([]);
+    expect(out.unknownNodes).toEqual([]);
   });
 
   it("a graph of only the LOCAL helper is still local", async () => {
+    // The reported-diff mutant (no localCategoryPrefixes) bills this by module match.
     const out = await runtimeOf(["VideoToFrames"], { VideoToFrames: SEED_FRAMES });
     expect(out.runtime).toBe("local");
+    expect(out.usesApiNodes).toBe(false);
     expect(out.externalApiNodes).toEqual([]);
+    expect(out.externalProviders).toBeUndefined();
+  });
+
+  it("the category prefix matches even when the pack directory is renamed", async () => {
+    // python_module is the clone folder. Without categoryPrefixes, a rename reads free —
+    // the same hole the fal and PoYo entries close this way.
+    const renamed = def({
+      ...SEED_IMAGE,
+      python_module: "custom_nodes.my-seed-fork",
+    } as Partial<ComfyUINodeDef>);
+    expect(isExternalServiceNode(renamed)).toBe(true);
+    const out = await runtimeOf(["Seedream4Unified"], { Seedream4Unified: renamed });
+    expect(out.runtime).toBe("api");
+    expect(out.externalProviders).toEqual(["BytePlus"]);
   });
 });
