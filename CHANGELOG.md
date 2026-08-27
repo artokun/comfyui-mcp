@@ -12,7 +12,6 @@ All notable changes to this project are documented here. This project adheres to
 - a restart confirmation approval is delivered to the pending restart instead of only the next call (#2440)
 - panel_screenshot writes a PNG to a caller-specified save_path/output_path and refuses an existing file unless overwrite is true (#2439)
 - bundled anima-inpaint ships AnimaLLLiteApply_sdscripts so apply_manifest / node install does not miss the kohya-ss node (#2442)
-- panel_screenshot writes a PNG to a caller-specified save_path/output_path and refuses an existing file unless overwrite is true (#2439)
 
 ## [0.52.144] - 2026-08-27
 
@@ -22,6 +21,7 @@ All notable changes to this project are documented here. This project adheres to
 - apply_manifest counts a GGUF as installed when ComfyUI-GGUF lists it under clip_gguf/unet_gguf (#2447)
 - panel_list_nodes lists installed packs from host Manager HTTP when the panel tab is gone (#2459)
 - panel_run queued_unknown names a live-canvas next step instead of an unavailable queue inspector (#2438)
+- panel_screenshot writes a PNG to a caller-specified save_path/output_path and refuses an existing file unless overwrite is true (#2439)
 
 ## [0.52.143] - 2026-08-27
 
