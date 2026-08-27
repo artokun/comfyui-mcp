@@ -6,6 +6,18 @@ All notable changes to this project are documented here. This project adheres to
 
 ## Unreleased
 
+## [0.52.140] - 2026-08-27
+
+### MCP
+
+#### Fixed
+- disclose /models vs /object_info model mismatch (#2421)
+- ComfyUI-Seed-API BytePlus nodes are no longer reported as local/free (#2433)
+- bound ripgrep's printed line at the source so one minified file cannot ENOBUFS the search (#2431)
+- restore fail-closed changelog release guard (#2420)
+- verify the release section, not just generate it (#2412)
+
+
 ## [0.52.139] - 2026-08-26
 
 ### MCP
