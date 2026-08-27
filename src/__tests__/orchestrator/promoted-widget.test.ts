@@ -135,6 +135,8 @@ function bridge(opts: {
   workflowUuid?: string;
   /** The outer node id used by the current fake viewing scope. */
   ownerNodeId?: number;
+  /** #2394: begin the fake panel inside a subgraph for active-view scope tests. */
+  startInSubgraph?: boolean;
   /** panel#1859 — a real pre-0.15.101 panel build. It publishes no
    * `graph_identity` anywhere (neither on `viewing` nor on `subgraph_of`) and
    * its hello advertises `enforces_expected_node_type_at_write` but none of the
@@ -152,11 +154,11 @@ function bridge(opts: {
   let subgraphReads = 0;
   let postEnterGraphQueries = 0;
   let authoritativeScopeReads = 0;
-  let inSubgraph = false;
+  let inSubgraph = opts.startInSubgraph === true;
   const workflowUuid = opts.workflowUuid ?? "workflow-a";
   let currentOwnerNodeId = opts.ownerNodeId ?? 78;
-  let currentGraphIdentity = "graph:workflow-a-root";
   const targetGraphIdentity = "graph:workflow-a-container-a";
+  let currentGraphIdentity = inSubgraph ? targetGraphIdentity : "graph:workflow-a-root";
   let connectionIdentity = { generation: 1, tabSessionId: "browser-tab-a" };
   let observedPromotedScope: {
     known: true;
@@ -843,6 +845,32 @@ describe("panel_set_widget coordinated promoted-widget fixes (#2393, #2394)", ()
     expect(isError).toBe(false);
     expect(mutations).toBe(1);
     expect(calls.filter((call) => call.cmd === "graph_get_subgraph")).toHaveLength(0);
+    expect(calls.filter((call) => call.cmd === "graph_set_widget")).toEqual([
+      expect.objectContaining({ node_id: 82, widget: "lora_1", value }),
+    ]);
+  });
+
+  it("does not use the root-only lora_N shortcut from an active subgraph (#2394)", async () => {
+    const value = '{"on":true,"lora":"turbo.safetensors","strength":1,"strengthTwo":null}';
+    const { isError, calls, mutations } = await setWidget(
+      { node_id: 82, widget: "lora_1", value },
+      {
+        ownerNodeId: 78,
+        startInSubgraph: true,
+        firstWrite: "ok",
+        // The target is ordinary, but the active viewing scope is a subgraph.
+        promotedDetail: {
+          text:
+            '1 match(es) of 1 in scope (viewing: 1 nodes)\n' +
+            '{"id":82,"type":"Power Lora Loader (rgthree)","is_subgraph":false}',
+        },
+        subgraph: new Error("Node 82 (Power Lora Loader (rgthree)) is not a subgraph"),
+      },
+    );
+
+    expect(isError).toBe(false);
+    expect(mutations).toBe(1);
+    expect(calls.filter((call) => call.cmd === "graph_get_subgraph")).toHaveLength(1);
     expect(calls.filter((call) => call.cmd === "graph_set_widget")).toEqual([
       expect.objectContaining({ node_id: 82, widget: "lora_1", value }),
     ]);

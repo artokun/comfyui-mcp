@@ -5909,13 +5909,17 @@ function parseQueriedNodeIdentityRow(row: unknown): QueriedNodeIdentity | null {
   return resolvedType ? { id, type: resolvedType } : null;
 }
 
-type QueriedNodeScope = "ordinary" | "container";
+type QueriedNodeScope = {
+  activeView: "root" | "subgraph";
+  node: "ordinary" | "container";
+};
 
-/** Read the node's explicit container bit before attempting promoted-widget
- * resolution. The pinpoint detail projection carries this bit even when the
- * widget list is empty (which is how a fresh rgthree Power Lora Loader appears).
- * Anything short of one exact, non-truncated row is deliberately indeterminate;
- * callers retain the existing fail-closed promoted-container path in that case. */
+/** Read the active viewing scope and node's explicit container bit before
+ * attempting promoted-widget resolution. The pinpoint detail projection carries
+ * the node bit even when the widget list is empty (which is how a fresh rgthree
+ * Power Lora Loader appears). Anything short of one exact, non-truncated row
+ * with an explicit root/subgraph witness is deliberately indeterminate; callers
+ * retain the existing fail-closed promoted-container path in that case. */
 function parseVerifiedQueriedNodeScope(
   payload: Record<string, unknown> | null,
   nodeId: unknown,
@@ -5927,6 +5931,10 @@ function parseVerifiedQueriedNodeScope(
   ) {
     return null;
   }
+  const viewing = payload.viewing;
+  if (!viewing || typeof viewing !== "object" || Array.isArray(viewing)) return null;
+  const activeView = (viewing as Record<string, unknown>).scope;
+  if (activeView !== "root" && activeView !== "subgraph") return null;
 
   let row: unknown;
   if (Object.prototype.hasOwnProperty.call(payload, "nodes")) {
@@ -5953,7 +5961,10 @@ function parseVerifiedQueriedNodeScope(
   if (!identity || !requestedId || identity.id !== requestedId) return null;
   const isSubgraph = (row as Record<string, unknown>).is_subgraph;
   if (typeof isSubgraph !== "boolean") return null;
-  return isSubgraph ? "container" : "ordinary";
+  return {
+    activeView,
+    node: isSubgraph ? "container" : "ordinary",
+  };
 }
 
 /** Strict identity parser for the DaSiWa refusal gate. Unlike the older type-only
@@ -6840,7 +6851,7 @@ async function preparePromotedWidgetWrite(
   // absent. An unreadable scope probe is not permission for an outer write;
   // it falls through to the existing conservative graph_get_subgraph path.
   const targetScope = await readPromotedTargetScope(ctx, nodeId);
-  if (targetScope === "ordinary") return null;
+  if (targetScope?.activeView === "root" && targetScope.node === "ordinary") return null;
 
   const sub = await ctx.call({ cmd: "graph_get_subgraph", node_id: nodeId });
   if (sub.isError) {
