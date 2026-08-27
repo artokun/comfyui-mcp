@@ -75,6 +75,10 @@ function bridge(opts: {
   /** #2393: successive graph_get_subgraph replies, used to model a witness
    * that is incomplete immediately after an official template load. */
   subgraphSequence?: Array<Record<string, unknown> | Error>;
+  /** #2401: change the routing or panel connection identity after the async
+   * ordinary-node scope probe has produced its result, before the caller can
+   * take the fast path. */
+  scopeProbeIdentityChange?: "tab" | "connection";
   nestedSubgraph?: Record<string, unknown> | Error;
   enterFails?: boolean;
   exitFails?: boolean;
@@ -171,6 +175,7 @@ function bridge(opts: {
     reason: "no current panel graph-scope witness has been observed",
   };
   const beforeWrite = { mutate: undefined as (() => void) | undefined };
+  const afterScopeProbe = { mutate: undefined as (() => void) | undefined };
   const legacyBuild = opts.legacyPanelBuild !== undefined;
   const currentViewing = () => ({
     scope: inSubgraph ? "subgraph" : "root",
@@ -373,18 +378,30 @@ function bridge(opts: {
       }
       if (cmd.cmd === "graph_query") {
         const wantId = Array.isArray(cmd.ids) && cmd.ids.length ? String(cmd.ids[0]) : null;
+        const returnGraphQuery = (value: Record<string, unknown>, id: string | null) => {
+          const result = afterGraphQuery(value, id);
+          if (cmd.fields === "detail" && cmd.max_chars === undefined) {
+            if (opts.scopeProbeIdentityChange === "connection") {
+              connectionIdentity = { generation: 2, tabSessionId: "browser-tab-a" };
+            }
+            const mutation = afterScopeProbe.mutate;
+            afterScopeProbe.mutate = undefined;
+            mutation?.();
+          }
+          return result;
+        };
         const postEnter =
           inSubgraph && wantId ? opts.postEnterGraphQueryById?.[wantId] : undefined;
         if (postEnter !== undefined) {
           if (postEnter instanceof Error) throw postEnter;
-          return afterGraphQuery(postEnter, wantId);
+          return returnGraphQuery(postEnter, wantId);
         }
         if (opts.detailById && wantId && opts.detailById[wantId] !== undefined) {
-          return afterGraphQuery(opts.detailById[wantId], wantId);
+          return returnGraphQuery(opts.detailById[wantId], wantId);
         }
-        if (opts.stackDataIdentity && !inSubgraph) return afterGraphQuery(opts.stackDataIdentity, wantId);
+        if (opts.stackDataIdentity && !inSubgraph) return returnGraphQuery(opts.stackDataIdentity, wantId);
         if (opts.stackDataIdentity && inSubgraph) {
-          return afterGraphQuery(
+          return returnGraphQuery(
             opts.stackDataInnerIdentity ?? { nodes: [{ id: 76, type: "OtherLoraLoader" }] },
             wantId,
           );
@@ -396,10 +413,10 @@ function bridge(opts: {
             candidate && typeof candidate === "object" && String(candidate.id) === wantId,
           );
           if (node && typeof node.type === "string") {
-            return afterGraphQuery({ nodes: [{ id: node.id, type: node.type }] }, wantId);
+            return returnGraphQuery({ nodes: [{ id: node.id, type: node.type }] }, wantId);
           }
         }
-        return afterGraphQuery(
+        return returnGraphQuery(
           opts.promotedDetail ?? {
             nodes: [
               {
@@ -497,6 +514,7 @@ function bridge(opts: {
     get postEnterGraphQueries() {
       return postEnterGraphQueries;
     },
+    afterScopeProbe,
     get writesApplied() {
       return writes;
     },
@@ -511,8 +529,13 @@ async function setWidget(
   opts: Parameters<typeof bridge>[0] = {},
 ) {
   const harness = bridge(opts);
-  const { b, calls, beforeWrite } = harness;
+  const { b, calls, beforeWrite, afterScopeProbe } = harness;
   const ctx = makePanelToolCtx(b, TAB, new WorkflowTargetStore());
+  if (opts.scopeProbeIdentityChange === "tab") {
+    afterScopeProbe.mutate = () => {
+      ctx.tabId = `${TAB}:rebound`;
+    };
+  }
   const def = buildPanelToolDefs().find((d) => d.name === "panel_set_widget");
   if (!def) throw new Error("panel_set_widget is not registered");
   const res: ToolResult = await def.handler(args as never, ctx);
@@ -874,6 +897,86 @@ describe("panel_set_widget coordinated promoted-widget fixes (#2393, #2394)", ()
     expect(calls.filter((call) => call.cmd === "graph_set_widget")).toEqual([
       expect.objectContaining({ node_id: 82, widget: "lora_1", value }),
     ]);
+  });
+});
+
+describe("panel_set_widget ordinary-node scope probe fence (#2401)", () => {
+  const value = '{"on":true,"lora":"turbo.safetensors","strength":1,"strengthTwo":null}';
+  const ordinaryRootDetail = {
+    text:
+      '1 match(es) of 1 in scope (viewing: 1 nodes)\n' +
+      '{"id":82,"type":"Power Lora Loader (rgthree)","is_subgraph":false}',
+  };
+
+  it.each(["tab", "connection"] as const)(
+    "refuses the ordinary fast path when the %s identity changes after the scope probe",
+    async (identity) => {
+      const { text, isError, calls, writesApplied, mutations } = await setWidget(
+        { node_id: 82, widget: "lora_1", value },
+        {
+          firstWrite: "ok",
+          promotedDetail: ordinaryRootDetail,
+          scopeProbeIdentityChange: identity,
+        },
+      );
+
+      expect(isError).toBe(true);
+      expect(text).toMatch(/after the scope probe/);
+      expect(calls.map((call) => call.cmd)).toEqual(["graph_query"]);
+      expect(writesApplied).toBe(0);
+      expect(mutations).toBe(0);
+    },
+  );
+
+  it("keeps a stable ordinary root on the fast path", async () => {
+    const { isError, calls, writesApplied, mutations } = await setWidget(
+      { node_id: 82, widget: "lora_1", value },
+      { firstWrite: "ok", promotedDetail: ordinaryRootDetail },
+    );
+
+    expect(isError).toBe(false);
+    expect(calls.map((call) => call.cmd)).toEqual(["graph_query", "graph_set_widget"]);
+    expect(writesApplied).toBe(1);
+    expect(mutations).toBe(1);
+  });
+
+  it("keeps an ordinary node in an active subgraph on the conservative path", async () => {
+    const { isError, calls, writesApplied, mutations } = await setWidget(
+      { node_id: 82, widget: "lora_1", value },
+      {
+        firstWrite: "ok",
+        ownerNodeId: 78,
+        startInSubgraph: true,
+        promotedDetail: ordinaryRootDetail,
+        subgraph: new Error("Node 82 (Power Lora Loader (rgthree)) is not a subgraph"),
+      },
+    );
+
+    expect(isError).toBe(false);
+    expect(calls.map((call) => call.cmd)).toEqual([
+      "graph_query",
+      "graph_get_subgraph",
+      "graph_set_widget",
+    ]);
+    expect(writesApplied).toBe(1);
+    expect(mutations).toBe(1);
+  });
+
+  it("keeps an unknown scope off the ordinary fast path", async () => {
+    const { text, isError, calls, writesApplied, mutations } = await setWidget(
+      { node_id: 82, widget: "lora_1", value },
+      {
+        firstWrite: "ok",
+        promotedDetail: { nodes: [{ id: 82, type: "Power Lora Loader (rgthree)" }] },
+        subgraph: new Error("graph_get_subgraph unavailable"),
+      },
+    );
+
+    expect(isError).toBe(true);
+    expect(text).toMatch(/could not determine whether the addressed node is a promoted container/);
+    expect(calls.map((call) => call.cmd)).toEqual(["graph_query", "graph_get_subgraph"]);
+    expect(writesApplied).toBe(0);
+    expect(mutations).toBe(0);
   });
 });
 

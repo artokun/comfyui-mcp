@@ -6898,7 +6898,30 @@ async function preparePromotedWidgetWrite(
   // absent. An unreadable scope probe is not permission for an outer write;
   // it falls through to the existing conservative graph_get_subgraph path.
   const targetScope = await readPromotedTargetScope(ctx, nodeId);
-  if (targetScope?.activeView === "root" && targetScope.node === "ordinary") return null;
+  if (targetScope?.activeView === "root" && targetScope.node === "ordinary") {
+    // The scope probe crossed an await. Re-read the binding before taking the
+    // ordinary fast path; otherwise a tab/connection rebind can make this
+    // probe's ordinary classification authorize a write on the new receiver.
+    if (!hasIdentityApi) {
+      return promotedWriteRefusal(widget, "the receiver identity was unavailable after the scope probe");
+    }
+    if (!isUsablePanelConnectionIdentity(identityBefore)) {
+      return promotedWriteRefusal(widget, "the panel connection identity was unavailable after the scope probe");
+    }
+    let identityAfterScope: { generation: number; tabSessionId: string } | undefined;
+    try {
+      identityAfterScope = ctx.panelConnectionIdentity?.();
+    } catch {
+      return promotedWriteRefusal(widget, "the panel connection identity became unreadable after the scope probe");
+    }
+    if (ctx.tabId !== tabBefore || !isUsablePanelConnectionIdentity(identityAfterScope)) {
+      return promotedWriteRefusal(widget, "the panel tab or connection changed after the scope probe");
+    }
+    if (!samePanelConnectionIdentity(identityBefore, identityAfterScope)) {
+      return promotedWriteRefusal(widget, "the panel session or connection changed after the scope probe");
+    }
+    return null;
+  }
 
   const sub = await ctx.call({ cmd: "graph_get_subgraph", node_id: nodeId });
   if (sub.isError) {
