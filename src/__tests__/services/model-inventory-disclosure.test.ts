@@ -51,6 +51,7 @@ describe("model inventory disclosure (#2414)", () => {
   });
 
   it("does not classify unreadable combos or ambiguous widget names as a cache mismatch", async () => {
+    expect(isReadableComboValueRefusal(REFUSAL)).toBe(true);
     expect(isReadableComboValueRefusal('The combo "vae_name" has an EMPTY option list')).toBe(false);
     expect(isReadableComboValueRefusal("The value is not in this combo's current option list")).toBe(
       false,
@@ -58,11 +59,54 @@ describe("model inventory disclosure (#2414)", () => {
 
     const listCategory = vi.fn(async () => ["model.safetensors"]);
     await expect(
+      getModelInventoryDisclosure(
+        "vae_name",
+        "model.safetensors",
+        'The combo "vae_name" has an EMPTY option list',
+        listCategory,
+      ),
+    ).resolves.toBeNull();
+    await expect(
       getModelInventoryDisclosure("model_name", "model.safetensors", REFUSAL, listCategory),
     ).resolves.toBeNull();
     await expect(
       getModelInventoryDisclosure("toString", "model.safetensors", REFUSAL, listCategory),
     ).resolves.toBeNull();
     expect(listCategory).not.toHaveBeenCalled();
+  });
+
+  it("stays silent for empty or non-string widget/value inputs", async () => {
+    const listCategory = vi.fn(async () => ["present.safetensors"]);
+    await expect(
+      getModelInventoryDisclosure("", "present.safetensors", REFUSAL, listCategory),
+    ).resolves.toBeNull();
+    await expect(
+      getModelInventoryDisclosure("vae_name", "", REFUSAL, listCategory),
+    ).resolves.toBeNull();
+    await expect(
+      getModelInventoryDisclosure(undefined, "present.safetensors", REFUSAL, listCategory),
+    ).resolves.toBeNull();
+    await expect(
+      getModelInventoryDisclosure("vae_name", undefined, REFUSAL, listCategory),
+    ).resolves.toBeNull();
+    expect(listCategory).not.toHaveBeenCalled();
+  });
+
+  it("matches a live listing by normalized path and ignores non-string entries", async () => {
+    const listCategory = vi.fn(async (category: string) => {
+      expect(category).toBe("checkpoints");
+      return [12, "./models\\video\\present.safetensors"] as unknown as string[];
+    });
+
+    const note = await getModelInventoryDisclosure(
+      "ckpt_name",
+      "models/video/present.safetensors",
+      REFUSAL.replace("vae_name", "ckpt_name"),
+      listCategory,
+    );
+
+    expect(note).toContain("/models/checkpoints");
+    expect(note).toContain("models/video/present.safetensors");
+    expect(note).toContain("Nothing was written");
   });
 });
