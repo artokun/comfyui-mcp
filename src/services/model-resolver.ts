@@ -1092,13 +1092,23 @@ function subfolderRemainder(targetSubfolder: string): string {
  * the contract speaking, not the server's contents). Callers must treat
  * inconclusive as "no evidence", never as "no files".
  */
+export type LiveCategoryListingOptions = {
+  /** Optional bound for callers that are already inside a user-facing deadline. */
+  timeoutMs?: number;
+};
+
 export async function liveCategoryListing(
   category: string,
+  options: LiveCategoryListingOptions = {},
 ): Promise<string[] | undefined> {
   if (!category) return undefined;
   if (categoryCannotEnumerateFiles(category)) return undefined;
   try {
-    const res = await comfyApiFetch(`/models/${encodeURIComponent(category)}`);
+    const init =
+      options.timeoutMs === undefined
+        ? undefined
+        : { signal: AbortSignal.timeout(options.timeoutMs) };
+    const res = await comfyApiFetch(`/models/${encodeURIComponent(category)}`, init);
     if (!res.ok) return undefined;
     const json = (await res.json()) as unknown;
     if (!Array.isArray(json)) return undefined;

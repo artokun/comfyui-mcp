@@ -57,6 +57,10 @@ import {
   findPackOnDisk,
   nodesInstallCommandArgs,
 } from "../services/node-management.js";
+import {
+  getModelInventoryDisclosure,
+  type ModelInventoryDisclosureProbe,
+} from "../services/model-inventory-disclosure.js";
 import { sanitizePanelUpdateNodeResult } from "../services/manager-update-error.js";
 import {
   formatQueueStatusPartialNote,
@@ -5513,6 +5517,29 @@ const SAVE_AS_NAME_CONFLICT_NOTE =
 function withSaveAsNameConflictNote(res: ToolResult): ToolResult {
   if (!isSaveAsNameConflict(res)) return res;
   return appendToolResultText(res, SAVE_AS_NAME_CONFLICT_NOTE);
+}
+
+/**
+ * #2414 — a live `/models/<category>` hit does not reconcile the panel's
+ * `/object_info` combo cache. Add the distinction only when both sides are
+ * positively observed; an unavailable listing remains an ordinary refusal.
+ */
+async function withModelInventoryDisclosure(
+  res: ToolResult,
+  widget: unknown,
+  value: unknown,
+  ctx: PanelToolCtx,
+): Promise<ToolResult> {
+  if (!res.isError) return res;
+  const probe = ctx.modelInventoryDisclosure ?? getModelInventoryDisclosure;
+  try {
+    const disclosure = await probe(widget, value, textOfToolResult(res));
+    return disclosure ? appendToolResultText(res, disclosure) : res;
+  } catch {
+    // The disclosure is advisory. Preserve the original panel refusal if its
+    // read-only corroboration fails for any reason.
+    return res;
+  }
 }
 
 // ---- #1695: bound the panel_set_widget previous/new echo --------------------
@@ -13319,6 +13346,8 @@ export interface PanelToolCtx {
   /** Notifies the completion watchdog when panel_run opens a ticket after a
    * fast completion was already observed. Optional for lightweight contexts. */
   onRunTicketOpened?: (promptIds: readonly string[]) => void;
+  /** Optional test seam for the read-only /models-vs-/object_info disclosure. */
+  modelInventoryDisclosure?: ModelInventoryDisclosureProbe;
   /** Per-tab workflow pin store (optional for tests). */
   workflowTarget?: WorkflowTargetStore;
   /**
@@ -18402,7 +18431,9 @@ export function buildPanelToolDefs(): PanelToolDef[] {
           textOfToolResult(first),
           args.widget as string,
         );
-        if (!refusal || String(refusal.nodeId) !== String(args.node_id)) return first;
+        if (!refusal || String(refusal.nodeId) !== String(args.node_id)) {
+          return withModelInventoryDisclosure(first, args.widget, value, ctx);
+        }
 
         if (refusal.widget !== args.widget) {
           const remapped = await guardedWrite(args.node_id, refusal.widget);

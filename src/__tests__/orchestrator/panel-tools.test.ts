@@ -221,6 +221,45 @@ describe("panel-tools: panel_set_widget (empty-string clear, issue #347)", () =>
   });
 });
 
+describe("panel-tools: model inventory disclosure (#2414)", () => {
+  it("adds a positive /models-vs-/object_info disclosure without retrying the write", async () => {
+    const { ctx } = makeFakeCtx();
+    const calls: Forwarded[] = [];
+    ctx.call = async (cmd) => {
+      calls.push(cmd);
+      return {
+        isError: true,
+        content: [
+          {
+            type: "text",
+            text:
+              `Error: Value "minimax_h3_video_vae_int8_convrot.safetensors" is not a valid ` +
+              `option for combo widget "vae_name". Its option list WAS read successfully ` +
+              `and holds 22 options, none of them this value.`,
+          },
+        ],
+      };
+    };
+    ctx.modelInventoryDisclosure = async (widget, value, refusalText) => {
+      expect(widget).toBe("vae_name");
+      expect(value).toBe("minimax_h3_video_vae_int8_convrot.safetensors");
+      expect(refusalText).toContain("option list WAS read successfully");
+      return "\n\nModel inventory disclosure: /models/vae includes the value; /object_info does not.";
+    };
+
+    const res = (await defByName("panel_set_widget").handler(
+      { node_id: 39, widget: "vae_name", value: "minimax_h3_video_vae_int8_convrot.safetensors" },
+      ctx,
+    )) as ToolResult;
+
+    expect(res.isError).toBe(true);
+    expect(res.content[0]).toMatchObject({ type: "text" });
+    expect((res.content[0] as { text: string }).text).toContain("Model inventory disclosure");
+    expect(calls).toHaveLength(1);
+    expect(calls[0]).toMatchObject({ cmd: "graph_set_widget", widget: "vae_name" });
+  });
+});
+
 describe("panel-tools: fresh /object_info ack timeout (#599)", () => {
   // The refresh-before-validate FRONTEND handlers (graph_set_widget #338/#458,
   // graph_add_node #289/#458) await an authoritative /object_info fetch before
