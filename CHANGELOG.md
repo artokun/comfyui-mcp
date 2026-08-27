@@ -6,6 +6,11 @@ All notable changes to this project are documented here. This project adheres to
 
 ## Unreleased
 
+### MCP
+
+#### Fixed
+- compact-mode `list_tools` / `panel_list_tools` enumeration is not a catalog hunt (#2429)
+
 ## [0.52.141] - 2026-08-27
 
 ### MCP

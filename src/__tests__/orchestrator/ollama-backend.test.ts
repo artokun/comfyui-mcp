@@ -329,6 +329,67 @@ describe("OllamaBackend", () => {
   });
 
   /**
+   * #2429 — the logged failure was `repeats=2 discovery=9`. Bare identical
+   * `list_tools {}` cannot produce that (the exact-repeat breaker dies at 4
+   * first). `list_tools` also takes `category`, and walking the catalog
+   * headings is the compact-mode protocol: each call has distinct args so
+   * repeats stay at 1–2, while a bare-name counter climbs on one key and
+   * kills the turn. That is the same #839 fold the action-keying already
+   * fixed for download_model / search_custom_nodes.
+   *
+   * Unfixed counting fails this: SEARCH LIMIT from the 4th category, then
+   * tool_loop at 8/9 with no answer. Fixed: every new category dispatches,
+   * the one exact repeat is blocked, the turn completes.
+   */
+  it("#2429 compact-mode category enumeration is not a discovery hunt (repeats=2 discovery=9)", async () => {
+    const { client, callTool } = fakeMcpClient(COMFY_META);
+    const backend = new OllamaBackend({ model: "gemma4:e4b", connectToolClients: async () => ({ comfyui: client }) });
+    const list = (args: Record<string, unknown>, extra?: Record<string, unknown>) => [
+      {
+        message: {
+          content: "",
+          tool_calls: [
+            { function: { name: "list_tools", arguments: args } },
+            ...(extra ? [{ function: { name: "list_tools", arguments: extra } }] : []),
+          ],
+        },
+        done: true,
+      },
+    ];
+    // 7 distinct categories, then a round with one more AND a repeat of the
+    // first — 9 list_tools, max exact-args repeats = 2, one discovery key.
+    chatScript.push(
+      list({ category: "generation" }),
+      list({ category: "models" }),
+      list({ category: "workflows" }),
+      list({ category: "custom-nodes" }),
+      list({ category: "diagnostics" }),
+      list({ category: "server" }),
+      list({ category: "images-assets" }),
+      list({ category: "apps" }, { category: "generation" }),
+      [{ message: { content: "generate_image is in the generation category." }, done: true }],
+    );
+    const events = await collect(backend, turnsOf({ text: "what can you generate?" }));
+    // 8 distinct categories dispatched; the one exact repeat is blocked, not
+    // re-run. None of them is a keyword search, so SEARCH LIMIT must not fire.
+    expect(callTool).toHaveBeenCalledTimes(8);
+    const limitNudges = chatRequests
+      .flatMap((r) => r.messages)
+      .filter((m) => m.role === "tool" && String(m.content).startsWith("SEARCH LIMIT"));
+    expect(limitNudges).toEqual([]);
+    const repeats = chatRequests
+      .flatMap((r) => r.messages)
+      .filter((m) => m.role === "tool" && String(m.content).startsWith("REPEAT CALL BLOCKED"));
+    expect(repeats).toHaveLength(1);
+    expect(events.filter((e) => e.type === "result")).toEqual([
+      { type: "result", ok: true, turn: 1, usage: expect.anything() },
+    ]);
+    const assistant = events.filter((e) => e.type === "assistant") as Array<{ text: string }>;
+    expect(assistant).toHaveLength(1);
+    expect(assistant[0].text).toContain("generate_image");
+  });
+
+  /**
    * 0.50.0 slice 11 folded the HuggingFace model search into
    * download_model action:"search", so the discovery counter had to become
    * action-aware. Keyed on the bare name it would count a download as a catalog

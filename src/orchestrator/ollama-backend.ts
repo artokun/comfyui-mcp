@@ -462,6 +462,64 @@ function msgOf(err: unknown): string {
  * same reason the repeat-call key stringifies rather than reads them.
  */
 function toolCallAction(args: unknown): string | undefined {
+  return stringField(args, "action");
+}
+
+/**
+ * Discovery-breaker key for one tool call, or undefined if this call is not a
+ * catalog search.
+ *
+ * Keyed on `tool` + `action` for consolidated tools, and that is not
+ * cosmetic: 0.50.0 slice 11 folded the HuggingFace search into
+ * download_model action:"search", and the SAME tool name now also STARTS
+ * MULTI-GB DOWNLOADS. Counting the bare name would answer a fourth
+ * download_model {action:"download"} in one turn with a "SEARCH LIMIT"
+ * refusal instead of downloading, and end the turn at eight — a fold
+ * turning legitimate calls into refusals because the thing reading the
+ * name was not updated with it (#839).
+ *
+ * 0.50.0 slice 12: `search_custom_nodes` SURVIVES the fold, but it now also
+ * covers the retired pack-DETAILS lookup as action:"details" — and that name
+ * was never counted here. Keying the bare name would start counting a call
+ * that never counted, on the workflow that is CORRECT: search once, then
+ * read `details` for three or four candidate packs. The fourth would be
+ * answered with "STOP searching" while the model is doing exactly the right
+ * thing, and at eight the turn breaks. Same #839 shape as the download_model
+ * case above, so the same remedy: key the ACTION, and count only the
+ * keyword search.
+ *
+ * `list_tools` / `panel_list_tools` are the remaining instance of that fold
+ * (#2429). Compact mode's protocol is to enumerate them — including walking
+ * `list_tools {category:…}` across the catalog headings — and the
+ * exact-repeat breaker already catches a wedged identical call. Counting
+ * the bare name treats that walk as the Civitai-hunt wedge: four categories
+ * get "STOP searching", eight kill the turn with repeats still at 1–2
+ * (every category is a distinct args blob). Count them only when the call
+ * carries a non-empty `search`; that is the hunt this counter exists for.
+ */
+const DISCOVERY_SEARCH_ACTIONS = new Set([
+  'download_model action:"search"',
+  'search_custom_nodes action:"search"',
+]);
+
+export function discoveryCallKey(name: string, args: unknown): string | undefined {
+  const action = toolCallAction(args);
+  if (action !== undefined) {
+    const keyed = `${name} action:"${action}"`;
+    if (DISCOVERY_SEARCH_ACTIONS.has(keyed)) return keyed;
+  }
+  if (name === "list_tools" || name === "panel_list_tools") {
+    return catalogHasSearch(args) ? name : undefined;
+  }
+  return undefined;
+}
+
+function catalogHasSearch(args: unknown): boolean {
+  const search = stringField(args, "search");
+  return search !== undefined && search.trim().length > 0;
+}
+
+function stringField(args: unknown, key: "action" | "search"): string | undefined {
   let obj: unknown = args;
   if (typeof args === "string") {
     try {
@@ -471,8 +529,10 @@ function toolCallAction(args: unknown): string | undefined {
     }
   }
   if (!obj || typeof obj !== "object") return undefined;
-  const action = (obj as { action?: unknown }).action;
-  return typeof action === "string" ? action : undefined;
+  const value = key === "action"
+    ? (obj as { action?: unknown }).action
+    : (obj as { search?: unknown }).search;
+  return typeof value === "string" ? value : undefined;
 }
 
 function textOf(result: McpCallResult): string {
@@ -1699,34 +1759,11 @@ export class OllamaBackend implements AgentBackend {
     // DISCOVERY meta-tool with a DIFFERENT search each round (list_tools
     // {"search":"lora"} → {"search":"civitai"} → {"search":"flux"} …), hunting a
     // capability that isn't in the catalog — every call is unique so the
-    // exact-repeat breaker above never fires. Count calls per discovery tool
-    // (ignoring args); past a threshold, stop searching and tell it the truth
-    // (some capabilities live in OPTIONAL companion servers). describe_tool is
+    // exact-repeat breaker above never fires. Count calls per discovery key
+    // (see discoveryCallKey; ignoring args that are not the search);
+    // past a threshold, stop searching and tell it the truth (some
+    // capabilities live in OPTIONAL companion servers). describe_tool is
     // NOT here — describing many distinct tools is legitimate exploration.
-    //
-    // Keyed on `tool` + `action` for consolidated tools, and that is not
-    // cosmetic: 0.50.0 slice 11 folded the HuggingFace search into
-    // download_model action:"search", and the SAME tool name now also STARTS
-    // MULTI-GB DOWNLOADS. Counting the bare name would answer a fourth
-    // download_model {action:"download"} in one turn with a "SEARCH LIMIT"
-    // refusal instead of downloading, and end the turn at eight — a fold
-    // turning legitimate calls into refusals because the thing reading the
-    // name was not updated with it (#839).
-    const DISCOVERY_TOOLS = new Set([
-      "list_tools",
-      "panel_list_tools",
-      'download_model action:"search"',
-      // 0.50.0 slice 12: was the bare name. `search_custom_nodes` SURVIVES the
-      // fold, but it now also covers the retired pack-DETAILS lookup as
-      // action:"details" — and that name was never counted here. Keying the bare
-      // name would start counting a call that never counted, on the workflow
-      // that is CORRECT: search once, then read `details` for three or four
-      // candidate packs. The fourth would be answered with "STOP searching"
-      // while the model is doing exactly the right thing, and at eight the turn
-      // breaks. Same #839 shape as the download_model case above, so the same
-      // remedy: key the ACTION, and count only the keyword search.
-      'search_custom_nodes action:"search"',
-    ]);
     const discoveryCounts = new Map<string, number>();
     let emptyFinalRetried = false;
     let attachmentsStripped = false;
@@ -1925,15 +1962,11 @@ export class OllamaBackend implements AgentBackend {
           const repeats = (seenCalls.get(callKey) ?? 0) + 1;
           seenCalls.set(callKey, repeats);
           maxRepeats = Math.max(maxRepeats, repeats);
-          // The consolidated form first, then the bare name — so a tool whose
-          // whole surface is discovery still counts, while a consolidated tool
-          // counts only for the action that actually searches.
-          const action = toolCallAction(args);
-          const discoveryKey = action !== undefined && DISCOVERY_TOOLS.has(`${name} action:"${action}"`)
-            ? `${name} action:"${action}"`
-            : DISCOVERY_TOOLS.has(name)
-              ? name
-              : undefined;
+          // The consolidated form first, then a catalog lister only when it
+          // actually searches — so a tool whose whole surface is discovery
+          // still counts, a consolidated tool counts only for the action that
+          // searches, and compact-mode enumeration (bare / category) does not.
+          const discoveryKey = discoveryCallKey(name, args);
           const discoveryHits = discoveryKey
             ? (discoveryCounts.set(discoveryKey, (discoveryCounts.get(discoveryKey) ?? 0) + 1),
               discoveryCounts.get(discoveryKey)!)
