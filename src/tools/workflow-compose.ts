@@ -243,7 +243,7 @@ export function registerWorkflowComposeTools(server: McpServer): void {
               health: args.health,
             });
           case "node_info":
-            return await nodeInfoAction(args.node_type, args.verbose, args.refresh);
+            return await nodeInfo(args.node_type, args.verbose, args.refresh);
           default: {
             // Unreachable given the zod enum, but a clear runtime guard beats a
             // silent undefined if the schema and switch ever drift apart.
@@ -264,8 +264,12 @@ export function registerWorkflowComposeTools(server: McpServer): void {
  * `create_workflow (action:"node_info")` — the body of the retired
  * node-schema lookup tool, verbatim. Same cache reset, same getObjectInfo /
  * backfillObjectInfo calls, same >20 / verbose / summary branches.
+ *
+ * Exported so tests drive this shipped path (not a parallel checker). A remote
+ * /object_info 401 is OBJECT_INFO_AUTH from getObjectInfo — not
+ * "No nodes found matching", and not a missing pack (#2451).
  */
-async function nodeInfoAction(
+export async function nodeInfo(
   node_type: string | undefined,
   verbose: boolean | undefined,
   refresh: boolean | undefined,

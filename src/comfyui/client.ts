@@ -379,6 +379,64 @@ function objectInfoCacheFresh(): boolean {
   return age >= 0 && age < OBJECT_INFO_TTL_MS;
 }
 
+/**
+ * True when /object_info was rejected by an authentication layer (401/403),
+ * including an empty body. That is not a JSON document of installed nodes and
+ * must not be read as "the class_type is not installed" (#2451).
+ */
+export function isObjectInfoAuthFailure(err: unknown): err is NonJsonResponseError {
+  if (!isNonJsonResponseError(err)) return false;
+  const { kind, status } = err.diagnosis;
+  return kind === "login" && (status === 401 || status === 403);
+}
+
+/**
+ * An /object_info auth rejection, worded so callers cannot conclude the pack
+ * is missing. The live panel may already have the type (#2451, same class of
+ * defect as #2085's "401 is not a missing Manager").
+ */
+export function objectInfoAuthError(err: NonJsonResponseError): ComfyUIError {
+  return new ComfyUIError(
+    `${err.message} This is an authentication failure, not evidence that the node pack is missing ` +
+      `or that the class_type is uninstalled. A connected panel that can already add the type ` +
+      `(panel_add_node after panel_refresh_nodes) is reading the live registry through an ` +
+      `authenticated browser session this process does not have. Configure COMFYUI_AUTH_TOKEN / ` +
+      `COMFYUI_AUTH_HEADER, or the CF_ACCESS_CLIENT_ID + CF_ACCESS_CLIENT_SECRET pair, for this ` +
+      `MCP process so /object_info can be read.`,
+    "OBJECT_INFO_AUTH",
+    { status: err.diagnosis.status, url: err.diagnosis.url },
+  );
+}
+
+/** Optional live-registry snapshot used when headless /object_info is a 401. */
+export type LiveObjectInfoFallback = () => Promise<ObjectInfo | undefined>;
+
+let liveObjectInfoFallback: LiveObjectInfoFallback | undefined;
+
+/**
+ * Test seam for #2451: the live panel registry (the same source panel_add_node
+ * used) when the configured /object_info answers 401. Production has no
+ * LiteGraph in this process; leave unset to get OBJECT_INFO_AUTH.
+ */
+export function setLiveObjectInfoFallbackForTests(fn: LiveObjectInfoFallback | undefined): void {
+  liveObjectInfoFallback = fn;
+}
+
+async function readLiveObjectInfoOnAuthFailure(): Promise<ObjectInfo | undefined> {
+  if (!liveObjectInfoFallback) return undefined;
+  try {
+    const live = await liveObjectInfoFallback();
+    if (!live || typeof live !== "object" || Array.isArray(live)) return undefined;
+    if (Object.keys(live).length === 0) return undefined;
+    logger.info("getObjectInfo serving live registry after /object_info auth rejection", {
+      types: Object.keys(live).length,
+    });
+    return live;
+  } catch {
+    return undefined;
+  }
+}
+
 export async function getObjectInfo(): Promise<ObjectInfo> {
   if (isCloudMode()) return cloudClient.getObjectInfo();
   // Serve from cache only while still inside the freshness window; once it lapses
@@ -440,6 +498,16 @@ export async function getObjectInfo(): Promise<ObjectInfo> {
         // fell through to `retryErr` every time — reintroducing the very
         // downgrade round 8 fixed.
         const toReport = provesNonJsonAnswer(retryErr) ? retryErr : provesNonJsonAnswer(err) ? err : retryErr;
+        // #2451 — a remote /object_info 401 empty body is an AUTH gate, not an
+        // empty node registry. panel_add_node can still create the type because
+        // the browser is authenticated; treating the 401 as "class missing"
+        // contradicts that live registry. Prefer the live snapshot when one
+        // exists; otherwise say it is auth, not a missing pack.
+        if (isObjectInfoAuthFailure(toReport)) {
+          const live = await readLiveObjectInfoOnAuthFailure();
+          if (live) return commit(live);
+          throw objectInfoAuthError(toReport);
+        }
         return await rethrowWithJsonDiagnosis(toReport, `${getComfyUIBaseUrl()}/object_info`);
       }
     }
