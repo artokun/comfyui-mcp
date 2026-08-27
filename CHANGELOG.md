@@ -10,7 +10,6 @@ All notable changes to this project are documented here. This project adheres to
 
 #### Fixed
 - a restart confirmation approval is delivered to the pending restart instead of only the next call (#2440)
-- panel_screenshot writes a PNG to a caller-specified save_path/output_path and refuses an existing file unless overwrite is true (#2439)
 
 ## [0.52.144] - 2026-08-27
 
@@ -20,13 +19,13 @@ All notable changes to this project are documented here. This project adheres to
 - apply_manifest counts a GGUF as installed when ComfyUI-GGUF lists it under clip_gguf/unet_gguf (#2447)
 - panel_list_nodes lists installed packs from host Manager HTTP when the panel tab is gone (#2459)
 - panel_run queued_unknown names a live-canvas next step instead of an unavailable queue inspector (#2438)
+- panel_screenshot writes a PNG to a caller-specified save_path/output_path and refuses an existing file unless overwrite is true (#2439)
 
 ## [0.52.143] - 2026-08-27
 
 ### MCP
 
 #### Fixed
-- a restart confirmation approval is delivered to the pending restart instead of only the next call (#2440)
 - Ollama names the cause of a 0-tool ready and logs recovery when the surface appears (#2428)
 - disclose unreindexed host links after panel_unexpose_subgraph_input/output (#2437)
 - a blocked repeat tool call returns the earlier payload instead of an error-string-only nudge (#2430)
