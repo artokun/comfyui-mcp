@@ -6,6 +6,14 @@ All notable changes to this project are documented here. This project adheres to
 
 ## Unreleased
 
+## [0.52.137] - 2026-08-26
+
+### MCP
+
+#### Fixed
+- pin the relay fetch to literal loopback addresses so localhost works again (#2391)
+
+
 ## [0.52.136] - 2026-08-26
 
 ### MCP
