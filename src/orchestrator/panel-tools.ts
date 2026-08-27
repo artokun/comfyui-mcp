@@ -6407,10 +6407,40 @@ function promotedEnvelopeCarriesEvidence(payload: Record<string, unknown> | null
 /** The shipped panel's only definitive non-promoted result is its own
  * `Node <id> (<type>) is not a subgraph` refusal. Every other graph_get_subgraph
  * error is an indeterminate read: a disconnect, stale route, old panel, or
- * transport failure can all leave a promoted container unresolved. */
+ * transport failure can all leave a promoted container unresolved.
+ *
+ * #2394 — the parenthesised segment is the node TYPE, and a node type may itself
+ * contain parentheses: rgthree names every node that way (`Power Lora Loader
+ * (rgthree)`), as do several other packs (`KSampler (Efficient)`). A `[^)]*`
+ * body stops at the FIRST `)`, so `Node 82 (Power Lora Loader (rgthree)) is not
+ * a subgraph` did not match its own definitive message. The read was then
+ * treated as indeterminate and the write refused with "graph_get_subgraph could
+ * not determine whether the addressed node is a promoted container" — the exact
+ * refusal #2394 reported, on a node that is provably ordinary.
+ *
+ * The type body is matched as a BALANCED group (plain text, or text containing
+ * one parenthesised group) UNIONED with the original `[^)]*` branch. Both halves
+ * of that union are load-bearing, and each was added because a simpler edit
+ * regressed a case that already worked (both caught by the codex gate):
+ *
+ *  - Widening to `.*` looks equivalent but is not: `.` does not cross a newline
+ *    and `[^)]*` did, so a node type carrying a newline stopped matching.
+ *  - The balanced branch alone rejects an UNMATCHED `(` — a type like
+ *    `Power (rgthree` yields `Node 82 (Power (rgthree) is not a subgraph`, which
+ *    the original matched by stopping at the first `)`.
+ *
+ * Keeping the original branch in the union makes the accept set a strict
+ * superset of the original's, so no message that was definitive before can
+ * become indeterminate now. The reject set is unchanged: still anchored at
+ * `^Error: Node `, still requiring the literal ` is not a subgraph` tail. A type
+ * nesting parentheses more than one level deep still does not match and is
+ * refused as indeterminate — the fail-closed direction, which is the correct
+ * default for a predicate whose `true` authorizes an ordinary write. The
+ * `[canvas-root-divergence]` diagnosis never begins with `Error: Node `, so it
+ * cannot collide. */
 function isDefinitiveNonPromotedSubgraphRead(res: ToolResult): boolean {
   if (!res.isError) return false;
-  return /^Error:\s*Node\s+\S+(?:\s+\([^)]*\))?\s+is not a subgraph\b/i.test(
+  return /^Error:\s*Node\s+\S+(?:\s+\((?:(?:[^()]|\([^()]*\))*|[^)]*)\))?\s+is not a subgraph\b/i.test(
     textOfToolResult(res),
   );
 }

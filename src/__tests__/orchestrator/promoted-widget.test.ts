@@ -3164,3 +3164,138 @@ describe("#2393 promoted-terminal witness is judged on the requested alias", () 
     expect(calls.filter((c) => c.cmd === "graph_set_widget")).toHaveLength(0);
   });
 });
+
+// #2394 (follow-up) — the definitive-read classifier matched the panel's own
+// `Node <id> (<type>) is not a subgraph` message with a `\([^)]*\)` body, which
+// stops at the FIRST `)`. rgthree names every node `… (rgthree)`, so the message
+// for the reported node never matched, the read was downgraded to indeterminate,
+// and the ordinary write was refused.
+//
+// PR #2399 added a root-scope shortcut that returns before graph_get_subgraph is
+// ever called, which hides this for a root node on a panel new enough to classify
+// (>= 0.15.101). It does NOT cover the two paths below, where the classifier is
+// still the only thing standing between an ordinary node and a false refusal.
+describe("definitive non-promoted read tolerates a parenthesised node type (#2394)", () => {
+  const RGTHREE_VALUE =
+    '{"on":false,"lora":"Detailer-KREA2.safetensors","strength":0.3,"strengthTwo":null}';
+
+  it("writes a root-level rgthree lora_N row when the scope probe cannot classify", async () => {
+    // A panel older than 0.15.101 emits no `is_subgraph`, so the #2399 shortcut
+    // reads indeterminate and correctly falls through to graph_get_subgraph.
+    // From there the classifier is the only remaining gate.
+    const { isError, text, mutations, calls } = await setWidget(
+      { node_id: 82, widget: "lora_1", value: RGTHREE_VALUE },
+      {
+        firstWrite: "ok",
+        subgraph: new Error("Node 82 (Power Lora Loader (rgthree)) is not a subgraph"),
+      },
+    );
+
+    expect(text).not.toMatch(/could not determine whether the addressed node is a promoted container/);
+    expect(isError).toBe(false);
+    expect(mutations).toBe(1);
+    expect(calls.filter((c) => c.cmd === "graph_set_widget")).toEqual([
+      expect.objectContaining({ node_id: 82, widget: "lora_1", value: RGTHREE_VALUE }),
+    ]);
+  });
+
+  it("writes an ordinary rgthree node from inside a subgraph", async () => {
+    // The #2399 shortcut is deliberately root-only, so an ordinary rgthree node
+    // reached while viewing a subgraph still goes through graph_get_subgraph.
+    const { isError, text, mutations, calls } = await setWidget(
+      { node_id: 82, widget: "lora_1", value: RGTHREE_VALUE },
+      {
+        ownerNodeId: 78,
+        startInSubgraph: true,
+        firstWrite: "ok",
+        nestedSubgraph: new Error("Node 82 (Power Lora Loader (rgthree)) is not a subgraph"),
+        promotedDetail: {
+          text:
+            '1 match(es) of 1 in scope (viewing: 1 nodes)\n' +
+            '{"id":82,"type":"Power Lora Loader (rgthree)","is_subgraph":false}',
+        },
+      },
+    );
+
+    expect(text).not.toMatch(/could not determine whether the addressed node is a promoted container/);
+    expect(isError).toBe(false);
+    expect(mutations).toBe(1);
+    expect(calls.filter((c) => c.cmd === "graph_set_widget")).toEqual([
+      expect.objectContaining({ node_id: 82, widget: "lora_1", value: RGTHREE_VALUE }),
+    ]);
+  });
+
+  // CONTROLS — these must hold BEFORE and AFTER the classifier change, or the two
+  // pins above would be satisfied by simply authorizing every failed read.
+  it("still refuses a genuinely indeterminate read", async () => {
+    const { isError, text, mutations, calls } = await setWidget(
+      { node_id: 82, widget: "lora_1", value: RGTHREE_VALUE },
+      {
+        firstWrite: "ok",
+        subgraph: new Error("websocket disconnected before graph_get_subgraph replied"),
+      },
+    );
+
+    expect(isError).toBe(true);
+    expect(text).toMatch(/could not determine whether the addressed node is a promoted container/);
+    expect(mutations).toBe(0);
+    expect(calls.filter((c) => c.cmd === "graph_set_widget")).toHaveLength(0);
+  });
+
+  // codex gate — the first cut of this fix used `.*`, which does NOT cross a
+  // newline, while the `[^)]*` body it replaced DID. A node type carrying a
+  // newline therefore matched before the fix and would have stopped matching
+  // after it: a regression smuggled in by a widening change. The balanced body
+  // keeps this case working.
+  it("still classifies a node type containing a newline", async () => {
+    const { isError, text, mutations, calls } = await setWidget(
+      { node_id: 82, widget: "lora_1", value: RGTHREE_VALUE },
+      {
+        firstWrite: "ok",
+        subgraph: new Error("Node 82 (Power Lora Loader\n(rgthree)) is not a subgraph"),
+      },
+    );
+
+    expect(text).not.toMatch(/could not determine whether the addressed node is a promoted container/);
+    expect(isError).toBe(false);
+    expect(mutations).toBe(1);
+    expect(calls.filter((c) => c.cmd === "graph_set_widget")).toHaveLength(1);
+  });
+
+  // codex gate, round 2 — the balanced body ALONE rejected an unmatched `(`,
+  // which the original `[^)]*` accepted by stopping at the first `)`. That would
+  // have traded one false refusal for another, so the original branch stays in
+  // the union and this pins the accept set as a strict superset.
+  it("still classifies a node type containing an unmatched open paren", async () => {
+    const { isError, text, mutations, calls } = await setWidget(
+      { node_id: 82, widget: "lora_1", value: RGTHREE_VALUE },
+      {
+        firstWrite: "ok",
+        subgraph: new Error("Node 82 (Power (rgthree) is not a subgraph"),
+      },
+    );
+
+    expect(text).not.toMatch(/could not determine whether the addressed node is a promoted container/);
+    expect(isError).toBe(false);
+    expect(mutations).toBe(1);
+    expect(calls.filter((c) => c.cmd === "graph_set_widget")).toHaveLength(1);
+  });
+
+  it("still refuses when the message names a promoted container rather than a plain node", async () => {
+    // Shape-adjacent but NOT the definitive message: it must not be admitted just
+    // because it carries parentheses and the word subgraph.
+    const { isError, text, mutations } = await setWidget(
+      { node_id: 82, widget: "lora_1", value: RGTHREE_VALUE },
+      {
+        firstWrite: "ok",
+        subgraph: new Error(
+          "Cannot read node 82 (Power Lora Loader (rgthree)) because the subgraph is not loaded",
+        ),
+      },
+    );
+
+    expect(isError).toBe(true);
+    expect(text).toMatch(/could not determine whether the addressed node is a promoted container/);
+    expect(mutations).toBe(0);
+  });
+});
