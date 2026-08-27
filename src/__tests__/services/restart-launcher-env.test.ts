@@ -143,6 +143,7 @@ vi.mock("../../services/instance-witness.js", async () => ({
 import { detectStabilityMatrix } from "../../services/launcher-env.js";
 import {
   __processControlTestHooks,
+  MANAGER_DEPENDENCY_REAPPLY_MARKER,
   preflightLocalRestart,
   restartComfyUI,
   startComfyUI,
@@ -2815,6 +2816,47 @@ n127.0.0.1:8188
     const serialized = JSON.parse(JSON.stringify(result));
     expect(serialized.startup).toBe("unconfirmed");
     expect(serialized.listener_ownership).toBe("unconfirmed");
+
+    killSpy.mockRestore();
+  });
+
+  it("replays the saved launch after Manager's dependency-reapply exit 0 (#2427)", async () => {
+    // Distinct from #2009: the port is NOT serving after Manager's clean handoff.
+    // restart_comfyui used to wait out the budget and return started:false /
+    // "could not be started" even though a subsequent action:"start" came up
+    // immediately. Replay the saved command once instead of treating the
+    // handoff as a terminal relaunch failure.
+    process.env.COMFYUI_STARTUP_CHECK_INTERVAL_S = "0.01";
+    process.env.COMFYUI_STARTUP_CHECK_MAX_TRIES = "2";
+    usePlainInstall();
+    mockLivePortThenFree();
+    const children = spawnCapturingChildren();
+    __processControlTestHooks.setLaunchLogText(MANAGER_DEPENDENCY_REAPPLY_MARKER);
+    let fetches = 0;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => {
+        fetches++;
+        if (children.length <= 1) {
+          children[0]?.emit("exit", 0, null);
+          throw new Error("ECONNREFUSED");
+        }
+        return { ok: true } as Response;
+      }),
+    );
+    const killSpy = vi.spyOn(process, "kill").mockImplementation(() => true);
+
+    const result = await restartComfyUI();
+
+    expect(mockSpawn).toHaveBeenCalledTimes(2);
+    expect(result.stopped).toBe(true);
+    expect(result.started).toBe(true);
+    expect(result.ready).toBe(true);
+    expect(result.startup).not.toBe("failed");
+    expect(result.message).not.toMatch(/could not be started/i);
+    expect(result.message).not.toMatch(/THIS RELAUNCH FAILED/);
+    expect(result.message).toMatch(/dependency-reapply handoff/);
+    expect(fetches).toBeGreaterThan(3);
 
     killSpy.mockRestore();
   });

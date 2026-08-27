@@ -96,6 +96,8 @@ import {
   __processControlTestHooks,
   clearRestartDispatch,
   getRestartDispatchRecord,
+  isManagerDependencyReapplyHandoff,
+  MANAGER_DEPENDENCY_REAPPLY_MARKER,
   parseListenerPidFromNetstat,
   preflightLocalRestart,
   PROCESS_WIDE_RESTART_DISPATCH_TOKEN,
@@ -552,6 +554,223 @@ describe("process-control startup readiness", () => {
     expect(result.message).toMatch(/EXITED \(exit code 0\)/);
     expect(result.message).toMatch(/could not be confirmed as the process this call launched/i);
     expect(fetchMock).toHaveBeenCalledTimes(3);
+  });
+
+  it("is a Manager dependency-reapply handoff only for exit 0 after the marker (#2427)", () => {
+    __processControlTestHooks.setLaunchLogText(
+      `loading custom nodes\n${MANAGER_DEPENDENCY_REAPPLY_MARKER}\n`,
+    );
+    expect(
+      isManagerDependencyReapplyHandoff({ exit: { code: 0, signal: null } }),
+    ).toBe(true);
+    expect(
+      isManagerDependencyReapplyHandoff({ exit: { code: 1, signal: null } }),
+    ).toBe(false);
+    expect(
+      isManagerDependencyReapplyHandoff({ exit: { code: 0, signal: "SIGTERM" } }),
+    ).toBe(false);
+    expect(isManagerDependencyReapplyHandoff({ exit: { code: 0, signal: null }, launchLogPath: "unused.log" })).toBe(true);
+
+    __processControlTestHooks.setLaunchLogText(undefined);
+    expect(
+      isManagerDependencyReapplyHandoff({ exit: { code: 0, signal: null } }),
+    ).toBe(false);
+
+    __processControlTestHooks.setLaunchLogText("ordinary startup, no manager restart\n");
+    expect(
+      isManagerDependencyReapplyHandoff({ exit: { code: 0, signal: null } }),
+    ).toBe(false);
+  });
+
+  it("replays the saved launch once after Manager's dependency-reapply exit 0 (#2427)", async () => {
+    // The reporter's shape: Manager prints the reapply marker, the child we
+    // launched exits 0, nothing is serving, and a later action:"start" brings
+    // the API up immediately. Treating that handoff as startup:"failed" /
+    // started:false is the bug; replaying the saved command once is the repair.
+    vi.useFakeTimers();
+    process.env.COMFYUI_STARTUP_CHECK_INTERVAL_S = "0.01";
+    process.env.COMFYUI_STARTUP_CHECK_MAX_TRIES = "2";
+    setLaunchInfo();
+    __processControlTestHooks.setLaunchLogText(
+      `Install done.\n${MANAGER_DEPENDENCY_REAPPLY_MARKER}\n`,
+    );
+    const children = mockSpawnedChildren();
+    mockNoPortProcess();
+    const fetchMock = vi.fn(async () => {
+      if (children.length <= 1) {
+        children[0]?.emit("exit", 0, null);
+        throw new Error("ECONNREFUSED");
+      }
+      return { ok: true } as Response;
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const pending = startComfyUI();
+    await vi.advanceTimersByTimeAsync(50);
+    const result = await pending;
+
+    expect(mockSpawn).toHaveBeenCalledTimes(2);
+    expect(result.started).toBe(true);
+    expect(result.ready).toBe(true);
+    expect(result.startup).not.toBe("failed");
+    expect(result.message).not.toMatch(/THIS RELAUNCH FAILED/);
+    expect(result.message).not.toMatch(/not a slow start/i);
+    expect(result.message).toMatch(/dependency-reapply handoff/);
+    expect(result.message).toContain(MANAGER_DEPENDENCY_REAPPLY_MARKER);
+  });
+
+  it("does not treat a Manager reapply handoff as started:false when the replay is still starting (#2427)", async () => {
+    vi.useFakeTimers();
+    process.env.COMFYUI_STARTUP_CHECK_INTERVAL_S = "0.01";
+    process.env.COMFYUI_STARTUP_CHECK_MAX_TRIES = "2";
+    setLaunchInfo();
+    __processControlTestHooks.setLaunchLogText(MANAGER_DEPENDENCY_REAPPLY_MARKER);
+    const children = mockSpawnedChildren();
+    mockNoPortProcess();
+    const fetchMock = vi.fn(async () => {
+      if (children.length <= 1) {
+        children[0]?.emit("exit", 0, null);
+      }
+      throw new Error("ECONNREFUSED");
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const pending = startComfyUI();
+    await vi.advanceTimersByTimeAsync(50);
+    const result = await pending;
+
+    expect(mockSpawn).toHaveBeenCalledTimes(2);
+    // The replayed child is still alive — this is #367 unconfirmed, not a failed
+    // relaunch of the Manager handoff child.
+    expect(result.started).toBe(true);
+    expect(result.ready).toBe(false);
+    expect(result.startup).toBe("unconfirmed");
+    expect(result.message).not.toMatch(/THIS RELAUNCH FAILED/);
+    expect(result.message).toContain(MANAGER_DEPENDENCY_REAPPLY_MARKER);
+  });
+
+  it("replays the saved launch only once even if the Manager marker fires again (#2427)", async () => {
+    vi.useFakeTimers();
+    process.env.COMFYUI_STARTUP_CHECK_INTERVAL_S = "0.01";
+    process.env.COMFYUI_STARTUP_CHECK_MAX_TRIES = "2";
+    setLaunchInfo();
+    __processControlTestHooks.setLaunchLogText(MANAGER_DEPENDENCY_REAPPLY_MARKER);
+    const children = mockSpawnedChildren();
+    mockNoPortProcess();
+    const fetchMock = vi.fn(async () => {
+      children[children.length - 1]?.emit("exit", 0, null);
+      throw new Error("ECONNREFUSED");
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const pending = startComfyUI();
+    await vi.advanceTimersByTimeAsync(50);
+    const result = await pending;
+
+    expect(mockSpawn).toHaveBeenCalledTimes(2);
+    expect(result.started).toBe(false);
+    expect(result.ready).toBe(false);
+    expect(result.startup).toBe("failed");
+    expect(result.message).toMatch(/dependency-reapply handoff/);
+    expect(result.message).toMatch(/replayed once/i);
+    expect(result.message).not.toMatch(/THIS RELAUNCH FAILED/);
+  });
+
+  it("does not replay a clean exit 0 that lacks the Manager reapply marker (#2427)", async () => {
+    vi.useFakeTimers();
+    process.env.COMFYUI_STARTUP_CHECK_INTERVAL_S = "0.01";
+    process.env.COMFYUI_STARTUP_CHECK_MAX_TRIES = "2";
+    setLaunchInfo();
+    const children = mockSpawnedChildren();
+    mockNoPortProcess();
+    const fetchMock = vi.fn(async () => {
+      children[0]?.emit("exit", 0, null);
+      throw new Error("ECONNREFUSED");
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const pending = startComfyUI();
+    await vi.advanceTimersByTimeAsync(50);
+    const result = await pending;
+
+    expect(mockSpawn).toHaveBeenCalledTimes(1);
+    expect(result.started).toBe(false);
+    expect(result.startup).toBe("failed");
+    expect(result.message).toMatch(/THIS RELAUNCH FAILED/);
+    expect(result.message).not.toMatch(/dependency-reapply/);
+  });
+
+  it("does not replay a crash that happens to print the Manager marker (#2427)", async () => {
+    vi.useFakeTimers();
+    process.env.COMFYUI_STARTUP_CHECK_INTERVAL_S = "0.01";
+    process.env.COMFYUI_STARTUP_CHECK_MAX_TRIES = "2";
+    setLaunchInfo();
+    __processControlTestHooks.setLaunchLogText(MANAGER_DEPENDENCY_REAPPLY_MARKER);
+    const children = mockSpawnedChildren();
+    mockNoPortProcess();
+    const fetchMock = vi.fn(async () => {
+      children[0]?.emit("exit", 1, null);
+      throw new Error("ECONNREFUSED");
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const pending = startComfyUI();
+    await vi.advanceTimersByTimeAsync(50);
+    const result = await pending;
+
+    expect(mockSpawn).toHaveBeenCalledTimes(1);
+    expect(result.started).toBe(false);
+    expect(result.startup).toBe("failed");
+    expect(result.message).toMatch(/EXITED \(exit code 1\)/);
+    expect(result.message).toMatch(/THIS RELAUNCH FAILED/);
+  });
+
+  it("follows a replacement listener after the Manager handoff instead of spawning a second copy (#2427)", async () => {
+    vi.useFakeTimers();
+    process.env.COMFYUI_STARTUP_CHECK_INTERVAL_S = "0.01";
+    process.env.COMFYUI_STARTUP_CHECK_MAX_TRIES = "2";
+    setLaunchInfo();
+    __processControlTestHooks.setLaunchLogText(MANAGER_DEPENDENCY_REAPPLY_MARKER);
+    const children: FakeChild[] = [];
+    let spawnCount = 0;
+    mockSpawn.mockImplementation(() => {
+      spawnCount += 1;
+      const child = new FakeChild();
+      children.push(child);
+      return child;
+    });
+    mockExecSync.mockImplementation((cmd: string) => {
+      if (cmd.includes("lsof")) {
+        // Proven free only before the first spawn; after Manager exits, a
+        // replacement already owns the port.
+        if (spawnCount === 0) throw noListener();
+        return "p7777\nn127.0.0.1:8188\n";
+      }
+      if (cmd.includes("netstat")) {
+        if (spawnCount === 0) return "";
+        return "  TCP    0.0.0.0:8188   0.0.0.0:0   LISTENING       7777";
+      }
+      return "";
+    });
+    let fetches = 0;
+    const fetchMock = vi.fn(async () => {
+      fetches += 1;
+      if (fetches <= 3) {
+        children[0]?.emit("exit", 0, null);
+        throw new Error("ECONNREFUSED");
+      }
+      return { ok: true } as Response;
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const pending = startComfyUI();
+    await vi.advanceTimersByTimeAsync(50);
+    const result = await pending;
+
+    expect(mockSpawn).toHaveBeenCalledTimes(1);
+    expect(result.ready).toBe(true);
+    expect(result.message).not.toMatch(/THIS RELAUNCH FAILED/);
+    expect(result.message).toContain(MANAGER_DEPENDENCY_REAPPLY_MARKER);
   });
 
   it("reports child process spawn errors without throwing", async () => {

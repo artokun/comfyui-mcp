@@ -1435,6 +1435,160 @@ function describeLaunchedChildExit(
   return ` The process this call launched EXITED (${exitCause(exit)}), so THIS RELAUNCH FAILED — it was not a slow start. No readiness probe got a healthy response, the last one included.`;
 }
 
+/**
+ * ComfyUI-Manager prints this then exits 0 so a supervisor can re-exec after
+ * installing custom-node dependencies (#2427). Distinct from the #2009 trampoline
+ * shape: that wrapper leaves a listener behind. This handoff does not.
+ */
+export const MANAGER_DEPENDENCY_REAPPLY_MARKER =
+  "Restarting to reapply dependency installation";
+
+/** Test seam: process-control tests mock `node:fs`, so a real launch log cannot
+ *  be opened or read there. Production always reads the file. */
+let launchLogTextOverride: string | undefined;
+
+function readLaunchLogText(logPath: string | undefined): string | undefined {
+  if (launchLogTextOverride !== undefined) return launchLogTextOverride;
+  if (!logPath) return undefined;
+  try {
+    return readFileSync(logPath, "utf-8");
+  } catch {
+    return undefined;
+  }
+}
+
+/** Clean exit 0 after Manager's dependency-reapply line — a handoff, not a crash. */
+export function isManagerDependencyReapplyHandoff(opts: {
+  exit?: { code: number | null; signal: NodeJS.Signals | null };
+  launchLogPath?: string;
+}): boolean {
+  if (!opts.exit) return false;
+  if (opts.exit.signal != null) return false;
+  if (opts.exit.code !== 0) return false;
+  const text = readLaunchLogText(opts.launchLogPath);
+  return text != null && text.includes(MANAGER_DEPENDENCY_REAPPLY_MARKER);
+}
+
+function describeManagerDependencyReapplyFailure(opts: {
+  readiness: StartupReadinessResult;
+  replayed: boolean;
+  launchLogPath?: string;
+}): string {
+  const followup = opts.replayed
+    ? `The saved launch command was replayed once, but no readiness probe got a healthy response in ${opts.readiness.waited_ms}ms (${opts.readiness.attempts}/${opts.readiness.max_tries} probes).`
+    : "No replacement listener answered, and the saved launch command was not replayed because the port was not proven free.";
+  return (
+    ` ComfyUI-Manager printed "${MANAGER_DEPENDENCY_REAPPLY_MARKER}" and the process this call launched EXITED (exit code 0) — a dependency-reapply handoff, not a crash. ` +
+    followup +
+    describeLaunchLog(opts.launchLogPath)
+  );
+}
+
+interface ManagerHandoffFollowup {
+  launched: SpawnedComfyUI;
+  launchedChildExit?: { code: number | null; signal: NodeJS.Signals | null };
+  launchedSpawnFailed: boolean;
+  readiness: StartupReadinessResult;
+  replayed: boolean;
+}
+
+/**
+ * After Manager's dependency-reapply exit 0: follow a replacement listener if one
+ * already owns the port; otherwise replay the saved launch command ONCE. A second
+ * copy is refused unless the port is proven free — that is the ownership argument
+ * for this being a start, not a double-launch (#2427).
+ */
+async function followManagerDependencyReapplyHandoff(opts: {
+  info: ProcessInfo;
+  port: number;
+  probeUrl: string;
+  launched: SpawnedComfyUI;
+  launchedChildExit?: { code: number | null; signal: NodeJS.Signals | null };
+  readiness: StartupReadinessResult;
+}): Promise<ManagerHandoffFollowup> {
+  const portState = probePortOwner(opts.port);
+  if (portState.state === "owned") {
+    // Something rebound. Wait for THAT listener; do not spawn a second copy.
+    const follow = await waitForApiReady({
+      ...getStartupReadinessConfig(),
+      probeUrl: opts.probeUrl,
+    });
+    return {
+      launched: opts.launched,
+      launchedChildExit: opts.launchedChildExit,
+      launchedSpawnFailed: false,
+      readiness: follow,
+      replayed: false,
+    };
+  }
+  if (portState.state !== "free") {
+    logger.info(
+      "ComfyUI-Manager dependency-reapply handoff observed, but the port was not proven free — not spawning a second copy",
+      { port: opts.port, portState: portState.state },
+    );
+    return {
+      launched: opts.launched,
+      launchedChildExit: opts.launchedChildExit,
+      launchedSpawnFailed: false,
+      readiness: opts.readiness,
+      replayed: false,
+    };
+  }
+
+  logger.info(
+    "ComfyUI-Manager exited after a dependency-reapply handoff; replaying the saved launch command once",
+  );
+  const replayed = spawnFromProcessInfo(opts.info);
+  if (!replayed) {
+    return {
+      launched: opts.launched,
+      launchedChildExit: opts.launchedChildExit,
+      launchedSpawnFailed: false,
+      readiness: opts.readiness,
+      replayed: false,
+    };
+  }
+
+  let launchedChildExit: { code: number | null; signal: NodeJS.Signals | null } | undefined;
+  let launchedSpawnFailed = false;
+  const spawnError = captureChildProcessError(replayed.child);
+  replayed.child.once("exit", (code, signal) => {
+    launchedChildExit = { code, signal };
+  });
+  replayed.child.once("error", () => {
+    launchedSpawnFailed = true;
+  });
+  replayed.child.unref();
+  superviseChild(replayed.child, opts.info);
+  if (!opts.info.isDesktopApp || opts.info.selfRelaunch) {
+    adoptLaunchedChild(replayed.child);
+  }
+
+  const replayResult = await Promise.race([
+    waitForApiReady({
+      ...getStartupReadinessConfig(),
+      probeUrl: opts.probeUrl,
+    }).then((readiness) => ({ readiness })),
+    spawnError.then((error) => ({ spawn_error: error })),
+  ]);
+  if ("spawn_error" in replayResult) {
+    return {
+      launched: replayed,
+      launchedChildExit,
+      launchedSpawnFailed: true,
+      readiness: opts.readiness,
+      replayed: true,
+    };
+  }
+  return {
+    launched: replayed,
+    launchedChildExit,
+    launchedSpawnFailed,
+    readiness: replayResult.readiness,
+    replayed: true,
+  };
+}
+
 /** Whole seconds, never rounded down to a "within 0s" that reads as no wait. */
 function seconds(ms: number): number {
   return Math.max(1, Math.round(ms / 1000));
@@ -4285,7 +4439,7 @@ export async function startComfyUI(anchor?: {
     argv: info.argv.join(" "),
   });
 
-  const launched = spawnFromProcessInfo(info);
+  let launched = spawnFromProcessInfo(info);
   if (!launched) {
     return {
       started: false,
@@ -4401,8 +4555,8 @@ export async function startComfyUI(anchor?: {
   // `launchedChildStillRunning` is tri-state on purpose: `undefined` is "cannot
   // tell", and it must not be spent as either answer, so it falls on the
   // unconfirmed side with the uncertainty stated. Only a DEFINITE death fails.
-  const childAlive = launchedChildStillRunning(launched.child);
-  const childIsGone =
+  let childAlive = launchedChildStillRunning(launched.child);
+  let childIsGone =
     launchedSpawnFailed || launchedChildExit != null || childAlive === false;
   // #2009: the launched PID exiting is NOT proof the server is down. A Windows
   // portable / venv trampoline / wrapper exits 0 after handing off, and the last
@@ -4428,6 +4582,56 @@ export async function startComfyUI(anchor?: {
         probe_url: readiness.probe_url,
       };
     }
+  }
+  // #2427: Manager's "Restarting to reapply dependency installation" + exit 0 is
+  // a handoff, not a crash. #2009's extra look covers a wrapper that left a
+  // listener behind; this marker means Manager expected a supervisor to re-exec
+  // and nothing is coming unless we replay the saved launch once — or follow a
+  // replacement that already rebound. Either way this first child's death is
+  // not `started:false`.
+  let managerHandoffSeen = false;
+  let managerHandoffReplayed = false;
+  if (
+    !readiness.ready &&
+    !launchedSpawnFailed &&
+    isManagerDependencyReapplyHandoff({
+      exit: launchedChildExit,
+      launchLogPath: launched.launchLogPath,
+    })
+  ) {
+    managerHandoffSeen = true;
+    const followup = await followManagerDependencyReapplyHandoff({
+      info,
+      port,
+      probeUrl: readiness.probe_url,
+      launched,
+      launchedChildExit,
+      readiness,
+    });
+    launched = followup.launched;
+    launchedChildExit = followup.launchedChildExit;
+    launchedSpawnFailed = followup.launchedSpawnFailed;
+    readiness = followup.readiness;
+    managerHandoffReplayed = followup.replayed;
+    if (!targetFenceMatchesCurrent(targetFence)) {
+      return {
+        started: false,
+        ready: readiness.ready,
+        startup: "unconfirmed",
+        readiness,
+        message:
+          `The ComfyUI target changed while following a ComfyUI-Manager dependency-reapply handoff at ${targetFence.baseUrl}. ` +
+          "The target-specific launch result is unconfirmed; no success is claimed for the new target.",
+        target_fence: targetFence,
+        target_stable: false,
+        auto_restart: supervisorResult(info),
+        launch_env: launchEnvInfo(info),
+        listener_ownership: unclassifiedOwnership(),
+      };
+    }
+    childAlive = launchedChildStillRunning(launched.child);
+    childIsGone =
+      launchedSpawnFailed || launchedChildExit != null || childAlive === false;
   }
   if (!readiness.ready) {
     const env = launchEnvInfo(info);
@@ -4463,7 +4667,14 @@ export async function startComfyUI(anchor?: {
           // the microtask window between the readiness result resolving and this
           // line reading the flag — an interleaving no test can schedule. The branch
           // costs nothing and removes a self-contradictory verdict if it ever runs.
-          (launchedSpawnFailed && !launchedChildExit
+          (managerHandoffSeen
+            ? `ComfyUI process was launched, but no readiness probe got a healthy response in ${readiness.waited_ms}ms (${readiness.attempts}/${readiness.max_tries} probes).` +
+              describeManagerDependencyReapplyFailure({
+                readiness,
+                replayed: managerHandoffReplayed,
+                launchLogPath: launched.launchLogPath,
+              })
+            : (launchedSpawnFailed && !launchedChildExit
             ? `The ComfyUI process could not be spawned, and no readiness probe got a healthy response in ${readiness.waited_ms}ms (${readiness.attempts}/${readiness.max_tries} probes). THIS RELAUNCH FAILED — it was not a slow start.`
             : `ComfyUI process was launched, but no readiness probe got a healthy response in ${readiness.waited_ms}ms (${readiness.attempts}/${readiness.max_tries} probes).` +
               (launchedChildExit
@@ -4473,7 +4684,7 @@ export async function startComfyUI(anchor?: {
           // nothing else is the least actionable thing a failed launch can say,
           // and it left a reporter offline with no way to diagnose it. The child
           // had already explained itself; the output was going to `ignore`.
-          describeLaunchLog(launched.launchLogPath) +
+          describeLaunchLog(launched.launchLogPath)) +
           ' Re-check with get_system_stats (action:"health") before assuming nothing is serving the port — an external launcher or supervisor may have brought one back since.' +
           (env ? ` Launch environment: ${env.note}.` : "") +
           launchEnvWarning(info),
@@ -4512,6 +4723,9 @@ export async function startComfyUI(anchor?: {
         `COMFYUI_STARTUP_CHECK_MAX_TRIES (currently ${readiness.max_tries} ` +
         `${readiness.max_tries === 1 ? "probe" : "probes"}, one every ` +
         `${describeInterval(readiness.interval_ms)}).` +
+        (managerHandoffReplayed
+          ? ` ComfyUI-Manager previously handed off after "${MANAGER_DEPENDENCY_REAPPLY_MARKER}"; this call replayed the saved launch command once and that process is still starting.`
+          : "") +
         (env ? ` Launch environment: ${env.note}.` : "") +
         launchEnvWarning(info),
       pid: launched.child.pid,
@@ -4665,6 +4879,11 @@ export async function startComfyUI(anchor?: {
       // produced it — it may be the server that was already there.
       (!portObservedFreeBeforeLaunch && ownership !== "ours"
         ? ` NOTE: the port was never observed free before launching, so this call cannot claim to have started the server that is answering.`
+        : "") +
+      (managerHandoffSeen
+        ? managerHandoffReplayed
+          ? ` ComfyUI-Manager had printed "${MANAGER_DEPENDENCY_REAPPLY_MARKER}" and exited 0; this call followed that dependency-reapply handoff by replaying the saved launch command once.`
+          : ` ComfyUI-Manager had printed "${MANAGER_DEPENDENCY_REAPPLY_MARKER}" and exited 0; this call followed that dependency-reapply handoff.`
         : "") +
       launchEnvWarning(info),
     pid: newPid ?? undefined,
@@ -6423,6 +6642,12 @@ export const __processControlTestHooks = {
     processExistsOverride = null;
     deliberateStop = false;
     restartDispatchRecords.clear();
+    launchLogTextOverride = undefined;
+  },
+  /** Inject launch-log text so tests can drive the Manager reapply marker without
+   *  a real file (#2427). `undefined` restores the production file reader. */
+  setLaunchLogText(text: string | undefined): void {
+    launchLogTextOverride = text;
   },
   /** Inject a fake parent-pid reader so the lineage check can be driven without a
    *  real process tree. */
