@@ -6,6 +6,11 @@ All notable changes to this project are documented here. This project adheres to
 
 ## Unreleased
 
+### MCP
+
+#### Fixed
+- apply_manifest counts a GGUF as installed when ComfyUI-GGUF lists it under clip_gguf/unet_gguf (#2447)
+
 ## [0.52.143] - 2026-08-27
 
 ### MCP

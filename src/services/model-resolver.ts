@@ -330,6 +330,20 @@ const GGUF_BACKING_DIRS: Record<string, string[]> = {
   clip_gguf: ["text_encoders", "clip"],
 };
 
+/** Reverse of GGUF_BACKING_DIRS: core folder → ComfyUI-GGUF views that alias it. */
+function ggufViewsAliasing(category: string): string[] {
+  const lower = category.toLowerCase();
+  const views: string[] = [];
+  for (const [view, backing] of Object.entries(GGUF_BACKING_DIRS)) {
+    if (backing.some((dir) => dir.toLowerCase() === lower)) views.push(view);
+  }
+  return views;
+}
+
+function isGgufFilename(filename: string): boolean {
+  return extname(filename).toLowerCase() === ".gguf";
+}
+
 /**
  * The real folder(s) a scanned category resolves to, for de-dup identity. A KNOWN
  * `*_gguf` view resolves to the physical folders it aliases (so the same file surfaced
@@ -1377,6 +1391,81 @@ function listingEntryFor(targetSubfolder: string, filename: string): string {
 }
 
 /**
+ * Categories the live server has registered (`GET /models`). Same inventory
+ * list_local_models uses to discover ComfyUI-GGUF's clip_gguf / unet_gguf.
+ * `undefined` = could not be asked.
+ */
+async function liveRegisteredCategories(): Promise<Set<string> | undefined> {
+  try {
+    const res = await comfyApiFetch("/models");
+    if (!res.ok) return undefined;
+    const json = (await res.json()) as unknown;
+    if (!Array.isArray(json)) return undefined;
+    return new Set(
+      json
+        .filter((c): c is string => typeof c === "string" && c.trim() !== "")
+        .map((c) => c.toLowerCase()),
+    );
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Extra `/models/<cat>` views to probe for a .gguf the core listing cannot name.
+ * Known ComfyUI-GGUF aliases of `category`, filtered to views the live server
+ * actually registered. When GET /models itself is unaskable, still probe the
+ * known aliases so a reachable `/models/clip_gguf` can confirm presence.
+ */
+async function extraGgufListingCategories(category: string): Promise<string[]> {
+  const views = ggufViewsAliasing(category);
+  if (views.length === 0) return [];
+  const registered = await liveRegisteredCategories();
+  if (registered === undefined) return views;
+  return views.filter((view) => registered.has(view.toLowerCase()));
+}
+
+function missIsContractualGgufCore(category: string, filename: string): boolean {
+  if (!isGgufFilename(filename)) return false;
+  if (isGgufCategory(category)) return false;
+  return (MODEL_SUBDIRS as readonly string[]).includes(category.toLowerCase());
+}
+
+/**
+ * Combine per-category listing answers. Any hit is present. A miss in a CORE
+ * category for a .gguf is contractual (supported_pt_extensions omits it) and is
+ * not a determined negative — that is #2447's false "does not list it under
+ * text_encoders". A miss in a registered GGUF view is determined.
+ */
+async function liveListingMatches(
+  categories: string[],
+  filename: string,
+  pred: (entry: string) => boolean,
+): Promise<boolean | undefined> {
+  let sawDeterminedMiss = false;
+  for (const cat of categories) {
+    if (!cat) continue;
+    const listing = await liveCategoryListing(cat);
+    if (listing === undefined) continue;
+    if (listing.some(pred)) return true;
+    if (missIsContractualGgufCore(cat, filename)) continue;
+    sawDeterminedMiss = true;
+  }
+  if (sawDeterminedMiss) return false;
+  return undefined;
+}
+
+async function listingCategoriesFor(
+  targetSubfolder: string,
+  filename: string,
+): Promise<string[]> {
+  const category = categoryOf(targetSubfolder);
+  if (!isGgufFilename(filename)) return [category];
+  const extra = await extraGgufListingCategories(category);
+  return extra.length === 0 ? [category] : [category, ...extra.filter((c) => c !== category)];
+}
+
+/**
  * Was this exact entry ALREADY in the live server's listing before we wrote?
  *
  * Captured BEFORE the transfer so the post-write check can tell "the server now
@@ -1385,15 +1474,21 @@ function listingEntryFor(targetSubfolder: string, filename: string): string {
  * happens to share a filename with the live install verifies as `visible` and is
  * reported as a success (codex gate, round 3). `undefined` = the server could not
  * answer, so nothing is known either way.
+ *
+ * For `.gguf`, also consults ComfyUI-GGUF's registered `*_gguf` views of the
+ * same folder (clip_gguf for text_encoders/clip, unet_gguf for unet/
+ * diffusion_models) — core `/models/<cat>` cannot name those files (#2447).
  */
 export async function liveListingHasEntry(
   targetSubfolder: string,
   filename: string,
 ): Promise<boolean | undefined> {
-  const listing = await liveCategoryListing(categoryOf(targetSubfolder));
-  if (listing === undefined) return undefined;
   const wanted = listingEntryFor(targetSubfolder, filename);
-  return listing.some((n) => normRel(n) === wanted);
+  return liveListingMatches(
+    await listingCategoriesFor(targetSubfolder, filename),
+    filename,
+    (n) => normRel(n) === wanted,
+  );
 }
 
 /**
@@ -1405,15 +1500,20 @@ export async function liveListingHasEntry(
  * exact-path check would FAIL legitimate nested installs. This is used only as an
  * ADDITIONAL requirement on the skip path — it can rule a skip out, never in on its
  * own. `undefined` = the server could not answer.
+ *
+ * For `.gguf`, a hit under the live GGUF alias of this folder counts as present
+ * (#2447) — apply_manifest's existing-file skip uses this function.
  */
 export async function liveListingHasBasename(
   category: string,
   filename: string,
 ): Promise<boolean | undefined> {
-  const listing = await liveCategoryListing(categoryOf(category));
-  if (listing === undefined) return undefined;
   const wanted = basename(filename);
-  return listing.some((n) => basename(normRel(n)) === wanted);
+  return liveListingMatches(
+    await listingCategoriesFor(category, filename),
+    filename,
+    (n) => basename(normRel(n)) === wanted,
+  );
 }
 
 /**
