@@ -13,6 +13,7 @@ All notable changes to this project are documented here. This project adheres to
 #### Fixed
 - retry active panel reads once (#2398)
 - reconcile promoted-widget writes (#2399)
+- a promoted write is judged on its own witness entry, not the whole array (#2400)
 
 
 ## [0.52.137] - 2026-08-26
