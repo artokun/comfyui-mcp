@@ -81,7 +81,7 @@ function reconnectingBridge(
         if (live.size === 0) throw new Error("Panel not reachable: no panel connected");
         throw new Error("Multiple panel tabs are connected and none is last active — pass tab_id.");
       }),
-  } as unknown as PanelToolCtx["bridge"];
+  } as PanelToolCtx["bridge"];
   return {
     bridge,
     live,
