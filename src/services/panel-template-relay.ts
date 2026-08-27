@@ -1,4 +1,6 @@
 import { createHmac, randomBytes, timingSafeEqual } from "node:crypto";
+import { lookup as dnsLookupCb } from "node:dns";
+import { promisify } from "node:util";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 
 /**
@@ -21,43 +23,47 @@ export const PANEL_TEMPLATE_RELAY_HTTP_PATH = "/__comfyui_mcp_panel_template_rel
 
 const ID_RE = /^[A-Za-z0-9_-]{16,80}$/;
 const HEX_RE = /^[a-f0-9]{64}$/;
-// `localhost` is a NAME, not a listener identity, so an exact origin match does
-// not prove the later fetch reaches the socket the browser is on (#2382). It is
-// accepted anyway, because every alternative costs more than it buys.
+// Hosts that may AUTHORIZE a relay origin. `localhost` is included, but it is
+// never fetched as a name — see LOOPBACK_LITERALS and pinnedLoopbackUrls.
 //
-// WHAT REFUSING IT COST. Dropping it (#2385, shipped in 0.52.135) took
-// `list_packs action:"list_templates"` from working to erroring for every user
-// whose ComfyUI is served at `http://localhost:<port>` — an ordinary setup, and
-// the panel Origin is the browser's. The relay declines, and the caller is
-// fail-closed once a panel route exists, so the action has no path left.
+// #2382 is the reason this needs saying. `localhost` names an address family,
+// not a listener, so an exact origin match does not prove that a later
+// `fetch(url)` reaches the socket the browser is on: Node >=20 connects with
+// Happy Eyeballs, so the name can land on either loopback family. #2385
+// answered that by dropping `localhost` from this set, which took `list_packs
+// action:"list_templates"` from working to erroring for every user whose
+// ComfyUI is served at `http://localhost:<port>` — an ordinary setup, since the
+// panel Origin is the browser's — and the caller is fail-closed once a panel
+// route exists, so nothing caught it.
 //
-// WHY THE HAZARD IS NARROWER THAN IT LOOKS. The non-adversarial case does not
-// occur on a supported runtime: Node >=20 connects with Happy Eyeballs
-// (`autoSelectFamily`), so `fetch("http://localhost:<port>")` reaches a
-// 127.0.0.1-only OR a ::1-only listener — measured on Node 24.16.0 against both
-// single-family binds. What remains is a second local process squatting the
-// other loopback family, which one-machine/one-trust-domain puts out of scope.
+// The refusal was not the only option, and it was not the right one. The
+// ambiguity lives in the SECOND name resolution, not in the origin check, so it
+// is removed rather than refused: the destination is resolved once, here, and
+// every request goes to a literal address. Where a name resolves to more than
+// one loopback address the candidates must AGREE, which is the property that
+// actually matters and is checkable, unlike listener identity, which is not.
 //
-// WHY NEITHER HARDENING WORKS HERE — recorded so they are not re-attempted:
-//
-//   - Pinning the fetch to a literal address needs the family the browser
-//     reached, and the Origin header does not carry it. Probing cannot recover
-//     it either: a dual-stack ComfyUI bound to `::` answers on BOTH 127.0.0.1
-//     and ::1 and is byte-indistinguishable from two separate processes, so
-//     "both families answer" cannot be read as ambiguity without refusing an
-//     ordinary working setup. The only place the question is answerable is the
-//     browser, which knows its own origin — a panel-side fetch, i.e. a
-//     cross-repo change, not a bug fix.
-//   - Letting the refusal fall through to the headless COMFYUI_URL path is
-//     unsafe for the reason #2387 documents below: a mid-turn child keeps the
-//     PREVIOUS target across a retarget (#1429, retargetAllForMcpEnv), so it
-//     can list a stale server's index. The relay fetching the current target
-//     under its own generation fence is what prevents that — and is why
-//     authorizing the origin here, rather than declining it, is the safe half.
+// Not falling through to the headless COMFYUI_URL path on a refusal is
+// deliberate and stays that way (#2387): a mid-turn child keeps the PREVIOUS
+// target across a retarget (#1429, retargetAllForMcpEnv), so it can list a
+// stale server's index. Fetching here, under the relay's own generation fence,
+// is what prevents that.
 //
 // A mixed pair (`localhost` observed vs `127.0.0.1` configured, or the reverse)
 // is still refused by the exact-origin equality below.
 const LOOPBACK_HOSTS = new Set(["localhost", "127.0.0.1", "::1"]);
+
+// Relay fetches only ever go to a LITERAL loopback address. `localhost` may
+// authorize an origin (above), but it is never a fetch destination: see
+// pinnedLoopbackUrls, which resolves it to these before any request is made.
+const LOOPBACK_LITERALS = new Set(["127.0.0.1", "::1"]);
+
+// Promisified so the single resolution happens in ONE place we control.
+const dnsLookup = promisify(dnsLookupCb) as (
+  hostname: string,
+  options: { all: true; verbatim: boolean },
+) => Promise<Array<{ address: string; family: number }>>;
+const AMBIGUOUS_LOOPBACK_NAMES = new Set(["localhost"]);
 
 export interface PanelTemplateRelayRequest {
   version: typeof PANEL_TEMPLATE_RELAY_VERSION;
@@ -254,6 +260,7 @@ function validateResponse(value: unknown, requestId: string, secret: string): Re
 
 function errorMessage(error: string): string {
   const known = new Set([
+    "AMBIGUOUS_PANEL_LISTENER",
     "AMBIGUOUS_REQUESTER",
     "BACKLOG_FULL",
     "HTTP_ERROR",
@@ -494,6 +501,92 @@ function safePanelTemplateUrl(raw: string | undefined, allowedOrigin: string | u
   }
 }
 
+/**
+ * Expands a relay URL into the literal-address URLs that will actually be
+ * fetched, so `fetch` never performs a second, independent name resolution
+ * (#2382).
+ *
+ * A literal host is returned unchanged. An ambiguous NAME is resolved once,
+ * here, and every resolved address must be loopback — which also closes a hole
+ * that existed before this function: a hosts-file entry pointing `localhost`
+ * off-box would previously have been fetched, because only the ORIGIN STRING
+ * was ever checked against the loopback set, never the address it resolves to.
+ */
+async function pinnedLoopbackUrls(url: URL): Promise<URL[]> {
+  const host = url.hostname.toLowerCase().replace(/^\[|\]$/g, "");
+  if (LOOPBACK_LITERALS.has(host)) return [url];
+  if (!AMBIGUOUS_LOOPBACK_NAMES.has(host)) {
+    throw new PanelTemplateRelayError("The panel template relay refused a non-loopback destination.", "NO_PANEL_ORIGIN");
+  }
+  let resolved: Array<{ address: string }>;
+  try {
+    resolved = await dnsLookup(host, { all: true, verbatim: true });
+  } catch {
+    throw new PanelTemplateRelayError("The connected panel could not fetch the workflow-template index.", "PANEL_FETCH_FAILED");
+  }
+  const urls: URL[] = [];
+  const seen = new Set<string>();
+  for (const { address } of resolved) {
+    const literal = address.toLowerCase();
+    // A name that resolves ANYWHERE off loopback is refused outright rather
+    // than partially honoured — the pair must be entirely local.
+    if (!LOOPBACK_LITERALS.has(literal)) {
+      throw new PanelTemplateRelayError("The panel template relay refused a non-loopback destination.", "NO_PANEL_ORIGIN");
+    }
+    if (seen.has(literal)) continue;
+    seen.add(literal);
+    const pinned = new URL(url.href);
+    pinned.hostname = literal.includes(":") ? `[${literal}]` : literal;
+    urls.push(pinned);
+  }
+  if (urls.length === 0) {
+    throw new PanelTemplateRelayError("The connected panel could not fetch the workflow-template index.", "PANEL_FETCH_FAILED");
+  }
+  return urls;
+}
+
+/**
+ * Fetches the template index over pinned literal addresses.
+ *
+ * When a name resolves to more than one loopback address we cannot know which
+ * socket the browser reached — the Origin header does not carry the family, and
+ * probing cannot tell a dual-stack listener bound to `::` apart from two
+ * separate processes. So identity is not what we establish. We fetch every
+ * candidate and require them to AGREE: if each reachable address returns the
+ * same index, the answer is the same whichever one the panel is on, which is
+ * the property that actually matters. Disagreement is the real ambiguity, and
+ * is refused rather than resolved by guessing.
+ */
+async function fetchPinnedPanelIndex(url: URL, deadlineAt: number): Promise<string> {
+  const candidates = await pinnedLoopbackUrls(url);
+  if (candidates.length === 1) return fetchPanelIndex(candidates[0], deadlineAt);
+  const settled = await Promise.all(
+    candidates.map(async (candidate) => {
+      try {
+        return { ok: true as const, body: await fetchPanelIndex(candidate, deadlineAt) };
+      } catch (error) {
+        return { ok: false as const, error };
+      }
+    }),
+  );
+  const answered = settled.filter((r): r is { ok: true; body: string } => r.ok);
+  // Nothing answered: surface the first real failure rather than inventing one.
+  if (answered.length === 0) {
+    const firstFailure = settled.find((r) => !r.ok);
+    throw firstFailure && !firstFailure.ok
+      ? firstFailure.error
+      : new PanelTemplateRelayError("The connected panel could not fetch the workflow-template index.", "PANEL_FETCH_FAILED");
+  }
+  const first = answered[0].body;
+  if (answered.some((r) => r.body !== first)) {
+    throw new PanelTemplateRelayError(
+      "Two different loopback listeners answered the panel's address with different template indexes.",
+      "AMBIGUOUS_PANEL_LISTENER",
+    );
+  }
+  return first;
+}
+
 async function fetchPanelIndex(url: URL, deadlineAt: number): Promise<string> {
   const remaining = deadlineAt - Date.now();
   if (remaining <= 0) throw new PanelTemplateRelayError("The panel template relay timed out.", "TIMEOUT");
@@ -600,7 +693,7 @@ export async function startPanelTemplateRelayServer(
             response = failureResponse(request.requestId, "NO_PANEL_ORIGIN");
           } else {
             try {
-              const body = await withinDeadline(fetchPanelIndex(panelUrl, requestDeadline(request)), requestDeadline(request));
+              const body = await withinDeadline(fetchPinnedPanelIndex(panelUrl, requestDeadline(request)), requestDeadline(request));
               const targetNow = options.resolveCurrentTarget();
               if (targetNow.url !== targetAtStart.url || targetNow.generation !== targetAtStart.generation) {
                 throw new PanelTemplateRelayError(

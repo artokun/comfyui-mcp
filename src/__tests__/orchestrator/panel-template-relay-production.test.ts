@@ -252,4 +252,68 @@ describe("orchestrator panel template relay wiring (#2196)", () => {
     });
     expect(panelRequests).toBe(2);
   });
+  // #2382 — the ambiguity is REMOVED, not refused. `localhost` authorizes the
+  // origin, but the fetch is pinned to literal addresses, and when more than one
+  // loopback address answers they must agree.
+  it("pins a localhost fetch to a literal address and refuses two disagreeing listeners", async () => {
+    const hits: string[] = [];
+    const makeServer = (payload: string) =>
+      createServer((req, res) => {
+        hits.push(`${req.headers.host ?? "?"}`);
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(payload);
+      });
+    // Bind the SAME port on both loopback families. Two distinct processes on a
+    // dual-stack machine look exactly like this.
+    const v4 = makeServer(JSON.stringify({ "v4-pack": [{ name: "from-127" }] }));
+    await new Promise<void>((resolve, reject) => {
+      v4.once("error", reject);
+      v4.listen({ host: "127.0.0.1", port: 0 }, () => resolve());
+    });
+    const addr = v4.address();
+    if (!addr || typeof addr === "string") throw new Error("no bind");
+    const port = addr.port;
+    servers.push({ close: () => closeServer(v4) });
+
+    const v6 = makeServer(JSON.stringify({ "v6-pack": [{ name: "from-::1" }] }));
+    let v6Bound = true;
+    await new Promise<void>((resolve) => {
+      v6.once("error", () => { v6Bound = false; resolve(); });
+      v6.listen({ host: "::1", port, ipv6Only: true }, () => resolve());
+    });
+    if (v6Bound) servers.push({ close: () => closeServer(v6) });
+
+    const target = `http://localhost:${port}/comfyapi`;
+    const observedOrigin = `http://localhost:${port}`;
+    const bridge = {
+      canReach: () => true,
+      resolveFailure: () => undefined,
+      resolveSharedTabId: () => "tab-1",
+      tabServerOrigin: () => observedOrigin,
+    };
+    const wiring = createPanelTemplateRelayWiring({
+      bridge,
+      currentTarget: () => target,
+      currentTargetGeneration: () => 0,
+      secrets: new Map([[SECRET, "orchestrator::codex"]]),
+    });
+    // The origin is authorized — that is the half #2385 removed.
+    expect(wiring.resolveAllowedPanelOrigin("tab-1", target)).toBe(observedOrigin);
+
+    const relay = await startPanelTemplateRelayServer({ bridge, ...wiring });
+    servers.push(relay);
+    process.env.COMFYUI_MCP_RELAY_SECRET = SECRET;
+    process.env.COMFYUI_MCP_TEMPLATE_RELAY_URL = relay.endpointUrl;
+
+    if (v6Bound) {
+      // Two listeners, two different indexes: refuse rather than guess.
+      await expect(requestPanelTemplateIndex()).rejects.toMatchObject({ code: "AMBIGUOUS_PANEL_LISTENER" });
+    } else {
+      await expect(requestPanelTemplateIndex()).resolves.toMatchObject({ "v4-pack": [{ name: "from-127" }] });
+    }
+    // Whatever happened, the NAME was never the destination: every request
+    // arrived with a literal-address Host header.
+    expect(hits.length).toBeGreaterThan(0);
+    for (const host of hits) expect(host).not.toContain("localhost");
+  });
 });
