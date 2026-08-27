@@ -95,7 +95,8 @@ describe("model inventory disclosure (#2414)", () => {
   it("matches a live listing by normalized path and ignores non-string entries", async () => {
     const listCategory = vi.fn(async (category: string) => {
       expect(category).toBe("checkpoints");
-      return [12, "./models\\video\\present.safetensors"] as unknown as string[];
+      const mixed: Array<number | string> = [12, "./models\\video\\present.safetensors"];
+      return mixed as string[];
     });
 
     const note = await getModelInventoryDisclosure(
