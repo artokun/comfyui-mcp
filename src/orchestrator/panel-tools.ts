@@ -8721,6 +8721,39 @@ function isPanelQueueUncertainty(parsed: Record<string, unknown> | null): boolea
   return parsed?.queued_unknown === true;
 }
 
+/**
+ * #2438 — the live-canvas surface has no render-queue inspector. Panel
+ * `retry_guidance` historically named `queue (action:"list")`, which is a
+ * headless stdio tool and may be unreachable (ECONNREFUSED) even while the
+ * panel is connected. The only safe next step on this surface is to wait for
+ * an eventual UNDETERMINED completion and not re-dispatch.
+ */
+const PANEL_QUEUED_UNKNOWN_RETRY_GUIDANCE =
+  `Do NOT re-run panel_run: the /prompt request already left the panel, and a second ` +
+  `dispatch may queue a duplicate render. This live-canvas surface has no render-queue ` +
+  `inspection tool. End your turn and wait for an eventual UNDETERMINED completion ` +
+  `event for this tab; if one arrives, treat it as this run's possible outcome rather ` +
+  `than queuing another.`;
+
+function applyQueuedUnknownRetryGuidance(res: ToolResult): ToolResult {
+  const parsed = parseToolResultJson(res);
+  if (!parsed || !isPanelQueueUncertainty(parsed)) return res;
+  if (parsed.retry_guidance === PANEL_QUEUED_UNKNOWN_RETRY_GUIDANCE) return res;
+  return {
+    ...res,
+    content: [
+      {
+        type: "text",
+        text: JSON.stringify({
+          ...parsed,
+          retry_guidance: PANEL_QUEUED_UNKNOWN_RETRY_GUIDANCE,
+        }),
+      },
+      ...res.content.slice(1),
+    ],
+  };
+}
+
 function detectRunRejection(res: ToolResult): ToolResult | null {
   // Bridge/transport/executor error: never a queue. Preserve it verbatim (#248),
   // no success note (#331). fail() already carries err.message (incl. any stack).
@@ -8730,9 +8763,9 @@ function detectRunRejection(res: ToolResult): ToolResult | null {
   if (!parsed) return null; // unparseable non-error reply — don't regress a success
 
   // #2143 — `queued_unknown` is an explicit Panel receipt, not the ComfyUI
-  // rejection channel. Its `error` field explains the timeout and its
-  // `retry_guidance` tells the caller how to settle it; keep the receipt intact
-  // and never redispatch from here.
+  // rejection channel. Its `error` field explains the timeout. Keep the
+  // receipt intact and never redispatch from here; the handler rewrites
+  // `retry_guidance` onto this surface (#2438) after this gate.
   if (isPanelQueueUncertainty(parsed)) return null;
 
   const topError = parsed.error;
@@ -8881,6 +8914,8 @@ export const __panelRunTestHooks = {
   isRetryableRunToNodeStampRace,
   isSeedRunToNodeStampRace,
   describeDroppedOutputs,
+  applyQueuedUnknownRetryGuidance,
+  PANEL_QUEUED_UNKNOWN_RETRY_GUIDANCE,
 };
 
 /** Drop a trailing .json (case-insensitive) so filename/path forms compare equal. */
@@ -16146,23 +16181,23 @@ function panelLateReceiptNote(promptId: string): string {
 }
 
 /**
- * #2143 — a normal Panel timeout receipt is neither a confirmed queue nor a
- * refusal. Keep its retry guidance in the original JSON and add only the
- * local fact that this handler did not dispatch a second run.
+ * #2143 / #2438 — a normal Panel timeout receipt is neither a confirmed queue
+ * nor a refusal. Name the next step that exists on THIS surface rather than
+ * forwarding Panel retry_guidance that points at a headless queue inspector.
  */
 function panelQueueUncertaintyNote(queuedPromptIds: readonly string[]): string {
   if (queuedPromptIds.length > 0) {
     return (
       `\n\n[UNCERTAIN] The Panel confirmed these prompt id(s) left its queue path: ` +
       `${queuedPromptIds.join(", ")}. Completion tickets were opened for them. ` +
-      `Any remaining request(s) are still uncertain; follow the Panel's retry_guidance above ` +
-      `before retrying. No second panel_run was dispatched.`
+      `Any remaining request(s) are still uncertain. ${PANEL_QUEUED_UNKNOWN_RETRY_GUIDANCE} ` +
+      `No second panel_run was dispatched.`
     );
   }
   return (
     `\n\n[UNCERTAIN] The Panel could not determine whether this run entered ComfyUI's queue. ` +
     `This is not a confirmed refusal, and no completion ticket can be opened without a prompt id. ` +
-    `Follow the Panel's retry_guidance above before retrying. No second panel_run was dispatched.`
+    `${PANEL_QUEUED_UNKNOWN_RETRY_GUIDANCE} No second panel_run was dispatched.`
   );
 }
 
@@ -20047,6 +20082,10 @@ export function buildPanelToolDefs(): PanelToolDef[] {
               `If the running job is genuinely stuck, queue (action:"cancel") with clear_pending:true interrupts it AND drops pending, then escalate to restart_comfyui if it reports the job wedged.`;
           }
         }
+        // #2438 — rewrite Panel retry_guidance BEFORE the notes are spliced so
+        // a headless `queue (action:"list")` inspector is not left in the JSON
+        // for a surface that cannot call it.
+        if (panelQueueUncertain) res = applyQueuedUnknownRetryGuidance(res);
         if (res.content?.[0]?.type === "text") {
           return {
             ...res,

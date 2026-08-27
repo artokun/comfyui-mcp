@@ -1917,14 +1917,16 @@ describe("panel-tools: panel_run verdict is derived from the ComfyUI reply", () 
     const { ctx, calls } = makeRunCtx(reply);
     const res = await defByName("panel_run").handler({ to_node_id: 9 }, ctx);
 
-    // A normal Panel timeout receipt must stay non-error so its explicit retry
-    // guidance survives verbatim. The handler performs no second dispatch and
-    // cannot ticket an unidentifiable completion.
+    // A normal Panel timeout receipt must stay non-error. #2438 rewrites the
+    // Panel's retry_guidance onto this surface (no live render-queue inspector)
+    // rather than forwarding it verbatim. The handler still performs no second
+    // dispatch and cannot ticket an unidentifiable completion.
     expect(res.isError).toBeFalsy();
     expect(calls).toHaveLength(1);
     const text = textOf(res);
-    expect(text).toContain("Check the ComfyUI queue before retrying anything.");
     expect(text).toContain("[UNCERTAIN]");
+    expect(text).toContain("Do NOT re-run panel_run");
+    expect(text).toContain("UNDETERMINED completion");
     expect(text).not.toContain(QUEUED_NOTE);
     expect(text).not.toContain("ComfyUI refused to queue");
   });
