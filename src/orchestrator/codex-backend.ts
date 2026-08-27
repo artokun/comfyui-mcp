@@ -1739,13 +1739,15 @@ export class CodexBackend implements AgentBackend {
     const panelReadRetries = new Map<string, PanelReadRetry>();
     const inFlightMcpItemIds = new Set<string>();
     let unkeyedMcpItems = 0;
-    let lastCompletedPanelItemId: string | null = null;
+    let panelEnterCandidate: { itemId: string; laterPanelRequestStarted: boolean } | null = null;
+    let immediatePanelReadAfterEnter: string | null = null;
 
-    // Retry contract: only an in-flight panel_graph_outline or
-    // panel_query_graph item that began immediately after a successful
-    // panel_enter_subgraph item may arm one retry. Correlation must resolve the
-    // transport error to that request; ambiguity is fail-closed. Mutations,
-    // unrelated reads, and reads outside this lifecycle use normal fencing.
+    // Retry contract: only the next panel request after a successful
+    // panel_enter_subgraph completion can be an eligible graph read. The
+    // one-shot sequence is consumed at request start; a mutation or unrelated
+    // panel request therefore invalidates it before a later read can qualify.
+    // Correlation must resolve the transport error to that request; ambiguity
+    // is fail-closed. Mutations and unrelated reads use normal fencing.
 
     // LIVENESS (watchdog re-arm): re-arm PanelAgent's idle watchdog ONLY for
     // notifications that represent work or an outcome for THIS active turn. A
@@ -1822,7 +1824,10 @@ export class CodexBackend implements AgentBackend {
       this.client === liveClient &&
       liveClient.exitError == null;
 
-    const trackPanelMcpItem = (item: PanelMcpToolItem): PanelMcpRequest => {
+    const trackPanelMcpItem = (
+      item: PanelMcpToolItem,
+      afterEnterItemId: string | null,
+    ): PanelMcpRequest => {
       const existing = panelMcpRequests.get(item.itemId);
       if (existing) {
         for (const key of item.requestKeys) {
@@ -1831,13 +1836,9 @@ export class CodexBackend implements AgentBackend {
         }
         return existing;
       }
-      const previousPanelItem = lastCompletedPanelItemId
-        ? panelMcpRequests.get(lastCompletedPanelItemId)
-        : undefined;
       const request: PanelMcpRequest = {
         ...item,
-        afterEnterItemId:
-          previousPanelItem?.name === "panel_enter_subgraph" ? previousPanelItem.itemId : null,
+        afterEnterItemId,
         completed: false,
       };
       panelMcpRequests.set(item.itemId, request);
@@ -2142,7 +2143,21 @@ export class CodexBackend implements AgentBackend {
           }
           const panelTool = panelMcpToolItemOf(item);
           if (panelTool) {
-            const request = trackPanelMcpItem(panelTool);
+            const isNewPanelRequest = !panelMcpRequests.has(panelTool.itemId);
+            let afterEnterItemId: string | null = null;
+            if (isNewPanelRequest) {
+              if (panelTool.name === "panel_enter_subgraph") {
+                immediatePanelReadAfterEnter = null;
+                panelEnterCandidate = { itemId: panelTool.itemId, laterPanelRequestStarted: false };
+              } else {
+                if (panelEnterCandidate) panelEnterCandidate.laterPanelRequestStarted = true;
+                if (immediatePanelReadAfterEnter && PANEL_OUTER_TRANSPORT_RETRY_SAFE_TOOLS.has(panelTool.name)) {
+                  afterEnterItemId = immediatePanelReadAfterEnter;
+                }
+                immediatePanelReadAfterEnter = null;
+              }
+            }
+            const request = trackPanelMcpItem(panelTool, afterEnterItemId);
             for (const [originItemId, retry] of panelReadRetries) {
               if (
                 request.name === retry.tool &&
@@ -2179,8 +2194,15 @@ export class CodexBackend implements AgentBackend {
               item?.status !== "error" &&
               item?.status !== "declined" &&
               item?.error == null;
-            if (completedSuccessfully) lastCompletedPanelItemId = request.itemId;
-            else if (lastCompletedPanelItemId === request.itemId) lastCompletedPanelItemId = null;
+            if (request.name === "panel_enter_subgraph") {
+              immediatePanelReadAfterEnter =
+                completedSuccessfully &&
+                panelEnterCandidate?.itemId === request.itemId &&
+                !panelEnterCandidate.laterPanelRequestStarted
+                  ? request.itemId
+                  : null;
+              panelEnterCandidate = null;
+            }
 
             const retryMatch = panelReadRetryForRequest(request);
             if (retryMatch && request.name === retryMatch.retry.tool) {
@@ -2240,15 +2262,10 @@ export class CodexBackend implements AgentBackend {
           if (this.noteMcpTransportFailure(message)) {
             const request = panelMcpRequestForTransportError(params);
             const matchedRetry = panelReadRetryForRequest(request);
-            // An uncorrelated terminal error after arming is still the only
-            // pending retry's outcome; preserve that first message. An
-            // explicitly correlated mutation never borrows a read's retry.
-            const errorKeys = panelMcpTransportErrorKeys(params);
-            const retryAttempted =
-              matchedRetry?.retry ??
-              (errorKeys.length === 0 && request == null && panelReadRetries.size === 1
-                ? firstPanelReadRetry()
-                : undefined);
+            // Only a correlated terminal error for the armed request is its
+            // retry outcome. A distinct mutation or unrelated request never
+            // borrows, clears, or consumes that read's retry.
+            const retryAttempted = matchedRetry?.retry;
             if (
               !retryAttempted &&
               params.willRetry === true &&
@@ -2268,9 +2285,17 @@ export class CodexBackend implements AgentBackend {
               });
               break;
             }
-            panelReadRetries.clear();
+            // A transport error for a different request must not consume or
+            // rewrite a read retry that is already armed. The mutation still
+            // fences this turn, because its dispatch/outcome is unknown, but
+            // retain the saved read error in the terminal diagnosis and leave
+            // its per-item retry state untouched.
+            const pendingRead = firstPanelReadRetry();
+            const failureMessage = pendingRead
+              ? `${pendingRead.originalMessage}\nA distinct panel MCP request also failed: ${message}`
+              : message;
             finishMcpTransportFailure(
-              retryAttempted?.originalMessage ?? message,
+              retryAttempted?.originalMessage ?? failureMessage,
               params.willRetry === true,
               retryAttempted !== undefined,
             );

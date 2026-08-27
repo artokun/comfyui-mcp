@@ -57,6 +57,7 @@ const MCP_SERVERS_WITH_UNRELATED_HTTP_UP = [
 const WORKER_TRANSPORT_FAILURE =
   "Transport send error: WorkerTransport<StreamableHttpClientWorker<...>> error: " +
   "HTTP request failed sending request to http://127.0.0.1:9198/orchestrator%3A%3Acodex";
+const MUTATION_WORKER_TRANSPORT_FAILURE = `${WORKER_TRANSPORT_FAILURE} (mutation item)`;
 // The exact wrapper reported by panel_save_workflow -> immediate panel_run on
 // the affected EventNotificationTransport path. It is an outer HTTP-MCP client
 // failure, not a panel tool result; handling it must not retry panel_run.
@@ -122,6 +123,8 @@ interface Drive {
       | "panel-read-retry-timeout"
       | "panel-read-retry-cancelled"
       | "panel-mutation-no-retry"
+      | "panel-mutation-before-read-no-retry"
+      | "panel-read-retry-mutation-error"
       | "panel-unrelated-read-no-retry"
       | "panel-read-no-enter-no-retry",
   ): Promise<void>;
@@ -246,6 +249,8 @@ function startDrive(opts: {
       if (
         kind.startsWith("panel-read-retry-") ||
         kind === "panel-mutation-no-retry" ||
+        kind === "panel-mutation-before-read-no-retry" ||
+        kind === "panel-read-retry-mutation-error" ||
         kind === "panel-unrelated-read-no-retry" ||
         kind === "panel-read-no-enter-no-retry"
       ) {
@@ -262,6 +267,31 @@ function startDrive(opts: {
           notify("error", {
             itemId: mutation.id,
             error: { message: WORKER_TRANSPORT_FAILURE },
+            willRetry: true,
+          });
+        } else if (kind === "panel-mutation-before-read-no-retry") {
+          const mutation = { type: "mcpToolCall", id: "mutation-1", server: "panel", tool: "panel_set_property" };
+          const read = { type: "mcpToolCall", id: "read-1", server: "panel", tool: "panel_graph_outline" };
+          notify("item/started", { item: mutation });
+          notify("item/started", { item: read });
+          notify("error", {
+            itemId: read.id,
+            error: { message: WORKER_TRANSPORT_FAILURE },
+            willRetry: true,
+          });
+        } else if (kind === "panel-read-retry-mutation-error") {
+          const read = { type: "mcpToolCall", id: "read-1", server: "panel", tool: "panel_graph_outline" };
+          const mutation = { type: "mcpToolCall", id: "mutation-1", server: "panel", tool: "panel_set_property" };
+          notify("item/started", { item: read });
+          notify("item/started", { item: mutation });
+          notify("error", {
+            itemId: read.id,
+            error: { message: WORKER_TRANSPORT_FAILURE },
+            willRetry: true,
+          });
+          notify("error", {
+            itemId: mutation.id,
+            error: { message: MUTATION_WORKER_TRANSPORT_FAILURE },
             willRetry: true,
           });
         } else if (kind === "panel-unrelated-read-no-retry") {
@@ -544,6 +574,41 @@ describe("Codex mid-session MCP drop reconnects panel tools (#1524)", () => {
       ),
     ).toHaveLength(1);
 
+    await drive.finish();
+  });
+
+  it("invalidates the enter lifecycle when a mutation starts before the read (#2395)", async () => {
+    const drive = startDrive({ listings: [PANEL_UP] });
+    await drive.endTurn("panel-mutation-before-read-no-retry");
+
+    const failures = drive.events.filter(
+      (e): e is Extract<AgentEvent, { type: "error" }> =>
+        e.type === "error" && !(e as { sessionNotice?: boolean }).sessionNotice,
+    );
+    expect(failures).toHaveLength(1);
+    expect(failures[0].message).toMatch(/did not retry the request/i);
+    expect(failures[0].message).not.toMatch(/retried this read once/i);
+    expect(drive.interruptCalls).toBe(1);
+    expect(drive.reloadCalls).toBe(1);
+    expect(drive.events.filter((e) => e.type === "result")).toHaveLength(1);
+    await drive.finish();
+  });
+
+  it("isolates a distinct mutation transport error from an armed read retry (#2395)", async () => {
+    const drive = startDrive({ listings: [PANEL_UP] });
+    await drive.endTurn("panel-read-retry-mutation-error");
+
+    const failures = drive.events.filter(
+      (e): e is Extract<AgentEvent, { type: "error" }> =>
+        e.type === "error" && !(e as { sessionNotice?: boolean }).sessionNotice,
+    );
+    expect(failures).toHaveLength(1);
+    expect(failures[0].message).toContain(WORKER_TRANSPORT_FAILURE);
+    expect(failures[0].message).toContain(MUTATION_WORKER_TRANSPORT_FAILURE);
+    expect(failures[0].message).toMatch(/did not retry the request/i);
+    expect(failures[0].message).not.toMatch(/retried this read once/i);
+    expect(drive.interruptCalls).toBe(1);
+    expect(drive.reloadCalls).toBe(1);
     await drive.finish();
   });
 
