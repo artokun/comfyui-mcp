@@ -510,15 +510,7 @@ export function main(argv, { runGit = git, root = ROOT, changelog = CHANGELOG } 
   // .git/objects reproduces the same trap: git then reports "not a git repository"
   // even though the checkout plainly is one. `.git` is a directory in a normal
   // clone and a FILE in a git worktree; existsSync answers both.
-  const repositoryPresent =
-    existsSync(join(root, ".git")) ||
-    (() => {
-      try {
-        return runGit("rev-parse", "--is-inside-work-tree") === "true";
-      } catch {
-        return false;
-      }
-    })();
+  const repositoryPresent = existsSync(join(root, ".git"));
 
   // Only a proven missing target tag may use HEAD. A failed lookup means the
   // target commit was not reliably identified and must fail closed.
@@ -537,8 +529,9 @@ export function main(argv, { runGit = git, root = ROOT, changelog = CHANGELOG } 
     targetRef = "HEAD";
   }
 
-  try {
-    commits = readCommits(targetRef, runGit);
+  if (repositoryPresent) {
+    try {
+      commits = readCommits(targetRef, runGit);
   } catch (error) {
     if (repositoryPresent) {
       console.error(
@@ -554,6 +547,7 @@ export function main(argv, { runGit = git, root = ROOT, changelog = CHANGELOG } 
         `(${String(error.message).split("\n")[0]}) — structure was checked, ` +
         `reachability and coverage were NOT.`,
     );
+  }
   }
 
   // A shallow clone cannot answer "what shipped since the last release". It can

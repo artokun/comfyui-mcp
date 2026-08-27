@@ -21,7 +21,7 @@
 // shape reverted; the named test fails in both cases. See the PR body.
 
 import { execFileSync, spawnSync } from "node:child_process";
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -912,6 +912,32 @@ describe("#2407 end to end: the guard blocks the cut that shipped 0.52.138", () 
     } finally {
       rmSync(bare, { recursive: true, force: true });
     }
+  });
+
+  it("SKIPS a source tarball nested inside another Git checkout", () => {
+    const nested = join(dir, "nested-tarball");
+    mkdirSync(nested);
+    writeFileSync(
+      join(nested, "CHANGELOG.md"),
+      [
+        "# Changelog",
+        "",
+        "## [1.0.0] - 2026-08-26",
+        "",
+        "### Fixed",
+        "- an entry that exists only in the tarball (#999)",
+        "",
+      ].join("\r\n"),
+    );
+
+    const result = spawnSync(process.execPath, [GUARD], {
+      cwd: nested,
+      encoding: "utf-8",
+      env: { ...process.env, COMFYUI_MCP_CHANGELOG_ROOT: nested },
+    });
+    expect(result.status).toBe(0);
+    expect(result.stdout).toContain("history was unavailable");
+    expect(result.stdout).not.toContain("lists every PR since");
   });
 
   it("measures from the previous RELEASE tag, not from a stray non-version tag", () => {
