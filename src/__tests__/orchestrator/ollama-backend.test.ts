@@ -288,7 +288,7 @@ describe("OllamaBackend", () => {
     ];
     const client: McpToolClient = {
       listTools: async () => ({ tools }),
-      callTool: callTool as unknown as McpToolClient["callTool"],
+      callTool: callTool as McpToolClient["callTool"],
       close: async () => {},
     };
     const backend = new OllamaBackend({ model: "gemma4:e4b", connectToolClients: async () => ({ comfyui: client }) });
