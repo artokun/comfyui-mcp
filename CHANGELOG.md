@@ -11,6 +11,7 @@ All notable changes to this project are documented here. This project adheres to
 #### Fixed
 - compact-mode `list_tools` / `panel_list_tools` enumeration is not a catalog hunt (#2429)
 - Save-As re-points session routing so panel_set_todo and panel_canvas follow the dest tab (#2419)
+- #971 legacy rebind recovers a workflows/ path, and a later canvas move drops the proof (#2415)
 
 ## [0.52.141] - 2026-08-27
 

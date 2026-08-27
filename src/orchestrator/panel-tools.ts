@@ -9802,6 +9802,9 @@ function refreshWorkflowUuid(ctx: PanelToolCtx, value: unknown): boolean {
 function refreshFenceFromOwnReply(ctx: PanelToolCtx, reply: ToolResult): WorkflowFenceRebind | null {
   const before = currentWorkflowFence(ctx);
   const parsed = parseToolResultJson(reply);
+  // #2415 — new / save / save-as / load re-point the canvas. Drop the #971
+  // proof unless this reply still names the identity it stored.
+  dropStaleLegacyRebindProof(ctx, parsed);
   if (!parsed) return null;
   const uuid = responseWorkflowUuid(parsed);
   if (!uuid) return null;
@@ -10723,6 +10726,9 @@ async function rebindWorkflowFence(
     };
   }
   const active = corroborated.active;
+  // #2415 — a later observation of a different live canvas must drop the #971
+  // proof. tabId + savedIdentity do not move when the canvas does.
+  dropStaleLegacyRebindProof(ctx, active);
   const uuid = responseWorkflowUuid(active);
   if (!uuid) {
     return {
@@ -11416,7 +11422,7 @@ async function refreshOpenWorkflowUuid(
   // confirmed active workflow contract.
   const legacyReboundRoute =
     legacyRebind?.tabId === ctx.tabId &&
-    legacyRebind.savedIdentity === canonicalBareSavedIdentity(requestedPath) &&
+    legacyRebindMatchesRequested(legacyRebind, requestedPath) &&
     !openResult.isError &&
     parsedOpen?.ok === true &&
     parsedOpen.routedTo === ctx.tabId &&
@@ -12301,6 +12307,54 @@ function canonicalBareSavedIdentity(path: unknown): string | null {
 }
 
 /**
+ * #2415 — does this #971 proof name the workflow the caller asked to open?
+ *
+ * The proof stores `canonicalSavedRecordIdentity` (`wf:workflows/demo.json`).
+ * Comparing that to `canonicalBareSavedIdentity(requestedPath)` (`wf:demo.json`,
+ * or null for any path containing `/`) made the recovery unsatisfiable for
+ * every normally-stored workflow. Accept the stored path exactly, or a bare
+ * filename that is that path's basename. Never a different file.
+ */
+function legacyRebindMatchesRequested(
+  proof: ExplicitCurrentRebindProof,
+  requestedPath: unknown,
+): boolean {
+  const requested = canonicalSavedWorkflowPath(requestedPath);
+  if (!requested) return false;
+  if (proof.savedIdentity === `wf:${requested}`) return true;
+  const bare = canonicalBareSavedIdentity(requested);
+  if (!bare) return false;
+  const savedPath = proof.savedIdentity.startsWith("wf:") ? proof.savedIdentity.slice(3) : "";
+  if (!savedPath) return false;
+  const slash = savedPath.lastIndexOf("/");
+  const savedBare = slash >= 0 ? savedPath.slice(slash + 1) : savedPath;
+  return `wf:${savedBare}` === bare;
+}
+
+/**
+ * #2415 — drop the #971 proof when the live canvas is no longer the identity
+ * it named. The proof is keyed to tabId + savedIdentity, neither of which
+ * moves with the canvas, so a later legacy `{ok:true, routedTo}` must not
+ * inherit it. A missing/unreadable identity is also a move: the proof no
+ * longer describes a world we can name.
+ */
+function dropStaleLegacyRebindProof(
+  ctx: Pick<PanelToolCtx, "tabId" | "lastExplicitCurrentRebind">,
+  observedActive?: unknown,
+): void {
+  const proof = ctx.lastExplicitCurrentRebind;
+  if (!proof) return;
+  if (proof.tabId !== ctx.tabId) {
+    ctx.lastExplicitCurrentRebind = undefined;
+    return;
+  }
+  const now = canonicalSavedRecordIdentity(observedActive);
+  if (!now || now !== proof.savedIdentity) {
+    ctx.lastExplicitCurrentRebind = undefined;
+  }
+}
+
+/**
  * Canonical `wf:<path>` identity, but only for a complete corroborating record.
  * Command-fence replacement is stricter than pin routing: a same-path record
  * with a missing/malformed route may be partial or replayed, and must not let a
@@ -12481,6 +12535,9 @@ export const __openWorkflowTestHooks = {
   activeMatchesOpenRefreshTarget,
   activeRecordMatchesExactSavedIdentity,
   resolveOpenWorkflow,
+  /** #2415 tests drive these, not a copy. */
+  legacyRebindMatchesRequested,
+  dropStaleLegacyRebindProof,
 };
 
 const slotRef = z.union([z.string(), z.number().int().min(0)]);
