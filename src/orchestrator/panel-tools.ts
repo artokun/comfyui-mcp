@@ -1261,6 +1261,12 @@ export const __panelToolsTestHooks = {
   setSaveTimeoutSettleGraceMs(ms: number | null): void {
     saveTimeoutSettleGraceMsOverride = ms;
   },
+  /** Shrink the #1908 route-boundary budget for frozen-tab tests. */
+  setPanelSearchRouteTiming(
+    timing: { budgetMs: number; fallbackTriggerMs: number } | null,
+  ): void {
+    panelSearchRouteTimingOverride = timing;
+  },
   isRetrySafeCmd,
   isTransientReconnectError,
   isWorkerTransportSendError,
@@ -1284,6 +1290,24 @@ export const __panelToolsTestHooks = {
 
 function sleep(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms));
+}
+
+// #1908 — `nodes_search` is a canvas-independent Manager read, but the old
+// handler still sent it through the session's bound canvas tab. A frozen tab
+// never starts the Panel-side deadline because its listener never runs, so the
+// route itself needs a finite budget and a safe same-ComfyUI fallback.
+export const PANEL_SEARCH_ROUTE_BUDGET_MS = 18_000;
+const PANEL_SEARCH_FALLBACK_TRIGGER_MS = 5_000;
+let panelSearchRouteTimingOverride: {
+  budgetMs: number;
+  fallbackTriggerMs: number;
+} | null = null;
+
+function panelSearchRouteTiming(): { budgetMs: number; fallbackTriggerMs: number } {
+  return panelSearchRouteTimingOverride ?? {
+    budgetMs: PANEL_SEARCH_ROUTE_BUDGET_MS,
+    fallbackTriggerMs: PANEL_SEARCH_FALLBACK_TRIGGER_MS,
+  };
 }
 
 // ── Post-reconnect retry-once for idempotent panel commands ──────────────────
@@ -13277,6 +13301,8 @@ interface BridgeProbe {
   isHeadless?: (tabId: string) => boolean;
   canReach?: (tabId: string) => boolean;
   tabs?: () => Array<{ tab_id: string }>;
+  liveTabIdFor?: (tabId: string) => string | undefined;
+  tabServerOrigin?: (tabId: string) => string | undefined;
   resolveActiveTabId?: () => string;
   resolveSharedTabId?: (scopeId?: string) => string | undefined;
   takeLateAskReply?: (askId: string) => unknown;
@@ -15501,6 +15527,234 @@ async function dispatchToTab(
     }
     return fail(err);
   }
+}
+
+type PanelSearchAttempt =
+  | { kind: "reply"; value: unknown }
+  | { kind: "error"; error: unknown }
+  | { kind: "timeout" };
+
+/**
+ * #1908 — bound a `nodes_search` send at the MCP route, independently of the
+ * Panel listener. The Panel's own timer is installed by that listener, so it
+ * cannot help when the bound browser tab is frozen before it handles the frame.
+ * This timer is deliberately external and every promise settles locally, so a
+ * late reply from the abandoned read cannot hold the tool open or become an
+ * unhandled rejection.
+ */
+function panelSearchAttempt(
+  ctx: PanelToolCtx,
+  tabId: string,
+  cmd: Record<string, unknown>,
+  timeoutMs: number,
+): Promise<PanelSearchAttempt> {
+  const budget = Math.max(1, Math.floor(timeoutMs));
+  return new Promise((resolve) => {
+    let settled = false;
+    let timer: ReturnType<typeof setTimeout>;
+    const finish = (attempt: PanelSearchAttempt): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve(attempt);
+    };
+    timer = setTimeout(() => finish({ kind: "timeout" }), budget);
+
+    // `bridge.send` normally rejects its own bounded timeout. The route timer
+    // above is still authoritative: it also covers a frozen-listener test seam
+    // or any future transport that never settles its send promise.
+    void Promise.resolve()
+      .then(() => ctx.bridge.send(cmd as { cmd: string }, { tabId, timeoutMs: budget }))
+      .then(
+        (value) => finish({ kind: "reply", value }),
+        (error) => finish(isReplyTimeoutTagged(error) ? { kind: "timeout" } : { kind: "error", error }),
+      );
+  });
+}
+
+/** Wait briefly for the bound tab before deciding whether a same-origin fallback is needed. */
+function waitForPanelSearchAttempt(
+  attempt: Promise<PanelSearchAttempt>,
+  timeoutMs: number,
+): Promise<{ kind: "settled"; attempt: PanelSearchAttempt } | { kind: "trigger" }> {
+  const wait = Math.max(0, Math.floor(timeoutMs));
+  return new Promise((resolve) => {
+    let settled = false;
+    const timer = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      resolve({ kind: "trigger" });
+    }, wait);
+    void attempt.then((result) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve({ kind: "settled", attempt: result });
+    });
+  });
+}
+
+function normalizedPanelSearchServerOrigin(value: unknown): string | undefined {
+  if (typeof value !== "string") return undefined;
+  const origin = value.trim();
+  return origin === "" ? undefined : origin.replace(/\/+$/, "");
+}
+
+/**
+ * Pick one alternate interactive tab only when the bridge has matching,
+ * server-observed handshake-origin proof for both tabs. Client hello metadata
+ * (`tabOrigin`) is not an authorization signal and is deliberately not
+ * consulted here.
+ */
+function panelSearchFallbackTab(ctx: PanelToolCtx, boundTab: string): string | undefined {
+  const b: BridgeProbe = ctx.bridge;
+  if (
+    typeof b.tabs !== "function" ||
+    typeof b.isHeadless !== "function" ||
+    typeof b.canReach !== "function" ||
+    typeof b.tabServerOrigin !== "function"
+  ) {
+    return undefined;
+  }
+  let boundServerOrigin: string | undefined;
+  try {
+    boundServerOrigin = normalizedPanelSearchServerOrigin(b.tabServerOrigin(boundTab));
+  } catch {
+    return undefined;
+  }
+  if (!boundServerOrigin) return undefined;
+  let live: Array<{ tab_id: string }>;
+  try {
+    live = b.tabs();
+  } catch {
+    return undefined;
+  }
+  if (!Array.isArray(live)) return undefined;
+
+  // `tabs()` preserves most-recent hello last; try the newest alternate first.
+  for (const tab of [...live].reverse()) {
+    const candidate = typeof tab?.tab_id === "string" ? tab.tab_id : "";
+    if (!candidate || candidate === boundTab) continue;
+    try {
+      if (b.isHeadless(candidate)) continue;
+      if (!b.canReach(candidate)) continue;
+      const candidateServerOrigin = normalizedPanelSearchServerOrigin(b.tabServerOrigin(candidate));
+      // Handshake Origin is pathless; use the existing canonical scheme/host/port
+      // comparison, which rejects malformed or DNS-ambiguous values closed.
+      if (!sameHttpOrigin(candidateServerOrigin, boundServerOrigin)) continue;
+    } catch {
+      continue;
+    }
+    return candidate;
+  }
+  return undefined;
+}
+
+function panelSearchBoundTab(ctx: PanelToolCtx): string | undefined {
+  const b: BridgeProbe = ctx.bridge;
+  try {
+    if (isScopeAddress(ctx.tabId)) return b.resolveSharedTabId?.(ctx.tabId);
+    return b.liveTabIdFor?.(ctx.tabId) ?? ctx.tabId;
+  } catch {
+    return undefined;
+  }
+}
+
+function panelSearchTimeoutResult(
+  query: string,
+  attemptedTabs: number,
+  budgetMs: number,
+): Record<string, unknown> {
+  return {
+    count: 0,
+    results: [],
+    query,
+    timed_out: true,
+    panel_unresponsive: true,
+    panel_route: attemptedTabs > 1 ? "same_comfyui_fallback_timeout" : "bound_tab_timeout",
+    timeout_ms: budgetMs,
+    reason: "No panel reply was observed before the MCP route budget expired.",
+    message:
+      "Node-registry search could not complete because the bound ComfyUI panel tab did not " +
+      "answer. This is not evidence that the requested pack is missing. The MCP route " +
+      "only retries this canvas-independent search on another tab proven to front the same " +
+      "ComfyUI instance; retry after a panel tab responds.",
+  };
+}
+
+function panelSearchAttemptResult(
+  attempt: PanelSearchAttempt,
+  query: string,
+  attemptedTabs: number,
+  budgetMs: number,
+): ToolResult {
+  if (attempt.kind === "reply") return ok(attempt.value);
+  if (attempt.kind === "error") return fail(attempt.error);
+  return ok(panelSearchTimeoutResult(query, attemptedTabs, budgetMs));
+}
+
+/**
+ * Route the Manager read with an MCP-owned deadline. Lightweight test bridges
+ * and older compatibility contexts keep the existing `ctx.call` path; the
+ * production UiBridge path is the one that can enumerate origins and safely
+ * address a second panel tab without changing the session's binding.
+ */
+async function panelSearchAtRouteBoundary(
+  ctx: PanelToolCtx,
+  cmd: Record<string, unknown>,
+  query: string,
+): Promise<ToolResult> {
+  const b: BridgeProbe = ctx.bridge;
+  const supportsRouteBoundary =
+    typeof b?.tabs === "function" &&
+    typeof b.isHeadless === "function" &&
+    typeof b.canReach === "function" &&
+    typeof b.tabServerOrigin === "function";
+  if (!supportsRouteBoundary) return ctx.call(cmd, 20000);
+
+  const boundTab = panelSearchBoundTab(ctx);
+  if (!boundTab) return ctx.call(cmd, 20000);
+
+  const timing = panelSearchRouteTiming();
+  const budgetMs = Math.max(1, Math.floor(timing.budgetMs));
+  const deadline = Date.now() + budgetMs;
+  const attemptedTabs = [boundTab];
+  const primary = panelSearchAttempt(ctx, boundTab, cmd, budgetMs);
+  const first = await waitForPanelSearchAttempt(
+    primary,
+    Math.min(budgetMs, Math.max(0, Math.floor(timing.fallbackTriggerMs))),
+  );
+  if (first.kind === "settled") {
+    return panelSearchAttemptResult(first.attempt, query, attemptedTabs.length, budgetMs);
+  }
+
+  const fallbackTab = panelSearchFallbackTab(ctx, boundTab);
+  if (!fallbackTab) {
+    return panelSearchAttemptResult(await primary, query, attemptedTabs.length, budgetMs);
+  }
+  attemptedTabs.push(fallbackTab);
+  const remaining = Math.max(1, deadline - Date.now());
+  const fallback = panelSearchAttempt(ctx, fallbackTab, cmd, remaining);
+
+  // A slow-but-alive bound tab may still answer while the alternate is probing.
+  // Prefer the first successful reply; do not let an early transport error from
+  // one tab hide a valid answer from the other.
+  const pending = new Set<Promise<PanelSearchAttempt>>([primary, fallback]);
+  let lastError: unknown;
+  let sawError = false;
+  while (pending.size > 0) {
+    const winner = await Promise.race(
+      [...pending].map(async (attempt) => ({ attempt, result: await attempt })),
+    );
+    pending.delete(winner.attempt);
+    if (winner.result.kind === "reply") return ok(winner.result.value);
+    if (winner.result.kind === "error") {
+      lastError = winner.result.error;
+      sawError = true;
+    }
+  }
+  if (sawError) return fail(lastError);
+  return ok(panelSearchTimeoutResult(query, attemptedTabs.length, budgetMs));
 }
 
 /** Re-resolve the desktop redirect target after a transient drop — returns the fresh
@@ -22178,7 +22432,12 @@ CHECKED FOR YOU: the graph read this message prescribes was just run, and it ` +
         const query = String(args.query ?? "");
         const limit = typeof args.limit === "number" ? args.limit : undefined;
         const out = await searchPanelNodes({
-          panelSearch: () => ctx.call({ cmd: "nodes_search", query, limit }, 20000),
+          // #1908 — this read is independent of the canvas, so a frozen bound
+          // tab must not own the whole bridge window. The route helper keeps
+          // the session binding unchanged and may address one same-ComfyUI
+          // interactive tab after the MCP-owned trigger deadline.
+          panelSearch: () =>
+            panelSearchAtRouteBoundary(ctx, { cmd: "nodes_search", query, limit }, query),
           query,
           limit,
         });
