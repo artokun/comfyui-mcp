@@ -55,7 +55,12 @@ function asJsDeclaration(tsFn: string): string {
     .replace(/\(url: string, timeoutMs = 8_000\): Promise<boolean>/, "(url, timeoutMs = 8_000)");
 }
 
-function helloOrdering(declarationJs: string): (fetchImpl: typeof fetch, headers: () => Record<string, string>) => unknown {
+type HelloOrdering = (
+  fetchImpl: typeof fetch,
+  headers: () => Record<string, string>,
+) => Promise<boolean>;
+
+function helloOrdering(declarationJs: string): HelloOrdering {
   // Same order as the bug: the hello path builds `probe: (u) => probeOk(u, 3_000)`
   // and invokes it BEFORE source evaluation would reach a later `const`.
   return new Function(
@@ -66,7 +71,7 @@ function helloOrdering(declarationJs: string): (fetchImpl: typeof fetch, headers
      const pending = probe("http://example.test/system_stats");
      ${declarationJs}
      return pending;`,
-  ) as (fetchImpl: typeof fetch, headers: () => Record<string, string>) => unknown;
+  ) as HelloOrdering;
 }
 
 describe("probeOk hoisting (#2425)", () => {
@@ -138,7 +143,7 @@ describe("probeOk hoisting (#2425)", () => {
   it("the shipped declaration is callable before its source line; the const form TDZs", async () => {
     const tsFn = extractAsyncFunction(PROBE_SRC, "probeOk");
     const fnJs = asJsDeclaration(tsFn);
-    const okFetch = (async () => ({ ok: true })) as unknown as typeof fetch;
+    const okFetch = (async () => ({ ok: true })) as typeof fetch;
     const headers = () => ({});
 
     await expect(helloOrdering(fnJs)(okFetch, headers)).resolves.toBe(true);
