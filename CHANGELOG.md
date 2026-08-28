@@ -6,6 +6,14 @@ All notable changes to this project are documented here. This project adheres to
 
 ## Unreleased
 
+## [0.52.146] - 2026-08-27
+
+### MCP
+
+#### Fixed
+- report live segmented .seg staging instead of withholding progress (#2356, #2471)
+
+
 ## [0.52.145] - 2026-08-27
 
 ### MCP
