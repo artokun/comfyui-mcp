@@ -21,7 +21,12 @@ import { basename, dirname } from "node:path";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { findResumablePartial, stagedPartialPathForUrl } from "../../services/download-cache.js";
+import {
+  findResumablePartial,
+  observeSegmentScratchAtPath,
+  stagedPartialPathForUrl,
+} from "../../services/download-cache.js";
+import { segmentScratchPath } from "../../services/download-segments.js";
 
 const URL_A = "https://huggingface.co/Comfy-Org/flux2-dev/resolve/main/flux2_dev_fp8mixed.safetensors";
 const URL_B = "https://huggingface.co/Comfy-Org/other/resolve/main/mistral_3_small.safetensors";
@@ -103,6 +108,24 @@ describe("findResumablePartial reports what is ACTUALLY staged (#1370)", () => {
     await stagePartialFor(URL_B, 8192);
     expect(await findResumablePartial(URL_A)).toBeNull();
     expect((await findResumablePartial(URL_B))?.bytes).toBe(8192);
+  });
+
+  it("a growing .seg scratch is not a resumable .partial (#2356 recurrence)", async () => {
+    // Segmented downloads write a holey `<partial>.seg` and only publish a
+    // contiguous prefix onto `.partial` on success/cancel. Treating the scratch
+    // as resumable would restate this issue as silent corruption.
+    await useTempCache();
+    const partial = stagedPartialPathForUrl(URL_A);
+    await mkdir(dirname(partial), { recursive: true });
+    await writeFile(segmentScratchPath(partial), Buffer.alloc(4096, 1));
+    expect(await findResumablePartial(URL_A)).toBeNull();
+    const scratch = await observeSegmentScratchAtPath(partial);
+    expect(scratch).toEqual({
+      state: "present",
+      path: segmentScratchPath(partial),
+      bytes: 4096,
+      modifiedMs: expect.any(Number),
+    });
   });
 
   it("a ZERO-BYTE partial is reported as absent", async () => {

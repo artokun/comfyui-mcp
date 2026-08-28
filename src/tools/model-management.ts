@@ -32,10 +32,10 @@ import {
   type DownloadJob,
 } from "../services/download-jobs.js";
 import {
+  observeSegmentScratchAtPath,
   observeStagedPartialAtPath,
   type StagedPartialObservation,
 } from "../services/download-cache.js";
-import { segmentScratchPath } from "../services/download-segments.js";
 import { downloadRetryPolicy } from "../services/download-retry.js";
 import { errorToToolResult, ModelError } from "../utils/errors.js";
 import {
@@ -262,13 +262,6 @@ function progressAgeMs(
   return lastEvidence > 0 ? Math.max(0, Date.now() - lastEvidence) : Number.POSITIVE_INFINITY;
 }
 
-async function observeSegmentScratch(partialPath: string | undefined): Promise<StagedPartialObservation> {
-  if (typeof partialPath !== "string" || !partialPath) {
-    return { state: "absent", path: "" };
-  }
-  return observeStagedPartialAtPath(segmentScratchPath(partialPath));
-}
-
 /**
  * Progress rows are arrival-based. Single-connection downloads stage a durable
  * `.partial`; segmented downloads (#1697) write a holey `.seg` until success or
@@ -372,7 +365,7 @@ async function progressViewForJob(
     return { bytes: formatProgressBytes(p), note: "" };
   }
   const partial = await observeStagedPartialAtPath(job.partialPath);
-  const scratch = await observeSegmentScratch(job.partialPath);
+  const scratch = await observeSegmentScratchAtPath(job.partialPath);
   return reconcileProgress(p, partial, scratch);
 }
 
@@ -403,23 +396,21 @@ async function exactPartialRecoveryAdvice(
       `determine whether bytes are resumable. Do not re-issue on an unreadable identity.`
     );
   }
+  const scratch = await observeSegmentScratchAtPath(job.partialPath);
   if (partial.state === "absent") {
-    const scratch = await observeSegmentScratch(job.partialPath);
-    if (scratch.state === "present") {
-      return (
-        `the exact staged .partial is absent or zero-byte (${job.partialPath}), but segmented ` +
-        `staging is present at ${scratch.path}. Cancel/failure publishes a contiguous hole-free ` +
-        `prefix to the durable .partial, so a re-issue does not start from the beginning. Wait ` +
-        `for that prefix to land, then re-issue to resume.`
-      );
+    if (scratch.state !== "present") {
+      return `the exact staged .partial is absent or zero-byte (${job.partialPath}); no resumable bytes were observed, so a re-issue starts from the beginning.`;
     }
-    return `the exact staged .partial is absent or zero-byte (${job.partialPath}); no resumable bytes were observed, so a re-issue starts from the beginning.`;
   }
+  const observedBytes = partial.state === "present" ? partial.bytes : scratch.state === "present" ? scratch.bytes : 0;
+  const observedPath = partial.state === "present" ? partial.path : scratch.path;
   let currentIdentity: ReturnType<typeof localDownloadCacheIdentity>;
   try {
     currentIdentity = localDownloadCacheIdentity(job.url);
   } catch {
-    return `the exact staged ${formatBytes(partial.bytes)} partial is observed at ${partial.path}, but the current local request identity could not be established; do not re-issue it.`;
+    return partial.state === "present"
+      ? `the exact staged ${formatBytes(partial.bytes)} partial is observed at ${partial.path}, but the current local request identity could not be established; do not re-issue it.`
+      : `segmented staging is present at ${scratch.path}, but the current local request identity could not be established; do not re-issue it.`;
   }
   if (
     currentIdentity.partialPath !== job.partialPath ||
@@ -427,9 +418,27 @@ async function exactPartialRecoveryAdvice(
     currentIdentity.partialIdentity.auth_mode !== job.partialIdentity.auth_mode
   ) {
     return (
-      `an exact ${formatBytes(partial.bytes)} partial is observed at ${partial.path}, but its ` +
+      (partial.state === "present"
+        ? `an exact ${formatBytes(observedBytes)} partial is observed at ${observedPath}, but its `
+        : `segmented staging is present at ${observedPath}, but its `) +
       `persisted route/identity proof does not match the current local request identity. ` +
       `Do not re-issue it or infer that those bytes are resumable.`
+    );
+  }
+  if (partial.state === "absent") {
+    if (job.partialIdentity.auth_mode === "explicit") {
+      return (
+        `the exact staged .partial is absent or zero-byte (${job.partialPath}), but segmented ` +
+        `staging is present at ${scratch.path}. A contiguous prefix may be published to the ` +
+        `durable .partial, but the persisted identity requires a per-request credential that ` +
+        `is not stored here. Do not re-issue without it and a matching identity check.`
+      );
+    }
+    return (
+      `the exact staged .partial is absent or zero-byte (${job.partialPath}), but segmented ` +
+      `staging is present at ${scratch.path}. Cancel/failure publishes a contiguous hole-free ` +
+      `prefix to the durable .partial, so a re-issue does not start from the beginning. Wait ` +
+      `for that prefix to land, then re-issue to resume.`
     );
   }
   const size = formatBytes(partial.bytes);

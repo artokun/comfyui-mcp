@@ -30,6 +30,7 @@ import {
   planSegments,
   probeSegmentedRanges,
   runSegmentedDownload,
+  segmentScratchPath,
   segmentedDownloadPolicy,
   SegmentedRangeUnsupportedError,
   type SegmentedProbe,
@@ -3852,6 +3853,20 @@ export async function observeStagedPartial(
     return { state: "unavailable", path: "" };
   }
   return observeStagedPartialAtPath(partialPath);
+}
+
+/**
+ * Read the segmented `.seg` scratch next to the writer's exact staged partial.
+ * Path derivation is the writer's (`segmentScratchPath`); this is live-transfer
+ * evidence only. `.seg` is holey and is not a resume candidate (#2356 recurrence).
+ */
+export async function observeSegmentScratchAtPath(
+  partialPath: string | undefined,
+): Promise<StagedPartialObservation> {
+  if (typeof partialPath !== "string" || !partialPath) {
+    return { state: "unavailable", path: "" };
+  }
+  return observeStagedPartialAtPath(segmentScratchPath(partialPath));
 }
 
 /**
