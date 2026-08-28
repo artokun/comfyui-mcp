@@ -35,6 +35,7 @@ import {
   observeStagedPartialAtPath,
   type StagedPartialObservation,
 } from "../services/download-cache.js";
+import { segmentScratchPath } from "../services/download-segments.js";
 import { downloadRetryPolicy } from "../services/download-retry.js";
 import { errorToToolResult, ModelError } from "../utils/errors.js";
 import {
@@ -248,79 +249,116 @@ function formatBytes(bytes: number): string {
   return gb >= 1 ? `${gb.toFixed(2)} GB` : `${(bytes / 1024 ** 2).toFixed(1)} MB`;
 }
 
-function progressAgeMs(p: DownloadProgress | null, partial: StagedPartialObservation): number {
+function progressAgeMs(
+  p: DownloadProgress | null,
+  partial: StagedPartialObservation,
+  scratch?: StagedPartialObservation,
+): number {
   const lastEvidence = Math.max(
     p?.updated ?? 0,
     partial.state === "present" ? partial.modifiedMs : 0,
+    scratch?.state === "present" ? scratch.modifiedMs : 0,
   );
   return lastEvidence > 0 ? Math.max(0, Date.now() - lastEvidence) : Number.POSITIVE_INFINITY;
 }
 
+async function observeSegmentScratch(partialPath: string | undefined): Promise<StagedPartialObservation> {
+  if (typeof partialPath !== "string" || !partialPath) {
+    return { state: "absent", path: "" };
+  }
+  return observeStagedPartialAtPath(segmentScratchPath(partialPath));
+}
+
 /**
- * Progress rows are arrival-based and segmented downloads stage into `.seg`,
- * not the resumable `.partial`. The status surface therefore uses the partial
- * as its byte authority and withholds an in-memory count it cannot reconcile
- * (#2356). This is reporting only: it never cancels or otherwise changes the
- * downloader's existing stall/retry ownership.
+ * Progress rows are arrival-based. Single-connection downloads stage a durable
+ * `.partial`; segmented downloads (#1697) write a holey `.seg` until success or
+ * cancel publishes a contiguous prefix onto that `.partial`.
+ *
+ * Durable `.partial` bytes remain the resume authority (#2356). A present `.seg`
+ * is live-writer evidence, not a resume prefix — so status may show the live
+ * onBytes snapshot (those deltas are real writes) without treating `.seg` size
+ * as progress (out-of-order ranges make size lie). This is reporting only: it
+ * never cancels or otherwise changes the downloader's stall/retry ownership.
  */
 function reconcileProgress(
   p: DownloadProgress | null,
   partial: StagedPartialObservation,
+  scratch: StagedPartialObservation,
 ): ProgressView {
-  if (partial.state !== "present") {
-    const staleMs = progressAgeMs(p, partial);
+  if (partial.state === "present") {
+    const durableBytes = Math.max(0, partial.bytes);
+    const displayedBytes = p?.total && p.total > 0 ? Math.min(durableBytes, p.total) : durableBytes;
+    const bytes =
+      p?.total && p.total > 0
+        ? `  ${(displayedBytes / 1024 ** 3).toFixed(2)}/${(p.total / 1024 ** 3).toFixed(2)} GB (${Math.floor((displayedBytes / p.total) * 100)}%)`
+        : displayedBytes > 0
+          ? `  ${formatBytes(displayedBytes)} durable`
+          : "  0 bytes durable";
+    const ahead = p !== null && p.downloaded > durableBytes;
+    const ageMs = progressAgeMs(p, partial, scratch);
     const stallTimeoutMs = downloadRetryPolicy().stallTimeoutMs;
-    const stale = stallTimeoutMs > 0 && Number.isFinite(staleMs) && staleMs >= stallTimeoutMs;
-    const reason =
-      partial.state === "absent"
-        ? "no readable durable .partial is present yet"
-        : "the durable .partial could not be read";
-    if (stale) {
+    const notes = ahead
+      ? `\n    progress reconciled to the durable .partial (${formatBytes(durableBytes)} on disk); ` +
+        `the live snapshot was ahead and is not reported`
+      : "";
+    if (stallTimeoutMs > 0 && ageMs >= stallTimeoutMs) {
       return {
-        bytes: "",
+        bytes,
         note:
-          `\n    PROGRESS STALLED/UNAVAILABLE — ${reason}; the last byte snapshot is ` +
-          `${Math.round(staleMs / 1000)}s old. This status call does not cancel the download; ` +
+          notes +
+          `\n    PROGRESS STALLED — no new byte snapshot or durable partial growth for ` +
+          `${Math.round(ageMs / 1000)}s. The existing downloader stall watchdog may retry a ` +
+          `wedged HTTP attempt; this status call does not cancel it.`,
+      };
+    }
+    return { bytes, note: notes };
+  }
+
+  if (scratch.state === "present") {
+    const ageMs = progressAgeMs(p, partial, scratch);
+    const stallTimeoutMs = downloadRetryPolicy().stallTimeoutMs;
+    const liveNote =
+      `\n    live segmented staging at ${scratch.path}; ` +
+      `those bytes are not a hole-free durable prefix until success or cancel publishes ` +
+      `a contiguous prefix to the .partial. A re-issue after cancel does not start from the beginning.`;
+    if (stallTimeoutMs > 0 && Number.isFinite(ageMs) && ageMs >= stallTimeoutMs) {
+      return {
+        bytes: formatProgressBytes(p),
+        note:
+          liveNote +
+          `\n    PROGRESS STALLED — no new byte snapshot or .seg growth for ` +
+          `${Math.round(ageMs / 1000)}s. This status call does not cancel the download; ` +
           `confirm the writer before using action:"cancel".`,
       };
     }
+    return { bytes: formatProgressBytes(p), note: liveNote };
+  }
+
+  const staleMs = progressAgeMs(p, partial, scratch);
+  const stallTimeoutMs = downloadRetryPolicy().stallTimeoutMs;
+  const stale = stallTimeoutMs > 0 && Number.isFinite(staleMs) && staleMs >= stallTimeoutMs;
+  const reason =
+    partial.state === "absent"
+      ? "no readable durable .partial is present yet"
+      : "the durable .partial could not be read";
+  if (stale) {
     return {
       bytes: "",
       note:
-        `\n    PROGRESS UNAVAILABLE — ${reason}; live-stream byte counts are withheld until ` +
-        `they can be reconciled to durable disk bytes.` +
-        (stallTimeoutMs === 0
-          ? ` The stall watchdog is disabled, so age is not treated as a stall verdict.`
-          : ""),
+        `\n    PROGRESS STALLED/UNAVAILABLE — ${reason}; the last byte snapshot is ` +
+        `${Math.round(staleMs / 1000)}s old. This status call does not cancel the download; ` +
+        `confirm the writer before using action:"cancel".`,
     };
   }
-
-  const durableBytes = Math.max(0, partial.bytes);
-  const displayedBytes = p?.total && p.total > 0 ? Math.min(durableBytes, p.total) : durableBytes;
-  const bytes =
-    p?.total && p.total > 0
-      ? `  ${(displayedBytes / 1024 ** 3).toFixed(2)}/${(p.total / 1024 ** 3).toFixed(2)} GB (${Math.floor((displayedBytes / p.total) * 100)}%)`
-      : displayedBytes > 0
-        ? `  ${formatBytes(displayedBytes)} durable`
-        : "  0 bytes durable";
-  const ahead = p !== null && p.downloaded > durableBytes;
-  const ageMs = progressAgeMs(p, partial);
-  const stallTimeoutMs = downloadRetryPolicy().stallTimeoutMs;
-  const notes = ahead
-    ? `\n    progress reconciled to the durable .partial (${formatBytes(durableBytes)} on disk); ` +
-      `the live snapshot was ahead and is not reported`
-    : "";
-  if (stallTimeoutMs > 0 && ageMs >= stallTimeoutMs) {
-    return {
-      bytes,
-      note:
-        notes +
-        `\n    PROGRESS STALLED — no new byte snapshot or durable partial growth for ` +
-        `${Math.round(ageMs / 1000)}s. The existing downloader stall watchdog may retry a ` +
-        `wedged HTTP attempt; this status call does not cancel it.`,
-    };
-  }
-  return { bytes, note: notes };
+  return {
+    bytes: "",
+    note:
+      `\n    PROGRESS UNAVAILABLE — ${reason}; live-stream byte counts are withheld until ` +
+      `they can be reconciled to durable disk bytes.` +
+      (stallTimeoutMs === 0
+        ? ` The stall watchdog is disabled, so age is not treated as a stall verdict.`
+        : ""),
+  };
 }
 
 async function progressViewForJob(
@@ -333,10 +371,9 @@ async function progressViewForJob(
   if (job.status === "done" || job.viaManager === true) {
     return { bytes: formatProgressBytes(p), note: "" };
   }
-  return reconcileProgress(
-    p,
-    await observeStagedPartialAtPath(job.partialPath),
-  );
+  const partial = await observeStagedPartialAtPath(job.partialPath);
+  const scratch = await observeSegmentScratch(job.partialPath);
+  return reconcileProgress(p, partial, scratch);
 }
 
 /**
@@ -367,6 +404,15 @@ async function exactPartialRecoveryAdvice(
     );
   }
   if (partial.state === "absent") {
+    const scratch = await observeSegmentScratch(job.partialPath);
+    if (scratch.state === "present") {
+      return (
+        `the exact staged .partial is absent or zero-byte (${job.partialPath}), but segmented ` +
+        `staging is present at ${scratch.path}. Cancel/failure publishes a contiguous hole-free ` +
+        `prefix to the durable .partial, so a re-issue does not start from the beginning. Wait ` +
+        `for that prefix to land, then re-issue to resume.`
+      );
+    }
     return `the exact staged .partial is absent or zero-byte (${job.partialPath}); no resumable bytes were observed, so a re-issue starts from the beginning.`;
   }
   let currentIdentity: ReturnType<typeof localDownloadCacheIdentity>;
