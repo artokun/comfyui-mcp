@@ -227,6 +227,7 @@ function stubFetch(opts: {
   /** Shape of both Manager queue/status dialect probes for fallback tests. */
   managerQueueStatus?:
     | "absent"
+    | "manager-unavailable"
     | "malformed"
     | "timeout"
     | "server-error"
@@ -256,6 +257,11 @@ function stubFetch(opts: {
       if (path === "/v2/manager/queue/status" || path === "/manager/queue/status") {
         if (opts.managerQueueStatus === "absent") {
           return new Response("missing", { status: 404 });
+        }
+        if (opts.managerQueueStatus === "manager-unavailable") {
+          // H3/Desktop shape: the route answers, but no Manager queue/status
+          // payload exists. It is not a frontend HTML catchall.
+          return new Response("", { status: 200 });
         }
         if (opts.managerQueueStatus === "malformed") {
           return new Response("<!doctype html>", { status: 200 });
@@ -754,6 +760,34 @@ describe("node-management service", () => {
       expect(res.mechanism).toBe("git-clone");
       expect(res.message).toMatch(/confirmed absent/);
       expect(res.message).toMatch(/both queue\/status dialects returned HTTP 404/);
+      expect(
+        mockedExec.mock.calls.find((c) => c[0] === "git" && (c[1] as string[])[0] === "clone"),
+      ).toBeDefined();
+    });
+
+    it("#1129 falls back when both queue-status dialects repeatedly answer empty", async () => {
+      stubFetch({ managerQueueStatus: "manager-unavailable" });
+      let cloned = false;
+      mockedExists.mockImplementation((p: unknown) => {
+        const s = String(p);
+        if (s.includes("requirements.txt") || s.includes("install.py")) return false;
+        if (s.includes(".venv") || s.includes("cm-cli.py")) return false;
+        if (s.includes(NODE_DIR_UTILS) || s.endsWith("comfyui-teskors-utils")) return cloned;
+        return false;
+      });
+      mockedExec.mockImplementation(((bin: string, args: string[]) => {
+        if (bin === "git" && args[0] === "clone") cloned = true;
+        return "";
+      }) as never);
+
+      const res = await installCustomNode({
+        id: "https://github.com/teskor-hub/comfyui-teskors-utils",
+        source: "git",
+      });
+
+      expect(res.mechanism).toBe("git-clone");
+      expect(res.message).toMatch(/queue\/status surface was unavailable/);
+      expect(res.message).toMatch(/before any install task was submitted/);
       expect(
         mockedExec.mock.calls.find((c) => c[0] === "git" && (c[1] as string[])[0] === "clone"),
       ).toBeDefined();

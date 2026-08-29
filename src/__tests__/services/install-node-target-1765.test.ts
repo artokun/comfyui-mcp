@@ -107,7 +107,11 @@ vi.mock("../../comfyui/client.js", () => ({
 // They reach `cloneCustomNodeFallback` from two different call sites, and a
 // guard on only one of them is a guard that is not there. ────────────────────
 const http = vi.hoisted(() => ({
-  mode: "refuse-enqueue" as "refuse-enqueue" | "accept-enqueue" | "manager-absent",
+  mode: "refuse-enqueue" as
+    | "refuse-enqueue"
+    | "accept-enqueue"
+    | "manager-absent"
+    | "manager-unavailable",
   calls: [] as string[],
 }));
 vi.mock("../../comfyui/fetch.js", () => {
@@ -129,6 +133,15 @@ vi.mock("../../comfyui/fetch.js", () => {
         return new Response("missing", { status: 404, statusText: "Not Found" });
       }
       const { pathname } = new URL(url);
+      if (
+        http.mode === "manager-unavailable" &&
+        (pathname === "/v2/manager/queue/status" || pathname === "/manager/queue/status")
+      ) {
+        // H3/Desktop can answer these routes without a usable Manager queue
+        // payload. This is the #1129 path, not the already-shipped both-404
+        // Manager-absent path.
+        return new Response("", { status: 200 });
+      }
       if (pathname === "/manager/queue/install") return json({ ui_id: "queued" });
       if (pathname === "/manager/queue/start") return json({});
       if (pathname === "/manager/queue/status") {
@@ -301,6 +314,39 @@ describe("#1765 — install_custom_node must not write into an install this sess
   it("asks the running server which install it is — the shipped path never did", async () => {
     await install({ id: REPO, source: "git" });
     expect(live.statsCalls).toBeGreaterThan(0);
+  });
+
+  it("#1129 clones to the verified live root when Manager queue status is unavailable", async () => {
+    http.mode = "manager-unavailable";
+    resetManagerApiCache("#1129 manager-unavailable regression");
+
+    const { ok, error } = await install({ id: REPO, source: "git" });
+
+    expect(error).toBeUndefined();
+    expect(ok).toMatchObject({ mechanism: "git-clone" });
+    expect(clonedInto()).toBe(join(CONNECTED, PACK_DIR));
+    expect(existsSync(join(SAVED_DEFAULT, PACK_DIR))).toBe(false);
+    expect(http.calls.some((url) => url.endsWith("/manager/queue/install"))).toBe(false);
+    expect(ok).toMatchObject({
+      details: { managerStatus: { manager_unavailable: true } },
+    });
+  });
+
+  it("#1129 serializes concurrent unavailable-Manager git installs", async () => {
+    http.mode = "manager-unavailable";
+    resetManagerApiCache("#1129 concurrent manager-unavailable regression");
+
+    const [first, second] = await Promise.all([
+      install({ id: REPO, source: "git" }),
+      install({ id: REPO, source: "git" }),
+    ]);
+
+    expect(first.error).toBeUndefined();
+    expect(second.error).toBeUndefined();
+    expect(first.ok).toMatchObject({ mechanism: "git-clone" });
+    expect(second.ok).toMatchObject({ mechanism: "git-clone" });
+    expect(git.calls.filter((call) => call[0] === "git" && call[1] === "clone")).toHaveLength(1);
+    expect(existsSync(join(CONNECTED, PACK_DIR))).toBe(true);
   });
 
   it("clones normally when the configured root IS the connected install", async () => {

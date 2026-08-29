@@ -40,7 +40,7 @@ import {
   resolveComfyCliExecutable,
   runComfyCliSync,
 } from "./comfy-cli.js";
-import { withPanelPinGuard } from "./panel-pin-guard.js";
+import { withPanelMutationLock, withPanelPinGuard } from "./panel-pin-guard.js";
 import {
   ambiguousBareNameRefusal,
   ambiguousBareNameWarning,
@@ -221,6 +221,10 @@ interface ManagerFetchOptions {
   soft?: boolean;
   /** Preserve the status class that a soft capability probe observed. */
   onSoftFailure?: (status: number | undefined) => void;
+  /** Preserve a transport failure separately from an empty/malformed 2xx body. */
+  onSoftTransportFailure?: () => void;
+  /** Observe the parsed body of a successful soft probe, including an empty body. */
+  onSoftResponse?: (body: unknown) => void;
 }
 
 /**
@@ -320,6 +324,8 @@ async function managerFetch<T>(
     base = managerBaseUrl(),
     soft = false,
     onSoftFailure,
+    onSoftTransportFailure,
+    onSoftResponse,
   } = options;
   const url = `${base}${path}`;
   logger.debug("Manager API request", { url, method });
@@ -337,6 +343,7 @@ async function managerFetch<T>(
   } catch (err) {
     if (soft) {
       onSoftFailure?.(undefined);
+      onSoftTransportFailure?.();
       return undefined;
     }
     throw new NodeManagementError(
@@ -382,13 +389,17 @@ async function managerFetch<T>(
 
   // Some endpoints return empty bodies (e.g. queue ops). Parse defensively.
   const raw = await res.text();
-  if (!raw) return undefined;
+  if (!raw.trim()) {
+    if (soft) onSoftResponse?.(undefined);
+    return undefined;
+  }
   let parsed: unknown;
   try {
     parsed = JSON.parse(raw);
   } catch {
     parsed = raw;
   }
+  if (soft) onSoftResponse?.(parsed);
   return parsed as T;
 }
 
@@ -519,6 +530,42 @@ function looksLikeQueueStatus(s: unknown): boolean {
   );
 }
 
+function managerQueueStatusKind(status: number): ManagerQueueStatusKind {
+  if (status === 404) return "not-found";
+  if (status === 405) return "method-not-allowed";
+  if (status >= 500) return "server-error";
+  return "http-error";
+}
+
+/**
+ * Some local ComfyUI Desktop builds leave the Manager queue/status endpoints
+ * registered as successful routes but return no body (or an explicit Manager
+ * unavailable error). That is different from the frontend HTML catchall: the
+ * former is a stable, positive answer that no queue/status surface is
+ * available, while the latter is merely an unrecognized route response.
+ */
+function looksLikeManagerUnavailableResponse(body: unknown): boolean {
+  if (looksLikeHtml(body)) return false;
+  const text =
+    typeof body === "string"
+      ? body
+      : body && typeof body === "object"
+        ? Object.values(body as Record<string, unknown>)
+            .filter((value): value is string => typeof value === "string")
+            .join(" ")
+        : "";
+  return /(?:comfyui[-\s]?manager|manager).{0,80}(?:not\s+reachable|unavailable|not\s+enabled|not\s+installed)/i.test(
+    text,
+  );
+}
+
+function managerQueueResponseKind(body: unknown): ManagerQueueStatusKind {
+  if (looksLikeQueueStatus(body)) return "queue";
+  if (body === undefined) return "empty";
+  if (looksLikeManagerUnavailableResponse(body)) return "unavailable";
+  return "malformed";
+}
+
 /**
  * What the two Manager queue/status routes established for ONE connected
  * ComfyUI. A 404 on only one route is not enough: the other route may be the
@@ -526,6 +573,22 @@ function looksLikeQueueStatus(s: unknown): boolean {
  * that Manager is absent.
  */
 export type ManagerQueueAvailability = "available" | "absent" | "unreadable";
+
+/** The evidence captured for each queue/status dialect during generation
+ * detection. Only `empty` / `unavailable` (and an already-shipped 404) can
+ * authorize the local git fallback; a timeout, HTML catchall, 405, 5xx, or
+ * authentication response is deliberately not absence evidence. */
+type ManagerQueueStatusKind =
+  | "queue"
+  | "not-found"
+  | "empty"
+  | "unavailable"
+  | "malformed"
+  | "method-not-allowed"
+  | "server-error"
+  | "http-error"
+  | "transport"
+  | "hard-error";
 
 /** Internal marker carried by the all-soft queue-generation probe. */
 const MANAGER_QUEUE_DETECTION_FAILURE = "manager-queue-detection";
@@ -571,6 +634,55 @@ export async function probeManagerQueueAvailability(
   return statuses.length === 2 && statuses.every((status) => status === 404)
     ? "absent"
     : "unreadable";
+}
+
+/**
+ * Repeat the queue/status probe with the response class preserved. The public
+ * availability helper intentionally exposes only its conservative three-state
+ * result; the install fallback needs the extra distinction between a stable
+ * empty/unavailable response and a timeout or malformed catchall.
+ */
+async function probeManagerQueueStatusKinds(
+  base: string,
+): Promise<ManagerQueueStatusKind[]> {
+  const kinds: ManagerQueueStatusKind[] = [];
+  for (const path of ["/v2/manager/queue/status", "/manager/queue/status"]) {
+    let kind: ManagerQueueStatusKind = "hard-error";
+    try {
+      await managerFetch<unknown>(path, {
+        base,
+        soft: true,
+        onSoftFailure: (status) => {
+          kind = status === undefined ? "transport" : managerQueueStatusKind(status);
+        },
+        onSoftTransportFailure: () => {
+          kind = "transport";
+        },
+        onSoftResponse: (body) => {
+          kind = managerQueueResponseKind(body);
+        },
+      });
+    } catch {
+      // Authentication and other hard probe failures must not become local
+      // clone authorization, even though managerFetch had already observed a
+      // status before throwing.
+      kind = "hard-error";
+    }
+    kinds.push(kind);
+  }
+  return kinds;
+}
+
+function isManagerUnavailableQueueKinds(kinds: unknown): kinds is ManagerQueueStatusKind[] {
+  if (!Array.isArray(kinds) || kinds.length !== 2) return false;
+  const allowed = new Set<ManagerQueueStatusKind>(["not-found", "empty", "unavailable"]);
+  if (!kinds.every((kind): kind is ManagerQueueStatusKind => allowed.has(kind as ManagerQueueStatusKind))) {
+    return false;
+  }
+  // Both 404s have their own already-shipped, stronger absence contract. This
+  // branch is for the new unavailable surface and therefore needs at least one
+  // positive empty/unavailable response rather than re-labelling 404 absence.
+  return kinds.some((kind) => kind === "empty" || kind === "unavailable");
 }
 
 async function probeManagerMajor(base: string): Promise<number | undefined> {
@@ -672,11 +784,20 @@ async function probeManagerApi(base: string): Promise<ManagerApi> {
   // the newer state (#646).
   const stamp = managerApiCacheStamp();
   const queueStatusCodes: Array<number | undefined> = [undefined, undefined];
+  const queueStatusKinds: ManagerQueueStatusKind[] = ["hard-error", "hard-error"];
   const v2 = await managerFetch<QueueStatus>("/v2/manager/queue/status", {
     base,
     soft: true,
     onSoftFailure: (status) => {
       queueStatusCodes[0] = status;
+      queueStatusKinds[0] =
+        status === undefined ? "transport" : managerQueueStatusKind(status);
+    },
+    onSoftTransportFailure: () => {
+      queueStatusKinds[0] = "transport";
+    },
+    onSoftResponse: (body) => {
+      queueStatusKinds[0] = managerQueueResponseKind(body);
     },
   });
   if (looksLikeQueueStatus(v2)) {
@@ -689,6 +810,14 @@ async function probeManagerApi(base: string): Promise<ManagerApi> {
     soft: true,
     onSoftFailure: (status) => {
       queueStatusCodes[1] = status;
+      queueStatusKinds[1] =
+        status === undefined ? "transport" : managerQueueStatusKind(status);
+    },
+    onSoftTransportFailure: () => {
+      queueStatusKinds[1] = "transport";
+    },
+    onSoftResponse: (body) => {
+      queueStatusKinds[1] = managerQueueResponseKind(body);
     },
   });
   if (looksLikeQueueStatus(legacy)) {
@@ -729,6 +858,7 @@ async function probeManagerApi(base: string): Promise<ManagerApi> {
       kind: MANAGER_QUEUE_DETECTION_FAILURE,
       base,
       queueStatusCodes,
+      queueStatusKinds,
     },
   );
 }
@@ -3086,11 +3216,15 @@ function initialManagerQueueAbsenceWasProven(err: unknown): boolean {
 
 /**
  * A direct clone is safe after either a Manager-native policy refusal whose body
- * explicitly proves no task was queued, a direct enqueue route-level 404, or a
+ * explicitly proves no task was queued, a direct enqueue route-level 404, a
  * detection failure followed by a fresh probe proving BOTH queue dialects are
- * 404 on the same captured ComfyUI base.
- * A bare 401/403/407, timeout, 5xx, malformed response, or unrelated reachability
- * error remains fail-closed.
+ * 404 on the same captured ComfyUI base, or the new local Manager-unavailable
+ * surface: both dialects repeatedly answer with an empty/explicitly-unavailable
+ * response before any enqueue route is attempted.
+ *
+ * A bare 401/403/407, timeout, 5xx, 405, malformed/HTML response, or unrelated
+ * reachability error remains fail-closed. This keeps a response that could be a
+ * live Manager or an accepted background task from being raced by the clone.
  */
 async function managerAbsenceAllowsGitFallback(
   err: unknown,
@@ -3106,12 +3240,36 @@ async function managerAbsenceAllowsGitFallback(
   if (status !== undefined) return false;
   if (
     status === undefined &&
-    (!isManagerQueueDetectionFailure(err) || !initialManagerQueueAbsenceWasProven(err))
+    !isManagerQueueDetectionFailure(err)
   ) {
     return false;
   }
+
+  if (initialManagerQueueAbsenceWasProven(err)) {
+    try {
+      return (await probeManagerQueueAvailability(base)) === "absent";
+    } catch {
+      return false;
+    }
+  }
+
+  const details = err instanceof NodeManagementError && err.details && typeof err.details === "object"
+    ? (err.details as { queueStatusKinds?: unknown })
+    : undefined;
+  const initialKinds = details?.queueStatusKinds;
+  if (!isManagerUnavailableQueueKinds(initialKinds)) return false;
+
+  // Re-read the same two endpoints. A single empty response can be a transient
+  // proxy/server failure; two identical no-queue observations are the minimum
+  // evidence this pre-enqueue fallback can safely act on. The direct probe keeps
+  // 405/5xx/auth/transport/malformed responses distinct instead of collapsing
+  // them into the public "unreadable" state.
   try {
-    return (await probeManagerQueueAvailability(base)) === "absent";
+    const freshKinds = await probeManagerQueueStatusKinds(base);
+    return (
+      isManagerUnavailableQueueKinds(freshKinds) &&
+      freshKinds.every((kind, index) => kind === initialKinds[index])
+    );
   } catch {
     return false;
   }
@@ -3450,6 +3608,21 @@ async function withObjectInfoInvalidation<T>(op: () => Promise<T>): Promise<T> {
   return result;
 }
 
+/**
+ * A git URL can end in a local filesystem write when Manager is unavailable or
+ * accepts an unregistered pack without installing it. Serialize that whole
+ * decision and write, not just the final `git clone`, so two orchestrators
+ * cannot both observe a missing destination and race into the same
+ * custom_nodes directory. `useCmCli` is included because comfy-cli is also a
+ * local writer and must share the same critical section.
+ */
+function needsLocalInstallMutationLock(opts: InstallOptions): boolean {
+  if (opts.useCmCli === true) return true;
+  if (opts.source === "git") return true;
+  if (opts.source === "registry") return false;
+  return looksLikeGitUrl(parseGitUrl(opts.id).baseUrl);
+}
+
 // NOTE on `async`: these wrappers are declared async purely so the PIN GUARD's
 // throw surfaces as a REJECTED PROMISE rather than a synchronous exception.
 // Callers rely on that — apply_manifest does `installCustomNode(...).then().catch()`
@@ -3461,9 +3634,10 @@ export async function installCustomNode(opts: InstallOptions): Promise<NodeOpRes
   // operation that install_comfyui(action:'panel') drives. Guarding here — where the TARGET is
   // known — covers every caller, including a bulk "all". The check and the
   // mutation are atomic under the panel mutation lock (withPanelPinGuard).
-  return withPanelPinGuard("install", opts.id, () =>
+  const op = () => withPanelPinGuard("install", opts.id, () =>
     withObjectInfoInvalidation(() => installCustomNodeImpl(opts)),
   );
+  return needsLocalInstallMutationLock(opts) ? withPanelMutationLock(op) : op();
 }
 
 /**
@@ -3742,7 +3916,11 @@ async function installCustomNodeImpl(
           wrongInstallRefusal(localWriteMismatch, 'install_custom_node (action:"install", git clone)', managerBase),
         );
       }
-      logger.info("Manager refused or was proven absent — cloning directly", {
+      const managerUnavailable =
+        refusedBy === undefined &&
+        isManagerQueueDetectionFailure(err) &&
+        !initialManagerQueueAbsenceWasProven(err);
+      logger.info("Manager refused, was unavailable, or was proven absent — cloning directly", {
         status: refusedBy,
         gitId,
       });
@@ -3752,7 +3930,9 @@ async function installCustomNodeImpl(
         gitRef,
         refusedBy === 403 || refusedBy === 404
           ? { manager_refused: refusedBy }
-          : { manager_absent: true },
+          : managerUnavailable
+            ? { manager_unavailable: true }
+            : { manager_absent: true },
         cliWorkspace,
         {
           refFromVersion,
@@ -3764,6 +3944,10 @@ async function installCustomNodeImpl(
               : refusedBy === 404
                 ? `ComfyUI-Manager's git-install route returned HTTP 404 before queueing. ` +
                   `Nothing was queued there.`
+                : managerUnavailable
+                  ? `ComfyUI-Manager's queue/status surface was unavailable: both dialect ` +
+                    `probes repeatedly returned no queue status before any install task was ` +
+                    `submitted. Nothing was queued there.`
                 : `ComfyUI-Manager is confirmed absent: both queue/status dialects returned HTTP 404 ` +
                   `on the connected ComfyUI. Nothing was queued there.`,
         },
