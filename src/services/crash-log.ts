@@ -135,40 +135,43 @@ const MAX_CONTEXT_CHARS = 1200;
  * A blank line or an unindented log line ends the run — which is exactly what
  * separates a crash dump from whatever the server printed next.
  */
-function traceRunAround(region: string, index: number): { lines: string[]; start: number } {
+function firstStackFrames(region: string): { frames: { path: string; line?: string }[]; start: number } {
   const lines = region.split("\n");
-  const starts: number[] = [];
   let off = 0;
-  for (const l of lines) {
-    starts.push(off);
-    off += l.length + 1;
+  let runStart = 0;
+  let frames: { path: string; line?: string }[] = [];
+  let inRun = false;
+  for (const raw of lines) {
+    const lineStart = off;
+    off += raw.length + 1;
+    // A stack is a contiguous run of frame lines and their indented source
+    // lines. A blank or unindented log line ends it — which is exactly what
+    // separates a crash dump from whatever the server printed next.
+    const isStackLine = raw.trim() !== "" && (/^\s/.test(raw) || frameOnLine(raw) !== null);
+    if (isStackLine) {
+      if (!inRun) {
+        inRun = true;
+        runStart = lineStart;
+        frames = [];
+      }
+      const f = frameOnLine(raw);
+      if (f) frames.push(f);
+    } else {
+      if (inRun && frames.length > 0) return { frames, start: runStart };
+      inRun = false;
+    }
   }
-  let li = 0;
-  for (let i = 0; i < starts.length; i++) {
-    if (starts[i] <= index) li = i;
-    else break;
-  }
-  const belongs = (s: string | undefined): boolean => {
-    if (!s || !s.trim()) return false;
-    if (/^\s/.test(s)) return true;
-    return frameOnLine(s) !== null;
-  };
-  if (!belongs(lines[li])) return { lines: lines[li] === undefined ? [] : [lines[li]], start: starts[li] ?? 0 };
-  let a = li;
-  let b = li;
-  while (a - 1 >= 0 && belongs(lines[a - 1])) a--;
-  while (b + 1 < lines.length && belongs(lines[b + 1])) b++;
-  return { lines: lines.slice(a, b + 1), start: starts[a] ?? 0 };
+  return inRun && frames.length > 0 ? { frames, start: runStart } : { frames: [], start: 0 };
 }
 
 /**
  * Parse ONE line as a stack frame, or null if it is not one.
  *
- * Deliberately anchored at the start of the (trimmed) line. `ANY_FRAME` matches
- * anywhere, so an ordinary indented SOURCE line inside a traceback —
- * `raise RuntimeError("bad.py:99")` — otherwise reads as a frame in a file
- * called bad.py and becomes a false fault site, exonerating the node that
- * really crashed (gate r2 P1).
+ * Deliberately ANCHORED at the start of the (trimmed) line. An unanchored match
+ * hits anywhere, so an ordinary indented SOURCE line inside a traceback —
+ * `raise RuntimeError("bad.py:99")`, or `raise RuntimeError("custom_nodes/Fake/f.py:99")` —
+ * reads as a frame in a file that was never on the stack, and names a false
+ * fault site or a nonexistent culprit node (gate r2/r3 P1).
  */
 function frameOnLine(line: string): { path: string; line?: string } | null {
   const quoted = /^\s*File\s+["']([^"']+?\.py)["']?,?\s*line\s*(\d+)/i.exec(line);
@@ -213,18 +216,8 @@ function precedingContext(text: string, lineStart: number): string {
   return kept.join("\n").trim();
 }
 
-/**
- * Match a stack frame that points INTO a custom node. Handles both quoted
- * `File "...custom_nodes/<Node>/<file.py>", line 338` (Windows fatal-exception
- * dumps + Python tracebacks) and bare `custom_nodes/<Node>/<file.py>:338` forms,
- * with either path separator.
- */
-const CUSTOM_NODE_FRAME =
-  /custom_nodes[\\/]+([^\\/]+)[\\/]+([^\s"',]+?\.py)(?:["']?,?\s*line\s*(\d+)|:(\d+))/gi;
-
-/** Any `<file>:<line>` or `File "...", line N` frame — the fallback culprit. */
-const ANY_FRAME =
-  /(?:File\s*["']([^"']+?\.py)["']?,?\s*line\s*(\d+))|([^\s"',()]+?\.py):(\d+)/gi;
+/** The custom-node directory in a frame path: `custom_nodes/<NodeDir>/…`. */
+const CUSTOM_NODE_DIR = /custom_nodes[\\/]+([^\\/]+)/i;
 
 /**
  * True when a crash-signature hit sits inside a Python "Exception ignored in:"
@@ -323,63 +316,40 @@ export function parseCrashBlock(text: string): CrashParseResult {
   // (the top custom-node frame), not its caller loadmodel.
   const region = text.slice(lineStart);
   const mostRecentFirst = /most recent call first/i.test(region);
-  /** Collect every match of a global regex against the region. */
-  const collectAll = (source: string, flags: string): RegExpExecArray[] => {
-    const g = new RegExp(source, flags);
-    const out: RegExpExecArray[] = [];
-    let m: RegExpExecArray | null;
-    while ((m = g.exec(region)) !== null) {
-      out.push(m);
-      if (m.index === g.lastIndex) g.lastIndex++;
-    }
-    return out;
-  };
-  /** Pick the innermost match given the trace order. */
-  const pickInnermost = <T>(matches: T[]): T | undefined =>
-    matches.length === 0 ? undefined : mostRecentFirst ? matches[0] : matches[matches.length - 1];
-
   let culpritNode: string | undefined;
   let culpritFrame: string | undefined;
   let faultFrame: string | undefined;
-  const nodeMatch = pickInnermost(collectAll(CUSTOM_NODE_FRAME.source, CUSTOM_NODE_FRAME.flags));
-  if (nodeMatch) {
-    culpritNode = nodeMatch[1];
-    const file = baseName(nodeMatch[2]);
-    const line = nodeMatch[3] ?? nodeMatch[4];
-    culpritFrame = line ? `${file}:${line}` : file;
-    // Is the chosen custom-node frame actually the innermost frame? When a
-    // NON-custom-node frame sits deeper, the custom node is on the stack but not
-    // at the fault site, and naming it alone is a confident wrong answer (#2497).
-    // "Deeper" is direction-dependent: with most-recent-FIRST the innermost frame
-    // is the earliest match, with most-recent-LAST it is the latest.
-    //
-    // Answered only WITHIN the custom-node frame's own stack, because depth is
-    // only meaningful inside one: the region reaches the end of the tail, so an
-    // unrelated traceback printed after the restart would otherwise pose as the
-    // deeper frame and exonerate the node that actually crashed (gate r1 P1).
-    //
-    // Inside one stack the question needs no index arithmetic — the innermost
-    // frame is simply the first or last FRAME LINE, per that stack's own
-    // direction. If it is in a custom node, the node IS the fault site and the
-    // plain verdict stands.
-    const { lines: runLines, start: runStart } = traceRunAround(region, nodeMatch.index);
-    const frames = runLines.map(frameOnLine).filter((f): f is { path: string; line?: string } => f !== null);
-    if (frames.length > 0) {
-      const innerFirst = traceDirectionFor(region, runStart, mostRecentFirst);
-      const innermost = innerFirst ? frames[0] : frames[frames.length - 1];
-      if (!/custom_nodes/i.test(innermost.path)) {
+
+  // Blame is decided inside ONE stack: the first one after the fatal signature.
+  // The region reaches the end of the tail, so it also holds whatever the server
+  // printed after the restart, and every cross-stack question has a wrong answer
+  // available to it — a later dump's direction marker reverses this stack, and a
+  // later traceback's frames pose as this one's (gate r1/r2/r3 P1). Frames come
+  // from frameOnLine, so a `.py:N` inside a source line is not one.
+  const stack = firstStackFrames(region);
+  if (stack.frames.length > 0) {
+    const innerFirst = traceDirectionFor(region, stack.start, mostRecentFirst);
+    const ordered = innerFirst ? stack.frames : [...stack.frames].reverse();
+    const innermost = ordered[0];
+    // The deepest CUSTOM-NODE frame is the culprit when there is one — a custom
+    // node is the usual cause and the one thing the user can act on.
+    const nodeFrame = ordered.find((f) => CUSTOM_NODE_DIR.test(f.path));
+    if (nodeFrame) {
+      culpritNode = CUSTOM_NODE_DIR.exec(nodeFrame.path)?.[1];
+      const file = baseName(nodeFrame.path);
+      culpritFrame = nodeFrame.line ? `${file}:${nodeFrame.line}` : file;
+      // …but if a NON-custom-node frame is deeper still, the node is only on the
+      // stack, not at the fault site, and naming it alone is a confident wrong
+      // answer (#2497).
+      if (!CUSTOM_NODE_DIR.test(innermost.path)) {
         const f = baseName(innermost.path);
         faultFrame = innermost.line ? `${f}:${innermost.line}` : f;
       }
-    }
-  } else {
-    // Fallback: no custom-node frame — take the innermost ANY frame so the agent
-    // at least gets a file:line to look at (e.g. a core ComfyUI crash).
-    const anyMatch = pickInnermost(collectAll(ANY_FRAME.source, ANY_FRAME.flags));
-    if (anyMatch) {
-      const file = baseName(anyMatch[1] ?? anyMatch[3] ?? "");
-      const line = anyMatch[2] ?? anyMatch[4];
-      if (file) culpritFrame = line ? `${file}:${line}` : file;
+    } else {
+      // No custom-node frame — give the agent the innermost file:line anyway so
+      // it has something to look at (e.g. a core ComfyUI crash).
+      const file = baseName(innermost.path);
+      culpritFrame = innermost.line ? `${file}:${innermost.line}` : file;
     }
   }
 

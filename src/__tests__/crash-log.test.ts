@@ -276,6 +276,38 @@ ValueError: bad input
     expect(r.faultFrame).toBeUndefined();
   });
 
+  it("#2497 picks the culprit by THIS stack's direction, not a later dump's", () => {
+    // Outer → Inner, most-recent-call-LAST, so Inner is the deepest custom node.
+    // A restart dump below carries a "most recent call first" marker; obeying it
+    // returned Outer and told the agent to update the wrong node (gate r3 P1).
+    const flipped = [
+      "Segmentation fault",
+      "Traceback (most recent call last):",
+      '  File "/home/u/ComfyUI/custom_nodes/Outer/o.py", line 1, in outer',
+      '  File "/home/u/ComfyUI/custom_nodes/Inner/i.py", line 2, in inner',
+      "[INFO] Comfy is restarting…",
+      "Current thread 0x1 (most recent call first):",
+      '  File "/home/u/ComfyUI/comfy/server.py", line 9 in serve',
+    ].join("\n");
+    const r = parseCrashBlock(flipped);
+    expect(r.culpritNode).toBe("Inner");
+    expect(r.culpritFrame).toBe("i.py:2");
+  });
+
+  it("#2497 does not take a custom_nodes path out of a SOURCE line as the culprit", () => {
+    // The raise is code, not a frame. Reading it named a node that was never on
+    // the stack and sent the agent to update it (gate r3 P1).
+    const fake = [
+      "Segmentation fault",
+      "Traceback (most recent call last):",
+      '  File "/home/u/ComfyUI/custom_nodes/Good/g.py", line 3, in run',
+      '    raise RuntimeError("custom_nodes/Fake/f.py:99")',
+    ].join("\n");
+    const r = parseCrashBlock(fake);
+    expect(r.culpritNode).toBe("Good");
+    expect(r.culpritFrame).toBe("g.py:3");
+  });
+
   it("#2497 fingerprints on the FATAL region, so added context cannot shift the key", () => {
     // Same crash, different preceding log. If the fingerprint keyed on the
     // displayed block, these would differ and a crash already injected would be
