@@ -803,7 +803,7 @@ export function registerImageManagementTools(server: McpServer): void {
             let note: string | undefined;
             let reconciliation: Awaited<ReturnType<typeof reconcileAssetsFromHistory>> | undefined;
             try {
-              reconciliation = await reconcileAssetsFromHistory();
+              reconciliation = await reconcileAssetsFromHistory({ maxImageProbes: args.limit });
             } catch (reconcileErr) {
               const message =
                 reconcileErr instanceof Error
@@ -818,11 +818,22 @@ export function registerImageManagementTools(server: McpServer): void {
             }
             const records = AssetRegistry.list({ limit: args.limit, since });
             const skippedUnavailable = reconciliation?.skippedUnavailable ?? 0;
-            if (skippedUnavailable > 0 && note === undefined) {
-              note =
-                skippedUnavailable + " history image output(s) were not listed because ComfyUI /view " +
-                "could not fetch them. Check the filename/subfolder in get_history or try " +
-                'get_image action:"get" directly.';
+            if (skippedUnavailable > 0 || reconciliation?.probeLimitReached) {
+              const reasons: string[] = [];
+              if (skippedUnavailable > 0) {
+                reasons.push(
+                  skippedUnavailable + " history image output(s) were not listed because the guarded ComfyUI /view consumer " +
+                    "could not fetch or validate them. Check the filename/subfolder in get_history or try " +
+                    'get_image action:"get" directly.',
+                );
+              }
+              if (reconciliation?.probeLimitReached) {
+                reasons.push(
+                  "History reconciliation stopped at its bounded /view validation budget, so additional refs may not be listed; " +
+                    'use get_history or get_image action:"get" for a specific older output.',
+                );
+              }
+              note = reasons.join(" ");
             }
             if (records.length === 0 && note === undefined) {
               note =

@@ -4,9 +4,10 @@ import { describe, expect, it, beforeEach, vi } from "vitest";
 // call form of the retired asset-listing tool (0.50.0 slice 15). The REAL
 // reconcile path runs; only the ComfyUI client/config boundary is mocked, so a
 // panel-dispatched render (never watched by this process) must surface via the
-// history reconcile. The image/convert/colour/upload services are mocked only
-// to keep their heavier import graphs (sharp, the storage clients) out of this
-// test — the action:"list_assets" branch never calls them.
+// history reconcile. The list-assets call is intentionally allowed to use the
+// real getOutputImage consumer, so its traversal/content/fallback contract is
+// covered at the production handler call site; unrelated image actions remain
+// mocked below.
 const getHistoryMock = vi.fn();
 const fetchImageMock = vi.fn();
 vi.mock("../../comfyui/client.js", () => ({
@@ -117,7 +118,7 @@ function registerWatched(promptId: string, filename: string) {
 beforeEach(() => {
   getHistoryMock.mockReset();
   fetchImageMock.mockReset();
-  fetchImageMock.mockResolvedValue({ base64: "", mimeType: "image/png" });
+  fetchImageMock.mockResolvedValue({ base64: "aGk=", mimeType: "image/png" });
   AssetRegistry.configure({ ttlMs: 24 * 60 * 60 * 1000, now: Date.now });
   AssetRegistry.clear();
 });
@@ -174,6 +175,70 @@ describe('get_image action:"list_assets" (#751)', () => {
     expect(out.assets).toEqual([]);
     expect(out.note).toContain("not listed");
     expect(out.note).toContain("/view");
+  });
+
+  it.each([
+    ["an empty 2xx body", "", "image/png"],
+    ["an HTML error body", Buffer.from("<html>login</html>").toString("base64"), "text/html"],
+    ["a JSON error body", Buffer.from('{"error":"not found"}').toString("base64"), "application/json"],
+  ])("does not advertise history output when /view returns %s", async (_label, base64, mimeType) => {
+    const filename = "false-success.png";
+    getHistoryMock.mockResolvedValue({
+      "false-success": panelHistoryEntry(13, "false-success", filename, Date.now() - 4000),
+    });
+    fetchImageMock.mockResolvedValue({ base64, mimeType });
+
+    const out = await callListAssets({ limit: 20 });
+
+    expect(fetchImageMock).toHaveBeenCalledWith(filename, "output", "");
+    expect(out.count).toBe(0);
+    expect(out.assets).toEqual([]);
+    expect(out.note).toContain("not listed");
+  });
+
+  it.each([
+    ["a filename traversal", "../outside.png", ""],
+    ["a subfolder traversal", "safe.png", "../outside"],
+  ])("does not forward %s from /history to /view", async (_label, filename, subfolder) => {
+    const entry = panelHistoryEntry(13, "unsafe-ref", filename, Date.now() - 4000);
+    entry.outputs["9"].images[0].subfolder = subfolder;
+    getHistoryMock.mockResolvedValue({ "unsafe-ref": entry });
+
+    const out = await callListAssets({ limit: 20 });
+
+    expect(fetchImageMock).not.toHaveBeenCalled();
+    expect(out.count).toBe(0);
+    expect(out.assets).toEqual([]);
+    expect(out.note).toContain("not listed");
+  });
+
+  it("normalizes a history type before probing and publishing the asset ref", async () => {
+    const filename = "normalized.png";
+    const entry = panelHistoryEntry(13, "normalized", filename, Date.now() - 4000);
+    entry.outputs["9"].images[0].type = "unknown-type";
+    getHistoryMock.mockResolvedValue({ normalized: entry });
+
+    const out = await callListAssets({ limit: 20 });
+
+    expect(fetchImageMock).toHaveBeenCalledWith(filename, "output", "");
+    expect(out.assets[0]).toMatchObject({ filename, type: "output" });
+    expect(out.assets[0].url).toContain("type=output");
+  });
+
+  it("bounds production list-assets probes by the requested limit", async () => {
+    const entry = panelHistoryEntry(13, "many", "many_0.png", Date.now() - 4000);
+    entry.outputs["9"].images = Array.from({ length: 4 }, (_, i) => ({
+      filename: `many_${i}.png`,
+      subfolder: "",
+      type: "output",
+    }));
+    getHistoryMock.mockResolvedValue({ many: entry });
+
+    const out = await callListAssets({ limit: 2 });
+
+    expect(fetchImageMock).toHaveBeenCalledTimes(2);
+    expect(out.count).toBe(2);
+    expect(out.note).toContain("bounded");
   });
 
   it("keeps watched registrations truthful and does not duplicate them", async () => {

@@ -1,8 +1,9 @@
-import { fetchImage, getHistory, type HistoryEntry } from "../comfyui/client.js";
+import { getHistory, type HistoryEntry } from "../comfyui/client.js";
 import { buildCompletionNotification } from "./job-watcher.js";
 import { extractWorkflowGraph } from "./history-select.js";
 import { hasAffirmativeSuccessStatus, historyCompletionTimeMs } from "./job-history.js";
 import { AssetRegistry } from "./asset-registry.js";
+import { getOutputImage } from "./image-management.js";
 import { logger } from "../utils/logger.js";
 
 /**
@@ -30,8 +31,8 @@ import { logger } from "../utils/logger.js";
  * misorder — untimed entries are skipped, not guessed). Entries older than
  * the registry TTL register but read as expired immediately — the TTL stays
  * the single source of truth for record lifetime.
- * Newly reconciled images are also required to be fetchable through ComfyUI's
- * `/view` before they enter the registry.
+ * Newly reconciled images are also required to pass the same guarded `/view`
+ * consumer used by get_image before they enter the registry.
  */
 
 export interface ReconcileResult {
@@ -43,10 +44,42 @@ export interface ReconcileResult {
   skippedExisting: number;
   /** History image outputs that ComfyUI's /view could not fetch. */
   skippedUnavailable: number;
+  /** Whether the bounded /view validation budget stopped reconciliation early. */
+  probeLimitReached: boolean;
 }
 
 /** Only the newest N completed prompts are reconciled per call. */
 const DEFAULT_MAX_PROMPTS = 25;
+/** Bound history validation even when one prompt contains an unbounded image list. */
+const DEFAULT_MAX_IMAGE_PROBES = 100;
+
+type ViewRefType = "output" | "input" | "temp";
+
+function normalizeViewRefType(type: unknown): ViewRefType {
+  return type === "input" || type === "temp" || type === "output" ? type : "output";
+}
+
+function boundedImageProbeLimit(value: number | undefined): number {
+  if (value === undefined || !Number.isFinite(value)) return DEFAULT_MAX_IMAGE_PROBES;
+  return Math.min(DEFAULT_MAX_IMAGE_PROBES, Math.max(0, Math.floor(value)));
+}
+
+function normalizeImageRef(img: {
+  filename: string;
+  subfolder: string;
+  type: string;
+  url: string;
+}): typeof img {
+  const type = normalizeViewRefType(img.type);
+  if (type === img.type) return img;
+
+  // buildCompletionNotification already made this URL, but its query still
+  // contains the untrusted history type. Keep the registry metadata and its
+  // public ref aligned with the type that was actually probed.
+  const url = new URL(img.url);
+  url.searchParams.set("type", type);
+  return { ...img, type, url: url.toString() };
+}
 
 function queueNumberOf(entry: HistoryEntry): number {
   const p = entry?.prompt as unknown;
@@ -55,9 +88,11 @@ function queueNumberOf(entry: HistoryEntry): number {
 
 export async function reconcileAssetsFromHistory(opts: {
   maxPrompts?: number;
+  maxImageProbes?: number;
   now?: () => number;
 } = {}): Promise<ReconcileResult> {
   const maxPrompts = opts.maxPrompts ?? DEFAULT_MAX_PROMPTS;
+  const maxImageProbes = boundedImageProbeLimit(opts.maxImageProbes);
   const now = opts.now ?? Date.now;
 
   const history = await getHistory();
@@ -69,8 +104,10 @@ export async function reconcileAssetsFromHistory(opts: {
   let registered = 0;
   let skippedExisting = 0;
   let skippedUnavailable = 0;
+  let imageProbes = 0;
+  let probeLimitReached = false;
 
-  for (const [promptId, entry] of completed) {
+  reconcilePrompts: for (const [promptId, entry] of completed) {
     // Eligibility keys on the HISTORY entry's own status via the shared
     // affirmative-success predicate (job-history) — the SAME gate the watched
     // path registers through, never the notification builder's default-success.
@@ -100,12 +137,15 @@ export async function reconcileAssetsFromHistory(opts: {
     }
 
     const fresh = [];
+    let stopAfterPrompt = false;
     for (const output of notification.outputs) {
       const images = [];
       for (const img of output.images) {
+        const normalizedImg = normalizeImageRef(img);
+
         // Keep the original (watched or earlier-reconciled) record: its
         // createdAt and any already-handed-out asset_id stay stable.
-        if (AssetRegistry.has(promptId, img)) {
+        if (AssetRegistry.has(promptId, normalizedImg)) {
           skippedExisting++;
           continue;
         }
@@ -113,40 +153,61 @@ export async function reconcileAssetsFromHistory(opts: {
         // History can outlive the file it describes (for example, if the
         // output was moved or cleaned up immediately after completion). The
         // registry is consumed by get_image (action:"view"), so only add a
-        // newly reconciled image after the same /view fetch succeeds.
+        // newly reconciled image after the same guarded consumer succeeds.
+        // Keep the total number of probes bounded even if one history entry
+        // contains an attacker-controlled or unexpectedly large image list.
+        if (imageProbes >= maxImageProbes) {
+          probeLimitReached = true;
+          stopAfterPrompt = true;
+          break;
+        }
+
+        imageProbes++;
         try {
-          const fetchType =
-            img.type === "input" || img.type === "temp" || img.type === "output" ? img.type : "output";
-          await fetchImage(img.filename, fetchType, img.subfolder);
+          await getOutputImage(
+            normalizedImg.filename,
+            normalizedImg.type as ViewRefType,
+            normalizedImg.subfolder,
+          );
         } catch (error) {
           skippedUnavailable++;
           logger.debug("Skipping history image that ComfyUI /view could not fetch", {
             prompt_id: promptId,
-            filename: img.filename,
-            subfolder: img.subfolder,
-            type: img.type,
+            filename: normalizedImg.filename,
+            subfolder: normalizedImg.subfolder,
+            type: normalizedImg.type,
             error: error instanceof Error ? error.message : String(error),
           });
           continue;
         }
-        images.push(img);
+        images.push(normalizedImg);
       }
       if (images.length > 0) fresh.push({ node_id: output.node_id, images });
+      if (stopAfterPrompt) break;
     }
-    if (fresh.length === 0) continue;
 
-    const records = AssetRegistry.register({
-      promptId,
-      workflow,
-      outputs: fresh,
-      source: "history-reconcile",
-      createdAt,
-      createdAtSource: "history",
-    });
-    registered += records.length;
+    if (fresh.length > 0) {
+      const records = AssetRegistry.register({
+        promptId,
+        workflow,
+        outputs: fresh,
+        source: "history-reconcile",
+        createdAt,
+        createdAtSource: "history",
+      });
+      registered += records.length;
+    }
+
+    if (probeLimitReached) break reconcilePrompts;
   }
 
-  const result = { scanned: completed.length, registered, skippedExisting, skippedUnavailable };
+  const result = {
+    scanned: completed.length,
+    registered,
+    skippedExisting,
+    skippedUnavailable,
+    probeLimitReached,
+  };
   if (result.registered > 0) {
     logger.info("Reconciled assets from ComfyUI history", result);
   }
