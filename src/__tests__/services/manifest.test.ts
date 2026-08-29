@@ -1642,7 +1642,7 @@ describe("applyManifest", () => {
     }
   });
 
-  it("trims git manifest identity before late local-fallback classification", async () => {
+  it("trims git manifest identity before late-ambiguity classification", async () => {
     const prevBudget = process.env.COMFYUI_MCP_MANIFEST_NODE_BUDGET_MS;
     process.env.COMFYUI_MCP_MANIFEST_NODE_BUDGET_MS = "40";
     const paddedId = "  https://github.com/example/local-fallback-pack  ";
@@ -1654,12 +1654,14 @@ describe("applyManifest", () => {
       });
 
       expect(result.summary).toMatchObject({ applied: 0, failed: 0, pending: 2 });
-      expect(result.results[0].message).toMatch(/local direct-install fallback/i);
+      expect(result.results[0].message).toMatch(/outcome is UNKNOWN/i);
+      expect(result.results[0].message).toMatch(/no local direct-install fallback is authorized/i);
       expect(result.partial).toMatchObject({
         not_started: ["next-pack"],
         still_installing: [paddedId],
-        local_fallback_pending: [paddedId],
+        outcome_unknown: [paddedId],
       });
+      expect(result.partial).not.toHaveProperty("local_fallback_pending");
       expect(installCustomNodeMock).toHaveBeenCalledWith(
         expect.objectContaining({
           id: "https://github.com/example/local-fallback-pack",

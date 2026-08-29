@@ -20,11 +20,12 @@ export interface ManifestPartialInstall {
   /** custom_node ids submitted but unresolved when the budget elapsed. */
   still_installing: string[];
   /**
-   * A subset of still_installing whose local git fallback can be selected after
-   * Manager drains. Their route is unresolved, so queue status alone cannot
-   * account for them.
+   * A subset of still_installing whose install promise did not settle before
+   * apply_manifest returned. No Manager or local-fallback outcome is known for
+   * these entries, so neither queue state nor local cloning is authorized by
+   * this result.
    */
-  local_fallback_pending?: string[];
+  outcome_unknown?: string[];
   message: string;
 }
 
@@ -37,8 +38,8 @@ export function recordManifestPartial(partial: ManifestPartialInstall | null): v
           ...partial,
           not_started: [...partial.not_started],
           still_installing: [...partial.still_installing],
-          ...(partial.local_fallback_pending
-            ? { local_fallback_pending: [...partial.local_fallback_pending] }
+          ...(partial.outcome_unknown
+            ? { outcome_unknown: [...partial.outcome_unknown] }
             : {}),
         }
       : null;
@@ -76,15 +77,17 @@ export function formatNotStartedMessage(item: string): string {
 }
 
 export function formatStillInstallingMessage(
-  opts: { localFallbackPossible?: boolean } = {},
+  opts: { outcomeUnknown?: boolean } = {},
 ): string {
-  if (opts.localFallbackPossible) {
+  if (opts.outcomeUnknown) {
     return (
-      "Install is still resolving when the apply_manifest time budget elapsed. It may " +
-      "still be running on the ComfyUI-Manager queue or may transition to a verified " +
-      "local direct-install fallback after Manager finishes. This is NOT a failure and " +
-      "must not be re-issued. Do not use Manager queue status alone to decide completion; " +
-      "verify the custom_nodes directory after the operation settles."
+      "Install outcome is UNKNOWN because the apply_manifest time budget elapsed before " +
+      "the Manager operation settled. It may still be running on the ComfyUI-Manager " +
+      "queue, or it may later settle to a result that does not authorize cloning. No " +
+      "local direct-install fallback is authorized from this unresolved result. This " +
+      "is NOT a failure and must not be re-issued. Do not use Manager queue status alone " +
+      "to decide completion; verify the custom_nodes directory after the operation " +
+      "settles."
     );
   }
   return (
@@ -110,18 +113,18 @@ export function buildManifestPartial(opts: {
   source: string;
   notStarted: string[];
   stillInstalling: string[];
-  localFallbackPending?: string[];
+  outcomeUnknown?: string[];
 }): ManifestPartialInstall | null {
   if (opts.notStarted.length === 0) return null;
   const names = opts.notStarted.join(", ");
-  const localFallbackPending = (opts.localFallbackPending ?? []).filter((id) =>
+  const outcomeUnknown = (opts.outcomeUnknown ?? []).filter((id) =>
     opts.stillInstalling.includes(id),
   );
   const still = opts.stillInstalling.length
-    ? localFallbackPending.length
-      ? ` Still unresolved: ${opts.stillInstalling.join(", ")}. For ${localFallbackPending.join(", ")}, ` +
-        `the route may remain on the Manager queue or transition to a verified local ` +
-        `fallback; do not use queue status alone to decide completion.`
+    ? outcomeUnknown.length
+      ? ` Still unresolved: ${opts.stillInstalling.join(", ")}. For ${outcomeUnknown.join(", ")}, ` +
+        `the install outcome is UNKNOWN and no local direct-install fallback is ` +
+        `authorized from this result; do not use queue status alone to decide completion.`
       : ` Still installing (ON the queue, pollable): ${opts.stillInstalling.join(", ")}.`
     : "";
   const n = opts.notStarted.length;
@@ -130,9 +133,7 @@ export function buildManifestPartial(opts: {
     source: opts.source,
     not_started: [...opts.notStarted],
     still_installing: [...opts.stillInstalling],
-    ...(localFallbackPending.length
-      ? { local_fallback_pending: [...localFallbackPending] }
-      : {}),
+    ...(outcomeUnknown.length ? { outcome_unknown: [...outcomeUnknown] } : {}),
     message:
       `PARTIAL INSTALL of ${opts.source}: ${n} custom_node ` +
       `${n === 1 ? "entry was" : "entries were"} NEVER submitted to ` +

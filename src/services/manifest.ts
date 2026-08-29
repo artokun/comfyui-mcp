@@ -1121,9 +1121,10 @@ async function applyManifestSections(
   // tools/call timeout (300s) and the caller sees a FALSE failure while the
   // Manager keeps installing. So we mirror the model-download grace pattern:
   // install sequentially, but RACE each install against the remaining budget. If
-  // the budget wins, the install keeps running either SERVER-SIDE or as a local
-  // fallback (we stop awaiting it, swallowing its late result) and is reported
-  // "pending" — never failed — and
+  // the budget wins, the install keeps running and its late result is swallowed;
+  // before that result settles, only the already-fired local-fallback callback can
+  // establish a local route. Otherwise the outcome is explicitly UNKNOWN and is
+  // reported "pending" — never failed — and
   // every not-yet-started node is reported "pending" too.
   //
   // #1699: a "not started" pending is NOT on the Manager queue. Telling the
@@ -1135,7 +1136,7 @@ async function applyManifestSections(
   const nodeDeadline = Date.now() + manifestNodeBudgetMs();
   const notStarted: string[] = [];
   const stillInstalling: string[] = [];
-  const localFallbackPending: string[] = [];
+  const outcomeUnknown: string[] = [];
   let nodeBudgetSpent = false;
   // Even the INITIAL installed-list probe is budget-bounded — a hung Manager here
   // must not blow the tools/call timeout before we can report anything.
@@ -1212,23 +1213,24 @@ async function applyManifestSections(
 
     if (outcome === BUDGET_TIMEOUT) {
       // Budget spent mid-install: leave it running, but distinguish a local
-      // direct fallback from a Manager task. Both promises already have a
-      // .catch, so their eventual settle is safely ignored; only the Manager
-      // case belongs in stillInstalling and the queue-polling message.
+      // direct fallback only after its callback has actually fired. If a Git
+      // install is still unresolved, its eventual Manager response may be
+      // empty/null or otherwise fail closed; local mode/root/Git syntax alone
+      // cannot authorize cloning. Both promises already have a .catch, so
+      // their eventual settle is safely ignored.
       nodeBudgetSpent = true;
       if (localFallbackSelected) {
         results.push(report("custom_node", id, "pending", formatLocalFallbackMessage()));
       } else {
         stillInstalling.push(id);
-        const localFallbackPossible =
-          localMode && Boolean(customNodesBase) && isGitManifestSource;
-        if (localFallbackPossible) localFallbackPending.push(id);
+        const outcomeIsUnknown = isGitManifestSource;
+        if (outcomeIsUnknown) outcomeUnknown.push(id);
         results.push(
           report(
             "custom_node",
             id,
             "pending",
-            formatStillInstallingMessage({ localFallbackPossible }),
+            formatStillInstallingMessage({ outcomeUnknown: outcomeIsUnknown }),
           ),
         );
       }
@@ -1634,7 +1636,7 @@ async function applyManifestSections(
     source,
     notStarted,
     stillInstalling,
-    localFallbackPending,
+    outcomeUnknown,
   });
   recordManifestPartial(partial);
 

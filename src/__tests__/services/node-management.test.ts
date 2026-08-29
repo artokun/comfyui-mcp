@@ -258,6 +258,8 @@ function stubFetch(opts: {
   queueOpEmpty?: boolean;
   /** Return JSON null for a custom-node install enqueue. */
   queueOpNull?: boolean;
+  /** Delay a custom-node install enqueue response to exercise apply_manifest's late race. */
+  queueOpDelayMs?: number;
   /** Body for `https://api.comfy.org/nodes/:id` (registry-zip empty-pack fallback). */
   registryDetails?: unknown;
   /** Body for v4 per-task queue history lookups. */
@@ -347,6 +349,9 @@ function stubFetch(opts: {
               "A security error has occurred. Please check the terminal logs",
             { status: opts.queueOpStatus },
           );
+        }
+        if (opts.queueOpDelayMs && isInstallOp) {
+          await new Promise<void>((resolve) => setTimeout(resolve, opts.queueOpDelayMs));
         }
         if (opts.queueOpNull && isInstallOp) {
           opts.onQueue?.();
@@ -1014,15 +1019,18 @@ describe("node-management service", () => {
           item: "https://github.com/teskor-hub/comfyui-teskors-utils",
           status: "pending",
         });
-        expect(first.message).toMatch(/still resolving/i);
-        expect(first.message).toMatch(/Manager queue or.*local direct-install fallback/i);
+        expect(first.message).toMatch(/outcome is UNKNOWN/i);
+        expect(first.message).toMatch(/no local direct-install fallback is authorized/i);
+        expect(first.message).not.toMatch(/may transition.*local direct-install fallback/i);
         expect(first.message).not.toMatch(/poll panel_node_queue_status/i);
         expect(result.partial).toMatchObject({
           not_started: ["next-pack"],
           still_installing: ["https://github.com/teskor-hub/comfyui-teskors-utils"],
-          local_fallback_pending: ["https://github.com/teskor-hub/comfyui-teskors-utils"],
+          outcome_unknown: ["https://github.com/teskor-hub/comfyui-teskors-utils"],
         });
-        expect(result.partial?.message).toMatch(/route may remain on the Manager queue/i);
+        expect(result.partial).not.toHaveProperty("local_fallback_pending");
+        expect(result.partial?.message).toMatch(/outcome is UNKNOWN/i);
+        expect(result.partial?.message).toMatch(/no local direct-install fallback is authorized/i);
         expect(result.partial?.message).not.toMatch(/ON the queue, pollable/i);
 
         // This is the production late transition: the queue drains after the
@@ -1038,6 +1046,58 @@ describe("node-management service", () => {
         expect(
           mockedExec.mock.calls.find((c) => c[0] === "git" && (c[1] as string[])[0] === "clone"),
         ).toBeDefined();
+      } finally {
+        if (previousBudget === undefined) delete process.env.COMFYUI_MCP_MANIFEST_NODE_BUDGET_MS;
+        else process.env.COMFYUI_MCP_MANIFEST_NODE_BUDGET_MS = previousBudget;
+      }
+    });
+
+    it("does not authorize a late local clone when Manager enqueue eventually returns null (#1129)", async () => {
+      const previousBudget = process.env.COMFYUI_MCP_MANIFEST_NODE_BUDGET_MS;
+      process.env.COMFYUI_MCP_MANIFEST_NODE_BUDGET_MS = "40";
+      const { calls } = stubFetch({
+        installedBody: {},
+        queueOpNull: true,
+        queueOpDelayMs: 100,
+      });
+      let cloned = false;
+      mockedExists.mockImplementation((p: unknown) => {
+        const s = String(p);
+        if (s.includes("requirements.txt") || s.includes("install.py")) return false;
+        if (s.includes(NODE_DIR_UTILS) || s.endsWith("comfyui-teskors-utils")) return cloned;
+        return false;
+      });
+      mockedExec.mockImplementation(((bin: string, args: string[]) => {
+        if (bin === "git" && args[0] === "clone") cloned = true;
+        return "";
+      }) as never);
+
+      try {
+        const result = await applyManifest({
+          manifest: {
+            custom_nodes: [
+              "https://github.com/teskor-hub/comfyui-teskors-utils",
+              "next-pack",
+            ],
+          },
+        });
+
+        expect(result.summary).toMatchObject({ applied: 0, failed: 0, pending: 2 });
+        expect(result.results[0].message).toMatch(/outcome is UNKNOWN/i);
+        expect(result.results[0].message).toMatch(/no local direct-install fallback is authorized/i);
+        expect(result.partial).toMatchObject({
+          not_started: ["next-pack"],
+          still_installing: ["https://github.com/teskor-hub/comfyui-teskors-utils"],
+          outcome_unknown: ["https://github.com/teskor-hub/comfyui-teskors-utils"],
+        });
+        expect(result.partial).not.toHaveProperty("local_fallback_pending");
+        expect(calls.some((c) => c.url.endsWith("/v2/manager/queue/task"))).toBe(true);
+
+        await new Promise<void>((resolve) => setTimeout(resolve, 130));
+        expect(cloned).toBe(false);
+        expect(
+          mockedExec.mock.calls.find((c) => c[0] === "git" && (c[1] as string[])[0] === "clone"),
+        ).toBeUndefined();
       } finally {
         if (previousBudget === undefined) delete process.env.COMFYUI_MCP_MANIFEST_NODE_BUDGET_MS;
         else process.env.COMFYUI_MCP_MANIFEST_NODE_BUDGET_MS = previousBudget;
