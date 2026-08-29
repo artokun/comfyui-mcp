@@ -13,6 +13,7 @@ const fetchImageMock = vi.fn();
 const VALID_PNG_BASE64 =
   "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
 vi.mock("../../comfyui/client.js", () => ({
+  MAX_VIEW_RESPONSE_BYTES: 32 * 1024 * 1024,
   getHistory: (...a: unknown[]) => getHistoryMock(...a),
   fetchImage: (...a: unknown[]) => fetchImageMock(...a),
   getClient: vi.fn(),
@@ -210,6 +211,72 @@ describe('get_image action:"list_assets" (#751)', () => {
     expect(out.note).toContain("not listed");
   });
 
+  it("keeps searching after a failed probe when the requested output limit is small", async () => {
+    const failedTs = Date.now() - 3000;
+    const validTs = Date.now() - 4000;
+    getHistoryMock.mockResolvedValue({
+      newerMissing: panelHistoryEntry(14, "newerMissing", "missing.png", failedTs),
+      olderValid: panelHistoryEntry(13, "olderValid", "valid.png", validTs),
+    });
+    fetchImageMock
+      .mockRejectedValueOnce(new Error('IMAGE_NOT_FOUND: /view returned 404 for "missing.png"'))
+      .mockResolvedValue({ base64: VALID_PNG_BASE64, mimeType: "image/png" });
+
+    const out = await callListAssets({ limit: 1 });
+
+    expect(fetchImageMock).toHaveBeenCalledTimes(2);
+    expect(out.count).toBe(1);
+    expect(out.assets[0]).toMatchObject({ filename: "valid.png", prompt_id: "olderValid" });
+    expect(out.note).toContain("1 history image output(s) were not listed");
+  });
+
+  it("rejects a corrupted image whose header still reports valid dimensions", async () => {
+    const corrupted = Buffer.from(VALID_PNG_BASE64, "base64");
+    corrupted[corrupted.length - 20] ^= 0xff;
+    getHistoryMock.mockResolvedValue({
+      corrupted: panelHistoryEntry(13, "corrupted", "corrupted.png", Date.now() - 4000),
+    });
+    fetchImageMock.mockResolvedValue({
+      base64: corrupted.toString("base64"),
+      mimeType: "image/png",
+    });
+
+    const out = await callListAssets({ limit: 20 });
+
+    expect(out.count).toBe(0);
+    expect(out.assets).toEqual([]);
+    expect(out.note).toContain("not listed");
+  });
+
+  it.each(["png", "jpeg", "webp", "avif"] as const)(
+    "accepts valid %s bytes through the production history probe",
+    async (format) => {
+      const sharp = (await import("sharp")).default;
+      const source = sharp({
+        create: { width: 2, height: 2, channels: 3, background: { r: 10, g: 20, b: 30 } },
+      });
+      const bytes =
+        format === "png"
+          ? await source.clone().png().toBuffer()
+          : format === "jpeg"
+            ? await source.clone().jpeg().toBuffer()
+            : format === "webp"
+              ? await source.clone().webp().toBuffer()
+              : await source.clone().avif().toBuffer();
+      const mimeType = format === "jpeg" ? "image/jpeg" : `image/${format}`;
+      const filename = `valid.${format}`;
+      getHistoryMock.mockResolvedValue({
+        valid: panelHistoryEntry(13, "valid", filename, Date.now() - 4000),
+      });
+      fetchImageMock.mockResolvedValue({ base64: bytes.toString("base64"), mimeType });
+
+      const out = await callListAssets({ limit: 20 });
+
+      expect(out.count).toBe(1);
+      expect(out.assets[0]).toMatchObject({ filename, type: "output" });
+    },
+  );
+
   it.each([
     ["a filename traversal", "../outside.png", ""],
     ["a subfolder traversal", "safe.png", "../outside"],
@@ -239,9 +306,9 @@ describe('get_image action:"list_assets" (#751)', () => {
     expect(out.assets[0].url).toContain("type=output");
   });
 
-  it("bounds production list-assets probes by the requested limit", async () => {
+  it("bounds production list-assets probes independently of the requested limit", async () => {
     const entry = panelHistoryEntry(13, "many", "many_0.png", Date.now() - 4000);
-    entry.outputs["9"].images = Array.from({ length: 4 }, (_, i) => ({
+    entry.outputs["9"].images = Array.from({ length: 101 }, (_, i) => ({
       filename: `many_${i}.png`,
       subfolder: "",
       type: "output",
@@ -250,7 +317,7 @@ describe('get_image action:"list_assets" (#751)', () => {
 
     const out = await callListAssets({ limit: 2 });
 
-    expect(fetchImageMock).toHaveBeenCalledTimes(2);
+    expect(fetchImageMock).toHaveBeenCalledTimes(100);
     expect(out.count).toBe(2);
     expect(out.note).toContain("bounded");
   });

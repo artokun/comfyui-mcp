@@ -50,12 +50,19 @@ export interface ReconcileResult {
 
 /** Only the newest N completed prompts are reconciled per call. */
 const DEFAULT_MAX_PROMPTS = 25;
-/** Bound history validation even when one prompt contains an unbounded image list. */
+/** Bound successfully validated history images even when one prompt is unbounded. */
 const DEFAULT_MAX_IMAGE_PROBES = 100;
+/** Keep failed availability probes bounded without consuming the success budget. */
+const DEFAULT_MAX_FAILED_PROBES = 100;
 
 function boundedImageProbeLimit(value: number | undefined): number {
   if (value === undefined || !Number.isFinite(value)) return DEFAULT_MAX_IMAGE_PROBES;
   return Math.min(DEFAULT_MAX_IMAGE_PROBES, Math.max(0, Math.floor(value)));
+}
+
+function boundedFailedProbeLimit(value: number | undefined): number {
+  if (value === undefined || !Number.isFinite(value)) return DEFAULT_MAX_FAILED_PROBES;
+  return Math.min(DEFAULT_MAX_FAILED_PROBES, Math.max(0, Math.floor(value)));
 }
 
 function queueNumberOf(entry: HistoryEntry): number {
@@ -65,11 +72,15 @@ function queueNumberOf(entry: HistoryEntry): number {
 
 export async function reconcileAssetsFromHistory(opts: {
   maxPrompts?: number;
+  /** Maximum number of newly validated images to register. */
   maxImageProbes?: number;
+  /** Maximum number of unavailable/malformed refs to probe before stopping. */
+  maxFailedProbes?: number;
   now?: () => number;
 } = {}): Promise<ReconcileResult> {
   const maxPrompts = opts.maxPrompts ?? DEFAULT_MAX_PROMPTS;
   const maxImageProbes = boundedImageProbeLimit(opts.maxImageProbes);
+  const maxFailedProbes = boundedFailedProbeLimit(opts.maxFailedProbes);
   const now = opts.now ?? Date.now;
 
   const history = await getHistory();
@@ -81,7 +92,8 @@ export async function reconcileAssetsFromHistory(opts: {
   let registered = 0;
   let skippedExisting = 0;
   let skippedUnavailable = 0;
-  let imageProbes = 0;
+  let validatedImages = 0;
+  let failedProbes = 0;
   let probeLimitReached = false;
 
   reconcilePrompts: for (const [promptId, entry] of completed) {
@@ -131,15 +143,16 @@ export async function reconcileAssetsFromHistory(opts: {
         // output was moved or cleaned up immediately after completion). The
         // registry is consumed by get_image (action:"view"), so only add a
         // newly reconciled image after the same guarded consumer succeeds.
-        // Keep the total number of probes bounded even if one history entry
-        // contains an attacker-controlled or unexpectedly large image list.
-        if (imageProbes >= maxImageProbes) {
+        // Keep both sides of the work bounded even if one history entry contains
+        // an attacker-controlled or unexpectedly large image list. Failed refs
+        // have their own budget so they cannot consume the budget for later
+        // valid records requested by the caller.
+        if (validatedImages >= maxImageProbes || failedProbes >= maxFailedProbes) {
           probeLimitReached = true;
           stopAfterPrompt = true;
           break;
         }
 
-        imageProbes++;
         try {
           await getOutputImage(
             normalizedImg.filename,
@@ -148,6 +161,7 @@ export async function reconcileAssetsFromHistory(opts: {
             { requireImageContent: true },
           );
         } catch (error) {
+          failedProbes++;
           skippedUnavailable++;
           logger.debug("Skipping history image that ComfyUI /view could not fetch", {
             prompt_id: promptId,
@@ -158,6 +172,7 @@ export async function reconcileAssetsFromHistory(opts: {
           });
           continue;
         }
+        validatedImages++;
         images.push(normalizedImg);
       }
       if (images.length > 0) fresh.push({ node_id: output.node_id, images });

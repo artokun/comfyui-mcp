@@ -23,6 +23,7 @@ vi.mock("../../comfyui/client.js", () => ({
   getHistory: (...a: unknown[]) => getHistoryMock(...a),
   fetchImage: vi.fn(),
   uploadImageHttp: vi.fn(),
+  MAX_VIEW_RESPONSE_BYTES: 32 * 1024 * 1024,
 }));
 
 // Keep the real config (and its mutable `comfyuiPath`) but make isRemoteMode()

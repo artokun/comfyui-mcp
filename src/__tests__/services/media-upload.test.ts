@@ -41,6 +41,7 @@ vi.mock("../../comfyui/client.js", () => ({
   fetchImage: (...a: unknown[]) => fetchImageMock(...a),
   getObjectInfo: (...a: unknown[]) => getObjectInfoMock(...a),
   resetObjectInfoCache: (...a: unknown[]) => resetObjectInfoCacheMock(...a),
+  MAX_VIEW_RESPONSE_BYTES: 32 * 1024 * 1024,
 }));
 
 import { config } from "../../config.js";

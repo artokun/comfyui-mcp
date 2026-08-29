@@ -22,6 +22,11 @@ import {
   deliveryDoubt,
   isTimeoutAbort,
 } from "./fetch.js";
+import {
+  BoundedResponseError,
+  MAX_VIEW_RESPONSE_BYTES,
+  readResponseBodyBounded,
+} from "./bounded-response.js";
 import { bodyPrefixOf, describeStatus } from "./json-guard.js";
 import { splitUploadTarget } from "./upload-target.js";
 import { ComfyUIError, ConnectionError, describeFetchFailure } from "../utils/errors.js";
@@ -353,8 +358,34 @@ export async function fetchImage(
   }
   const contentType = res.headers.get("content-type") ?? "image/png";
   const mimeType = contentType.split(";")[0].trim();
-  const arrayBuffer = await res.arrayBuffer();
-  const base64 = Buffer.from(arrayBuffer).toString("base64");
+  let bytes: Buffer;
+  try {
+    // Cloud /api/view is reached by every automatic history availability probe.
+    // Read it through the same bounded stream consumer as the headless client;
+    // arrayBuffer() would let one oversized response become an oversized base64
+    // tool result before the caller can reject it.
+    bytes = await readResponseBodyBounded(
+      res,
+      Math.round(comfyHttpTimeoutSeconds() * 1000),
+      MAX_VIEW_RESPONSE_BYTES,
+    );
+  } catch (error) {
+    if (error instanceof BoundedResponseError) {
+      if (error.kind === "too-large") {
+        throw new ComfyUIError(
+          `Cloud /api/view response for "${filename}" exceeds the ${MAX_VIEW_RESPONSE_BYTES / 1024 ** 2} MB safety limit.`,
+          "VIEW_TOO_LARGE",
+          { filename, maxBytes: MAX_VIEW_RESPONSE_BYTES },
+        );
+      }
+      throw new ConnectionError(
+        `No reply from Comfy Cloud within ${comfyHttpTimeoutSeconds()}s while downloading ` +
+          `"${filename}" — the response body did not finish in time.`,
+      );
+    }
+    throw error;
+  }
+  const base64 = bytes.toString("base64");
   return { base64, mimeType };
 }
 

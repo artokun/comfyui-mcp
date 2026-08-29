@@ -836,13 +836,16 @@ const IMAGE_EXTENSIONS = new Set([
 
 /**
  * The history reconciler needs stronger evidence than an image/* header. Keep
- * this check bounded: /view already caps the response bytes, and sharp parses
- * the image header without decoding an unbounded pixel surface.
+ * this check bounded: /view already caps the response bytes, and Sharp's input
+ * pixel limit bounds decoding before the result is reduced to one pixel.
  */
 const HISTORY_IMAGE_MAX_INPUT_PIXELS = 192_000_000;
+const MAX_VIEW_RESPONSE_BASE64_CHARS = Math.ceil((MAX_VIEW_RESPONSE_BYTES / 3)) * 4;
 
 async function hasActualImageContent(base64: string, filename: string): Promise<boolean> {
-  if (base64.length === 0) return false;
+  // The transport normally enforces this first, but keep the consumer safe if
+  // another fetch implementation or a test seam hands it an oversized string.
+  if (base64.length === 0 || base64.length > MAX_VIEW_RESPONSE_BASE64_CHARS) return false;
 
   const loaded = await tryLoadSharp();
   if (!loaded.ok) {
@@ -852,17 +855,31 @@ async function hasActualImageContent(base64: string, filename: string): Promise<
 
   try {
     const bytes = Buffer.from(base64, "base64");
-    if (bytes.length === 0) return false;
-    const metadata = await loaded.sharp(bytes, {
+    if (bytes.length === 0 || bytes.length > MAX_VIEW_RESPONSE_BYTES) return false;
+    const sharpOptions = {
       limitInputPixels: HISTORY_IMAGE_MAX_INPUT_PIXELS,
-    }).metadata();
-    return (
+      // The default is warning, but keep the strict untrusted-input setting
+      // explicit: malformed pixel data must not be certified by metadata alone.
+      failOn: "warning" as const,
+    };
+    const metadata = await loaded.sharp(bytes, sharpOptions).metadata();
+    const hasDimensions =
       typeof metadata.format === "string" &&
       Number.isInteger(metadata.width) &&
       metadata.width > 0 &&
       Number.isInteger(metadata.height) &&
-      metadata.height > 0
-    );
+      metadata.height > 0;
+    if (!hasDimensions) return false;
+
+    // metadata() only inspects headers. Decode and reduce to one pixel so
+    // corrupt compressed data is rejected while the output allocation stays
+    // constant even for a large, valid image.
+    await loaded
+      .sharp(bytes, sharpOptions)
+      .resize({ width: 1, height: 1, fit: "inside", withoutEnlargement: true })
+      .raw()
+      .toBuffer();
+    return true;
   } catch (error) {
     logger.debug("History image probe could not decode the /view body", {
       filename,
@@ -1159,6 +1176,7 @@ const IMAGE_MIME: Record<string, string> = {
   ".gif": "image/gif",
   ".tiff": "image/tiff",
   ".tif": "image/tiff",
+  ".avif": "image/avif",
 };
 
 const VIDEO_MIME: Record<string, string> = {

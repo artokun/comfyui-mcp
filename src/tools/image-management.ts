@@ -803,7 +803,11 @@ export function registerImageManagementTools(server: McpServer): void {
             let note: string | undefined;
             let reconciliation: Awaited<ReturnType<typeof reconcileAssetsFromHistory>> | undefined;
             try {
-              reconciliation = await reconcileAssetsFromHistory({ maxImageProbes: args.limit });
+              // Keep the history validation budgets independent from the output
+              // page size: a few unavailable refs must not consume the capacity
+              // needed to find later valid assets, and `limit` only slices the
+              // registry response below.
+              reconciliation = await reconcileAssetsFromHistory();
             } catch (reconcileErr) {
               const message =
                 reconcileErr instanceof Error

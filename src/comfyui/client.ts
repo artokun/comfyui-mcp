@@ -28,13 +28,17 @@ import {
   httpOriginOf,
 } from "../services/panel-fallback-target.js";
 import {
-  PANEL_IMAGE_RELAY_MAX_BYTES,
   PanelComfyUIReadRelayError,
   PanelImageRelayError,
   requestPanelComfyUIRead,
   requestPanelImage,
   type PanelComfyUIReadSuccess,
 } from "../services/panel-image-relay.js";
+import {
+  BoundedResponseError,
+  MAX_VIEW_RESPONSE_BYTES as SHARED_MAX_VIEW_RESPONSE_BYTES,
+  readResponseBodyBounded,
+} from "./bounded-response.js";
 import {
   bodyPrefixOf,
   classifyNonJson,
@@ -1323,7 +1327,7 @@ export async function getHistory(
 }
 
 /** A /view response is saved and may later be previewed, so bound the first read too. */
-export const MAX_VIEW_RESPONSE_BYTES = PANEL_IMAGE_RELAY_MAX_BYTES;
+export const MAX_VIEW_RESPONSE_BYTES = SHARED_MAX_VIEW_RESPONSE_BYTES;
 
 function validateViewResponseOrigin(res: Response, expectedOrigin: string, label: string): void {
   if (res.url) {
@@ -1356,74 +1360,16 @@ function viewTooLarge(filename: string): ComfyUIError {
   );
 }
 
-function readChunkWithAbort(
-  reader: ReadableStreamDefaultReader<Uint8Array>,
-  signal: AbortSignal,
-): Promise<Awaited<ReturnType<ReadableStreamDefaultReader<Uint8Array>["read"]>>> {
-  if (signal.aborted) {
-    return Promise.reject(signal.reason ?? new Error("The response read timed out"));
-  }
-  return new Promise((resolve, reject) => {
-    let settled = false;
-    const cleanup = () => signal.removeEventListener("abort", onAbort);
-    const onAbort = () => {
-      if (settled) return;
-      settled = true;
-      cleanup();
-      void reader.cancel(signal.reason).catch(() => undefined);
-      reject(signal.reason ?? new Error("The response read timed out"));
-    };
-    signal.addEventListener("abort", onAbort, { once: true });
-    reader.read().then(
-      (result) => {
-        if (settled) return;
-        settled = true;
-        cleanup();
-        resolve(result);
-      },
-      (error: unknown) => {
-        if (settled) return;
-        settled = true;
-        cleanup();
-        reject(error);
-      },
-    );
-  });
-}
-
 async function readViewResponseBounded(
   res: Response,
   filename: string,
   timeoutMs: number,
 ): Promise<Buffer> {
-  const declared = Number(res.headers.get("content-length") ?? "");
-  if (Number.isFinite(declared) && declared > MAX_VIEW_RESPONSE_BYTES) {
-    throw viewTooLarge(filename);
-  }
-  if (!res.body) return Buffer.alloc(0);
-
-  const reader = res.body.getReader();
-  const signal = AbortSignal.timeout(timeoutMs);
-  const chunks: Uint8Array[] = [];
-  let total = 0;
   try {
-    for (;;) {
-      const { done, value } = await readChunkWithAbort(reader, signal);
-      if (done) break;
-      if (!value) continue;
-      total += value.byteLength;
-      if (total > MAX_VIEW_RESPONSE_BYTES) {
-        try {
-          await reader.cancel("ComfyUI /view response exceeded the safety limit");
-        } catch {
-          // The size refusal is the useful error even if the producer is already gone.
-        }
-        throw viewTooLarge(filename);
-      }
-      chunks.push(value);
-    }
+    return await readResponseBodyBounded(res, timeoutMs, MAX_VIEW_RESPONSE_BYTES);
   } catch (error) {
-    if (signal.aborted) {
+    if (error instanceof BoundedResponseError) {
+      if (error.kind === "too-large") throw viewTooLarge(filename);
       throw new ComfyUIError(
         `ComfyUI /view did not finish sending "${filename}" within ${timeoutMs / 1000}s; the response was aborted.`,
         "VIEW_READ_TIMEOUT",
@@ -1431,10 +1377,7 @@ async function readViewResponseBounded(
       );
     }
     throw error;
-  } finally {
-    reader.releaseLock();
   }
-  return Buffer.concat(chunks, total);
 }
 
 /**

@@ -406,4 +406,40 @@ describe("reconcileAssetsFromHistory", () => {
     expect(result).toMatchObject({ registered: 2, probeLimitReached: true });
     expect(AssetRegistry.list().map((record) => record.filename).sort()).toEqual(["many_0.png", "many_1.png"]);
   });
+
+  it("does not spend the successful-image budget on failed probes", async () => {
+    const ts = Date.now() - 1000;
+    getHistoryMock.mockResolvedValue({
+      mixed: historyEntry({
+        queue: 1,
+        promptId: "mixed",
+        successTs: ts,
+        outputs: {
+          "9": {
+            images: [
+              { filename: "missing.png", subfolder: "", type: "output" },
+              { filename: "valid_0.png", subfolder: "", type: "output" },
+              { filename: "valid_1.png", subfolder: "", type: "output" },
+            ],
+          },
+        },
+      }),
+    });
+    getOutputImageMock
+      .mockRejectedValueOnce(new Error("IMAGE_NOT_FOUND"))
+      .mockResolvedValue({ base64: "aGk=", mimeType: "image/png", filename: "valid.png" });
+
+    const result = await reconcileAssetsFromHistory({ maxImageProbes: 2, maxFailedProbes: 2 });
+
+    expect(getOutputImageMock).toHaveBeenCalledTimes(3);
+    expect(result).toMatchObject({
+      registered: 2,
+      skippedUnavailable: 1,
+      probeLimitReached: false,
+    });
+    expect(AssetRegistry.list().map((record) => record.filename).sort()).toEqual([
+      "valid_0.png",
+      "valid_1.png",
+    ]);
+  });
 });

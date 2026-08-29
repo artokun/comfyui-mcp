@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { fakeFetch } from "../helpers/fake-fetch.js";
+import { MAX_VIEW_RESPONSE_BYTES } from "../../comfyui/bounded-response.js";
 
 // Stub config helpers BEFORE importing the module under test.
 vi.mock("../../config.js", async () => {
@@ -131,6 +132,23 @@ describe("cloud-client", () => {
     const r = await fetchImage("out.png");
     expect(r.mimeType).toBe("image/png");
     expect(r.base64).toBe(Buffer.from(bytes).toString("base64"));
+  });
+
+  it("bounds a Cloud /api/view body before converting it to base64", async () => {
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new Uint8Array(MAX_VIEW_RESPONSE_BYTES + 1));
+        controller.close();
+      },
+    });
+    global.fetch = vi.fn(async () =>
+      new Response(body, { status: 200, headers: { "content-type": "image/png" } }),
+    );
+
+    await expect(fetchImage("oversized.png")).rejects.toMatchObject({
+      code: "VIEW_TOO_LARGE",
+      details: { filename: "oversized.png", maxBytes: MAX_VIEW_RESPONSE_BYTES },
+    });
   });
 
   it("wraps non-2xx responses in a ComfyUIError with status code", async () => {
