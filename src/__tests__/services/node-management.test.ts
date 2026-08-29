@@ -179,10 +179,35 @@ import {
   NodeManagementError,
 } from "../../services/node-management.js";
 import { ProcessControlError, ValidationError } from "../../utils/errors.js";
+import { withPanelMutationLock } from "../../services/panel-pin-guard.js";
 
 const mockedExec = vi.mocked(execFileSync);
 const mockedExists = vi.mocked(existsSync);
 let priorComfyuiPathEnv: string | undefined;
+
+/** Hold the shared writer lock so a production install call can prove which
+ * work is actually inside its critical section. */
+function holdPanelMutationLock() {
+  let releaseLock!: () => void;
+  let markReady!: () => void;
+  const ready = new Promise<void>((resolve) => {
+    markReady = resolve;
+  });
+  const done = withPanelMutationLock(async () => {
+    await new Promise<void>((resolve) => {
+      releaseLock = resolve;
+      markReady();
+    });
+  });
+  return { ready, done, release: () => releaseLock() };
+}
+
+async function settlesBefore<T>(promise: Promise<T>, timeoutMs = 500): Promise<boolean> {
+  return Promise.race([
+    promise.then(() => true, () => true),
+    new Promise<boolean>((resolve) => setTimeout(() => resolve(false), timeoutMs)),
+  ]);
+}
 
 // The product builds these paths with node:path (join), so they use the
 // platform separator (backslashes on Windows). Build the expected values the
@@ -2166,6 +2191,34 @@ describe("node-management service", () => {
       expect(taskOf(calls, "install").params).toMatchObject({ id: "my-pack" });
     });
 
+    it("does not wait on the local writer lock while unavailable comfy-cli falls back to Manager", async () => {
+      mockedExists.mockReturnValue(false);
+      let markManagerReached!: () => void;
+      const managerReached = new Promise<void>((resolve) => {
+        markManagerReached = resolve;
+      });
+      const { calls } = stubFetch({
+        installedBody: {
+          "my-pack": { ver: "1.0.0", cnr_id: "my-pack", enabled: true },
+        },
+        onQueue: markManagerReached,
+      });
+      const held = holdPanelMutationLock();
+      await held.ready;
+      const install = installCustomNode({ id: "my-pack", useCmCli: true });
+      try {
+        // This is the Manager-only branch: it must reach the queue while a
+        // separate local writer is still holding the shared lock.
+        expect(await settlesBefore(managerReached)).toBe(true);
+        expect(await settlesBefore(install)).toBe(true);
+      } finally {
+        held.release();
+        await held.done;
+      }
+      await expect(install).resolves.toMatchObject({ mechanism: "manager-http" });
+      expect(taskOf(calls, "install").params).toMatchObject({ id: "my-pack" });
+    });
+
     it("useCmCli still uses comfy-cli when it IS available", async () => {
       mockedExec.mockReturnValue(cliEnvelope({ message: "ok" }) as never);
       const res = await installCustomNode({ id: "my-pack", useCmCli: true });
@@ -2278,6 +2331,34 @@ describe("node-management service", () => {
       expect(gitCalls.some((args) => args[2] === "checkout")).toBe(false);
     });
 
+  });
+
+  describe("local install writer lock boundary (#2509)", () => {
+    it("does not wait on the local writer lock before refusing an accepted remote git fallback", async () => {
+      remoteFlags.remoteMode = true;
+      let markManagerReached!: () => void;
+      const managerReached = new Promise<void>((resolve) => {
+        markManagerReached = resolve;
+      });
+      stubFetch({ installedBody: {}, onQueue: markManagerReached });
+      const held = holdPanelMutationLock();
+      await held.ready;
+      const install = installCustomNode({
+        id: "https://github.com/foo/unregistered-pack",
+        source: "git",
+      });
+      try {
+        // Manager may be contacted while the local writer lock is occupied.
+        // The eventual clone helper refusal is also a non-write path and must
+        // not wait for that lock.
+        expect(await settlesBefore(managerReached)).toBe(true);
+        expect(await settlesBefore(install)).toBe(true);
+      } finally {
+        held.release();
+        await held.done;
+      }
+      await expect(install).rejects.toThrow(/REMOTE ComfyUI/);
+    });
   });
 
   // ---- disable / enable / uninstall (#775) ----------------------------------

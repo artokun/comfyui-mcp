@@ -3608,21 +3608,6 @@ async function withObjectInfoInvalidation<T>(op: () => Promise<T>): Promise<T> {
   return result;
 }
 
-/**
- * A git URL can end in a local filesystem write when Manager is unavailable or
- * accepts an unregistered pack without installing it. Serialize that whole
- * decision and write, not just the final `git clone`, so two orchestrators
- * cannot both observe a missing destination and race into the same
- * custom_nodes directory. `useCmCli` is included because comfy-cli is also a
- * local writer and must share the same critical section.
- */
-function needsLocalInstallMutationLock(opts: InstallOptions): boolean {
-  if (opts.useCmCli === true) return true;
-  if (opts.source === "git") return true;
-  if (opts.source === "registry") return false;
-  return looksLikeGitUrl(parseGitUrl(opts.id).baseUrl);
-}
-
 // NOTE on `async`: these wrappers are declared async purely so the PIN GUARD's
 // throw surfaces as a REJECTED PROMISE rather than a synchronous exception.
 // Callers rely on that — apply_manifest does `installCustomNode(...).then().catch()`
@@ -3637,7 +3622,7 @@ export async function installCustomNode(opts: InstallOptions): Promise<NodeOpRes
   const op = () => withPanelPinGuard("install", opts.id, () =>
     withObjectInfoInvalidation(() => installCustomNodeImpl(opts)),
   );
-  return needsLocalInstallMutationLock(opts) ? withPanelMutationLock(op) : op();
+  return op();
 }
 
 /**
@@ -3719,6 +3704,25 @@ function assertInstallTargetStable(
       actualGeneration,
     },
   );
+}
+
+/**
+ * Serialize only a local install writer. The callback must be the complete
+ * filesystem transaction, including any existence check that decides whether
+ * it will create the destination. Manager probing, enqueueing, draining, and
+ * Manager-only fallback decisions stay outside this boundary.
+ */
+function withLocalInstallMutationLock<T>(
+  expectedGeneration: number,
+  managerBase: string,
+  op: () => Promise<T>,
+): Promise<T> {
+  return withPanelMutationLock(async () => {
+    // Another local writer may have held the lock while the target changed.
+    // Refuse before touching the captured filesystem target in that case.
+    assertInstallTargetStable(expectedGeneration, managerBase);
+    return op();
+  });
 }
 
 async function installCustomNodeImpl(
@@ -3814,11 +3818,25 @@ async function installCustomNodeImpl(
       }
       // cm-cli install accepts registry ids and git urls alike.
       const installId = source === "git" ? gitId : id;
-      const out = runCmCli(["install", installId, "--mode", mode, "--channel", channel], cliWorkspace);
-      let checkoutWarning: string | undefined;
-      if (source === "git" && gitRef) {
-        checkoutWarning = runGitCheckout(gitId, gitRef, cliWorkspace, { refFromVersion });
-      }
+      const { out, checkoutWarning } = await withLocalInstallMutationLock(
+        targetGeneration,
+        managerBase,
+        async () => {
+          // The lock is intentionally acquired only after the CLI availability
+          // probe and Manager-only fallback decision. The helper re-checks the
+          // target after waiting, so a retarget while another local writer held
+          // the lock cannot send this mutation to an obsolete install.
+          const out = runCmCli(
+            ["install", installId, "--mode", mode, "--channel", channel],
+            cliWorkspace,
+          );
+          let checkoutWarning: string | undefined;
+          if (source === "git" && gitRef) {
+            checkoutWarning = runGitCheckout(gitId, gitRef, cliWorkspace, { refFromVersion });
+          }
+          return { out, checkoutWarning };
+        },
+      );
       return {
         mechanism: "comfy-cli",
         message: `Installed "${id}" via official comfy-cli.${checkoutWarning ? ` ${checkoutWarning}` : ""}`,
@@ -3924,7 +3942,7 @@ async function installCustomNodeImpl(
         status: refusedBy,
         gitId,
       });
-      const cloned = await cloneCustomNodeFallback(
+      const clone = () => cloneCustomNodeFallback(
         gitId,
         repoName,
         gitRef,
@@ -3952,6 +3970,13 @@ async function installCustomNodeImpl(
                   `on the connected ComfyUI. Nothing was queued there.`,
         },
       );
+      // A remote target never writes locally. In particular, an accepted
+      // Manager task that resolves no pack reaches cloneCustomNodeFallback only
+      // to receive its authoritative remote-target refusal; do not make that
+      // refusal wait behind an unrelated local writer.
+      const cloned = isRemoteMode()
+        ? await clone()
+        : await withLocalInstallMutationLock(targetGeneration, managerBase, clone);
       assertInstallTargetStable(targetGeneration, managerBase);
       return withCliNote(cloned);
     }
@@ -3976,10 +4001,16 @@ async function installCustomNodeImpl(
         wrongInstallRefusal(localWriteMismatch, 'install_custom_node (action:"install", git clone)', managerBase),
       );
     }
-    const cloned = await cloneCustomNodeFallback(gitId, repoName, gitRef, status, cliWorkspace, {
+    const clone = () => cloneCustomNodeFallback(gitId, repoName, gitRef, status, cliWorkspace, {
       refFromVersion,
       allowSharedWorkspaceFallback: cliWorkspace !== undefined,
     });
+    // An accepted remote Manager task that resolves no pack still reaches this
+    // helper only for its authoritative remote-target refusal; it is not a
+    // local write and must not wait on the local writer lock.
+    const cloned = isRemoteMode()
+      ? await clone()
+      : await withLocalInstallMutationLock(targetGeneration, managerBase, clone);
     assertInstallTargetStable(targetGeneration, managerBase);
     return withCliNote(cloned);
   }
