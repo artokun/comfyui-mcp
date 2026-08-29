@@ -2,7 +2,7 @@ import { getHistory, type HistoryEntry } from "../comfyui/client.js";
 import { buildCompletionNotification } from "./job-watcher.js";
 import { extractWorkflowGraph } from "./history-select.js";
 import { hasAffirmativeSuccessStatus, historyCompletionTimeMs } from "./job-history.js";
-import { AssetRegistry } from "./asset-registry.js";
+import { AssetRegistry, normalizeAssetImage } from "./asset-registry.js";
 import { getOutputImage } from "./image-management.js";
 import { logger } from "../utils/logger.js";
 
@@ -53,32 +53,9 @@ const DEFAULT_MAX_PROMPTS = 25;
 /** Bound history validation even when one prompt contains an unbounded image list. */
 const DEFAULT_MAX_IMAGE_PROBES = 100;
 
-type ViewRefType = "output" | "input" | "temp";
-
-function normalizeViewRefType(type: unknown): ViewRefType {
-  return type === "input" || type === "temp" || type === "output" ? type : "output";
-}
-
 function boundedImageProbeLimit(value: number | undefined): number {
   if (value === undefined || !Number.isFinite(value)) return DEFAULT_MAX_IMAGE_PROBES;
   return Math.min(DEFAULT_MAX_IMAGE_PROBES, Math.max(0, Math.floor(value)));
-}
-
-function normalizeImageRef(img: {
-  filename: string;
-  subfolder: string;
-  type: string;
-  url: string;
-}): typeof img {
-  const type = normalizeViewRefType(img.type);
-  if (type === img.type) return img;
-
-  // buildCompletionNotification already made this URL, but its query still
-  // contains the untrusted history type. Keep the registry metadata and its
-  // public ref aligned with the type that was actually probed.
-  const url = new URL(img.url);
-  url.searchParams.set("type", type);
-  return { ...img, type, url: url.toString() };
 }
 
 function queueNumberOf(entry: HistoryEntry): number {
@@ -141,7 +118,7 @@ export async function reconcileAssetsFromHistory(opts: {
     for (const output of notification.outputs) {
       const images = [];
       for (const img of output.images) {
-        const normalizedImg = normalizeImageRef(img);
+        const normalizedImg = normalizeAssetImage(img);
 
         // Keep the original (watched or earlier-reconciled) record: its
         // createdAt and any already-handed-out asset_id stay stable.
@@ -166,7 +143,7 @@ export async function reconcileAssetsFromHistory(opts: {
         try {
           await getOutputImage(
             normalizedImg.filename,
-            normalizedImg.type as ViewRefType,
+            normalizedImg.type,
             normalizedImg.subfolder,
           );
         } catch (error) {

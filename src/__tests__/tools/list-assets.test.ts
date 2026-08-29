@@ -30,6 +30,7 @@ vi.mock("../../services/storage-upload.js", () => ({ uploadOutput: vi.fn() }));
 
 import { registerImageManagementTools } from "../../tools/image-management.js";
 import { AssetRegistry } from "../../services/asset-registry.js";
+import { JobWatcher } from "../../services/job-watcher.js";
 import type { WorkflowJSON } from "../../comfyui/types.js";
 
 type ToolHandler = (args: Record<string, unknown>) => Promise<{
@@ -263,6 +264,59 @@ describe('get_image action:"list_assets" (#751)', () => {
       prompt_id: "panel-prompt",
       source: "history-reconcile",
     });
+  });
+
+  it("preserves a concurrent watcher and collapses raw/normalized type identity", async () => {
+    const promptId = "concurrent-watched";
+    const filename = "concurrent-watched.png";
+    const entry = panelHistoryEntry(13, promptId, filename, Date.now() - 4000);
+    entry.outputs["9"].images[0].type = "legacy-output-tag";
+    getHistoryMock.mockResolvedValue({ [promptId]: entry });
+
+    let probeStarted!: () => void;
+    const started = new Promise<void>((resolve) => {
+      probeStarted = resolve;
+    });
+    let releaseProbe!: () => void;
+    const probeRelease = new Promise<void>((resolve) => {
+      releaseProbe = resolve;
+    });
+    fetchImageMock.mockImplementationOnce(async () => {
+      probeStarted();
+      await probeRelease;
+      return { base64: "aGk=", mimeType: "image/png" };
+    });
+
+    const listing = callListAssets();
+    await started;
+
+    process.env.COMFYUI_JOB_POLL_INTERVAL_S = "0.01";
+    JobWatcher.watch(promptId, sampleGraph());
+    try {
+      await vi.waitFor(() => {
+        expect(AssetRegistry.find(promptId, {
+          filename,
+          subfolder: "",
+          type: "legacy-output-tag",
+        })?.source).toBe("watched");
+      }, { timeout: 3000, interval: 10 });
+      releaseProbe();
+
+      const out = await listing;
+
+      expect(out.count).toBe(1);
+      expect(out.assets[0]).toMatchObject({
+        asset_id: AssetRegistry.find(promptId, { filename, subfolder: "", type: "output" })?.assetId,
+        filename,
+        type: "output",
+        source: "watched",
+      });
+      expect(out.assets[0].url).toContain("type=output");
+    } finally {
+      JobWatcher.unwatch(promptId);
+      delete process.env.COMFYUI_JOB_POLL_INTERVAL_S;
+      releaseProbe();
+    }
   });
 
   it("says so honestly when nothing is watched and history has no completed outputs", async () => {

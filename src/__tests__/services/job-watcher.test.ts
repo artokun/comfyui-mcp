@@ -328,6 +328,30 @@ describe("watched-path asset registration (#751 r3 gate)", () => {
       source: "watched",
     });
   });
+
+  it("canonicalizes an unsupported history type on the watched production path", async () => {
+    const ts = Date.now() - 1000;
+    await runWatchedCompletion(
+      "watched-raw-type",
+      completionEntry({
+        statusStr: "success",
+        outputs: {
+          "9": {
+            images: [{ filename: "watched-raw-type.png", subfolder: "", type: "legacy-output-tag" }],
+          },
+        },
+        messages: [
+          ["execution_start", { prompt_id: "watched-raw-type", timestamp: ts - 1 }],
+          ["execution_success", { prompt_id: "watched-raw-type", timestamp: ts }],
+        ],
+      }),
+    );
+
+    expect(AssetRegistry.list()[0]).toMatchObject({
+      type: "output",
+      url: expect.stringContaining("type=output"),
+    });
+  });
 });
 
 describe("watched-path createdAt provenance (#751 r4 gate)", () => {

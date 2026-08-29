@@ -14,7 +14,7 @@ import {
 } from "../config.js";
 import { attachExecutionListeners } from "../comfyui/events.js";
 import { logger } from "../utils/logger.js";
-import { AssetRegistry } from "./asset-registry.js";
+import { AssetRegistry, normalizeAssetType } from "./asset-registry.js";
 import type { WorkflowJSON } from "../comfyui/types.js";
 import {
   analyzeHistoryEntry,
@@ -201,16 +201,15 @@ export function buildCompletionNotification(
     if (Array.isArray(out.images)) {
       const images = (out.images as unknown[])
         .filter(isHistoryMediaRef)
-        .map((img) => ({
-          filename: img.filename,
-          subfolder: img.subfolder ?? "",
-          type: img.type ?? "output",
-          url: buildImageUrl(
-            img.filename,
-            img.subfolder ?? "",
-            img.type ?? "output",
-          ),
-        }));
+        .map((img) => {
+          const type = normalizeAssetType(img.type);
+          return {
+            filename: img.filename,
+            subfolder: img.subfolder ?? "",
+            type,
+            url: buildImageUrl(img.filename, img.subfolder ?? "", type),
+          };
+        });
       if (images.length > 0) {
         outputs.push({ node_id: nodeId, images });
       }
@@ -225,15 +224,12 @@ export function buildCompletionNotification(
       const videoData = out[videoKey];
       if (!Array.isArray(videoData)) continue;
       for (const vid of (videoData as unknown[]).filter(isHistoryMediaRef)) {
+        const type = normalizeAssetType(vid.type);
         videos.push({
           filename: vid.filename,
           subfolder: vid.subfolder ?? "",
-          type: vid.type ?? "output",
-          url: buildImageUrl(
-            vid.filename,
-            vid.subfolder ?? "",
-            vid.type ?? "output",
-          ),
+          type,
+          url: buildImageUrl(vid.filename, vid.subfolder ?? "", type),
         });
       }
     }
@@ -329,7 +325,7 @@ async function handleCompletion(
         // to this watcher's own observed finish time — distinguishable via
         // createdAtSource ("history" vs "observed").
         const recordedAt = historyCompletionTimeMs(entry, observedFinishAt);
-        const records = AssetRegistry.register({
+        AssetRegistry.register({
           promptId,
           workflow: state.workflow,
           outputs: notification.outputs.map((o) => ({
@@ -344,14 +340,10 @@ async function handleCompletion(
           createdAt: recordedAt ?? observedFinishAt,
           createdAtSource: recordedAt !== undefined ? "history" : "observed",
         });
-        const idByKey = new Map(
-          records.map((r) => [`${r.nodeId}|${r.filename}|${r.subfolder}|${r.type}`, r.assetId]),
-        );
         for (const output of notification.outputs) {
           for (const img of output.images) {
-            const key = `${output.node_id}|${img.filename}|${img.subfolder}|${img.type}`;
-            const id = idByKey.get(key);
-            if (id) img.asset_id = id;
+            const record = AssetRegistry.find(promptId, img);
+            if (record) img.asset_id = record.assetId;
           }
         }
       } catch (regErr) {
