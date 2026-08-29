@@ -374,9 +374,12 @@ describe("reconcileAssetsFromHistory", () => {
 
     await reconcileAssetsFromHistory();
 
-    expect(getOutputImageMock).toHaveBeenCalledWith("safe.png", "output", "", {
-      requireImageContent: true,
-    });
+    expect(getOutputImageMock).toHaveBeenCalledWith(
+      "safe.png",
+      "output",
+      "",
+      expect.objectContaining({ requireImageContent: true, signal: expect.any(AbortSignal) }),
+    );
     expect(AssetRegistry.list()[0]).toMatchObject({
       filename: "safe.png",
       type: "output",
@@ -441,5 +444,40 @@ describe("reconcileAssetsFromHistory", () => {
       "valid_0.png",
       "valid_1.png",
     ]);
+  });
+
+  it("stops non-cooperative probes at the whole-reconciliation deadline", async () => {
+    const ts = Date.now() - 1000;
+    getHistoryMock.mockResolvedValue({
+      stalled: historyEntry({
+        queue: 1,
+        promptId: "stalled",
+        successTs: ts,
+        outputs: {
+          "9": {
+            images: Array.from({ length: 10 }, (_, i) => ({
+              filename: `stalled_${i}.png`,
+              subfolder: "",
+              type: "output",
+            })),
+          },
+        },
+      }),
+    });
+    getOutputImageMock.mockImplementation(() => new Promise(() => undefined));
+
+    const result = await reconcileAssetsFromHistory({
+      maxFailedProbes: 10,
+      maxProbeAttempts: 10,
+      deadlineMs: 25,
+      probeTimeoutMs: 1000,
+    });
+
+    expect(getOutputImageMock).toHaveBeenCalledTimes(1);
+    expect(result).toMatchObject({
+      registered: 0,
+      skippedUnavailable: 1,
+      probeLimitReached: true,
+    });
   });
 });

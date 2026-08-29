@@ -20,6 +20,7 @@
 
 import { ComfyUIError } from "../utils/errors.js";
 import { config, getComfyUIAuthHeaders, getComfyUIBaseUrl } from "../config.js";
+import { BoundedResponseError, readResponseBodyBounded } from "./bounded-response.js";
 import {
   comfyuiFetch,
   targetOf,
@@ -1157,10 +1158,49 @@ export function classifyNonJson(args: {
  */
 export async function readComfyJson<T = unknown>(
   res: Response,
-  opts: { url: string; expectShape?: (v: unknown) => boolean; shapeHint?: string },
+  opts: {
+    url: string;
+    expectShape?: (v: unknown) => boolean;
+    shapeHint?: string;
+    /** Read at most this many bytes before JSON.parse(). */
+    maxBytes?: number;
+    /** Body-read ceiling used when maxBytes is set. */
+    bodyTimeoutMs?: number;
+    /** Caller-owned cancellation for a bounded body read. */
+    signal?: AbortSignal;
+  },
 ): Promise<T> {
   const contentType = res.headers.get("content-type") ?? "";
-  const body = await res.text();
+  const safeUrl = redactUrlForDiagnosis(opts.url);
+  const bodyTimeoutMs = opts.bodyTimeoutMs ?? 120_000;
+  let body: string;
+  try {
+    body =
+      opts.maxBytes === undefined
+        ? await res.text()
+        : (
+            await readResponseBodyBounded(
+              res,
+              bodyTimeoutMs,
+              opts.maxBytes,
+              opts.signal,
+            )
+          ).toString("utf8");
+  } catch (error) {
+    if (!(error instanceof BoundedResponseError)) throw error;
+    if (error.kind === "too-large") {
+      throw new ComfyUIError(
+        `${safeUrl} response exceeds the ${opts.maxBytes} byte safety limit; the JSON document was not parsed.`,
+        "RESPONSE_TOO_LARGE",
+        { url: safeUrl, maxBytes: opts.maxBytes },
+      );
+    }
+    throw new ComfyUIError(
+      `${safeUrl} response did not finish within ${bodyTimeoutMs / 1000}s; the JSON document was not parsed.`,
+      "RESPONSE_READ_TIMEOUT",
+      { url: safeUrl, timeout_ms: bodyTimeoutMs },
+    );
+  }
   const jsonish = /\bjson\b/i.test(contentType);
   let parsed: unknown;
   try {
@@ -1180,7 +1220,6 @@ export async function readComfyJson<T = unknown>(
   }
   // Every url that reaches a MESSAGE goes through the same redaction as the one
   // in classifyNonJson — these two paths build their text by hand.
-  const safeUrl = redactUrlForDiagnosis(opts.url);
   if (!res.ok) {
     // Valid JSON, but an error status — surface it verbatim rather than as a
     // shape failure; the server told us something specific.

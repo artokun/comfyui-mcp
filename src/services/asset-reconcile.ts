@@ -5,6 +5,7 @@ import { hasAffirmativeSuccessStatus, historyCompletionTimeMs } from "./job-hist
 import { AssetRegistry, normalizeAssetImage } from "./asset-registry.js";
 import { getOutputImage } from "./image-management.js";
 import { logger } from "../utils/logger.js";
+import { raceAbort } from "../comfyui/fetch.js";
 
 /**
  * Reconcile the in-memory AssetRegistry with ComfyUI's /history (#751).
@@ -44,16 +45,22 @@ export interface ReconcileResult {
   skippedExisting: number;
   /** History image outputs that ComfyUI's /view could not fetch. */
   skippedUnavailable: number;
-  /** Whether the bounded /view validation budget stopped reconciliation early. */
+  /** Whether the bounded history/probe work budget stopped reconciliation early. */
   probeLimitReached: boolean;
 }
 
 /** Only the newest N completed prompts are reconciled per call. */
 const DEFAULT_MAX_PROMPTS = 25;
 /** Bound successfully validated history images even when one prompt is unbounded. */
-const DEFAULT_MAX_IMAGE_PROBES = 100;
+const DEFAULT_MAX_IMAGE_PROBES = 16;
 /** Keep failed availability probes bounded without consuming the success budget. */
-const DEFAULT_MAX_FAILED_PROBES = 100;
+const DEFAULT_MAX_FAILED_PROBES = 8;
+/** Hard ceiling across both successful and failed availability probes. */
+export const MAX_RECONCILIATION_PROBE_ATTEMPTS = 16;
+/** A list operation must not wait on a wedged history image indefinitely. */
+export const RECONCILIATION_DEADLINE_MS = 5_000;
+/** A single unavailable ref must not block later useful refs for the full HTTP budget. */
+export const RECONCILIATION_PROBE_TIMEOUT_MS = 1_000;
 
 function boundedImageProbeLimit(value: number | undefined): number {
   if (value === undefined || !Number.isFinite(value)) return DEFAULT_MAX_IMAGE_PROBES;
@@ -63,6 +70,16 @@ function boundedImageProbeLimit(value: number | undefined): number {
 function boundedFailedProbeLimit(value: number | undefined): number {
   if (value === undefined || !Number.isFinite(value)) return DEFAULT_MAX_FAILED_PROBES;
   return Math.min(DEFAULT_MAX_FAILED_PROBES, Math.max(0, Math.floor(value)));
+}
+
+function boundedProbeAttemptLimit(value: number | undefined): number {
+  if (value === undefined || !Number.isFinite(value)) return MAX_RECONCILIATION_PROBE_ATTEMPTS;
+  return Math.min(MAX_RECONCILIATION_PROBE_ATTEMPTS, Math.max(0, Math.floor(value)));
+}
+
+function boundedDuration(value: number | undefined, fallback: number): number {
+  if (value === undefined || !Number.isFinite(value)) return fallback;
+  return Math.min(60_000, Math.max(1, Math.floor(value)));
 }
 
 function queueNumberOf(entry: HistoryEntry): number {
@@ -76,14 +93,39 @@ export async function reconcileAssetsFromHistory(opts: {
   maxImageProbes?: number;
   /** Maximum number of unavailable/malformed refs to probe before stopping. */
   maxFailedProbes?: number;
+  /** Maximum total availability probes, regardless of success/failure. */
+  maxProbeAttempts?: number;
+  /** Whole reconciliation deadline, including the history response read. */
+  deadlineMs?: number;
+  /** Per-ref deadline, shorter than the normal /view HTTP budget by design. */
+  probeTimeoutMs?: number;
   now?: () => number;
 } = {}): Promise<ReconcileResult> {
   const maxPrompts = opts.maxPrompts ?? DEFAULT_MAX_PROMPTS;
   const maxImageProbes = boundedImageProbeLimit(opts.maxImageProbes);
   const maxFailedProbes = boundedFailedProbeLimit(opts.maxFailedProbes);
+  const maxProbeAttempts = boundedProbeAttemptLimit(opts.maxProbeAttempts);
+  const deadlineMs = boundedDuration(opts.deadlineMs, RECONCILIATION_DEADLINE_MS);
+  const probeTimeoutMs = boundedDuration(opts.probeTimeoutMs, RECONCILIATION_PROBE_TIMEOUT_MS);
   const now = opts.now ?? Date.now;
+  const reconciliationSignal = AbortSignal.timeout(deadlineMs);
 
-  const history = await getHistory();
+  let history: Record<string, HistoryEntry>;
+  try {
+    history = await raceAbort(reconciliationSignal, () =>
+      getHistory(undefined, { signal: reconciliationSignal }),
+    );
+  } catch (error) {
+    if (!reconciliationSignal.aborted) throw error;
+    logger.debug("History reconciliation deadline expired while reading /history");
+    return {
+      scanned: 0,
+      registered: 0,
+      skippedExisting: 0,
+      skippedUnavailable: 0,
+      probeLimitReached: true,
+    };
+  }
   const completed = Object.entries(history)
     .filter(([, entry]) => entry?.status?.completed === true)
     .sort((a, b) => queueNumberOf(b[1]) - queueNumberOf(a[1]))
@@ -94,6 +136,7 @@ export async function reconcileAssetsFromHistory(opts: {
   let skippedUnavailable = 0;
   let validatedImages = 0;
   let failedProbes = 0;
+  let probeAttempts = 0;
   let probeLimitReached = false;
 
   reconcilePrompts: for (const [promptId, entry] of completed) {
@@ -147,18 +190,33 @@ export async function reconcileAssetsFromHistory(opts: {
         // an attacker-controlled or unexpectedly large image list. Failed refs
         // have their own budget so they cannot consume the budget for later
         // valid records requested by the caller.
-        if (validatedImages >= maxImageProbes || failedProbes >= maxFailedProbes) {
+        if (
+          validatedImages >= maxImageProbes ||
+          failedProbes >= maxFailedProbes ||
+          probeAttempts >= maxProbeAttempts ||
+          reconciliationSignal.aborted
+        ) {
           probeLimitReached = true;
           stopAfterPrompt = true;
           break;
         }
 
+        probeAttempts++;
+        const probeSignal = AbortSignal.any([
+          reconciliationSignal,
+          AbortSignal.timeout(Math.min(probeTimeoutMs, deadlineMs)),
+        ]);
         try {
-          await getOutputImage(
-            normalizedImg.filename,
-            normalizedImg.type,
-            normalizedImg.subfolder,
-            { requireImageContent: true },
+          // Race as well as signal: the production consumer observes the signal
+          // and cancels its HTTP/body read, while a test double or an older
+          // consumer that ignores it still cannot hold the list operation open.
+          await raceAbort(probeSignal, () =>
+            getOutputImage(
+              normalizedImg.filename,
+              normalizedImg.type,
+              normalizedImg.subfolder,
+              { requireImageContent: true, signal: probeSignal },
+            ),
           );
         } catch (error) {
           failedProbes++;
@@ -171,6 +229,11 @@ export async function reconcileAssetsFromHistory(opts: {
             error: error instanceof Error ? error.message : String(error),
           });
           continue;
+        }
+        if (reconciliationSignal.aborted) {
+          probeLimitReached = true;
+          stopAfterPrompt = true;
+          break;
         }
         validatedImages++;
         images.push(normalizedImg);

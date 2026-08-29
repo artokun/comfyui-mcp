@@ -13,7 +13,10 @@ import {
   stageOutputAsInput,
 } from "../services/image-management.js";
 import { AssetRegistry } from "../services/asset-registry.js";
-import { reconcileAssetsFromHistory } from "../services/asset-reconcile.js";
+import {
+  MAX_RECONCILIATION_PROBE_ATTEMPTS,
+  reconcileAssetsFromHistory,
+} from "../services/asset-reconcile.js";
 import { viewAssetImage } from "../services/view-image.js";
 import { convertImage } from "../services/image-convert.js";
 import { boundInlineImage } from "../services/inline-preview.js";
@@ -803,11 +806,20 @@ export function registerImageManagementTools(server: McpServer): void {
             let note: string | undefined;
             let reconciliation: Awaited<ReturnType<typeof reconcileAssetsFromHistory>> | undefined;
             try {
-              // Keep the history validation budgets independent from the output
-              // page size: a few unavailable refs must not consume the capacity
-              // needed to find later valid assets, and `limit` only slices the
-              // registry response below.
-              reconciliation = await reconcileAssetsFromHistory();
+              // Keep a small failure allowance so unavailable newest refs do not
+              // hide a later valid asset, while scaling the total work envelope
+              // to the requested page. The response limit is still applied to
+              // the registry below; this only prevents an unbounded sequence of
+              // availability probes when the caller asks for one record.
+              const requestedLimit =
+                typeof args.limit === "number" && Number.isFinite(args.limit)
+                  ? Math.floor(args.limit)
+                  : undefined;
+              const maxProbeAttempts =
+                requestedLimit === undefined
+                  ? MAX_RECONCILIATION_PROBE_ATTEMPTS
+                  : Math.min(MAX_RECONCILIATION_PROBE_ATTEMPTS, Math.max(8, requestedLimit * 4));
+              reconciliation = await reconcileAssetsFromHistory({ maxProbeAttempts });
             } catch (reconcileErr) {
               const message =
                 reconcileErr instanceof Error
@@ -833,7 +845,7 @@ export function registerImageManagementTools(server: McpServer): void {
               }
               if (reconciliation?.probeLimitReached) {
                 reasons.push(
-                  "History reconciliation stopped at its bounded /view validation budget, so additional refs may not be listed; " +
+                  "History reconciliation stopped at its bounded work/time budget, so additional refs may not be listed; " +
                     'use get_history or get_image action:"get" for a specific older output.',
                 );
               }

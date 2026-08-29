@@ -36,6 +36,7 @@ import {
 } from "../services/panel-image-relay.js";
 import {
   BoundedResponseError,
+  MAX_HISTORY_RESPONSE_BYTES,
   MAX_VIEW_RESPONSE_BYTES as SHARED_MAX_VIEW_RESPONSE_BYTES,
   readResponseBodyBounded,
 } from "./bounded-response.js";
@@ -1291,20 +1292,30 @@ export interface HistoryEntry {
   meta?: Record<string, unknown>;
 }
 
+export { MAX_HISTORY_RESPONSE_BYTES } from "./bounded-response.js";
+
 export async function getHistory(
   promptId?: string,
+  options: { signal?: AbortSignal } = {},
 ): Promise<Record<string, HistoryEntry>> {
-  if (isCloudMode()) return cloudClient.getHistory(promptId);
+  if (isCloudMode()) return cloudClient.getHistory(promptId, options);
   const path = promptId ? `/history/${promptId}` : "/history";
   let res: Response;
   try {
-    res = await comfyApiFetch(path);
+    res = await comfyApiFetch(path, options.signal ? { signal: options.signal } : {});
   } catch (err) {
     // The panel command has one fixed global /history route. A prompt-scoped
     // request is therefore deliberately not eligible for this fallback.
     if (!promptId && isComfyTransportFailure(err)) {
       const relayed = await panelReadFallback("history", err);
-      if (relayed) return await readComfyJson<Record<string, HistoryEntry>>(panelReadResponse(relayed), { url: path });
+      if (relayed) {
+        return await readComfyJson<Record<string, HistoryEntry>>(panelReadResponse(relayed), {
+          url: path,
+          maxBytes: MAX_HISTORY_RESPONSE_BYTES,
+          bodyTimeoutMs: Math.round(comfyHttpTimeoutSeconds() * 1000),
+          signal: options.signal,
+        });
+      }
     }
     throw err;
   }
@@ -1323,7 +1334,12 @@ export async function getHistory(
   // No expectShape: /history's value is an object keyed by prompt id, and `{}`
   // is a perfectly valid EMPTY history. Asserting a shape here would turn a
   // legitimately empty answer into a fabricated failure — the opposite defect.
-  return readComfyJson<Record<string, HistoryEntry>>(res, { url: path });
+  return readComfyJson<Record<string, HistoryEntry>>(res, {
+    url: path,
+    maxBytes: MAX_HISTORY_RESPONSE_BYTES,
+    bodyTimeoutMs: Math.round(comfyHttpTimeoutSeconds() * 1000),
+    signal: options.signal,
+  });
 }
 
 /** A /view response is saved and may later be previewed, so bound the first read too. */
@@ -1364,9 +1380,10 @@ async function readViewResponseBounded(
   res: Response,
   filename: string,
   timeoutMs: number,
+  signal?: AbortSignal,
 ): Promise<Buffer> {
   try {
-    return await readResponseBodyBounded(res, timeoutMs, MAX_VIEW_RESPONSE_BYTES);
+    return await readResponseBodyBounded(res, timeoutMs, MAX_VIEW_RESPONSE_BYTES, signal);
   } catch (error) {
     if (error instanceof BoundedResponseError) {
       if (error.kind === "too-large") throw viewTooLarge(filename);
@@ -1388,8 +1405,9 @@ export async function fetchImage(
   filename: string,
   type: "output" | "input" | "temp" = "output",
   subfolder = "",
+  options: { signal?: AbortSignal } = {},
 ): Promise<{ base64: string; mimeType: string }> {
-  if (isCloudMode()) return cloudClient.fetchImage(filename, type, subfolder);
+  if (isCloudMode()) return cloudClient.fetchImage(filename, type, subfolder, options);
   const client = getClient();
   const params = new URLSearchParams({ filename, type, subfolder });
   const viewRoute = `/view?${params.toString()}`;
@@ -1400,7 +1418,10 @@ export async function fetchImage(
   let answeredByPanelOrigin: string | undefined;
   let responseReadTimeoutMs = Math.round(comfyHttpTimeoutSeconds() * 1000);
   try {
-    res = await comfyApiFetch(viewRoute, { redirect: "manual" });
+    res = await comfyApiFetch(viewRoute, {
+      redirect: "manual",
+      ...(options.signal ? { signal: options.signal } : {}),
+    });
     if (configuredOrigin === undefined) {
       throw new ComfyUIError("The configured ComfyUI target is not a valid HTTP(S) origin.", "VIEW_ERROR");
     }
@@ -1443,7 +1464,9 @@ export async function fetchImage(
       // not add the full headless timeout on top of the failed primary request.
       res = await fetch(fallbackUrl, {
         redirect: "manual",
-        signal: AbortSignal.timeout(8_000),
+        signal: options.signal
+          ? AbortSignal.any([options.signal, AbortSignal.timeout(8_000)])
+          : AbortSignal.timeout(8_000),
       });
       responseReadTimeoutMs = 8_000;
     } catch (fallbackError) {
@@ -1468,7 +1491,7 @@ export async function fetchImage(
     let rejectionReason = "";
     if (res.status === 400) {
       try {
-        const body = await readViewResponseBounded(res, filename, responseReadTimeoutMs);
+        const body = await readViewResponseBounded(res, filename, responseReadTimeoutMs, options.signal);
         rejectionReason = bodyPrefixOf(body.toString("utf8"));
       } catch {
         // The status is still actionable when a diagnostic body cannot be read.
@@ -1493,7 +1516,7 @@ export async function fetchImage(
   }
   const contentType = res.headers.get("content-type") ?? "image/png";
   const mimeType = contentType.split(";")[0].trim();
-  const bytes = await readViewResponseBounded(res, filename, responseReadTimeoutMs);
+  const bytes = await readViewResponseBounded(res, filename, responseReadTimeoutMs, options.signal);
   const base64 = bytes.toString("base64");
   return { base64, mimeType };
 }

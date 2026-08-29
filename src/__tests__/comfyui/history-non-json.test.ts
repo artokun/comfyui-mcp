@@ -44,7 +44,7 @@ vi.mock("../../config.js", () => ({
   isRemoteMode: () => true,
 }));
 
-import { getHistory } from "../../comfyui/client.js";
+import { getHistory, MAX_HISTORY_RESPONSE_BYTES } from "../../comfyui/client.js";
 import { isNonJsonResponseError } from "../../comfyui/json-guard.js";
 
 beforeEach(() => {
@@ -93,5 +93,21 @@ describe("getHistory does not leak a bare parser message (#1149)", () => {
     const body = { "p-1": { prompt: [], outputs: {}, status: { completed: true } } };
     fetchApi.impl = async () => new Response(JSON.stringify(body), { status: 200 });
     await expect(getHistory()).resolves.toEqual(body);
+  });
+
+  it("refuses an oversized history stream before JSON.parse", async () => {
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new Uint8Array(MAX_HISTORY_RESPONSE_BYTES + 1));
+        controller.close();
+      },
+    });
+    fetchApi.impl = async () =>
+      new Response(body, { status: 200, headers: { "content-type": "application/json" } });
+
+    await expect(getHistory()).rejects.toMatchObject({
+      code: "RESPONSE_TOO_LARGE",
+      details: { maxBytes: MAX_HISTORY_RESPONSE_BYTES },
+    });
   });
 });

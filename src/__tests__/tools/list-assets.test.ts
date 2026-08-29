@@ -174,7 +174,12 @@ describe('get_image action:"list_assets" (#751)', () => {
 
     const out = await callListAssets({ limit: 20 });
 
-    expect(fetchImageMock).toHaveBeenCalledWith(filename, "output", "");
+    expect(fetchImageMock).toHaveBeenCalledWith(
+      filename,
+      "output",
+      "",
+      expect.objectContaining({ signal: expect.any(AbortSignal) }),
+    );
     expect(out.count).toBe(0);
     expect(out.assets).toEqual([]);
     expect(out.note).toContain("not listed");
@@ -205,7 +210,12 @@ describe('get_image action:"list_assets" (#751)', () => {
 
     const out = await callListAssets({ limit: 20 });
 
-    expect(fetchImageMock).toHaveBeenCalledWith(filename, "output", "");
+    expect(fetchImageMock).toHaveBeenCalledWith(
+      filename,
+      "output",
+      "",
+      expect.objectContaining({ signal: expect.any(AbortSignal) }),
+    );
     expect(out.count).toBe(0);
     expect(out.assets).toEqual([]);
     expect(out.note).toContain("not listed");
@@ -227,6 +237,41 @@ describe('get_image action:"list_assets" (#751)', () => {
     expect(fetchImageMock).toHaveBeenCalledTimes(2);
     expect(out.count).toBe(1);
     expect(out.assets[0]).toMatchObject({ filename: "valid.png", prompt_id: "olderValid" });
+    expect(out.note).toContain("1 history image output(s) were not listed");
+  });
+
+  it("times out a stalled newest ref and retains a later valid asset", async () => {
+    const stalledTs = Date.now() - 3000;
+    const validTs = Date.now() - 4000;
+    getHistoryMock.mockResolvedValue({
+      stalled: panelHistoryEntry(14, "stalled", "stalled.png", stalledTs),
+      laterValid: panelHistoryEntry(13, "laterValid", "later-valid.png", validTs),
+    });
+    fetchImageMock.mockImplementation(
+      (
+        filename: string,
+        _type: string,
+        _subfolder: string,
+        options: { signal?: AbortSignal } | undefined,
+      ) => {
+        if (filename !== "stalled.png") {
+          return Promise.resolve({ base64: VALID_PNG_BASE64, mimeType: "image/png" });
+        }
+        return new Promise((_, reject) => {
+          options?.signal?.addEventListener(
+            "abort",
+            () => reject(options.signal?.reason ?? new Error("probe timed out")),
+            { once: true },
+          );
+        });
+      },
+    );
+
+    const out = await callListAssets({ limit: 1 });
+
+    expect(fetchImageMock).toHaveBeenCalledTimes(2);
+    expect(out.count).toBe(1);
+    expect(out.assets[0]).toMatchObject({ filename: "later-valid.png", prompt_id: "laterValid" });
     expect(out.note).toContain("1 history image output(s) were not listed");
   });
 
@@ -301,12 +346,17 @@ describe('get_image action:"list_assets" (#751)', () => {
 
     const out = await callListAssets({ limit: 20 });
 
-    expect(fetchImageMock).toHaveBeenCalledWith(filename, "output", "");
+    expect(fetchImageMock).toHaveBeenCalledWith(
+      filename,
+      "output",
+      "",
+      expect.objectContaining({ signal: expect.any(AbortSignal) }),
+    );
     expect(out.assets[0]).toMatchObject({ filename, type: "output" });
     expect(out.assets[0].url).toContain("type=output");
   });
 
-  it("bounds production list-assets probes independently of the requested limit", async () => {
+  it("bounds production list-assets probes by the requested page and hard ceiling", async () => {
     const entry = panelHistoryEntry(13, "many", "many_0.png", Date.now() - 4000);
     entry.outputs["9"].images = Array.from({ length: 101 }, (_, i) => ({
       filename: `many_${i}.png`,
@@ -317,7 +367,7 @@ describe('get_image action:"list_assets" (#751)', () => {
 
     const out = await callListAssets({ limit: 2 });
 
-    expect(fetchImageMock).toHaveBeenCalledTimes(100);
+    expect(fetchImageMock).toHaveBeenCalledTimes(8);
     expect(out.count).toBe(2);
     expect(out.note).toContain("bounded");
   });

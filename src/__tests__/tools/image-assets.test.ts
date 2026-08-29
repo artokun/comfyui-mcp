@@ -78,6 +78,7 @@ vi.mock("../../services/asset-registry.js", () => ({
 
 const reconcileMock = vi.fn();
 vi.mock("../../services/asset-reconcile.js", () => ({
+  MAX_RECONCILIATION_PROBE_ATTEMPTS: 16,
   reconcileAssetsFromHistory: (...a: unknown[]) => reconcileMock(...a),
 }));
 
@@ -374,6 +375,7 @@ describe("get_image: each action reaches exactly one service", () => {
   it('action:"list_assets" reconciles history first, then reads the registry with limit/since', async () => {
     await getImage()({ action: "list_assets", limit: 3, since: "2026-08-05T00:00:00.000Z" });
     expect(reconcileMock).toHaveBeenCalledTimes(1);
+    expect(reconcileMock).toHaveBeenCalledWith({ maxProbeAttempts: 12 });
     expect(registryListMock).toHaveBeenCalledWith({
       limit: 3,
       since: Date.parse("2026-08-05T00:00:00.000Z"),

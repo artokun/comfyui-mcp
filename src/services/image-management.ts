@@ -932,12 +932,20 @@ export async function getOutputImage(
      * ordinary get_image fetch path keeps its existing MIME-based contract.
      */
     requireImageContent = false,
-  }: { allowMedia?: boolean; allowJson?: boolean; requireImageContent?: boolean } = {},
+    signal,
+  }: {
+    allowMedia?: boolean;
+    allowJson?: boolean;
+    requireImageContent?: boolean;
+    signal?: AbortSignal;
+  } = {},
 ): Promise<{ base64: string; mimeType: string; filename: string }> {
   assertSafeViewRef(filename, subfolder);
   let result: { base64: string; mimeType: string };
   try {
-    result = await fetchImage(filename, type, subfolder);
+    result = signal
+      ? await fetchImage(filename, type, subfolder, { signal })
+      : await fetchImage(filename, type, subfolder);
   } catch (error) {
     if (!isViewBadRequest(error)) throw error;
     const local = await readLocalViewFallback(filename, type, subfolder);

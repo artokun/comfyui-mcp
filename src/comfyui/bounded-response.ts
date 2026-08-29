@@ -3,6 +3,13 @@ import { PANEL_IMAGE_RELAY_MAX_BYTES } from "../services/panel-image-relay.js";
 /** One byte ceiling for every raw ComfyUI /view response, including Cloud. */
 export const MAX_VIEW_RESPONSE_BYTES = PANEL_IMAGE_RELAY_MAX_BYTES;
 
+/**
+ * Ceiling for a ComfyUI history document before it reaches JSON.parse().
+ * History repeats prompt graphs and output metadata for completed jobs, so it
+ * can grow much faster than the prompt-scoped responses used by most callers.
+ */
+export const MAX_HISTORY_RESPONSE_BYTES = 16 * 1024 * 1024;
+
 export type BoundedResponseErrorKind = "too-large" | "timeout";
 
 /** A bounded body read failed for a known, actionable reason. */
@@ -52,7 +59,7 @@ function readChunkWithAbort(
 }
 
 /**
- * Read a raw response without ever accumulating more than the shared /view
+ * Read a raw response without ever accumulating more than the caller's
  * ceiling. A missing body is an empty response; it is never handed to an
  * unbounded arrayBuffer() fallback.
  */
@@ -60,6 +67,7 @@ export async function readResponseBodyBounded(
   res: Response,
   timeoutMs: number,
   maxBytes = MAX_VIEW_RESPONSE_BYTES,
+  externalSignal?: AbortSignal,
 ): Promise<Buffer> {
   const declared = Number(res.headers.get("content-length") ?? "");
   if (Number.isFinite(declared) && declared > maxBytes) {
@@ -76,7 +84,7 @@ export async function readResponseBodyBounded(
   if (!res.body) return Buffer.alloc(0);
 
   const reader = res.body.getReader();
-  const signal = AbortSignal.timeout(timeoutMs);
+  const signal = externalSignal ?? AbortSignal.timeout(timeoutMs);
   const chunks: Uint8Array[] = [];
   let total = 0;
   try {

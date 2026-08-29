@@ -24,10 +24,11 @@ import {
 } from "./fetch.js";
 import {
   BoundedResponseError,
+  MAX_HISTORY_RESPONSE_BYTES,
   MAX_VIEW_RESPONSE_BYTES,
   readResponseBodyBounded,
 } from "./bounded-response.js";
-import { bodyPrefixOf, describeStatus } from "./json-guard.js";
+import { bodyPrefixOf, describeStatus, readComfyJson } from "./json-guard.js";
 import { splitUploadTarget } from "./upload-target.js";
 import { ComfyUIError, ConnectionError, describeFetchFailure } from "../utils/errors.js";
 import { logger } from "../utils/logger.js";
@@ -134,13 +135,20 @@ export async function enqueuePrompt(
 
 export async function getHistory(
   promptId?: string,
+  options: { signal?: AbortSignal } = {},
 ): Promise<Record<string, HistoryEntry>> {
   if (!promptId) {
     logger.warn("Cloud: getHistory() without prompt_id returns {} (no global history endpoint)");
     return {};
   }
-  const res = await cloudFetch(`/api/history_v2/${promptId}`);
-  const data = await res.json();
+  const path = `/api/history_v2/${promptId}`;
+  const res = await cloudFetch(path, options.signal ? { signal: options.signal } : {});
+  const data = await readComfyJson<unknown>(res, {
+    url: path,
+    maxBytes: MAX_HISTORY_RESPONSE_BYTES,
+    bodyTimeoutMs: Math.round(comfyHttpTimeoutSeconds() * 1000),
+    signal: options.signal,
+  });
   if (data && typeof data === "object") {
     if ((data as Record<string, unknown>)[promptId]) {
       return data as Record<string, HistoryEntry>;
@@ -317,6 +325,7 @@ export async function fetchImage(
   filename: string,
   type: "output" | "input" | "temp" = "output",
   subfolder = "",
+  options: { signal?: AbortSignal } = {},
 ): Promise<{ base64: string; mimeType: string }> {
   const params = new URLSearchParams({ filename, type, subfolder });
   const url = cloudUrl(`/api/view?${params.toString()}`);
@@ -330,7 +339,7 @@ export async function fetchImage(
     res = await fetch(url, {
       headers: authHeaders(),
       redirect: "follow",
-      signal: defaultComfyTimeoutSignal(),
+      signal: options.signal ?? defaultComfyTimeoutSignal(),
     });
   } catch (err) {
     if (isTimeoutAbort(err)) {
@@ -368,6 +377,7 @@ export async function fetchImage(
       res,
       Math.round(comfyHttpTimeoutSeconds() * 1000),
       MAX_VIEW_RESPONSE_BYTES,
+      options.signal,
     );
   } catch (error) {
     if (error instanceof BoundedResponseError) {
