@@ -180,6 +180,7 @@ import {
 } from "../../services/node-management.js";
 import { ProcessControlError, ValidationError } from "../../utils/errors.js";
 import { withPanelMutationLock } from "../../services/panel-pin-guard.js";
+import { applyManifest } from "../../services/manifest.js";
 
 const mockedExec = vi.mocked(execFileSync);
 const mockedExists = vi.mocked(existsSync);
@@ -232,9 +233,17 @@ interface Call {
  * Install a fetch stub that records every call and returns canned responses.
  * The queue status returns "done" on the first poll so runManagerQueue resolves.
  */
+type QueueStatusFixture = {
+  total_count: number;
+  done_count: number;
+  in_progress_count: number;
+  is_processing: boolean;
+  pending_count?: number;
+};
+
 function stubFetch(opts: {
   installedBody?: unknown;
-  statusSequence?: unknown[];
+  statusSequence?: QueueStatusFixture[] | (() => QueueStatusFixture);
   /** Fires when a queue op is submitted — lets a test make the install REAL. */
   onQueue?: () => void;
   /**
@@ -308,7 +317,9 @@ function stubFetch(opts: {
         }
       }
       if (path === "/v2/manager/queue/status") {
-        const s = statusSeq[Math.min(statusIdx, statusSeq.length - 1)];
+        const s = typeof statusSeq === "function"
+          ? statusSeq()
+          : statusSeq[Math.min(statusIdx, statusSeq.length - 1)];
         statusIdx++;
         return jsonResponse(s);
       }
@@ -902,6 +913,101 @@ describe("node-management service", () => {
       expect(
         mockedExec.mock.calls.find((c) => c[0] === "git" && (c[1] as string[])[0] === "clone"),
       ).toBeDefined();
+    });
+
+    it("keeps apply_manifest truthful when a late Manager drain selects local fallback (#1129)", async () => {
+      const previousBudget = process.env.COMFYUI_MCP_MANIFEST_NODE_BUDGET_MS;
+      process.env.COMFYUI_MCP_MANIFEST_NODE_BUDGET_MS = "80";
+      const pending = {
+        total_count: 1,
+        done_count: 0,
+        in_progress_count: 1,
+        is_processing: true,
+      };
+      const drainedStatus = {
+        total_count: 1,
+        done_count: 1,
+        in_progress_count: 0,
+        is_processing: false,
+      };
+      let statusCalls = 0;
+      let drained = false;
+      const { calls } = stubFetch({
+        installedBody: {},
+        // The first status response is the dialect probe. Hold the real queue
+        // open until apply_manifest has returned, then let installCustomNode's
+        // actual post-drain verification select its local clone fallback.
+        statusSequence: () =>
+          statusCalls++ === 0 || drained ? drainedStatus : pending,
+      });
+      let cloned = false;
+      let markCloneStarted!: () => void;
+      const cloneStarted = new Promise<void>((resolve) => {
+        markCloneStarted = resolve;
+      });
+      mockedExists.mockImplementation((p: unknown) => {
+        const s = String(p);
+        if (s.includes("requirements.txt") || s.includes("install.py")) return false;
+        if (s.includes(NODE_DIR_UTILS) || s.endsWith("comfyui-teskors-utils")) return cloned;
+        return false;
+      });
+      fsCtl.readdirSync = (p) => {
+        const norm = p.replace(/\\/g, "/");
+        return norm.endsWith("/comfyui-teskors-utils") ? ["__init__.py"] : [];
+      };
+      mockedExec.mockImplementation(((bin: string, args: string[]) => {
+        if (bin === "git" && args[0] === "clone") {
+          cloned = true;
+          markCloneStarted();
+        }
+        return "";
+      }) as never);
+
+      try {
+        const result = await applyManifest({
+          manifest: {
+            custom_nodes: [
+              "https://github.com/teskor-hub/comfyui-teskors-utils",
+              "next-pack",
+            ],
+          },
+        });
+
+        const first = result.results[0];
+        expect(result.summary).toMatchObject({ applied: 0, failed: 0, pending: 2 });
+        expect(first).toMatchObject({
+          action: "custom_node",
+          item: "https://github.com/teskor-hub/comfyui-teskors-utils",
+          status: "pending",
+        });
+        expect(first.message).toMatch(/still resolving/i);
+        expect(first.message).toMatch(/Manager queue or.*local direct-install fallback/i);
+        expect(first.message).not.toMatch(/poll panel_node_queue_status/i);
+        expect(result.partial).toMatchObject({
+          not_started: ["next-pack"],
+          still_installing: ["https://github.com/teskor-hub/comfyui-teskors-utils"],
+          local_fallback_pending: ["https://github.com/teskor-hub/comfyui-teskors-utils"],
+        });
+        expect(result.partial?.message).toMatch(/route may remain on the Manager queue/i);
+        expect(result.partial?.message).not.toMatch(/ON the queue, pollable/i);
+
+        // This is the production late transition: the queue drains after the
+        // response, then the real installCustomNode path verifies Manager's
+        // empty installed list and runs git clone.
+        drained = true;
+        const late = await Promise.race([
+          cloneStarted.then(() => "cloned" as const),
+          new Promise<"timed-out">((resolve) => setTimeout(() => resolve("timed-out"), 500)),
+        ]);
+        expect(late).toBe("cloned");
+        expect(calls.some((c) => c.url.endsWith("/v2/manager/queue/task"))).toBe(true);
+        expect(
+          mockedExec.mock.calls.find((c) => c[0] === "git" && (c[1] as string[])[0] === "clone"),
+        ).toBeDefined();
+      } finally {
+        if (previousBudget === undefined) delete process.env.COMFYUI_MCP_MANIFEST_NODE_BUDGET_MS;
+        else process.env.COMFYUI_MCP_MANIFEST_NODE_BUDGET_MS = previousBudget;
+      }
     });
 
     it("#1129 accepts repeated explicit Manager-unavailable responses", async () => {

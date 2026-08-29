@@ -1134,6 +1134,7 @@ async function applyManifestSections(
   const nodeDeadline = Date.now() + manifestNodeBudgetMs();
   const notStarted: string[] = [];
   const stillInstalling: string[] = [];
+  const localFallbackPending: string[] = [];
   let nodeBudgetSpent = false;
   // Even the INITIAL installed-list probe is budget-bounded — a hung Manager here
   // must not blow the tools/call timeout before we can report anything.
@@ -1215,7 +1216,17 @@ async function applyManifestSections(
         results.push(report("custom_node", id, "pending", formatLocalFallbackMessage()));
       } else {
         stillInstalling.push(id);
-        results.push(report("custom_node", id, "pending", formatStillInstallingMessage()));
+        const localFallbackPossible =
+          localMode && Boolean(customNodesBase) && looksLikeGitManifestSource(id);
+        if (localFallbackPossible) localFallbackPending.push(id);
+        results.push(
+          report(
+            "custom_node",
+            id,
+            "pending",
+            formatStillInstallingMessage({ localFallbackPossible }),
+          ),
+        );
       }
       continue;
     }
@@ -1615,7 +1626,12 @@ async function applyManifestSections(
   // #1699 — name the PARTIAL INSTALL (unsubmitted custom_nodes) so a drained
   // Manager queue cannot be read as completion. Replacing the leftover record
   // on every apply keeps queue-status honest about THIS call only.
-  const partial = buildManifestPartial({ source, notStarted, stillInstalling });
+  const partial = buildManifestPartial({
+    source,
+    notStarted,
+    stillInstalling,
+    localFallbackPending,
+  });
   recordManifestPartial(partial);
 
   return {
