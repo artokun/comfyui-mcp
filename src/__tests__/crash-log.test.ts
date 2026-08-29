@@ -22,6 +22,29 @@ Current thread 0x00004abc (most recent call first):
   File "C:\\Users\\Artokun\\ComfyUI-Installs\\ComfyUI\\ComfyUI\\execution.py", line 152 in recursive_execute
 `;
 
+// #2497 — a MiniMax H3 render aborted ComfyUI inside SageAttention's CUDA
+// kernel. Two things make this shape different from WAN_CRASH: the signature
+// (`Fatal Python error: Aborted`) says nothing on its own, and the line that
+// names the failing subsystem sits ABOVE it; and the only custom node on the
+// stack (TiledDiffusion) is a monkey-patch that passes straight through to the
+// original sampler, so blaming it sends the user to update an innocent node.
+const SAGE_ABORT = [
+  "got prompt",
+  "Requested to load MiniMaxRef2VideoModel",
+  " 35%|###5      | 7/20 [02:41<04:59, 23.05s/it]",
+  "[ERROR] Error running sage attention: CUDA error: an illegal memory access was encountered, using pytorch attention instead.",
+  "Traceback (most recent call last):",
+  '  File "C:\\ComfyUI\\comfy\\ldm\\modules\\attention.py", line 512, in attention_sage',
+  "    out = sageattn(q, k, v, is_causal=False)",
+  '  File "C:\\ComfyUI\\custom_nodes\\ComfyUI-TiledDiffusion\\utils.py", line 121, in KSAMPLER_sample',
+  "    return orig_fn(*args, **kwargs)",
+  "Fatal Python error: Aborted",
+  "",
+  "Current thread 0x00004b1c (most recent call first):",
+  '  File "C:\\ComfyUI\\comfy\\ldm\\modules\\attention.py", line 512 in attention_sage',
+  '  File "C:\\ComfyUI\\custom_nodes\\ComfyUI-TiledDiffusion\\utils.py", line 121 in KSAMPLER_sample',
+].join("\n");
+
 describe("parseCrashBlock", () => {
   it("extracts the culprit node + frame from the WanVideoWrapper access violation", () => {
     const r = parseCrashBlock(WAN_CRASH);
@@ -168,6 +191,43 @@ ValueError: bad input
     // Same crash head → same fingerprint even though the tail grew post-restart.
     expect(b.fingerprint).toBe(a.fingerprint);
   });
+
+  it("#2497 keeps the line ABOVE the signature that names what actually failed", () => {
+    const r = parseCrashBlock(SAGE_ABORT);
+    expect(r.fatal).toBe(true);
+    // The abort itself is contentless; this is the only line that says "Sage".
+    expect(r.block).toContain("Error running sage attention");
+    expect(r.block).toContain("illegal memory access");
+    // …and the signature it is context FOR is still there.
+    expect(r.block).toContain("Fatal Python error: Aborted");
+  });
+
+  it("#2497 names the innermost NON-custom-node frame as the fault site", () => {
+    const r = parseCrashBlock(SAGE_ABORT);
+    // TiledDiffusion is on the stack only because it monkey-patches
+    // KSAMPLER_sample and passes through — it is not where this died.
+    expect(r.culpritNode).toBe("ComfyUI-TiledDiffusion");
+    expect(r.faultFrame).toBe("attention.py:512");
+  });
+
+  it("#2497 leaves faultFrame UNSET when the custom node really is innermost", () => {
+    // The motivating WanVideoWrapper case: the deepest frame IS in the node, so
+    // the unhedged "update that node" verdict must survive this change.
+    const r = parseCrashBlock(WAN_CRASH);
+    expect(r.culpritNode).toBe("ComfyUI-WanVideoWrapper");
+    expect(r.faultFrame).toBeUndefined();
+  });
+
+  it("#2497 fingerprints on the FATAL region, so added context cannot shift the key", () => {
+    // Same crash, different preceding log. If the fingerprint keyed on the
+    // displayed block, these would differ and a crash already injected would be
+    // re-injected on the next resume.
+    const tail = SAGE_ABORT.slice(SAGE_ABORT.indexOf("[ERROR] Error running sage"));
+    const a = parseCrashBlock(`[INFO] got prompt\n[INFO] loaded model A\n${tail}`);
+    const b = parseCrashBlock(`[INFO] a totally different preceding line\n${tail}`);
+    expect(a.fingerprint).toBeTruthy();
+    expect(b.fingerprint).toBe(a.fingerprint);
+  });
 });
 
 describe("formatCrashNote", () => {
@@ -181,6 +241,27 @@ describe("formatCrashNote", () => {
 
   it("returns null on a clean parse", () => {
     expect(formatCrashNote({ fatal: false, block: "" })).toBeNull();
+  });
+
+  it("#2497 does NOT tell the user to update a node that only wrapped the call", () => {
+    const note = formatCrashNote(parseCrashBlock(SAGE_ABORT))!;
+    expect(note).not.toBeNull();
+    // The old note said "Most likely culprit custom node: ComfyUI-TiledDiffusion.
+    // Update or fix that node before retrying" — a confident wrong instruction.
+    expect(note).not.toContain("Most likely culprit custom node");
+    expect(note).not.toContain("Update or fix that node before retrying");
+    // What it must say instead: where it really died, and that the node may be blameless.
+    expect(note).toContain("attention.py:512");
+    expect(note).toContain("NOT inside a custom node");
+    expect(note).toContain("do not update ComfyUI-TiledDiffusion");
+    // The causal line rides along in the block.
+    expect(note).toContain("Error running sage attention");
+  });
+
+  it("#2497 still gives the unhedged verdict when the custom node IS the fault site", () => {
+    const note = formatCrashNote(parseCrashBlock(WAN_CRASH))!;
+    expect(note).toContain("Most likely culprit custom node");
+    expect(note).toContain("Update or fix that node before retrying");
   });
 });
 
