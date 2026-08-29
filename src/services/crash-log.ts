@@ -121,6 +121,48 @@ const MAX_CONTEXT_LINES = 25;
 const MAX_CONTEXT_CHARS = 1200;
 
 /**
+ * The contiguous stack that the frame at `index` belongs to.
+ *
+ * The culprit region runs from the signature to the END of the tail, which after
+ * a restart also holds log APPENDED post-crash. Comparing frame depth across
+ * that whole span lets a later, unrelated traceback supply the "innermost"
+ * frame: a segfault in custom_nodes/GoodNode followed by an ordinary
+ * comfy/server.py traceback would name server.py the fault site and tell the
+ * user NOT to update the node that actually crashed (gate r1 P1). Depth is only
+ * meaningful WITHIN one stack, so the comparison is bounded to one.
+ *
+ * A stack line is an indented frame/source line, or a bare `file.py:12` form.
+ * A blank line or an unindented log line ends the run — which is exactly what
+ * separates a crash dump from whatever the server printed next.
+ */
+function traceRunAround(region: string, index: number): string {
+  const lines = region.split("\n");
+  const starts: number[] = [];
+  let off = 0;
+  for (const l of lines) {
+    starts.push(off);
+    off += l.length + 1;
+  }
+  let li = 0;
+  for (let i = 0; i < starts.length; i++) {
+    if (starts[i] <= index) li = i;
+    else break;
+  }
+  const belongs = (s: string | undefined): boolean => {
+    if (!s || !s.trim()) return false;
+    if (/^\s/.test(s)) return true;
+    // Non-global clone: ANY_FRAME carries /g, whose lastIndex would persist.
+    return new RegExp(ANY_FRAME.source, "i").test(s);
+  };
+  if (!belongs(lines[li])) return lines[li] ?? "";
+  let a = li;
+  let b = li;
+  while (a - 1 >= 0 && belongs(lines[a - 1])) a--;
+  while (b + 1 < lines.length && belongs(lines[b + 1])) b++;
+  return lines.slice(a, b + 1).join("\n");
+}
+
+/**
  * The bounded run of lines immediately preceding `lineStart`, oldest-first.
  * Returns "" when the signature is already at the top of the scanned tail.
  */
@@ -250,12 +292,12 @@ export function parseCrashBlock(text: string): CrashParseResult {
   // (the top custom-node frame), not its caller loadmodel.
   const region = text.slice(lineStart);
   const mostRecentFirst = /most recent call first/i.test(region);
-  /** Collect every match of a global regex against the region. */
-  const collectAll = (source: string, flags: string): RegExpExecArray[] => {
+  /** Collect every match of a global regex against `haystack` (default: region). */
+  const collectAll = (source: string, flags: string, haystack: string = region): RegExpExecArray[] => {
     const g = new RegExp(source, flags);
     const out: RegExpExecArray[] = [];
     let m: RegExpExecArray | null;
-    while ((m = g.exec(region)) !== null) {
+    while ((m = g.exec(haystack)) !== null) {
       out.push(m);
       if (m.index === g.lastIndex) g.lastIndex++;
     }
@@ -279,15 +321,21 @@ export function parseCrashBlock(text: string): CrashParseResult {
     // at the fault site, and naming it alone is a confident wrong answer (#2497).
     // "Deeper" is direction-dependent: with most-recent-FIRST the innermost frame
     // is the earliest match, with most-recent-LAST it is the latest.
-    const innermostAny = pickInnermost(collectAll(ANY_FRAME.source, ANY_FRAME.flags));
-    if (innermostAny) {
-      const path = innermostAny[1] ?? innermostAny[3] ?? "";
-      const deeper = mostRecentFirst
-        ? innermostAny.index < nodeMatch.index
-        : innermostAny.index > nodeMatch.index;
+    //
+    // Compared only WITHIN the custom-node frame's own stack: the region reaches
+    // the end of the tail, so an unrelated traceback printed after the restart
+    // would otherwise pose as the deeper frame and exonerate the node that
+    // actually crashed (gate r1 P1). Both sides are re-picked inside the run so
+    // the two indices are in the same coordinate space.
+    const run = traceRunAround(region, nodeMatch.index);
+    const runNode = pickInnermost(collectAll(CUSTOM_NODE_FRAME.source, CUSTOM_NODE_FRAME.flags, run));
+    const runAny = pickInnermost(collectAll(ANY_FRAME.source, ANY_FRAME.flags, run));
+    if (runAny && runNode) {
+      const path = runAny[1] ?? runAny[3] ?? "";
+      const deeper = mostRecentFirst ? runAny.index < runNode.index : runAny.index > runNode.index;
       if (deeper && path && !/custom_nodes/i.test(path)) {
         const f = baseName(path);
-        const l = innermostAny[2] ?? innermostAny[4];
+        const l = runAny[2] ?? runAny[4];
         faultFrame = l ? `${f}:${l}` : f;
       }
     }

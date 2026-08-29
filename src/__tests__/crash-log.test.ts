@@ -218,6 +218,31 @@ ValueError: bad input
     expect(r.faultFrame).toBeUndefined();
   });
 
+  it("#2497 does not let log printed AFTER the crash pose as a deeper frame", () => {
+    // The region runs to the end of the tail, so it also holds whatever the
+    // server printed once it came back. An ordinary traceback there must not
+    // exonerate the node that actually segfaulted (gate r1 P1).
+    const postCrashNoise = [
+      "Segmentation fault",
+      '  File "/home/u/ComfyUI/custom_nodes/GoodNode/nodes.py", line 5 in forward',
+      "[INFO] Comfy is restarting…",
+      "[INFO] got prompt",
+      "Traceback (most recent call last):",
+      '  File "/home/u/ComfyUI/comfy/server.py", line 2, in handler',
+      "ValueError: unrelated later error",
+    ].join("\n");
+    const r = parseCrashBlock(postCrashNoise);
+    expect(r.culpritNode).toBe("GoodNode");
+    // server.py is in a DIFFERENT stack — it is not this crash's fault site.
+    expect(r.faultFrame).toBeUndefined();
+    // The block still shows the whole tail (unchanged), so assert on the ADVICE:
+    // it must be the plain verdict, with no exonerating hedge.
+    const note = formatCrashNote(r)!;
+    expect(note).toContain("Update or fix that node before retrying");
+    expect(note).not.toContain("NOT inside a custom node");
+    expect(note).not.toContain("do not update GoodNode");
+  });
+
   it("#2497 fingerprints on the FATAL region, so added context cannot shift the key", () => {
     // Same crash, different preceding log. If the fingerprint keyed on the
     // displayed block, these would differ and a crash already injected would be
