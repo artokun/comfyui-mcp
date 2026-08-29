@@ -141,6 +141,8 @@ describe("getOutputImage — local fallback for ComfyUI's 400 rejection (#2194)"
   it.each([
     ["a filename traversal", "../outside.mp4", ""],
     ["a subfolder traversal", "safe.mp4", "../outside"],
+    ["a filename drive-relative path", "C:outside.mp4", ""],
+    ["a subfolder drive-relative path", "safe.mp4", "C:outside"],
   ])("rejects %s before the local fallback can read it", async (_label, name, subfolder) => {
     fetchImageMock.mockRejectedValue(view400());
 
@@ -216,6 +218,14 @@ describe("getOutputImage — path-traversal sanitisation (CWE-22)", () => {
     await expect(
       getOutputImage("..\\..\\windows\\win.ini", "output", ""),
     ).rejects.toBeInstanceOf(ValidationError);
+    expect(fetchImageMock).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["a filename drive-relative path", "C:outside.png", ""],
+    ["a subfolder drive-relative path", "hero.png", "C:outside"],
+  ])("rejects %s before /view is called", async (_label, filename, subfolder) => {
+    await expect(getOutputImage(filename, "output", subfolder)).rejects.toBeInstanceOf(ValidationError);
     expect(fetchImageMock).not.toHaveBeenCalled();
   });
 

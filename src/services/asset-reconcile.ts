@@ -145,6 +145,7 @@ export async function reconcileAssetsFromHistory(opts: {
             normalizedImg.filename,
             normalizedImg.type,
             normalizedImg.subfolder,
+            { requireImageContent: true },
           );
         } catch (error) {
           skippedUnavailable++;

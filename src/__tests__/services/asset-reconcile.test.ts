@@ -374,7 +374,9 @@ describe("reconcileAssetsFromHistory", () => {
 
     await reconcileAssetsFromHistory();
 
-    expect(getOutputImageMock).toHaveBeenCalledWith("safe.png", "output", "");
+    expect(getOutputImageMock).toHaveBeenCalledWith("safe.png", "output", "", {
+      requireImageContent: true,
+    });
     expect(AssetRegistry.list()[0]).toMatchObject({
       filename: "safe.png",
       type: "output",

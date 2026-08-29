@@ -10,6 +10,8 @@ import { describe, expect, it, beforeEach, vi } from "vitest";
 // mocked below.
 const getHistoryMock = vi.fn();
 const fetchImageMock = vi.fn();
+const VALID_PNG_BASE64 =
+  "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
 vi.mock("../../comfyui/client.js", () => ({
   getHistory: (...a: unknown[]) => getHistoryMock(...a),
   fetchImage: (...a: unknown[]) => fetchImageMock(...a),
@@ -119,7 +121,7 @@ function registerWatched(promptId: string, filename: string) {
 beforeEach(() => {
   getHistoryMock.mockReset();
   fetchImageMock.mockReset();
-  fetchImageMock.mockResolvedValue({ base64: "aGk=", mimeType: "image/png" });
+  fetchImageMock.mockResolvedValue({ base64: VALID_PNG_BASE64, mimeType: "image/png" });
   AssetRegistry.configure({ ttlMs: 24 * 60 * 60 * 1000, now: Date.now });
   AssetRegistry.clear();
 });
@@ -182,6 +184,17 @@ describe('get_image action:"list_assets" (#751)', () => {
     ["an empty 2xx body", "", "image/png"],
     ["an HTML error body", Buffer.from("<html>login</html>").toString("base64"), "text/html"],
     ["a JSON error body", Buffer.from('{"error":"not found"}').toString("base64"), "application/json"],
+    [
+      "malformed HTML mislabeled as image/png",
+      Buffer.from("<!DOCTYPE html><html><body>login").toString("base64"),
+      "image/png",
+    ],
+    [
+      "truncated JSON mislabeled as image/jpeg",
+      Buffer.from('{"error":').toString("base64"),
+      "image/jpeg",
+    ],
+    ["arbitrary bytes labeled image/webp", Buffer.from("not an image").toString("base64"), "image/webp"],
   ])("does not advertise history output when /view returns %s", async (_label, base64, mimeType) => {
     const filename = "false-success.png";
     getHistoryMock.mockResolvedValue({
@@ -284,7 +297,7 @@ describe('get_image action:"list_assets" (#751)', () => {
     fetchImageMock.mockImplementationOnce(async () => {
       probeStarted();
       await probeRelease;
-      return { base64: "aGk=", mimeType: "image/png" };
+      return { base64: VALID_PNG_BASE64, mimeType: "image/png" };
     });
 
     const listing = callListAssets();
