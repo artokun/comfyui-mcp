@@ -245,6 +245,8 @@ function stubFetch(opts: {
   queueOpStatus?: number;
   /** Exact body returned by the Manager queue operation when queueOpStatus is set. */
   queueOpBody?: string;
+  /** Return an empty successful body for a custom-node install enqueue. */
+  queueOpEmpty?: boolean;
   /** Body for `https://api.comfy.org/nodes/:id` (registry-zip empty-pack fallback). */
   registryDetails?: unknown;
   /** Body for v4 per-task queue history lookups. */
@@ -332,6 +334,16 @@ function stubFetch(opts: {
               "A security error has occurred. Please check the terminal logs",
             { status: opts.queueOpStatus },
           );
+        }
+        if (opts.queueOpEmpty && isInstallOp) {
+          opts.onQueue?.();
+          return new Response("", { status: 200 });
+        }
+        // A successful install enqueue normally has an acknowledgement body;
+        // keep that distinct from the adversarial empty-2xx race fixture.
+        if (isInstallOp) {
+          opts.onQueue?.();
+          return jsonResponse({ accepted: true });
         }
         opts.onQueue?.();
       }
@@ -794,7 +806,28 @@ describe("node-management service", () => {
       ).toBeDefined();
     });
 
-    it("invalidates a warm dialect cache when enqueue/status routes become empty", async () => {
+    it("fails closed when Manager accepts a git enqueue with an empty success body", async () => {
+      const { calls } = stubFetch({ installedBody: {}, queueOpEmpty: true });
+
+      await expect(
+        installCustomNode({
+          id: "https://github.com/teskor-hub/comfyui-teskors-utils",
+          source: "git",
+        }),
+      ).rejects.toMatchObject({
+        details: { kind: "manager-enqueue-empty-success" },
+      });
+
+      // The successful empty enqueue is ambiguous: do not start/poll it and
+      // never race a possible Manager task with a local clone.
+      expect(calls.some((c) => c.url.endsWith("/v2/manager/queue/task"))).toBe(true);
+      expect(calls.some((c) => c.url.endsWith("/v2/manager/queue/start"))).toBe(false);
+      expect(
+        mockedExec.mock.calls.find((c) => c[0] === "git" && (c[1] as string[])[0] === "clone"),
+      ).toBeUndefined();
+    });
+
+    it("fails closed when a warm dialect cache later returns an empty queue status", async () => {
       const fetchOptions = {
         managerQueueStatus: undefined as "manager-unavailable" | undefined,
       };
@@ -825,16 +858,21 @@ describe("node-management service", () => {
       const res = await installCustomNode({
         id: "https://github.com/teskor-hub/comfyui-teskors-utils",
         source: "git",
-      });
+      }).catch((err) => err);
 
-      expect(res.mechanism).toBe("git-clone");
-      expect(res.message).toMatch(/queue\/status surface was unavailable/);
-      expect(res.message).toMatch(/before any install task was submitted/);
+      expect(res).toMatchObject({
+        details: { kind: "manager-queue-empty-status" },
+      });
+      expect(res.message).toMatch(/outcome is UNKNOWN/);
+      expect(res.message).toMatch(/no local fallback is authorized/);
       expect(
         mockedExec.mock.calls.find((c) => c[0] === "git" && (c[1] as string[])[0] === "clone"),
-      ).toBeDefined();
-      // The first empty status must invalidate the warm v2 classification and
-      // probe the alternate dialect before authorizing the local fallback.
+      ).toBeUndefined();
+      // The task was accepted with a non-empty acknowledgement, then status
+      // went empty. Reclassification is still attempted, but cannot authorize
+      // a clone after the enqueue has happened.
+      expect(calls.some((c) => c.url.endsWith("/v2/manager/queue/task"))).toBe(true);
+      expect(calls.some((c) => c.url.endsWith("/v2/manager/queue/start"))).toBe(true);
       expect(calls.some((c) => c.url.endsWith("/manager/queue/status"))).toBe(true);
     });
 
@@ -3655,6 +3693,9 @@ describe("node-management service", () => {
           }
           if (path === "/customnode/installed") {
             return jsonResponse(opts.installedBody ?? {});
+          }
+          if (path === "/manager/queue/install") {
+            return jsonResponse({ accepted: true });
           }
           return new Response("", { status: 200 });
         },

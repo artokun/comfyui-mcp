@@ -186,7 +186,7 @@ function stubServer(opts: {
     } else {
       if (path === "/v2/manager/queue/task") {
         const status = opts.taskStatus?.(url) ?? 200;
-        return new Response(status === 200 ? "" : String(status), { status });
+        return status === 200 ? jsonResponse({ accepted: true }) : new Response(String(status), { status });
       }
       // v4 registers install_model but validates a ModelMetadata envelope — the
       // 3.x-shaped body the v2-batch dialect sends is rejected 400 (#646).

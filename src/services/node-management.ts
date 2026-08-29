@@ -1460,13 +1460,55 @@ async function reclassifyAfterEmptyQueueStatus(
       `Manager queue/status returned an empty successful response on the cached "${used}" dialect`,
     );
   }
-  const fresh = await detectManagerApi(base);
+  let fresh: ManagerApi | undefined;
+  try {
+    fresh = await detectManagerApi(base);
+  } catch {
+    // Re-detection can itself conclude that both queue surfaces are empty or
+    // unavailable. That is useful classification evidence, but it is NOT proof
+    // that the enqueue already observed by this operation did not submit a task.
+    // Keep the post-enqueue ambiguity distinct so the local git fallback cannot
+    // race an accepted Manager task.
+  }
   throw new NodeManagementError(
     `ComfyUI-Manager queue/status returned an empty successful response while the cached ` +
-      `"${used}" dialect was in use. The live server reclassified as "${fresh}", but the ` +
-      `${kind ?? "Manager"} enqueue outcome is UNKNOWN and was NOT retried automatically. ` +
-      `Verify whether it took effect before reissuing it.`,
+      `"${used}" dialect was in use. The live server ` +
+      (fresh ? `reclassified as "${fresh}"` : `could not be reclassified`) +
+      `, but the ${kind ?? "Manager"} enqueue may already have submitted a task. Its ` +
+      `outcome is UNKNOWN; it was NOT retried automatically and no local fallback is ` +
+      `authorized. Verify whether it took effect before reissuing it.`,
     { kind: "manager-queue-empty-status", base, used, fresh },
+  );
+}
+
+interface ManagerEnqueueOptions {
+  /** A git install may fall back to a local clone, so an empty 2xx is unsafe. */
+  rejectEmptyEnqueue?: boolean;
+}
+
+type ManagerEnqueueResponse = Record<string, unknown> | string | undefined;
+
+function assertManagerEnqueueResponse(
+  response: unknown,
+  options: ManagerEnqueueOptions,
+  kind: ManagerTaskKind,
+  api: ManagerApi,
+  path: string,
+  base: string,
+): void {
+  if (!options.rejectEmptyEnqueue || response !== undefined) return;
+  throw new NodeManagementError(
+    `ComfyUI-Manager returned a successful but empty response for the ${kind} enqueue ` +
+      `on the "${api}" dialect. The task may have been submitted, so its outcome is ` +
+      `UNKNOWN; the queue was not started and no local fallback is authorized. ` +
+      `Verify whether it took effect before reissuing it.`,
+    {
+      kind: "manager-enqueue-empty-success",
+      operation: kind,
+      api,
+      path,
+      base,
+    },
   );
 }
 
@@ -1481,8 +1523,9 @@ async function queueManagerTask(
   kind: ManagerTaskKind,
   params: ManagerTaskParams,
   base = managerBaseUrl(),
+  options: ManagerEnqueueOptions = {},
 ): Promise<QueueStatus> {
-  return (await queueManagerTaskTracked(kind, params, base)).status;
+  return (await queueManagerTaskTracked(kind, params, base, options)).status;
 }
 
 /**
@@ -1500,6 +1543,7 @@ async function queueManagerTaskTracked(
   kind: ManagerTaskKind,
   params: ManagerTaskParams,
   base = managerBaseUrl(),
+  options: ManagerEnqueueOptions = {},
 ): Promise<{ status: QueueStatus; uiId: string }> {
   // Normalize to a resolver so every attempt builds its body for the dialect it
   // is about to speak — a few operations (git installs) have dialect-specific
@@ -1517,7 +1561,7 @@ async function queueManagerTaskTracked(
   // retry, queue start, or verification of a request the user already made.
   const used = await enqueueWithDialectSelfHeal(kind, (api, epoch) => {
     uiId = randomUUID();
-    return enqueueManagerTask(api, kind, resolve, uiId, base, epoch);
+    return enqueueManagerTask(api, kind, resolve, uiId, base, epoch, options);
   }, base);
   // Thread the kind so a model download gets the model budget, not the node one (#817).
   const status = await runManagerQueue(used, base, kind);
@@ -1791,18 +1835,21 @@ async function enqueueManagerTask(
   uiId: string,
   base: string,
   startEpoch: number,
+  options: ManagerEnqueueOptions = {},
 ): Promise<ManagerApi> {
   if (api === "legacy") {
-    await enqueueLegacyTask(kind, resolveParams("legacy"), uiId, base);
+    const response = await enqueueLegacyTask(kind, resolveParams("legacy"), uiId, base);
+    assertManagerEnqueueResponse(response, options, kind, api, "/manager/queue/install", base);
     return "legacy";
   }
   if (api === "v2-batch") {
-    await enqueueV2BatchTask(kind, resolveParams("v2-batch"), uiId, base);
+    const response = await enqueueV2BatchTask(kind, resolveParams("v2-batch"), uiId, base);
+    assertManagerEnqueueResponse(response, options, kind, api, "/v2/manager/queue/batch", base);
     return "v2-batch";
   }
   // v2 unified task envelope (normal-mode pip Manager v4).
   try {
-    await managerFetch("/v2/manager/queue/task", {
+    const response = await managerFetch("/v2/manager/queue/task", {
       method: "POST",
       base,
       body: {
@@ -1812,6 +1859,7 @@ async function enqueueManagerTask(
         params: { ...resolveParams("v2"), ui_id: uiId },
       },
     });
+    assertManagerEnqueueResponse(response, options, kind, api, "/v2/manager/queue/task", base);
   } catch (err) {
     if (errorStatus(err) === 405) {
       // Detection chose the unified /v2 task dialect (the /v2 queue surface
@@ -1854,10 +1902,10 @@ async function enqueueLegacyTask(
   params: Record<string, unknown>,
   uiId: string,
   base: string,
-): Promise<void> {
+): Promise<ManagerEnqueueResponse> {
   const { path, body } = legacyTaskRequest(kind, params, uiId);
   try {
-    await managerFetch(path, { method: "POST", body, base });
+    return await managerFetch<Record<string, unknown> | string>(path, { method: "POST", body, base });
   } catch (err) {
     throw annotateLegacyError(err, kind);
   }
@@ -1877,11 +1925,11 @@ async function enqueueV2BatchTask(
   params: Record<string, unknown>,
   uiId: string,
   base: string,
-): Promise<void> {
+): Promise<ManagerEnqueueResponse> {
   const { path, body } = legacyTaskRequest(kind, params, uiId);
   try {
     if (kind === "install-model") {
-      await managerFetch("/v2/manager/queue/install_model", { method: "POST", body, base });
+      return await managerFetch<Record<string, unknown> | string>("/v2/manager/queue/install_model", { method: "POST", body, base });
     } else {
       // legacyTaskRequest's path is "/manager/queue/<op>"; the batch key is
       // that trailing op ("enable" maps to an install body → key "install").
@@ -1899,6 +1947,7 @@ async function enqueueV2BatchTask(
             "gating is a common cause).",
         );
       }
+      return res;
     }
   } catch (err) {
     throw annotateLegacyError(err, kind, MANAGER_LEGACY_UI_HINT);
@@ -3974,6 +4023,10 @@ async function installCustomNodeImpl(
             mode: opts.mode ?? "cache",
           },
       managerBase,
+      // This branch can authorize a local clone after Manager returns. An
+      // empty successful enqueue is ambiguous, so fail before start/status
+      // rather than treating it as a safe pre-queue refusal.
+      { rejectEmptyEnqueue: true },
     );
 
     let status: unknown;
