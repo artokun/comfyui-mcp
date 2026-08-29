@@ -135,7 +135,7 @@ const MAX_CONTEXT_CHARS = 1200;
  * A blank line or an unindented log line ends the run — which is exactly what
  * separates a crash dump from whatever the server printed next.
  */
-function traceRunAround(region: string, index: number): string {
+function traceRunAround(region: string, index: number): { lines: string[]; start: number } {
   const lines = region.split("\n");
   const starts: number[] = [];
   let off = 0;
@@ -151,15 +151,46 @@ function traceRunAround(region: string, index: number): string {
   const belongs = (s: string | undefined): boolean => {
     if (!s || !s.trim()) return false;
     if (/^\s/.test(s)) return true;
-    // Non-global clone: ANY_FRAME carries /g, whose lastIndex would persist.
-    return new RegExp(ANY_FRAME.source, "i").test(s);
+    return frameOnLine(s) !== null;
   };
-  if (!belongs(lines[li])) return lines[li] ?? "";
+  if (!belongs(lines[li])) return { lines: lines[li] === undefined ? [] : [lines[li]], start: starts[li] ?? 0 };
   let a = li;
   let b = li;
   while (a - 1 >= 0 && belongs(lines[a - 1])) a--;
   while (b + 1 < lines.length && belongs(lines[b + 1])) b++;
-  return lines.slice(a, b + 1).join("\n");
+  return { lines: lines.slice(a, b + 1), start: starts[a] ?? 0 };
+}
+
+/**
+ * Parse ONE line as a stack frame, or null if it is not one.
+ *
+ * Deliberately anchored at the start of the (trimmed) line. `ANY_FRAME` matches
+ * anywhere, so an ordinary indented SOURCE line inside a traceback —
+ * `raise RuntimeError("bad.py:99")` — otherwise reads as a frame in a file
+ * called bad.py and becomes a false fault site, exonerating the node that
+ * really crashed (gate r2 P1).
+ */
+function frameOnLine(line: string): { path: string; line?: string } | null {
+  const quoted = /^\s*File\s+["']([^"']+?\.py)["']?,?\s*line\s*(\d+)/i.exec(line);
+  if (quoted) return { path: quoted[1], line: quoted[2] };
+  const bare = /^\s*([^\s"',()]+?\.py):(\d+)/i.exec(line);
+  if (bare) return { path: bare[1], line: bare[2] };
+  return null;
+}
+
+/**
+ * Which end of THIS stack is innermost, from the nearest direction marker ABOVE
+ * it. Read globally, a marker printed after the restart reverses an earlier
+ * crash stack and flips the answer (gate r2 P1); the marker that governs a stack
+ * is the closest one preceding it. Falls back to the caller's global reading
+ * when this stack has no marker of its own.
+ */
+function traceDirectionFor(region: string, runStart: number, fallback: boolean): boolean {
+  const before = region.slice(0, runStart);
+  const first = before.toLowerCase().lastIndexOf("most recent call first");
+  const last = before.toLowerCase().lastIndexOf("most recent call last");
+  if (first < 0 && last < 0) return fallback;
+  return first > last;
 }
 
 /**
@@ -292,12 +323,12 @@ export function parseCrashBlock(text: string): CrashParseResult {
   // (the top custom-node frame), not its caller loadmodel.
   const region = text.slice(lineStart);
   const mostRecentFirst = /most recent call first/i.test(region);
-  /** Collect every match of a global regex against `haystack` (default: region). */
-  const collectAll = (source: string, flags: string, haystack: string = region): RegExpExecArray[] => {
+  /** Collect every match of a global regex against the region. */
+  const collectAll = (source: string, flags: string): RegExpExecArray[] => {
     const g = new RegExp(source, flags);
     const out: RegExpExecArray[] = [];
     let m: RegExpExecArray | null;
-    while ((m = g.exec(haystack)) !== null) {
+    while ((m = g.exec(region)) !== null) {
       out.push(m);
       if (m.index === g.lastIndex) g.lastIndex++;
     }
@@ -322,21 +353,23 @@ export function parseCrashBlock(text: string): CrashParseResult {
     // "Deeper" is direction-dependent: with most-recent-FIRST the innermost frame
     // is the earliest match, with most-recent-LAST it is the latest.
     //
-    // Compared only WITHIN the custom-node frame's own stack: the region reaches
-    // the end of the tail, so an unrelated traceback printed after the restart
-    // would otherwise pose as the deeper frame and exonerate the node that
-    // actually crashed (gate r1 P1). Both sides are re-picked inside the run so
-    // the two indices are in the same coordinate space.
-    const run = traceRunAround(region, nodeMatch.index);
-    const runNode = pickInnermost(collectAll(CUSTOM_NODE_FRAME.source, CUSTOM_NODE_FRAME.flags, run));
-    const runAny = pickInnermost(collectAll(ANY_FRAME.source, ANY_FRAME.flags, run));
-    if (runAny && runNode) {
-      const path = runAny[1] ?? runAny[3] ?? "";
-      const deeper = mostRecentFirst ? runAny.index < runNode.index : runAny.index > runNode.index;
-      if (deeper && path && !/custom_nodes/i.test(path)) {
-        const f = baseName(path);
-        const l = runAny[2] ?? runAny[4];
-        faultFrame = l ? `${f}:${l}` : f;
+    // Answered only WITHIN the custom-node frame's own stack, because depth is
+    // only meaningful inside one: the region reaches the end of the tail, so an
+    // unrelated traceback printed after the restart would otherwise pose as the
+    // deeper frame and exonerate the node that actually crashed (gate r1 P1).
+    //
+    // Inside one stack the question needs no index arithmetic — the innermost
+    // frame is simply the first or last FRAME LINE, per that stack's own
+    // direction. If it is in a custom node, the node IS the fault site and the
+    // plain verdict stands.
+    const { lines: runLines, start: runStart } = traceRunAround(region, nodeMatch.index);
+    const frames = runLines.map(frameOnLine).filter((f): f is { path: string; line?: string } => f !== null);
+    if (frames.length > 0) {
+      const innerFirst = traceDirectionFor(region, runStart, mostRecentFirst);
+      const innermost = innerFirst ? frames[0] : frames[frames.length - 1];
+      if (!/custom_nodes/i.test(innermost.path)) {
+        const f = baseName(innermost.path);
+        faultFrame = innermost.line ? `${f}:${innermost.line}` : f;
       }
     }
   } else {

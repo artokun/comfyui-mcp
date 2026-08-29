@@ -243,6 +243,39 @@ ValueError: bad input
     expect(note).not.toContain("do not update GoodNode");
   });
 
+  it("#2497 does not read a .py:N inside a SOURCE line as a frame", () => {
+    // The indented line is code, not a frame. Reading `bad.py:99` out of the
+    // string literal invented a non-custom fault site (gate r2 P1).
+    const withSourceLine = [
+      "Segmentation fault",
+      "Traceback (most recent call last):",
+      '  File "/home/u/ComfyUI/custom_nodes/Good/a.py", line 2, in y',
+      '    raise RuntimeError("bad.py:99")',
+    ].join("\n");
+    const r = parseCrashBlock(withSourceLine);
+    expect(r.culpritNode).toBe("Good");
+    expect(r.faultFrame).toBeUndefined();
+  });
+
+  it("#2497 reads trace direction from THIS stack, not a later marker in the tail", () => {
+    // The crash stack is most-recent-call-LAST, so its innermost frame is the
+    // custom node at the bottom. A thread dump printed after the restart carries
+    // a "most recent call first" marker; letting it flip the direction picked
+    // core.py and exonerated the crashing node (gate r2 P1).
+    const flipped = [
+      "Segmentation fault",
+      "Traceback (most recent call last):",
+      '  File "/home/u/ComfyUI/comfy/core.py", line 1, in x',
+      '  File "/home/u/ComfyUI/custom_nodes/Good/a.py", line 2, in y',
+      "[INFO] Comfy is restarting…",
+      "Current thread 0x1 (most recent call first):",
+      '  File "/home/u/ComfyUI/comfy/server.py", line 9 in serve',
+    ].join("\n");
+    const r = parseCrashBlock(flipped);
+    expect(r.culpritNode).toBe("Good");
+    expect(r.faultFrame).toBeUndefined();
+  });
+
   it("#2497 fingerprints on the FATAL region, so added context cannot shift the key", () => {
     // Same crash, different preceding log. If the fingerprint keyed on the
     // displayed block, these would differ and a crash already injected would be
