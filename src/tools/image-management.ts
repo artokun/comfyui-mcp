@@ -211,7 +211,7 @@ export function registerImageManagementTools(server: McpServer): void {
       '- action:"list_outputs" — List recently generated image AND video files from ComfyUI\'s output/ directory, newest-first, with each file\'s kind (\'image\' | \'video\'), subfolder, size, and modification time. Covers stills (.png/.jpg/.jpeg/.bmp) and video/animation outputs (.mp4/.webm/.mov/.mkv/.m4v/.avi/.gif/.webp). LOCAL ComfyUI (COMFYUI_PATH set): a RECURSIVE filesystem scan of output/ — includes subfolders like video/ that VHS/SaveVideo write to, and reports size + modification time. REMOTE ComfyUI: derives the list from /history over HTTP instead (size/modified are unavailable and omitted). It does NOT return the media bytes themselves — fetch those with action:"get". USE THIS TO CONFIRM A VIDEO RENDER (e.g. VHS_VideoCombine / LTX / WAN output) when get_history (action:"list") shows the prompt done but lists no output: VHS-style video nodes write the file but often do NOT register in ComfyUI\'s /history, so the local filesystem scan is the reliable way to verify the .mp4 exists — then chain it with upload_image (action:"stage"). THAT GUARANTEE IS LOCAL-ONLY AND INVERTS ON A REMOTE TARGET: with no disk to scan, this falls back to the very /history that omits those videos, so a REMOTE listing can neither confirm nor deny a VHS video render, and absence from it is NOT evidence the file is missing. Check a specific filename with action:"get" or upload_image (action:"stage") instead — both read /view, straight from the output directory. Every remote result says so in its own text. IT ALSO HAS A SECOND HOLE, ON LOCAL: the scan reads output/ ONLY, and a VHS_VideoCombine with `save_output` unchecked writes its .mp4 (including the "-audio.mp4" the completion names) to ComfyUI\'s temp/ instead — so a finished render can be absent here and still exist. An empty local result says so and names the fix: action:"get" / upload_image (action:"stage") with type:"temp". Read-only.\n' +
       '- action:"convert" — Re-encode a generated image to PNG, JPEG, or WebP and return it inline as an image content block. Source can be a registered asset_id or a path under the local ComfyUI output directory. Optionally writes the converted image back under the output directory and reports source/output size plus bytes saved.\n' +
       '- action:"analyze_color" — Measure the color of a rendered image (not by eye): returns black/white points, contrast (luma std), saturation, per-channel means + cast, and clipping — plus heuristic flags (washedOut, lowContrast, liftedBlacks, dimHighlights, lowSaturation, colorCast) and a one-line verdict. Source = asset_id, a ComfyUI output ref (filename/subfolder/type), or an image path. Pass reference_path to shot-match against a known-good frame (target−reference deltas). Set histogram:true to also get an overlaid R/G/B/luma histogram PNG. Use this to diagnose \'washed out\' objectively and decide a color fix; for a video, extract a frame to PNG first.\n' +
-      '- action:"list_assets" — List recently generated assets, newest-first. Each call first reconciles ComfyUI\'s /history, so outputs are listed even when this session did not watch the render complete (e.g. queued via panel_run, by an earlier session, or before a server restart) — those are tagged source:\'history-reconcile\', versus source:\'watched\' for renders this server saw finish. Returns count + assets (asset_id, prompt_id, filename, url, source, created_at). The registry is ephemeral and clears on server restart; records expire after COMFYUI_ASSET_TTL_HOURS (default 24h), and only the most recent completed runs are reconciled — use get_history (action:\"list\") / action:"get" by filename for anything older.\n' +
+      '- action:"list_assets" — List recently generated assets, newest-first. Each call first reconciles ComfyUI\'s /history, so outputs are listed even when this session did not watch the render complete (e.g. queued via panel_run, by an earlier session, or before a server restart) — those are tagged source:\'history-reconcile\', versus source:\'watched\' for renders this server saw finish. Newly reconciled image refs are checked through /view before registration; stale or unavailable refs are omitted and disclosed in the response note. Returns count + assets (asset_id, prompt_id, filename, url, source, created_at). The registry is ephemeral and clears on server restart; records expire after COMFYUI_ASSET_TTL_HOURS (default 24h), and only the most recent completed runs are reconciled — use get_history (action:\"list\") / action:"get" by filename for anything older.\n' +
       '- action:"asset_metadata" — Get full provenance for a registered asset including the workflow snapshot that produced it. Use this to inspect the parameters that generated an image before calling generate_image (action:"regenerate") with overrides.',
     {
       action: z
@@ -801,8 +801,9 @@ export function registerImageManagementTools(server: McpServer): void {
             // register from history on demand. Best-effort — the registry still
             // answers when ComfyUI is unreachable.
             let note: string | undefined;
+            let reconciliation: Awaited<ReturnType<typeof reconcileAssetsFromHistory>> | undefined;
             try {
-              await reconcileAssetsFromHistory();
+              reconciliation = await reconcileAssetsFromHistory();
             } catch (reconcileErr) {
               const message =
                 reconcileErr instanceof Error
@@ -816,6 +817,13 @@ export function registerImageManagementTools(server: McpServer): void {
                 "they still include assets reconciled from history earlier, and very recent completions may be missing.";
             }
             const records = AssetRegistry.list({ limit: args.limit, since });
+            const skippedUnavailable = reconciliation?.skippedUnavailable ?? 0;
+            if (skippedUnavailable > 0 && note === undefined) {
+              note =
+                skippedUnavailable + " history image output(s) were not listed because ComfyUI /view " +
+                "could not fetch them. Check the filename/subfolder in get_history or try " +
+                'get_image action:"get" directly.';
+            }
             if (records.length === 0 && note === undefined) {
               note =
                 "No assets found — nothing completed under this server's watch and no recent successfully completed outputs in ComfyUI history. " +

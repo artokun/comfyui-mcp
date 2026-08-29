@@ -4,8 +4,10 @@ import { describe, expect, it, beforeEach, vi } from "vitest";
 // payloads. getClient/ensureConnected are imported by job-watcher (same module
 // graph), so the mock must provide them even though reconcile never calls them.
 const getHistoryMock = vi.fn();
+const fetchImageMock = vi.fn();
 vi.mock("../../comfyui/client.js", () => ({
   getHistory: (...a: unknown[]) => getHistoryMock(...a),
+  fetchImage: (...a: unknown[]) => fetchImageMock(...a),
   getClient: vi.fn(),
   ensureConnected: vi.fn(),
 }));
@@ -77,6 +79,8 @@ function historyEntry(opts: EntryOpts) {
 
 beforeEach(() => {
   getHistoryMock.mockReset();
+  fetchImageMock.mockReset();
+  fetchImageMock.mockResolvedValue({ base64: "", mimeType: "image/png" });
   AssetRegistry.configure({ ttlMs: DAY_MS, now: Date.now });
   AssetRegistry.clear();
 });
@@ -90,7 +94,7 @@ describe("reconcileAssetsFromHistory", () => {
 
     const result = await reconcileAssetsFromHistory();
 
-    expect(result).toEqual({ scanned: 1, registered: 1, skippedExisting: 0 });
+    expect(result).toEqual({ scanned: 1, registered: 1, skippedExisting: 0, skippedUnavailable: 0 });
     const [record] = AssetRegistry.list();
     expect(record).toMatchObject({
       promptId: "panel-prompt",
@@ -142,7 +146,7 @@ describe("reconcileAssetsFromHistory", () => {
 
     const result = await reconcileAssetsFromHistory();
 
-    expect(result).toEqual({ scanned: 1, registered: 0, skippedExisting: 1 });
+    expect(result).toEqual({ scanned: 1, registered: 0, skippedExisting: 1, skippedUnavailable: 0 });
     const all = AssetRegistry.list();
     expect(all).toHaveLength(1);
     expect(all[0].assetId).toBe(watched.assetId);
@@ -295,7 +299,7 @@ describe("reconcileAssetsFromHistory", () => {
 
     const result = await reconcileAssetsFromHistory({ maxPrompts: 2 });
 
-    expect(result).toEqual({ scanned: 2, registered: 2, skippedExisting: 0 });
+    expect(result).toEqual({ scanned: 2, registered: 2, skippedExisting: 0, skippedUnavailable: 0 });
     const promptIds = AssetRegistry.list().map((r) => r.promptId).sort();
     expect(promptIds).toEqual(["middle", "newest"]);
   });

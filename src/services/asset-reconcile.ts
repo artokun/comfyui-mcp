@@ -1,4 +1,4 @@
-import { getHistory, type HistoryEntry } from "../comfyui/client.js";
+import { fetchImage, getHistory, type HistoryEntry } from "../comfyui/client.js";
 import { buildCompletionNotification } from "./job-watcher.js";
 import { extractWorkflowGraph } from "./history-select.js";
 import { hasAffirmativeSuccessStatus, historyCompletionTimeMs } from "./job-history.js";
@@ -30,6 +30,8 @@ import { logger } from "../utils/logger.js";
  * misorder — untimed entries are skipped, not guessed). Entries older than
  * the registry TTL register but read as expired immediately — the TTL stays
  * the single source of truth for record lifetime.
+ * Newly reconciled images are also required to be fetchable through ComfyUI's
+ * `/view` before they enter the registry.
  */
 
 export interface ReconcileResult {
@@ -39,6 +41,8 @@ export interface ReconcileResult {
   registered: number;
   /** History outputs already present in the registry (left untouched). */
   skippedExisting: number;
+  /** History image outputs that ComfyUI's /view could not fetch. */
+  skippedUnavailable: number;
 }
 
 /** Only the newest N completed prompts are reconciled per call. */
@@ -64,6 +68,7 @@ export async function reconcileAssetsFromHistory(opts: {
 
   let registered = 0;
   let skippedExisting = 0;
+  let skippedUnavailable = 0;
 
   for (const [promptId, entry] of completed) {
     // Eligibility keys on the HISTORY entry's own status via the shared
@@ -94,20 +99,40 @@ export async function reconcileAssetsFromHistory(opts: {
       continue;
     }
 
-    const fresh = notification.outputs
-      .map((output) => ({
-        node_id: output.node_id,
-        images: output.images.filter((img) => {
-          // Keep the original (watched or earlier-reconciled) record: its
-          // createdAt and any already-handed-out asset_id stay stable.
-          if (AssetRegistry.has(promptId, img)) {
-            skippedExisting++;
-            return false;
-          }
-          return true;
-        }),
-      }))
-      .filter((output) => output.images.length > 0);
+    const fresh = [];
+    for (const output of notification.outputs) {
+      const images = [];
+      for (const img of output.images) {
+        // Keep the original (watched or earlier-reconciled) record: its
+        // createdAt and any already-handed-out asset_id stay stable.
+        if (AssetRegistry.has(promptId, img)) {
+          skippedExisting++;
+          continue;
+        }
+
+        // History can outlive the file it describes (for example, if the
+        // output was moved or cleaned up immediately after completion). The
+        // registry is consumed by get_image (action:"view"), so only add a
+        // newly reconciled image after the same /view fetch succeeds.
+        try {
+          const fetchType =
+            img.type === "input" || img.type === "temp" || img.type === "output" ? img.type : "output";
+          await fetchImage(img.filename, fetchType, img.subfolder);
+        } catch (error) {
+          skippedUnavailable++;
+          logger.debug("Skipping history image that ComfyUI /view could not fetch", {
+            prompt_id: promptId,
+            filename: img.filename,
+            subfolder: img.subfolder,
+            type: img.type,
+            error: error instanceof Error ? error.message : String(error),
+          });
+          continue;
+        }
+        images.push(img);
+      }
+      if (images.length > 0) fresh.push({ node_id: output.node_id, images });
+    }
     if (fresh.length === 0) continue;
 
     const records = AssetRegistry.register({
@@ -121,7 +146,7 @@ export async function reconcileAssetsFromHistory(opts: {
     registered += records.length;
   }
 
-  const result = { scanned: completed.length, registered, skippedExisting };
+  const result = { scanned: completed.length, registered, skippedExisting, skippedUnavailable };
   if (result.registered > 0) {
     logger.info("Reconciled assets from ComfyUI history", result);
   }

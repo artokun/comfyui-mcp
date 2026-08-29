@@ -8,8 +8,10 @@ import { describe, expect, it, beforeEach, vi } from "vitest";
 // to keep their heavier import graphs (sharp, the storage clients) out of this
 // test — the action:"list_assets" branch never calls them.
 const getHistoryMock = vi.fn();
+const fetchImageMock = vi.fn();
 vi.mock("../../comfyui/client.js", () => ({
   getHistory: (...a: unknown[]) => getHistoryMock(...a),
+  fetchImage: (...a: unknown[]) => fetchImageMock(...a),
   getClient: vi.fn(),
   ensureConnected: vi.fn(),
 }));
@@ -114,6 +116,8 @@ function registerWatched(promptId: string, filename: string) {
 
 beforeEach(() => {
   getHistoryMock.mockReset();
+  fetchImageMock.mockReset();
+  fetchImageMock.mockResolvedValue({ base64: "", mimeType: "image/png" });
   AssetRegistry.configure({ ttlMs: 24 * 60 * 60 * 1000, now: Date.now });
   AssetRegistry.clear();
 });
@@ -153,6 +157,23 @@ describe('get_image action:"list_assets" (#751)', () => {
     // The reconciled asset is genuinely registered — get_image (action:"view")
     // and generate_image (action:"regenerate") can resolve it by id afterwards.
     expect(AssetRegistry.get(asset.asset_id)).toBeDefined();
+  });
+
+  it("does not advertise a freshly reconciled history image when /view returns 404 (#2476)", async () => {
+    const successTs = Date.now() - 4000;
+    const filename = "ComfyUI_00002_.png";
+    getHistoryMock.mockResolvedValue({
+      "fresh-missing-output": panelHistoryEntry(13, "fresh-missing-output", filename, successTs),
+    });
+    fetchImageMock.mockRejectedValue(new Error(`IMAGE_NOT_FOUND: /view returned 404 for "${filename}"`));
+
+    const out = await callListAssets({ limit: 20 });
+
+    expect(fetchImageMock).toHaveBeenCalledWith(filename, "output", "");
+    expect(out.count).toBe(0);
+    expect(out.assets).toEqual([]);
+    expect(out.note).toContain("not listed");
+    expect(out.note).toContain("/view");
   });
 
   it("keeps watched registrations truthful and does not duplicate them", async () => {
