@@ -4709,13 +4709,21 @@ async function settleDroppedEnqueue(
 }
 
 /**
- * #1699 — a drained Manager queue is not apply_manifest completion when
- * custom_nodes were never submitted. Keep the panel payload parseable (do not
- * append prose after the JSON) and name the leftover entries on the object.
+ * #1699/#1129 — a drained Manager queue is not apply_manifest completion when
+ * custom_nodes were never submitted or a submitted operation is unresolved.
+ * Keep the panel payload parseable (do not append prose after the JSON) and
+ * name the outstanding entries on the object.
  */
 function annotateQueueStatusWithManifestPartial(res: ToolResult): ToolResult {
   const leftover = getManifestPartialLeftover();
-  if (!leftover || leftover.not_started.length === 0) return res;
+  if (
+    !leftover ||
+    (leftover.not_started.length === 0 &&
+      leftover.still_installing.length === 0 &&
+      (leftover.outcome_unknown?.length ?? 0) === 0)
+  ) {
+    return res;
+  }
   if (res.isError) return res;
   const parsed = parseToolResultJson(res);
   if (!parsed) return appendNote(res, formatQueueStatusPartialNote(leftover));
@@ -22779,9 +22787,9 @@ CHECKED FOR YOU: the graph read this message prescribes was just run, and it ` +
       "Check the built-in Manager's install/update queue status (to see if a queued install finished). Read-only. " +
         "A drained queue (total_count: 0, is_processing: false) only means THIS queue is idle — " +
         "it does not include apply_manifest custom_nodes that were never submitted (#1699). " +
-        "When apply_manifest returned a PARTIAL INSTALL, this tool names the leftover entries and " +
-        "sets queue_complete_for_apply_manifest:false; do not restart ComfyUI until those are " +
-        "submitted (re-run apply_manifest).",
+        "When apply_manifest returned a PARTIAL INSTALL, this tool names the outstanding entries and " +
+        "sets queue_complete_for_apply_manifest:false; do not treat queue idle as completion until " +
+        "those entries are verified (re-run apply_manifest only when the result authorizes it).",
       {},
       async (_args, ctx) => {
         const res = await ctx.call({ cmd: "nodes_queue_status" }, 20000);

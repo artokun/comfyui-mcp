@@ -268,6 +268,7 @@ function stubFetch(opts: {
   managerQueueStatus?:
     | "absent"
     | "manager-unavailable"
+    | "manager-unavailable-null"
     | "manager-unavailable-explicit"
     | "malformed"
     | "timeout"
@@ -360,6 +361,11 @@ function stubFetch(opts: {
         if (opts.queueOpEmpty && isInstallOp) {
           opts.onQueue?.();
           return new Response("", { status: 200 });
+        }
+        if (opts.managerQueueStatus === "manager-unavailable-null") {
+          // A JSON null is a successful response with no queue evidence. It
+          // must take the same fail-closed path as the empty 200 body.
+          return jsonResponse(null);
         }
         // A 405 on the unified task route is retried through v2-batch; model
         // that downgrade as an acknowledged enqueue for the existing race
@@ -879,7 +885,10 @@ describe("node-management service", () => {
 
     it("fails closed when a warm dialect cache later returns an empty queue status", async () => {
       const fetchOptions = {
-        managerQueueStatus: undefined as "manager-unavailable" | undefined,
+        managerQueueStatus: undefined as
+          | "manager-unavailable"
+          | "manager-unavailable-null"
+          | undefined,
       };
       const { calls } = stubFetch(fetchOptions);
 
@@ -924,6 +933,51 @@ describe("node-management service", () => {
       expect(calls.some((c) => c.url.endsWith("/v2/manager/queue/task"))).toBe(true);
       expect(calls.some((c) => c.url.endsWith("/v2/manager/queue/start"))).toBe(true);
       expect(calls.some((c) => c.url.endsWith("/manager/queue/status"))).toBe(true);
+    });
+
+    it("preserves UNKNOWN in production apply_manifest after a warm cached enqueue sees JSON null status (#1129)", async () => {
+      const fetchOptions = {
+        managerQueueStatus: undefined as "manager-unavailable-null" | undefined,
+      };
+      const { calls } = stubFetch(fetchOptions);
+
+      // Warm the real Manager dialect cache, then make both queue/status
+      // dialects answer JSON null. The custom-node enqueue still returns an
+      // acknowledgement, so apply_manifest must report UNKNOWN/pending rather
+      // than converting the tagged error into failed or authorizing a clone.
+      await installModelViaManager({
+        name: "warmup.safetensors",
+        url: "https://example.com/warmup.safetensors",
+        filename: "warmup.safetensors",
+        type: "checkpoints",
+      });
+      fetchOptions.managerQueueStatus = "manager-unavailable-null";
+
+      const started = Date.now();
+      const result = await applyManifest({
+        manifest: {
+          custom_nodes: ["https://github.com/teskor-hub/comfyui-teskors-utils"],
+        },
+      });
+
+      expect(Date.now() - started).toBeLessThan(1000);
+      expect(result.success).toBe(false);
+      expect(result.summary).toMatchObject({ applied: 0, failed: 0, pending: 1 });
+      expect(result.results[0]).toMatchObject({
+        action: "custom_node",
+        status: "pending",
+      });
+      expect(result.results[0].message).toMatch(/outcome is UNKNOWN/i);
+      expect(result.results[0].message).toMatch(/no local fallback is authorized/i);
+      expect(result.partial).toMatchObject({
+        not_started: [],
+        still_installing: ["https://github.com/teskor-hub/comfyui-teskors-utils"],
+        outcome_unknown: ["https://github.com/teskor-hub/comfyui-teskors-utils"],
+      });
+      expect(calls.some((c) => c.url.endsWith("/v2/manager/queue/task"))).toBe(true);
+      expect(
+        mockedExec.mock.calls.find((c) => c[0] === "git" && (c[1] as string[])[0] === "clone"),
+      ).toBeUndefined();
     });
 
     it("#1129 falls back when both queue-status dialects repeatedly answer empty", async () => {

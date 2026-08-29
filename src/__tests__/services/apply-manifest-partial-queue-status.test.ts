@@ -31,6 +31,7 @@ import {
   clearManifestPartialLeftover,
   describeManifestSource,
   getManifestPartialLeftover,
+  recordManifestPartial,
 } from "../../services/manifest-partial.js";
 import { WorkflowTargetStore } from "../../services/workflow-target-store.js";
 import {
@@ -178,5 +179,41 @@ describe("apply_manifest leftover + panel_node_queue_status (#1699)", () => {
     const { parsed } = await queueStatus();
     expect(parsed?.queue_complete_for_apply_manifest).toBeUndefined();
     expect(parsed?.apply_manifest_partial).toBeUndefined();
+  });
+
+  it("retains submitted UNKNOWN entries when no custom_node was left unsubmitted (#1129)", async () => {
+    const id = "https://github.com/example/ambiguous-pack";
+    const partial = buildManifestPartial({
+      source: "this inline manifest",
+      notStarted: [],
+      stillInstalling: [id],
+      outcomeUnknown: [id],
+    });
+
+    expect(partial).not.toBeNull();
+    expect(partial).toMatchObject({
+      not_started: [],
+      still_installing: [id],
+      outcome_unknown: [id],
+    });
+    expect(partial?.message).toMatch(/outcome is UNKNOWN/i);
+    expect(partial?.message).toMatch(/no local direct-install fallback is authorized/i);
+
+    recordManifestPartial(partial);
+    expect(getManifestPartialLeftover()).toMatchObject({
+      not_started: [],
+      still_installing: [id],
+      outcome_unknown: [id],
+    });
+
+    const { text, parsed } = await queueStatus();
+    expect(parsed?.queue_complete_for_apply_manifest).toBe(false);
+    expect(parsed?.apply_manifest_partial).toMatchObject({
+      not_started: [],
+      still_installing: [id],
+      outcome_unknown: [id],
+    });
+    expect(text).toMatch(/UNKNOWN/i);
+    expect(text).toMatch(/no local direct-install fallback is authorized/i);
   });
 });

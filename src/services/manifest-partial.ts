@@ -3,12 +3,13 @@
  *
  * The ComfyUI-Manager queue only knows about tasks it was given. When
  * apply_manifest's time budget expires, later custom_nodes are reported
- * "pending" / "not started" and are NEVER enqueued. panel_node_queue_status
- * then reports a drained queue (total_count: 0, is_processing: false) which
- * agents read as "all installs finished". This module is the process-local
- * record of those unsubmitted names so apply_manifest (which names the
- * PARTIAL INSTALL) and panel_node_queue_status (which refuses to look
- * complete while they remain) share one source of truth.
+ * "pending" / "not started" and are NEVER enqueued; an accepted-but-ambiguous
+ * operation can also remain unresolved. panel_node_queue_status then reports a
+ * drained queue (total_count: 0, is_processing: false) which agents read as
+ * "all installs finished". This module is the process-local record of both
+ * unsubmitted and unresolved names so apply_manifest (which names the PARTIAL
+ * INSTALL) and panel_node_queue_status (which refuses to look complete while
+ * they remain) share one source of truth.
  */
 
 export interface ManifestPartialInstall {
@@ -33,7 +34,10 @@ let leftover: ManifestPartialInstall | null = null;
 
 export function recordManifestPartial(partial: ManifestPartialInstall | null): void {
   leftover =
-    partial && partial.not_started.length > 0
+    partial &&
+    (partial.not_started.length > 0 ||
+      partial.still_installing.length > 0 ||
+      (partial.outcome_unknown?.length ?? 0) > 0)
       ? {
           ...partial,
           not_started: [...partial.not_started],
@@ -115,11 +119,11 @@ export function buildManifestPartial(opts: {
   stillInstalling: string[];
   outcomeUnknown?: string[];
 }): ManifestPartialInstall | null {
-  if (opts.notStarted.length === 0) return null;
-  const names = opts.notStarted.join(", ");
   const outcomeUnknown = (opts.outcomeUnknown ?? []).filter((id) =>
     opts.stillInstalling.includes(id),
   );
+  if (opts.notStarted.length === 0 && opts.stillInstalling.length === 0) return null;
+  const names = opts.notStarted.join(", ");
   const still = opts.stillInstalling.length
     ? outcomeUnknown.length
       ? ` Still unresolved: ${opts.stillInstalling.join(", ")}. For ${outcomeUnknown.join(", ")}, ` +
@@ -128,6 +132,16 @@ export function buildManifestPartial(opts: {
       : ` Still installing (ON the queue, pollable): ${opts.stillInstalling.join(", ")}.`
     : "";
   const n = opts.notStarted.length;
+  const unsubmitted =
+    n > 0
+      ? `${n} custom_node ${n === 1 ? "entry was" : "entries were"} NEVER submitted to ` +
+        `ComfyUI-Manager (${names}). panel_node_queue_status going idle does NOT ` +
+        `mean they installed — they are not on that queue. Do not restart ComfyUI ` +
+        `yet. Re-run apply_manifest with the same pack/path/manifest to submit the ` +
+        `remaining entries.`
+      : `No custom_node entries were left unsubmitted, but the submitted entries ` +
+        `below remain unresolved; panel_node_queue_status going idle does NOT prove ` +
+        `this apply_manifest completed.`;
   return {
     kind: "custom_nodes_not_started",
     source: opts.source,
@@ -135,23 +149,24 @@ export function buildManifestPartial(opts: {
     still_installing: [...opts.stillInstalling],
     ...(outcomeUnknown.length ? { outcome_unknown: [...outcomeUnknown] } : {}),
     message:
-      `PARTIAL INSTALL of ${opts.source}: ${n} custom_node ` +
-      `${n === 1 ? "entry was" : "entries were"} NEVER submitted to ` +
-      `ComfyUI-Manager (${names}). panel_node_queue_status going idle does NOT ` +
-      `mean they installed — they are not on that queue. Do not restart ComfyUI ` +
-      `yet. Re-run apply_manifest with the same pack/path/manifest to submit the ` +
-      `remaining entries.` +
+      `PARTIAL INSTALL of ${opts.source}: ${unsubmitted}` +
       still,
   };
 }
 
 export function formatQueueStatusPartialNote(partial: ManifestPartialInstall): string {
-  return (
-    `WARNING — PARTIAL INSTALL, QUEUE DRAIN IS NOT COMPLETION. apply_manifest of ` +
-    `${partial.source} never submitted: ${partial.not_started.join(", ")}. ` +
-    `Those entries are NOT on the ComfyUI-Manager queue, so this status (even ` +
-    `total_count: 0 / is_processing: false) cannot account for them. Re-run ` +
-    `apply_manifest to submit the remaining custom_nodes. Do not restart ComfyUI ` +
-    `until those entries report applied or skipped.`
-  );
+  const unsubmitted = partial.not_started.length
+    ? `apply_manifest of ${partial.source} never submitted: ${partial.not_started.join(", ")}. ` +
+      `Those entries are NOT on the ComfyUI-Manager queue, so this status cannot ` +
+      `account for them. Re-run apply_manifest to submit the remaining custom_nodes.`
+    : "No entries were left unsubmitted, but submitted entries remain unresolved.";
+  const unresolved = partial.still_installing.length
+    ? ` Unresolved submitted entries: ${partial.still_installing.join(", ")}.` +
+      (partial.outcome_unknown?.length
+        ? ` For ${partial.outcome_unknown.join(", ")}, the install outcome is UNKNOWN; ` +
+          `no local direct-install fallback is authorized and queue idle is not proof ` +
+          `of completion. Verify the custom_nodes directory before reissuing.`
+        : " Do not treat queue idle as proof that this apply_manifest completed.")
+    : "";
+  return `WARNING — PARTIAL INSTALL, QUEUE DRAIN IS NOT COMPLETION. ${unsubmitted}${unresolved}`;
 }

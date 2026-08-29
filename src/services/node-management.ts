@@ -561,7 +561,10 @@ function looksLikeManagerUnavailableResponse(body: unknown): boolean {
 
 function managerQueueResponseKind(body: unknown): ManagerQueueStatusKind {
   if (looksLikeQueueStatus(body)) return "queue";
-  if (body === undefined) return "empty";
+  // A successful JSON `null` is the same absence of queue evidence as a 200
+  // with no body. Treat both as empty so a warm cached dialect cannot poll
+  // until timeout and then invite a re-issue (#1129).
+  if (body === undefined || body === null) return "empty";
   if (looksLikeManagerUnavailableResponse(body)) return "unavailable";
   return "malformed";
 }
@@ -1389,7 +1392,11 @@ async function runManagerQueue(
       base,
       soft: true,
       onSoftResponse: (body) => {
-        emptyStatusResponse = body === undefined;
+        // managerFetch preserves JSON null, so it must be fail-closed exactly
+        // like an empty successful body. Otherwise a stale warm-cache install
+        // waits for the full queue budget instead of being classified as an
+        // ambiguous outcome immediately.
+        emptyStatusResponse = body === undefined || body === null;
       },
     });
     if (emptyStatusResponse) {

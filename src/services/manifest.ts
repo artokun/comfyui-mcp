@@ -260,9 +260,9 @@ export interface ApplyManifestResult {
   summary: Record<ManifestItemStatus, number>;
   results: ManifestItemReport[];
   /**
-   * Present only when some custom_nodes were never submitted to ComfyUI-Manager
-   * (#1699). Names the PARTIAL INSTALL. A drained Manager queue does not include
-   * these entries — re-run apply_manifest to submit them.
+   * Present when custom_nodes were never submitted or a submitted operation
+   * remains unresolved (#1699/#1129). Names the PARTIAL INSTALL. A drained
+   * Manager queue does not by itself account for these entries.
    */
   partial?: ManifestPartialInstall;
 }
@@ -1012,6 +1012,21 @@ async function resolveLocalManifestCustomNodesBase(): Promise<string | undefined
   }
 }
 
+/**
+ * Manager can report a successful-but-empty enqueue or an empty queue/status
+ * response after a warm dialect cache. Both are deliberately tagged UNKNOWN
+ * by node-management: the request may already have reached the host, so no
+ * caller may reissue it or authorize a local clone. Keep that meaning intact
+ * when apply_manifest assembles its structured per-item result.
+ */
+function isUnknownManagerInstallOutcome(err: unknown): boolean {
+  if (!err || typeof err !== "object") return false;
+  const details = (err as { details?: unknown }).details;
+  if (!details || typeof details !== "object") return false;
+  const kind = (details as { kind?: unknown }).kind;
+  return kind === "manager-enqueue-empty-success" || kind === "manager-queue-empty-status";
+}
+
 async function applyManifestSections(
   manifest: ComfyManifest,
   localRoots: {
@@ -1237,12 +1252,23 @@ async function applyManifestSections(
       continue;
     }
     if (outcome.kind === "error") {
+      const message =
+        outcome.err instanceof Error ? outcome.err.message : String(outcome.err);
+      if (isUnknownManagerInstallOutcome(outcome.err)) {
+        // UNKNOWN is an unsettled, fail-closed result, not a hard failure. The
+        // Manager may have accepted the task; preserve the no-reissue/no-clone
+        // disclosure and keep it visible to panel_node_queue_status.
+        stillInstalling.push(id);
+        outcomeUnknown.push(id);
+        results.push(report("custom_node", id, "pending", message));
+        continue;
+      }
       results.push(
         report(
           "custom_node",
           id,
           "failed",
-          outcome.err instanceof Error ? outcome.err.message : String(outcome.err),
+          message,
         ),
       );
       continue;
