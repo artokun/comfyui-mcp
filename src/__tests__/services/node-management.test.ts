@@ -794,6 +794,50 @@ describe("node-management service", () => {
       ).toBeDefined();
     });
 
+    it("invalidates a warm dialect cache when enqueue/status routes become empty", async () => {
+      const fetchOptions = {
+        managerQueueStatus: undefined as "manager-unavailable" | undefined,
+      };
+      const { calls } = stubFetch(fetchOptions);
+
+      // Warm the production dialect cache through a real Manager operation.
+      await installModelViaManager({
+        name: "warmup.safetensors",
+        url: "https://example.com/warmup.safetensors",
+        filename: "warmup.safetensors",
+        type: "checkpoints",
+      });
+      fetchOptions.managerQueueStatus = "manager-unavailable";
+
+      let cloned = false;
+      mockedExists.mockImplementation((p: unknown) => {
+        const s = String(p);
+        if (s.includes("requirements.txt") || s.includes("install.py")) return false;
+        if (s.includes(".venv") || s.includes("cm-cli.py")) return false;
+        if (s.includes(NODE_DIR_UTILS) || s.endsWith("comfyui-teskors-utils")) return cloned;
+        return false;
+      });
+      mockedExec.mockImplementation(((bin: string, args: string[]) => {
+        if (bin === "git" && args[0] === "clone") cloned = true;
+        return "";
+      }) as never);
+
+      const res = await installCustomNode({
+        id: "https://github.com/teskor-hub/comfyui-teskors-utils",
+        source: "git",
+      });
+
+      expect(res.mechanism).toBe("git-clone");
+      expect(res.message).toMatch(/queue\/status surface was unavailable/);
+      expect(res.message).toMatch(/before any install task was submitted/);
+      expect(
+        mockedExec.mock.calls.find((c) => c[0] === "git" && (c[1] as string[])[0] === "clone"),
+      ).toBeDefined();
+      // The first empty status must invalidate the warm v2 classification and
+      // probe the alternate dialect before authorizing the local fallback.
+      expect(calls.some((c) => c.url.endsWith("/manager/queue/status"))).toBe(true);
+    });
+
     it("#1129 falls back when both queue-status dialects repeatedly answer empty", async () => {
       stubFetch({ managerQueueStatus: "manager-unavailable" });
       let cloned = false;

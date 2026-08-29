@@ -1384,10 +1384,17 @@ async function runManagerQueue(
   let lastStatus: QueueStatus | undefined;
   while (Date.now() - start < timeoutMs) {
     await sleep(queueTiming.pollIntervalMs);
+    let emptyStatusResponse = false;
     const status = await managerFetch<QueueStatus>(`${prefix}/status`, {
       base,
       soft: true,
+      onSoftResponse: (body) => {
+        emptyStatusResponse = body === undefined;
+      },
     });
+    if (emptyStatusResponse) {
+      await reclassifyAfterEmptyQueueStatus(api, kind, base);
+    }
     if (status) {
       lastStatus = status;
       // Manager defines total_count = done + in_progress + queued. The queue
@@ -1422,6 +1429,44 @@ async function runManagerQueue(
           `automatically, and size-verified before anything is reported as landed.`
         : `The Manager worker may still be running the task on the host; check its state before retrying.`),
     lastStatus,
+  );
+}
+
+/**
+ * A warm dialect cache can send an enqueue and queue-start request to a local
+ * ComfyUI whose Manager surface has since disappeared. Those routes may answer
+ * 2xx with empty bodies, so there is no enqueue HTTP error for the existing
+ * dialect self-heal to see. An empty queue/status response is the first
+ * production-path signal that the cached classification may be stale: clear it
+ * and classify the live server before waiting for the queue timeout.
+ *
+ * If a different usable dialect is found, the earlier empty enqueue is
+ * ambiguous and must not be re-sent. If both dialects remain empty/unavailable,
+ * detectManagerApi() preserves the queue-status evidence that the git-install
+ * fallback is allowed to re-check. Every other probe failure remains fail-closed.
+ */
+async function reclassifyAfterEmptyQueueStatus(
+  used: ManagerApi,
+  kind: ManagerTaskKind | undefined,
+  base: string,
+): Promise<never> {
+  // Do not discard a newer classification another operation may have committed
+  // after this operation captured `used`. If the cache is already absent, the
+  // detector below will perform the needed fresh probe without another epoch
+  // bump; if it names another dialect, it is already the reclassification we
+  // need to observe.
+  if (getCachedManagerApi(base) === used) {
+    resetManagerApiCache(
+      `Manager queue/status returned an empty successful response on the cached "${used}" dialect`,
+    );
+  }
+  const fresh = await detectManagerApi(base);
+  throw new NodeManagementError(
+    `ComfyUI-Manager queue/status returned an empty successful response while the cached ` +
+      `"${used}" dialect was in use. The live server reclassified as "${fresh}", but the ` +
+      `${kind ?? "Manager"} enqueue outcome is UNKNOWN and was NOT retried automatically. ` +
+      `Verify whether it took effect before reissuing it.`,
+    { kind: "manager-queue-empty-status", base, used, fresh },
   );
 }
 
@@ -3588,6 +3633,24 @@ export interface InstallOptions {
   managerBase?: string;
   /** Monotonic ComfyUI target generation captured with managerBase. */
   targetGeneration?: number;
+  /**
+   * Internal apply_manifest phase hook. Called once when this operation has
+   * selected its local git fallback, before it waits for the local writer lock.
+   * It is observational only and does not change the install decision.
+   */
+  onLocalFallback?: () => void;
+}
+
+function notifyLocalFallbackSelected(opts: InstallOptions): void {
+  try {
+    opts.onLocalFallback?.();
+  } catch (err) {
+    // This is an observational hook used by apply_manifest; a reporting
+    // callback must never prevent the selected local fallback from running.
+    logger.debug("Ignoring local fallback phase-hook failure", {
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
 }
 
 /**
@@ -3934,6 +3997,7 @@ async function installCustomNodeImpl(
           wrongInstallRefusal(localWriteMismatch, 'install_custom_node (action:"install", git clone)', managerBase),
         );
       }
+      if (!isRemoteMode()) notifyLocalFallbackSelected(opts);
       const managerUnavailable =
         refusedBy === undefined &&
         isManagerQueueDetectionFailure(err) &&
@@ -4001,6 +4065,7 @@ async function installCustomNodeImpl(
         wrongInstallRefusal(localWriteMismatch, 'install_custom_node (action:"install", git clone)', managerBase),
       );
     }
+    if (!isRemoteMode()) notifyLocalFallbackSelected(opts);
     const clone = () => cloneCustomNodeFallback(gitId, repoName, gitRef, status, cliWorkspace, {
       refFromVersion,
       allowSharedWorkspaceFallback: cliWorkspace !== undefined,

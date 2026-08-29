@@ -55,6 +55,7 @@ import { logger } from "../utils/logger.js";
 import {
   buildManifestPartial,
   describeManifestSource,
+  formatLocalFallbackMessage,
   formatNotStartedMessage,
   formatStillInstallingMessage,
   recordManifestPartial,
@@ -74,7 +75,8 @@ function manifestDownloadGraceMs(): number {
  *  big pack. Blocking apply_manifest until it drains blows past the MCP tools/call
  *  timeout (300s) and the caller sees a FALSE failure while the Manager keeps
  *  installing (#489). Bounding the phase well under that cap lets us hand back a
- *  "pending" result (poll the Manager queue) instead. Env-tunable; default 240s. */
+ *  "pending" result (poll the Manager queue when the operation really is
+ *  server-side). Env-tunable; default 240s. */
 function manifestNodeBudgetMs(): number {
   const raw = Number(process.env.COMFYUI_MCP_MANIFEST_NODE_BUDGET_MS);
   return Number.isFinite(raw) && raw > 0 ? raw : 240_000;
@@ -1118,8 +1120,9 @@ async function applyManifestSections(
   // tools/call timeout (300s) and the caller sees a FALSE failure while the
   // Manager keeps installing. So we mirror the model-download grace pattern:
   // install sequentially, but RACE each install against the remaining budget. If
-  // the budget wins, the install keeps running SERVER-SIDE (we stop awaiting it,
-  // swallowing its late result) and is reported "pending" — never failed — and
+  // the budget wins, the install keeps running either SERVER-SIDE or as a local
+  // fallback (we stop awaiting it, swallowing its late result) and is reported
+  // "pending" — never failed — and
   // every not-yet-started node is reported "pending" too.
   //
   // #1699: a "not started" pending is NOT on the Manager queue. Telling the
@@ -1185,6 +1188,7 @@ async function applyManifestSections(
     // Thread the call-scoped DATA/base (no global config mutation) so the
     // git-clone / ref-checkout fallback writes into the tree the runtime scans
     // (#1715/#1770). Pip uses codeBase independently above.
+    let localFallbackSelected = false;
     const installOutcome = installCustomNode({
       id,
       ...(customNodesBase ? { comfyuiPath: customNodesBase } : {}),
@@ -1193,18 +1197,26 @@ async function applyManifestSections(
         : {}),
       managerBase,
       targetGeneration,
+      onLocalFallback: () => {
+        localFallbackSelected = true;
+      },
     })
       .then((res) => ({ kind: "settled" as const, res }))
       .catch((err) => ({ kind: "error" as const, err }));
     const outcome = await raceDeadline(installOutcome, nodeDeadline);
 
     if (outcome === BUDGET_TIMEOUT) {
-      // Budget spent mid-install: leave it running server-side (installOutcome
-      // already has a .catch, so its eventual settle is safely ignored) and stop
-      // blocking on the remaining nodes.
+      // Budget spent mid-install: leave it running, but distinguish a local
+      // direct fallback from a Manager task. Both promises already have a
+      // .catch, so their eventual settle is safely ignored; only the Manager
+      // case belongs in stillInstalling and the queue-polling message.
       nodeBudgetSpent = true;
-      stillInstalling.push(id);
-      results.push(report("custom_node", id, "pending", formatStillInstallingMessage()));
+      if (localFallbackSelected) {
+        results.push(report("custom_node", id, "pending", formatLocalFallbackMessage()));
+      } else {
+        stillInstalling.push(id);
+        results.push(report("custom_node", id, "pending", formatStillInstallingMessage()));
+      }
       continue;
     }
     if (outcome.kind === "error") {

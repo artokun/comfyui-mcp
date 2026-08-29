@@ -971,12 +971,15 @@ describe("applyManifest", () => {
       ["pip", "install", "--python", `${codeRoot}/python`, "numpy"],
       expect.objectContaining({ cwd: codeRoot }),
     );
-    expect(installCustomNodeMock).toHaveBeenCalledWith({
+    expect(installCustomNodeMock).toHaveBeenCalledWith(expect.objectContaining({
       id: "split-root-pack",
       comfyuiPath: dataRoot,
       managerBase: "http://127.0.0.1:8188",
       targetGeneration: 0,
-    });
+    }));
+    expect(installCustomNodeMock).toHaveBeenCalledWith(
+      expect.objectContaining({ onLocalFallback: expect.any(Function) }),
+    );
     expect(installInterpreterMock).not.toHaveBeenCalledWith(dataRoot);
   });
 
@@ -1601,6 +1604,44 @@ describe("applyManifest", () => {
     }
   });
 
+  it("does not call a local fallback queued server-side when the node budget wins", async () => {
+    const prevBudget = process.env.COMFYUI_MCP_MANIFEST_NODE_BUDGET_MS;
+    process.env.COMFYUI_MCP_MANIFEST_NODE_BUDGET_MS = "40";
+    installCustomNodeMock.mockImplementationOnce(
+      (opts: { onLocalFallback?: () => void }) => {
+        opts.onLocalFallback?.();
+        return new Promise(() => {});
+      },
+    );
+
+    try {
+      const result = await applyManifest({
+        manifest: {
+          custom_nodes: [
+            "https://github.com/example/local-fallback-pack",
+            "next-pack",
+          ],
+        },
+      });
+
+      expect(result.summary).toMatchObject({ applied: 0, failed: 0, pending: 2 });
+      expect(result.results[0].message).toMatch(/local direct-install fallback/i);
+      expect(result.results[0].message).toMatch(/NOT queued server-side/i);
+      expect(result.results[0].message).toMatch(/NOT on the ComfyUI-Manager queue/i);
+      expect(result.results[0].message).not.toMatch(/poll panel_node_queue_status/i);
+      expect(result.partial).toMatchObject({
+        not_started: ["next-pack"],
+        still_installing: [],
+      });
+      expect(installCustomNodeMock).toHaveBeenCalledWith(
+        expect.objectContaining({ onLocalFallback: expect.any(Function) }),
+      );
+    } finally {
+      if (prevBudget === undefined) delete process.env.COMFYUI_MCP_MANIFEST_NODE_BUDGET_MS;
+      else process.env.COMFYUI_MCP_MANIFEST_NODE_BUDGET_MS = prevBudget;
+    }
+  });
+
   it("clears leftover not-started names when a later apply submits everything (#1699)", async () => {
     const prevBudget = process.env.COMFYUI_MCP_MANIFEST_NODE_BUDGET_MS;
     process.env.COMFYUI_MCP_MANIFEST_NODE_BUDGET_MS = "40";
@@ -1914,11 +1955,11 @@ describe("applyManifest", () => {
       expect(byAction.pip.status).toBe("skipped");
       expect(execFileSyncMock).not.toHaveBeenCalled();
       // custom_nodes still go through the Manager HTTP install (remote-ok).
-      expect(installCustomNodeMock).toHaveBeenCalledWith({
+      expect(installCustomNodeMock).toHaveBeenCalledWith(expect.objectContaining({
         id: "x",
         managerBase: "http://127.0.0.1:8188",
         targetGeneration: 0,
-      });
+      }));
       // models route through installModelViaManager, NOT the local downloadModel.
       expect(downloadModelMock).not.toHaveBeenCalled();
       expect(installModelViaManagerMock).toHaveBeenCalledWith({

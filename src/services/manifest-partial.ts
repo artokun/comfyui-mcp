@@ -76,6 +76,16 @@ export function formatStillInstallingMessage(): string {
   );
 }
 
+export function formatLocalFallbackMessage(): string {
+  return (
+    "A local direct-install fallback is still in progress in this MCP process when the " +
+    "apply_manifest time budget elapsed. This is NOT queued server-side work and is NOT " +
+    "on the ComfyUI-Manager queue. Do not use Manager queue status to track this local " +
+    "work or re-issue this node while the fallback is running; verify the custom_nodes " +
+    "directory after it finishes."
+  );
+}
+
 export function buildManifestPartial(opts: {
   source: string;
   notStarted: string[];
