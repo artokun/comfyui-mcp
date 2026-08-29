@@ -285,9 +285,15 @@ export function panelLockPath(): string {
   );
 }
 
-/** Default acquisition budget. Callers that must not block (the fire-and-forget
- *  on-load ensure) pass something much shorter. */
-const DEFAULT_ACQUIRE_MS = 60_000;
+/**
+ * Default acquisition budget for a guarded mutation. It must cover the
+ * longest operation that can validly hold this cross-process lock: Manager and
+ * comfy-cli node operations are bounded at 10 minutes, while direct git work
+ * is bounded at 3 minutes. Keep a small margin for the final filesystem work
+ * and the 100 ms polling cadence. Callers that must not block (the
+ * fire-and-forget on-load ensure) pass something much shorter.
+ */
+const DEFAULT_ACQUIRE_MS = 10 * 60_000 + 30_000;
 
 const POLL_MS = 100;
 
