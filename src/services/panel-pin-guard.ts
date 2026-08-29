@@ -286,14 +286,18 @@ export function panelLockPath(): string {
 }
 
 /**
- * Default acquisition budget for a guarded mutation. It must cover the
- * longest operation that can validly hold this cross-process lock: Manager and
- * comfy-cli node operations are bounded at 10 minutes, while direct git work
- * is bounded at 3 minutes. Keep a small margin for the final filesystem work
- * and the 100 ms polling cadence. Callers that must not block (the
- * fire-and-forget on-load ensure) pass something much shorter.
+ * Default acquisition budget for a guarded mutation. This lock has NO expiry:
+ * the owner holds it until its callback returns, and only a proven dead owner
+ * can take the abandoned-lock recovery path. The budget is for a WAITER.
+ *
+ * The longest current local custom-node writer can spend 1,260s in git command
+ * ceilings (clone plus the version/ref probes and checkout) and another 1,200s
+ * in the sequential requirements.txt and install.py ceilings: 2,460s total.
+ * Give a valid concurrent writer 60s for final filesystem work and polling.
+ * Callers that must not block (the fire-and-forget on-load ensure) pass a much
+ * shorter explicit budget.
  */
-const DEFAULT_ACQUIRE_MS = 10 * 60_000 + 30_000;
+const DEFAULT_ACQUIRE_MS = 42 * 60_000;
 
 const POLL_MS = 100;
 

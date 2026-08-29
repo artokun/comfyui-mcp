@@ -63,21 +63,24 @@ function stopChild(run: ChildRun): void {
 }
 
 describe("panel mutation lock across processes", () => {
-  it("waits for a slow holder beyond the old 60s default", async () => {
+  it("waits for a holder near the full local install ceiling", async () => {
     const dir = mkdtempSync(join(tmpdir(), "cmcp-lock-cross-process-"));
     const lockPath = join(dir, "panel-op.lock");
     const moduleUrl = JSON.stringify(
       pathToFileURL(resolve(process.cwd(), "src/services/panel-pin-guard.ts")).href,
     );
-    // Scale only the waiter's Date.now clock. A 1.5s real holder represents
-    // 150s of the production budget, so the old 60s default fails in ~600ms;
-    // the corrected 630s default still waits for the live holder to release.
-    const clockRate = 100;
+    // Scale only the waiter's Date.now clock. A 4s real holder represents
+    // 2,400s of production budget: close to the 2,460s worst-case writer
+    // contract (clone/ref git ceilings plus requirements.txt and install.py).
+    // The old 630s budget fails after ~1.05s; the corrected 2,520s budget still
+    // waits for the live holder to release.
+    const clockRate = 600;
+    const holderDurationMs = 4_000;
     const holder = spawnLockChild(
       `import { withPanelMutationLock } from ${moduleUrl};
        await withPanelMutationLock(async () => {
          console.log("holder-acquired");
-         await new Promise((resolve) => setTimeout(resolve, 1500));
+         await new Promise((resolve) => setTimeout(resolve, ${holderDurationMs}));
          console.log("holder-releasing");
        });`,
       lockPath,
