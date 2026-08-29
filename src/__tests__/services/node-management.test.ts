@@ -256,6 +256,8 @@ function stubFetch(opts: {
   queueOpBody?: string;
   /** Return an empty successful body for a custom-node install enqueue. */
   queueOpEmpty?: boolean;
+  /** Return JSON null for a custom-node install enqueue. */
+  queueOpNull?: boolean;
   /** Body for `https://api.comfy.org/nodes/:id` (registry-zip empty-pack fallback). */
   registryDetails?: unknown;
   /** Body for v4 per-task queue history lookups. */
@@ -346,9 +348,20 @@ function stubFetch(opts: {
             { status: opts.queueOpStatus },
           );
         }
+        if (opts.queueOpNull && isInstallOp) {
+          opts.onQueue?.();
+          return jsonResponse(null);
+        }
         if (opts.queueOpEmpty && isInstallOp) {
           opts.onQueue?.();
           return new Response("", { status: 200 });
+        }
+        // A 405 on the unified task route is retried through v2-batch; model
+        // that downgrade as an acknowledged enqueue for the existing race
+        // coverage below.
+        if (opts.queueOpStatus === 405 && path.endsWith("/queue/batch")) {
+          opts.onQueue?.();
+          return jsonResponse({ accepted: true });
         }
         // A successful install enqueue normally has an acknowledgement body;
         // keep that distinct from the adversarial empty-2xx race fixture.
@@ -731,7 +744,7 @@ describe("node-management service", () => {
       });
     });
 
-    it("falls back to a direct git clone when the Manager can't resolve the repo", async () => {
+    it("falls back to a direct git clone after a non-empty accepted Manager enqueue", async () => {
       // Manager drains "done" but the pack never appears → unregistered repo.
       const { calls } = stubFetch({ installedBody: {} });
       // Simulate clone landing the dir on disk, with no requirements/install.py.
@@ -765,6 +778,8 @@ describe("node-management service", () => {
       expect(taskOf(calls, "install").params).toMatchObject({
         id: "comfyui-teskors-utils",
       });
+      expect(calls.some((c) => c.url.endsWith("/v2/manager/queue/task"))).toBe(true);
+      expect(calls.some((c) => c.url.endsWith("/v2/manager/queue/start"))).toBe(true);
       // git clone was invoked with the URL + the target node dir (shallow, no ref).
       const cloneCall = mockedExec.mock.calls.find(
         (c) => c[0] === "git" && (c[1] as string[])[0] === "clone",
@@ -831,6 +846,25 @@ describe("node-management service", () => {
 
       // The successful empty enqueue is ambiguous: do not start/poll it and
       // never race a possible Manager task with a local clone.
+      expect(calls.some((c) => c.url.endsWith("/v2/manager/queue/task"))).toBe(true);
+      expect(calls.some((c) => c.url.endsWith("/v2/manager/queue/start"))).toBe(false);
+      expect(
+        mockedExec.mock.calls.find((c) => c[0] === "git" && (c[1] as string[])[0] === "clone"),
+      ).toBeUndefined();
+    });
+
+    it("fails closed when Manager accepts a git enqueue with JSON null", async () => {
+      const { calls } = stubFetch({ installedBody: {}, queueOpNull: true });
+
+      await expect(
+        installCustomNode({
+          id: "https://github.com/teskor-hub/comfyui-teskors-utils",
+          source: "git",
+        }),
+      ).rejects.toMatchObject({
+        details: { kind: "manager-enqueue-empty-success" },
+      });
+
       expect(calls.some((c) => c.url.endsWith("/v2/manager/queue/task"))).toBe(true);
       expect(calls.some((c) => c.url.endsWith("/v2/manager/queue/start"))).toBe(false);
       expect(
@@ -4275,7 +4309,11 @@ describe("node-management service", () => {
   describe("v2 task 405 → v2-batch negotiation (issue #464)", () => {
     /** Stub a build whose /v2 queue surface answers status but 405s the unified
      *  task route, with `is_legacy_manager_ui` absent (catchall HTML). */
-    function stub464Fetch(opts: { failed?: unknown[]; installedBody?: unknown } = {}) {
+    function stub464Fetch(opts: {
+      failed?: unknown[];
+      installedBody?: unknown;
+      batchResponse?: "accepted" | "empty" | "null";
+    } = {}) {
       const calls: Call[] = [];
       const fetchMock = vi.fn(async (url: string, init?: RequestInit): Promise<Response> => {
         const method = init?.method ?? "GET";
@@ -4299,6 +4337,8 @@ describe("node-management service", () => {
           return new Response("405: Method Not Allowed", { status: 405 });
         }
         if (path === "/v2/manager/queue/batch" && method === "POST") {
+          if (opts.batchResponse === "empty") return new Response("", { status: 200 });
+          if (opts.batchResponse === "null") return jsonResponse(null);
           return jsonResponse({ failed: opts.failed ?? [] });
         }
         if (path === "/v2/manager/queue/start" && method === "POST") {
@@ -4308,6 +4348,59 @@ describe("node-management service", () => {
       });
       vi.stubGlobal("fetch", fetchMock);
       return { calls };
+    }
+
+    function armGitCloneFixture(): () => boolean {
+      let cloned = false;
+      mockedExists.mockImplementation((p: unknown) => {
+        const s = String(p);
+        if (s.includes("requirements.txt") || s.includes("install.py")) return false;
+        if (s.includes(".venv") || s.includes("cm-cli.py")) return false;
+        return s.includes("comfyui-teskors-utils") ? cloned : false;
+      });
+      mockedExec.mockImplementation(((bin: string, args: string[]) => {
+        if (bin === "git" && args[0] === "clone") cloned = true;
+        return "";
+      }) as never);
+      return () => cloned;
+    }
+
+    it("uses the verified local fallback after an accepted v2-to-v2-batch downgrade", async () => {
+      const { calls } = stub464Fetch({ installedBody: {} });
+      const wasCloned = armGitCloneFixture();
+
+      const res = await installCustomNode({
+        id: "https://github.com/teskor-hub/comfyui-teskors-utils",
+      });
+
+      expect(res.mechanism).toBe("git-clone");
+      expect(calls.some((c) => new URL(c.url).pathname === "/v2/manager/queue/task")).toBe(true);
+      expect(calls.some((c) => new URL(c.url).pathname === "/v2/manager/queue/batch")).toBe(true);
+      expect(calls.some((c) => new URL(c.url).pathname === "/v2/manager/queue/start")).toBe(true);
+      expect(wasCloned()).toBe(true);
+    });
+
+    for (const [label, batchResponse] of [
+      ["an empty success body", "empty"],
+      ["JSON null", "null"],
+    ] as const) {
+      it(`fails closed when a v2-to-v2-batch downgrade returns ${label}`, async () => {
+        const { calls } = stub464Fetch({ installedBody: {}, batchResponse });
+        const wasCloned = armGitCloneFixture();
+
+        await expect(
+          installCustomNode({
+            id: "https://github.com/teskor-hub/comfyui-teskors-utils",
+          }),
+        ).rejects.toMatchObject({
+          details: { kind: "manager-enqueue-empty-success" },
+        });
+
+        expect(calls.some((c) => new URL(c.url).pathname === "/v2/manager/queue/task")).toBe(true);
+        expect(calls.some((c) => new URL(c.url).pathname === "/v2/manager/queue/batch")).toBe(true);
+        expect(calls.some((c) => new URL(c.url).pathname === "/v2/manager/queue/start")).toBe(false);
+        expect(wasCloned()).toBe(false);
+      });
     }
 
     it("panel_update_node succeeds via batch when /v2 task 405s (no raw 405 surfaced)", async () => {

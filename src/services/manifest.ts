@@ -992,7 +992,8 @@ async function resolveLocalManifestBase(): Promise<string | undefined> {
 }
 
 function looksLikeGitManifestSource(id: string): boolean {
-  return /^(?:https?:\/\/|git@|git\+)/i.test(id) || /\.git(?:[?#]|$)/i.test(id);
+  const candidate = id.trim();
+  return /^(?:https?:\/\/|git@|git\+)/i.test(candidate) || /\.git(?:[?#]|$)/i.test(candidate);
 }
 
 async function resolveLocalManifestCustomNodesBase(): Promise<string | undefined> {
@@ -1142,6 +1143,9 @@ async function applyManifestSections(
   const installedNodes = initialList === BUDGET_TIMEOUT ? [] : initialList;
   if (initialList === BUDGET_TIMEOUT) nodeBudgetSpent = true;
   for (const id of manifest.custom_nodes) {
+    const normalizedId = id.trim();
+    const isGitManifestSource = looksLikeGitManifestSource(normalizedId);
+
     if (getComfyuiTargetGeneration() !== targetGeneration) {
       results.push(
         report(
@@ -1154,7 +1158,7 @@ async function applyManifestSections(
       );
       continue;
     }
-    const isPanelTarget = targetsPanelPackExactly(id);
+    const isPanelTarget = targetsPanelPackExactly(normalizedId);
     if (isPanelTarget) {
       // `apply_manifest` has a Manager target but no authoritative association
       // between that target and a local served-panel root. In particular,
@@ -1173,7 +1177,7 @@ async function applyManifestSections(
       );
       continue;
     }
-    if (nodeAlreadyInstalled(id, installedNodes)) {
+    if (nodeAlreadyInstalled(normalizedId, installedNodes)) {
       results.push(report("custom_node", id, "skipped", "Custom node is already installed."));
       continue;
     }
@@ -1191,9 +1195,9 @@ async function applyManifestSections(
     // (#1715/#1770). Pip uses codeBase independently above.
     let localFallbackSelected = false;
     const installOutcome = installCustomNode({
-      id,
+      id: normalizedId,
       ...(customNodesBase ? { comfyuiPath: customNodesBase } : {}),
-      ...(looksLikeGitManifestSource(id)
+      ...(isGitManifestSource
         ? { localCloneFallback: "verified-only" as const }
         : {}),
       managerBase,
@@ -1217,7 +1221,7 @@ async function applyManifestSections(
       } else {
         stillInstalling.push(id);
         const localFallbackPossible =
-          localMode && Boolean(customNodesBase) && looksLikeGitManifestSource(id);
+          localMode && Boolean(customNodesBase) && isGitManifestSource;
         if (localFallbackPossible) localFallbackPending.push(id);
         results.push(
           report(

@@ -291,13 +291,15 @@ export function panelLockPath(): string {
  * can take the abandoned-lock recovery path. The budget is for a WAITER.
  *
  * The longest current local custom-node writer can spend 1,260s in git command
- * ceilings (clone plus the version/ref probes and checkout) and another 1,200s
- * in the sequential requirements.txt and install.py ceilings: 2,460s total.
- * Give a valid concurrent writer 60s for final filesystem work and polling.
+ * ceilings (clone plus the version/ref probes and checkout), another 1,200s
+ * in the sequential requirements.txt and install.py ceilings, and 120s in the
+ * in-lock /system_stats request used while resolving the install interpreter:
+ * 2,580s total. Give a valid concurrent writer 60s for final filesystem work
+ * and polling.
  * Callers that must not block (the fire-and-forget on-load ensure) pass a much
  * shorter explicit budget.
  */
-const DEFAULT_ACQUIRE_MS = 42 * 60_000;
+const DEFAULT_ACQUIRE_MS = 44 * 60_000;
 
 const POLL_MS = 100;
 

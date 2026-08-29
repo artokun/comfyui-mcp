@@ -69,13 +69,11 @@ describe("panel mutation lock across processes", () => {
     const moduleUrl = JSON.stringify(
       pathToFileURL(resolve(process.cwd(), "src/services/panel-pin-guard.ts")).href,
     );
-    // Scale only the waiter's Date.now clock. A 4s real holder represents
-    // 2,400s of production budget: close to the 2,460s worst-case writer
-    // contract (clone/ref git ceilings plus requirements.txt and install.py).
-    // The old 630s budget fails after ~1.05s; the corrected 2,520s budget still
-    // waits for the live holder to release.
+    // Scale only the waiter's Date.now clock. A 4.25s real holder represents
+    // 2,550s of production budget: beyond the previous 2,520s ceiling, but
+    // inside the corrected 2,640s budget, which includes in-lock /system_stats.
     const clockRate = 600;
-    const holderDurationMs = 4_000;
+    const holderDurationMs = 4_250;
     const holder = spawnLockChild(
       `import { withPanelMutationLock } from ${moduleUrl};
        await withPanelMutationLock(async () => {

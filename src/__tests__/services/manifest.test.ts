@@ -1642,6 +1642,36 @@ describe("applyManifest", () => {
     }
   });
 
+  it("trims git manifest identity before late local-fallback classification", async () => {
+    const prevBudget = process.env.COMFYUI_MCP_MANIFEST_NODE_BUDGET_MS;
+    process.env.COMFYUI_MCP_MANIFEST_NODE_BUDGET_MS = "40";
+    const paddedId = "  https://github.com/example/local-fallback-pack  ";
+    installCustomNodeMock.mockReturnValueOnce(new Promise(() => {}));
+
+    try {
+      const result = await applyManifest({
+        manifest: { custom_nodes: [paddedId, "next-pack"] },
+      });
+
+      expect(result.summary).toMatchObject({ applied: 0, failed: 0, pending: 2 });
+      expect(result.results[0].message).toMatch(/local direct-install fallback/i);
+      expect(result.partial).toMatchObject({
+        not_started: ["next-pack"],
+        still_installing: [paddedId],
+        local_fallback_pending: [paddedId],
+      });
+      expect(installCustomNodeMock).toHaveBeenCalledWith(
+        expect.objectContaining({
+          id: "https://github.com/example/local-fallback-pack",
+          localCloneFallback: "verified-only",
+        }),
+      );
+    } finally {
+      if (prevBudget === undefined) delete process.env.COMFYUI_MCP_MANIFEST_NODE_BUDGET_MS;
+      else process.env.COMFYUI_MCP_MANIFEST_NODE_BUDGET_MS = prevBudget;
+    }
+  });
+
   it("clears leftover not-started names when a later apply submits everything (#1699)", async () => {
     const prevBudget = process.env.COMFYUI_MCP_MANIFEST_NODE_BUDGET_MS;
     process.env.COMFYUI_MCP_MANIFEST_NODE_BUDGET_MS = "40";

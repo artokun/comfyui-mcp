@@ -1486,7 +1486,7 @@ interface ManagerEnqueueOptions {
   rejectEmptyEnqueue?: boolean;
 }
 
-type ManagerEnqueueResponse = Record<string, unknown> | string | undefined;
+type ManagerEnqueueResponse = Record<string, unknown> | string | null | undefined;
 
 function assertManagerEnqueueResponse(
   response: unknown,
@@ -1496,7 +1496,7 @@ function assertManagerEnqueueResponse(
   path: string,
   base: string,
 ): void {
-  if (!options.rejectEmptyEnqueue || response !== undefined) return;
+  if (!options.rejectEmptyEnqueue || (response !== undefined && response !== null)) return;
   throw new NodeManagementError(
     `ComfyUI-Manager returned a successful but empty response for the ${kind} enqueue ` +
       `on the "${api}" dialect. The task may have been submitted, so its outcome is ` +
@@ -1879,7 +1879,15 @@ async function enqueueManagerTask(
       // Rebuild the body for the dialect we are downgrading TO: this build runs
       // the 3.x handlers under /v2, so a dialect-specific body (a git install)
       // must be its 3.x shape, not the v2 one we just tried.
-      await enqueueV2BatchTask(kind, resolveParams("v2-batch"), uiId, base);
+      const response = await enqueueV2BatchTask(kind, resolveParams("v2-batch"), uiId, base);
+      assertManagerEnqueueResponse(
+        response,
+        options,
+        kind,
+        "v2-batch",
+        kind === "install-model" ? "/v2/manager/queue/install_model" : "/v2/manager/queue/batch",
+        base,
+      );
       // Pin the corrected dialect ONLY after the batch enqueue actually
       // succeeded, so a transient/proxy 405 on a genuine v4 host (task 405 but
       // batch also unavailable) never poisons the cache: enqueueV2BatchTask
