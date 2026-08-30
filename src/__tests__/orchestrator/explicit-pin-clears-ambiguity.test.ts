@@ -46,14 +46,17 @@ function harness(opts: {
   active?: string;
   headless?: string[];
   backendOf?: (t: string) => string;
+  aliases?: Record<string, string>;
 }) {
   const repinTo = vi.fn();
   const reachable = new Set(opts.reachable ?? opts.tabs);
+  const aliases = opts.aliases ?? {};
   const bridge: ScopeRepinBridge = {
-    canReach: (t) => reachable.has(t),
+    canReach: (t) => Boolean(aliases[t]) || reachable.has(t),
     resolveActiveScopeTab: () => opts.active,
     isHeadless: (t) => (opts.headless ?? []).includes(t),
     tabs: () => opts.tabs.map((tab_id) => ({ tab_id })),
+    liveTabIdFor: (t) => aliases[t] ?? (reachable.has(t) ? t : undefined),
   };
   const handler = makeScopeRepinHandler({
     bridge,
@@ -113,6 +116,40 @@ describe("#888 a HEALTHY pin is still never displaced", () => {
     const out = handler(KEY, PATH_B);
     expect(typeof out).toBe("object");
     expect((out as { reason: string }).reason).toMatch(/still reaches a live tab/);
+    expect(repinTo).not.toHaveBeenCalled();
+  });
+});
+
+describe("#2419 a tmp: predecessor pin is rewritten onto the named save dest", () => {
+  const TMP = "tmp:2522828d-unsaved";
+
+  it("rewrites a still-reachable tmp: pin onto the unique dest tab", () => {
+    const { handler, repinTo } = harness({
+      pin: TMP,
+      tabs: [TAB_A],
+      reachable: [TMP, TAB_A],
+    });
+
+    expect(handler(KEY, PATH_A)).toBe(TAB_A);
+    expect(repinTo).toHaveBeenCalledWith(KEY, TAB_A);
+  });
+
+  it("rewrites a tmp: pin that only reaches dest through a same-socket alias", () => {
+    const { handler, repinTo } = harness({
+      pin: TMP,
+      tabs: [TAB_A],
+      reachable: [TAB_A],
+      aliases: { [TMP]: TAB_A },
+    });
+
+    expect(handler(KEY, PATH_A)).toBe(TAB_A);
+    expect(repinTo).toHaveBeenCalledWith(KEY, TAB_A);
+  });
+
+  it("does not treat a live saved pin as a tmp: predecessor", () => {
+    const { handler, repinTo } = harness({ pin: TAB_A, tabs: [TAB_A, TAB_B] });
+    const out = handler(KEY, PATH_B);
+    expect(typeof out).toBe("object");
     expect(repinTo).not.toHaveBeenCalled();
   });
 });

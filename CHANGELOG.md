@@ -9,6 +9,7 @@ All notable changes to this project are documented here. This project adheres to
 ### MCP
 
 #### Fixed
+- first save of a pinned tmp: workflow re-points panel_set_todo and panel_canvas onto the dest tab even while the tmp: address still reaches (#2419)
 - a root SubgraphNode promoted COMBO write uses the unique rail-backed inner mapping when the terminal witness is incomplete after loading an official template (#2393)
 - get_image action:"list_outputs" lists completed VHS mp4 outputs written to ComfyUI's temp/ (save_output unchecked), tagged type:"temp" (#2370)
 - panel_expose_subgraph_input retries Anything Everywhere? wildcard sockets against the live LiteGraph slot array after Convert to Subgraph (#2493)

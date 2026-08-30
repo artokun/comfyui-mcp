@@ -10395,20 +10395,28 @@ function refreshFenceFromOwnReply(ctx: PanelToolCtx, reply: ToolResult): Workflo
 /**
  * #2419 — the PATH the save reply names as the dest canvas.
  *
- * `routing_key` is the precise identity (`wf:<path>` handle, or a full
- * `wf:<route>:<path>` tab id). `path` / `workflow` / `filename` are fallbacks
- * for older replies that only named the new file. Empty / unreadable →
- * undefined, so the caller leaves routing alone rather than guessing.
+ * `routing_key` is the precise identity: a `wf:<path>` handle, a full
+ * `wf:<route>:<path>` tab id, or (first save of a tmp: canvas) the bare
+ * `workflows/…` path the panel publishes after persist. `path` / `workflow` /
+ * `filename` are fallbacks for older replies that only named the new file.
+ * Empty / unreadable / still-tmp → undefined, so the caller leaves routing
+ * alone rather than guessing.
  */
 function saveDestWorkflowPath(parsed: Record<string, unknown>): string | undefined {
   const routing = parsed.routing_key;
-  if (typeof routing === "string" && routing.startsWith("wf:")) {
-    const rest = routing.slice(3);
-    const sep = rest.indexOf(":");
-    const pathPart =
-      sep >= 0 && rest.slice(sep + 1).includes("/") ? rest.slice(sep + 1) : rest;
-    const fromRouting = canonicalSavedWorkflowPath(pathPart);
-    if (fromRouting) return fromRouting;
+  if (typeof routing === "string" && routing.trim()) {
+    const trimmed = routing.trim();
+    if (trimmed.startsWith("wf:")) {
+      const rest = trimmed.slice(3);
+      const sep = rest.indexOf(":");
+      const pathPart =
+        sep >= 0 && rest.slice(sep + 1).includes("/") ? rest.slice(sep + 1) : rest;
+      const fromRouting = canonicalSavedWorkflowPath(pathPart);
+      if (fromRouting) return fromRouting;
+    } else if (!trimmed.startsWith("tmp:")) {
+      const fromRouting = canonicalSavedWorkflowPath(trimmed);
+      if (fromRouting) return fromRouting;
+    }
   }
   for (const v of [parsed.path, parsed.workflow, parsed.filename]) {
     if (typeof v !== "string") continue;
@@ -10434,17 +10442,85 @@ function uniqueLiveTabForSaveDest(ctx: PanelToolCtx, destPath: string): string |
   return matches.length === 1 ? matches[0] : undefined;
 }
 
+/** The live tab `ctx.tabId` currently routes to, if any. */
+function liveRoutingTab(ctx: PanelToolCtx): string | undefined {
+  if (typeof ctx.bridge.liveTabIdFor === "function") {
+    try {
+      return ctx.bridge.liveTabIdFor(ctx.tabId);
+    } catch {
+      return undefined;
+    }
+  }
+  if (typeof ctx.bridge.canReach === "function" && ctx.bridge.canReach(ctx.tabId)) {
+    return ctx.tabId;
+  }
+  return undefined;
+}
+
+/**
+ * #2419 recurrence — a PINNED unsaved canvas (`tmp:<uuid>` tab id or pin path).
+ * First persist changes the routing key to `workflows/…` but the tmp: address
+ * often still `canReach` via the same-socket migration alias, which is what
+ * made the original dead-address-only re-point a no-op.
+ */
+function routingIsUnsavedPredecessor(ctx: PanelToolCtx): boolean {
+  if (ctx.tabId.startsWith("tmp:")) return true;
+  const pin = ctx.workflowTarget?.get(ctx.tabId);
+  return typeof pin?.path === "string" && pin.path.startsWith("tmp:");
+}
+
+function destPinnedTarget(
+  pinned: { path?: string; filename?: string },
+  destPath: string,
+  parsed: Record<string, unknown>,
+): { mode: "pinned"; path: string; filename?: string } {
+  let filename: string | undefined;
+  for (const v of [parsed.filename, parsed.workflow]) {
+    if (typeof v === "string" && v.trim()) {
+      filename = v.trim().replace(/\.json$/i, "");
+      break;
+    }
+  }
+  if (!filename) {
+    const base = destPath.split("/").pop();
+    filename = base ? base.replace(/\.json$/i, "") : pinned.filename;
+  }
+  return { mode: "pinned", path: destPath, filename };
+}
+
+function adoptPinnedDestPath(
+  ctx: PanelToolCtx,
+  destPath: string,
+  parsed: Record<string, unknown>,
+  destTab?: string,
+): void {
+  if (!ctx.workflowTarget) return;
+  const previous = ctx.tabId;
+  const pinned = ctx.workflowTarget.get(previous);
+  if (pinned?.mode !== "pinned") return;
+  const next = destPinnedTarget(pinned, destPath, parsed);
+  if (destTab && destTab !== previous && !isScopeAddress(previous)) {
+    ctx.workflowTarget.clear(previous);
+    ctx.workflowTarget.set(destTab, next);
+    return;
+  }
+  ctx.workflowTarget.set(previous, next);
+}
+
 /**
  * #2419 — after Save-As (or a first save) mints a new tab id, the command
  * fence is already refreshed from the reply, but session-scoped commands
  * (`panel_set_todo`, `panel_canvas`) still address the old id.
  *
- * Re-point ONLY when the current routing address is dead. A live pin
- * elsewhere is left alone — that is #1917 / #884: this recovery must not
- * take a routing target out from under a pin another command in the same
- * turn is relying on. Matching is on the dest path the save reply proved,
- * and only when exactly one live canvas carries it, so this cannot silently
- * redirect to a different workflow.
+ * Follow dest when the current address is dead, when it already aliases onto
+ * dest (same-socket tmp:→wf: / Save-As rename), or when it is the unsaved
+ * predecessor of dest (pinned tmp: canvas whose first save published a
+ * `workflows/…` routing key). A live pin on a DIFFERENT saved tab is left
+ * alone — that is #1917 / #884.
+ *
+ * Matching is on the dest path the save reply proved, and only when exactly
+ * one live canvas carries it, so this cannot silently redirect to a different
+ * workflow.
  *
  * Best-effort by construction: the file WAS written. A re-point that cannot
  * happen must not retract the save.
@@ -10454,24 +10530,26 @@ function repointRoutingAfterSave(ctx: PanelToolCtx, reply: ToolResult): void {
   if (!parsed) return;
   const destPath = saveDestWorkflowPath(parsed);
   if (!destPath) return;
-  if (typeof ctx.bridge.canReach === "function" && ctx.bridge.canReach(ctx.tabId)) return;
   const destTab = uniqueLiveTabForSaveDest(ctx, destPath);
-  if (!destTab) return;
+  if (!destTab) {
+    if (routingIsUnsavedPredecessor(ctx)) adoptPinnedDestPath(ctx, destPath, parsed);
+    return;
+  }
+  const live = liveRoutingTab(ctx);
+  const follow =
+    !live || live === destTab || routingIsUnsavedPredecessor(ctx);
+  if (!follow) return;
   if (isScopeAddress(ctx.tabId)) {
     try {
       ctx.bridge.repinScopeToWorkflow?.(ctx.tabId, destPath);
     } catch {
       // never worse than the pre-#2419 silence; the save already succeeded
     }
+    adoptPinnedDestPath(ctx, destPath, parsed);
     return;
   }
+  adoptPinnedDestPath(ctx, destPath, parsed, destTab);
   if (destTab === ctx.tabId) return;
-  const previous = ctx.tabId;
-  const pinned = ctx.workflowTarget?.get(previous);
-  if (ctx.workflowTarget && pinned?.mode === "pinned") {
-    ctx.workflowTarget.clear(previous);
-    ctx.workflowTarget.set(destTab, pinned);
-  }
   ctx.tabId = destTab;
 }
 
@@ -22048,9 +22126,10 @@ export function buildPanelToolDefs(): PanelToolDef[] {
         // #2419 — BEFORE the fence refresh so the stamp lands on the dest
         // address. Save-As mints a new tab id; the fence repair re-stamps
         // graph commands, but session-scoped commands (set_todo, graph_canvas)
-        // still address the old id unless routing is re-pointed. Only when
-        // the current address is dead — a live pin elsewhere is left alone
-        // (#1917 / #884).
+        // still address the old id unless routing is re-pointed. Follow dest
+        // when the current address is dead, aliases onto dest, or is the
+        // unsaved tmp: predecessor of dest. A live pin on a different saved
+        // tab is left alone (#1917 / #884).
         repointRoutingAfterSave(ctx, res);
         const fenceRebind = refreshFenceFromOwnReply(ctx, res) ?? (await rebindWorkflowFence(ctx));
         let canMutateNow: boolean | undefined;

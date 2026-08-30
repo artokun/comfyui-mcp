@@ -697,6 +697,8 @@ export interface ScopeRepinBridge {
   resolveActiveScopeTab(): string | undefined;
   isHeadless?(tabId: string): boolean;
   tabs(): Array<{ tab_id: string }>;
+  /** Canonical live id a (possibly retired/aliased) tab currently routes to. */
+  liveTabIdFor?(tabId: string): string | undefined;
 }
 
 /**
@@ -798,14 +800,40 @@ export function makeScopeRepinHandler(opts: {
 }): (scopeId: string, preferredWorkflowPath?: string) => ScopeRepinOutcome {
   return (scopeId, preferredWorkflowPath) => {
     const key = opts.scopeAgentKeyOf(scopeId);
+    const backend = opts.backendOfKey(key);
+    const eligible = opts.bridge
+      .tabs()
+      .map((t) => t.tab_id)
+      .filter((t) => opts.bridge.isHeadless?.(t) !== true && opts.backendForTab(t) === backend);
+    const namedDest = (path: string | undefined): string | undefined => {
+      if (!path) return undefined;
+      const matches = eligible.filter((t) => tabRouteCarriesPath(t, path));
+      return matches.length === 1 ? matches[0] : undefined;
+    };
     // RECOVERY ONLY: a pin that still reaches a live tab OF THIS conversation
     // is healthy — never displace it (null = ambiguous/ownership-refused and
     // absent = no pin are both recoverable). resolvedPinOf, not raw pinOf: a
     // pin whose tab was revived by another backend "reaches" but is NOT
     // healthy — treating it as healthy would deadlock the advertised recovery
     // against the resolution-time refusal (codex gate-4 delta).
+    //
+    // #2419 — exception: a named dest that this pin ALREADY routes to (same-
+    // socket alias) or a tmp: predecessor of that dest is the SAME canvas
+    // under its new identity, not a steal. Rewrite the stored pin onto the
+    // canonical dest id so session-scoped commands stop addressing the retired
+    // tmp: / Untitled handle.
     const existing = opts.tracker.resolvedPinOf(key);
     if (typeof existing === "string" && opts.bridge.canReach(existing)) {
+      const named = namedDest(preferredWorkflowPath);
+      const live = opts.bridge.liveTabIdFor?.(existing) ?? existing;
+      const predecessor = existing.startsWith("tmp:");
+      if (named && existing !== named && (live === named || predecessor)) {
+        opts.tracker.repinTo(key, named);
+        opts.info(
+          `[panel-orchestrator] ${key} re-pinned onto ${named.slice(0, 8)} as the save dest successor of ${existing.slice(0, 8)} (#2419)`,
+        );
+        return named;
+      }
       return {
         repinned: false,
         reason:
@@ -814,11 +842,6 @@ export function makeScopeRepinHandler(opts: {
           `pin that is dead or ambiguous`,
       };
     }
-    const backend = opts.backendOfKey(key);
-    const eligible = opts.bridge
-      .tabs()
-      .map((t) => t.tab_id)
-      .filter((t) => opts.bridge.isHeadless?.(t) !== true && opts.backendForTab(t) === backend);
     // #888 — a NAMED workflow decides which tab, where "current" cannot.
     //
     // The refusal below already tells the agent to do exactly this ("Name the
