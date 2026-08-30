@@ -1138,7 +1138,7 @@
     },
     {
       "id": 758,
-      "type": "TSVideoCombineNoMetadata",
+      "type": "VHS_VideoCombine",
       "pos": [
         3100,
         280
@@ -1189,23 +1189,28 @@
           "version": "7.7",
           "input_ue_unconnectable": {}
         },
-        "Node name for S&R": "TSVideoCombineNoMetadata",
-        "aux_id": "teskor-hub/comfyui-teskors-utils",
-        "ver": "cba89dd597152e08257e0bac588d59024196d49c"
+        "Node name for S&R": "VHS_VideoCombine",
+        "cnr_id": "comfyui-videohelpersuite",
+        "aux_id": "Kosinkadink/ComfyUI-VideoHelperSuite",
+        "ver": "0a75c7958fe320efcb052f1d9f8451fd20c730a8"
       },
-      "widgets_values": [
-        30,
-        0,
-        "wananimate",
-        "video/h264-mp4",
-        false,
-        true,
-        {
+      "widgets_values": {
+        "frame_rate": 30,
+        "loop_count": 0,
+        "filename_prefix": "wananimate",
+        "format": "video/h264-mp4",
+        "pix_fmt": "yuv420p",
+        "crf": 19,
+        "save_metadata": false,
+        "trim_to_audio": false,
+        "pingpong": false,
+        "save_output": true,
+        "videopreview": {
           "hidden": false,
           "paused": false,
           "params": {}
         }
-      ],
+      },
       "color": "#232",
       "bgcolor": "#353"
     },
@@ -5504,7 +5509,7 @@
                 "input_ue_unconnectable": {}
               },
               "Node name for S&R": "TSPoseDataSmoother",
-              "aux_id": "teskor-hub/comfyui-teskors-utils",
+              "aux_id": "artokun/comfyui-teskors-utils",
               "ver": "9c4d0507ccd1f1c5b18fd536f2796e216560ed43"
             },
             "widgets_values": [
@@ -5939,7 +5944,7 @@
                 "input_ue_unconnectable": {}
               },
               "Node name for S&R": "TSColorMatch",
-              "aux_id": "teskor-hub/NEW-UTILS",
+              "aux_id": "artokun/comfyui-teskors-utils",
               "ver": "1e29548a5ff751b73c1a5a2a3f68d20bf2bd8bed"
             },
             "widgets_values": [
