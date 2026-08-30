@@ -1282,6 +1282,8 @@ export type MediaKind = "image" | "video" | "audio";
 
 export type StageLoaderSelectability = "verified" | "root-fallback" | "unverified";
 
+/** Combo loaders whose /object_info lists input/ filenames. Path loaders are
+ * STRING filesystem widgets and must not count as combo proof (#2083). */
 const STAGE_LOADER_INPUTS: Readonly<Record<MediaKind, ReadonlyMap<string, ReadonlySet<string>>>> = {
   image: new Map([
     ["LoadImage", new Set(["image"])],
@@ -1290,9 +1292,7 @@ const STAGE_LOADER_INPUTS: Readonly<Record<MediaKind, ReadonlyMap<string, Readon
   ]),
   video: new Map([
     ["VHS_LoadVideo", new Set(["video"])],
-    ["VHS_LoadVideoPath", new Set(["video"])],
     ["VHS_LoadVideoFFmpeg", new Set(["video"])],
-    ["VHS_LoadVideoFFmpegPath", new Set(["video"])],
   ]),
   audio: new Map([
     ["LoadAudio", new Set(["audio"])],
@@ -1300,6 +1300,57 @@ const STAGE_LOADER_INPUTS: Readonly<Record<MediaKind, ReadonlyMap<string, Readon
     ["VHS_LoadAudioUpload", new Set(["audio"])],
   ]),
 };
+
+const VHS_PATH_LOADERS: ReadonlySet<string> = new Set([
+  "VHS_LoadVideoPath",
+  "VHS_LoadVideoFFmpegPath",
+]);
+
+export function comboReferenceOf(staged: {
+  filename: string;
+  subfolder?: string;
+}): string {
+  return staged.subfolder ? `${staged.subfolder}/${staged.filename}` : staged.filename;
+}
+
+/**
+ * Map a staged input onto the widget value a loader actually accepts.
+ * VHS combo loaders take the input/ filename. VHS *Path loaders take a
+ * filesystem path — a combo filename is not a valid path and fails at
+ * panel_run with "Invalid file path" (#2083).
+ */
+export function stagedLoaderWidgetValue(
+  staged: Pick<StagedInput, "filename" | "subfolder" | "pathReference">,
+  classType: string,
+): string | undefined {
+  if (VHS_PATH_LOADERS.has(classType)) return staged.pathReference;
+  return comboReferenceOf(staged);
+}
+
+async function filesystemPathForStaged(result: {
+  name: string;
+  subfolder?: string;
+}): Promise<string | undefined> {
+  try {
+    const inputDir = await getInputDir();
+    const sub = result.subfolder ?? "";
+    return sub ? join(inputDir, sub, result.name) : join(inputDir, result.name);
+  } catch (err) {
+    logger.warn("Could not resolve input dir for staged Path-loader reference", {
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return undefined;
+  }
+}
+
+async function withVideoPathReference(staged: StagedInput): Promise<StagedInput> {
+  if (staged.kind !== "video") return staged;
+  const pathReference = await filesystemPathForStaged({
+    name: staged.filename,
+    subfolder: staged.subfolder,
+  });
+  return pathReference ? { ...staged, pathReference } : staged;
+}
 
 /** Read every ComfyUI combo shape that can enumerate loader filenames. */
 function comboOptions(spec: unknown): string[] | null {
@@ -1420,6 +1471,8 @@ export interface StagedInput {
   loaderSelectable: StageLoaderSelectability;
   /** The requested nested reference, when a host required the root fallback. */
   requestedFilename?: string;
+  /** Filesystem path for VHS_*Path loaders. Combo filenames are not valid paths. */
+  pathReference?: string;
 }
 
 /**
@@ -1436,8 +1489,15 @@ export async function stageOutputAsInput(
 ): Promise<StagedInput> {
   const sourceType = args.type ?? "output";
   const kind = args.kind ?? inferMediaKind(args.filename);
-  const targetName = args.asFilename ?? basename(args.filename);
-  const mimeType = mimeForKind(targetName, kind);
+  const requestedName = args.asFilename ?? basename(args.filename);
+  const mimeType = mimeForKind(requestedName, kind);
+  const nestedRequested = requestedName.includes("/") || requestedName.includes("\\");
+  // VHS_LoadVideo combo lists only top-level input/ files. A nested video
+  // as_filename is stored in a subfolder that never appears in that combo, and
+  // VHS_LoadVideoPath then treats the combo filename as a filesystem path
+  // ("Invalid file path"). Stage videos at the input root instead (#2083).
+  const flattenVideoToRoot = kind === "video" && nestedRequested;
+  const targetName = flattenVideoToRoot ? basename(requestedName) : requestedName;
 
   // Fetch the existing asset's bytes via the same /view mechanism the asset
   // tools use (fetchImage handles cloud vs local). Despite the name, /view
@@ -1462,47 +1522,49 @@ export async function stageOutputAsInput(
     result.subfolder ? `${result.subfolder}/${result.name}` : result.name;
   const result = await uploadImageHttp(targetName, data, mimeType);
   const stagedReference = referenceOf(result);
-  const nestedTarget = targetName.includes("/") || targetName.includes("\\");
+  const nestedTarget = nestedRequested || Boolean(result.subfolder);
   const nestedSelectable = await verifyLoaderReference(kind, stagedReference);
+  const requestedFilename = nestedRequested
+    ? requestedName.replace(/\\/g, "/")
+    : undefined;
 
   if (nestedTarget && nestedSelectable === false) {
     // Some ComfyUI builds store a nested upload correctly but do not expose
     // nested input paths in the loader combo. Re-register the same bytes at the
     // root so the returned value is actually selectable, rather than claiming
     // that the nested path works because /upload/image returned 200.
-    const rootName = basename(targetName);
-    // Never replace an unrelated root file when the host requires this
-    // compatibility fallback. ComfyUI will choose a unique name when the
-    // requested root name already exists, and the returned name is verified
-    // below before being reported as selectable.
-    const rootResult = await uploadImageHttp(rootName, data, mimeType, false);
-    const rootReference = referenceOf(rootResult);
-    const rootSelectable = await verifyLoaderReference(kind, rootReference);
-    if (rootSelectable === true) {
-      return {
+    const alreadyRoot = !result.subfolder && targetName === basename(targetName);
+    if (!alreadyRoot) {
+      const rootName = basename(targetName);
+      // Never replace an unrelated root file when the host requires this
+      // compatibility fallback. ComfyUI will choose a unique name when the
+      // requested root name already exists, and the returned name is verified
+      // below before being reported as selectable.
+      const rootResult = await uploadImageHttp(rootName, data, mimeType, false);
+      const rootReference = referenceOf(rootResult);
+      const rootSelectable = await verifyLoaderReference(kind, rootReference);
+      return withVideoPathReference({
         filename: rootResult.name,
         subfolder: rootResult.subfolder ?? "",
         type: rootResult.type,
         kind,
-        loaderSelectable: "root-fallback",
-        requestedFilename: stagedReference,
-      };
+        loaderSelectable: rootSelectable === true ? "root-fallback" : "unverified",
+        requestedFilename: requestedFilename ?? stagedReference,
+      });
     }
-    return {
-      filename: rootResult.name,
-      subfolder: rootResult.subfolder ?? "",
-      type: rootResult.type,
-      kind,
-      loaderSelectable: "unverified",
-      requestedFilename: stagedReference,
-    };
   }
 
-  return {
+  return withVideoPathReference({
     filename: result.name,
     subfolder: result.subfolder ?? "",
     type: result.type,
     kind,
-    loaderSelectable: nestedSelectable === true ? "verified" : "unverified",
-  };
+    loaderSelectable:
+      flattenVideoToRoot && nestedSelectable === true
+        ? "root-fallback"
+        : nestedSelectable === true
+          ? "verified"
+          : "unverified",
+    ...(flattenVideoToRoot && requestedFilename ? { requestedFilename } : {}),
+  });
 }

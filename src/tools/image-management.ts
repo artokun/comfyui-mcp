@@ -934,7 +934,7 @@ export function registerImageManagementTools(server: McpServer): void {
       '- action:"image" — Upload a local image file to the connected ComfyUI\'s input/ directory via the HTTP /upload/image endpoint so it can be referenced in LoadImage nodes. Works for both local and remote ComfyUI. Returns the stored filename.\n' +
       '- action:"video" — Upload a local video file (.mp4, .mov, .webm, .avi, .mkv, .m4v) to the connected ComfyUI\'s input/ directory via the HTTP /upload/image endpoint for use in video-loading nodes such as VHS_LoadVideo (ComfyUI-VideoHelperSuite). Works for both local and remote ComfyUI. Returns the stored filename.\n' +
       '- action:"audio" — Upload a local audio file (.wav, .mp3, .flac, .ogg, .m4a, .aac) to the connected ComfyUI\'s input/ directory via the HTTP /upload/image endpoint for use in audio-conditioned workflows (e.g. LoadAudio). Works for both local and remote ComfyUI. Returns the stored filename.\n' +
-      '- action:"stage" — Stage an EXISTING ComfyUI output (or temp/preview) as an INPUT so the next stage\'s loader (LoadImage / VHS_LoadVideo / LoadAudio) can read it. This is the CORRECT way to chain a multi-stage pipeline (e.g. Krea2 image → LTX video → WAN extend): it fetches the output\'s bytes from the server via /view and re-registers them as an input via /upload/image — the same endpoints get_image and the uploads above use. Because it goes entirely through the server API, it works even when ComfyUI was launched with a CUSTOM input/output directory. Do NOT instead copy the output file or guess a filesystem `input/` path — the server\'s input dir may be custom and it will reject the file ("Invalid image file"), wasting the render. Pass an existing output reference ({ filename, subfolder?, type? }); the media kind (image/video/audio) is inferred from the extension unless you set `kind`. Returns the registered input { filename, subfolder, type: "input", kind } — drop the returned `filename` straight into the loader\'s image/video/audio widget.\n' +
+      '- action:"stage" — Stage an EXISTING ComfyUI output (or temp/preview) as an INPUT so the next stage\'s loader (LoadImage / VHS_LoadVideo / LoadAudio) can read it. This is the CORRECT way to chain a multi-stage pipeline (e.g. Krea2 image → LTX video → WAN extend): it fetches the output\'s bytes from the server via /view and re-registers them as an input via /upload/image — the same endpoints get_image and the uploads above use. Because it goes entirely through the server API, it works even when ComfyUI was launched with a CUSTOM input/output directory. Do NOT instead copy the output file or guess a filesystem `input/` path — the server\'s input dir may be custom and it will reject the file ("Invalid image file"), wasting the render. Pass an existing output reference ({ filename, subfolder?, type? }); the media kind (image/video/audio) is inferred from the extension unless you set `kind`. Nested video as_filename values are staged at the input root because VHS_LoadVideo lists only top-level files. Returns { filename, subfolder, type: "input", kind } — drop `filename` into LoadImage / VHS_LoadVideo / LoadAudio combo widgets. VHS_LoadVideoPath needs the returned filesystem path, not that combo filename ("Invalid file path" otherwise).\n' +
       '- action:"output" — Upload a generated ComfyUI output to CLOUD storage (this is the only action that sends bytes off the machine). Source can be asset_id or a local path under COMFYUI_PATH/output. Destination can be S3, Azure Blob, HTTP PUT, or HuggingFace via the hf CLI.',
     {
       action: z
@@ -1067,7 +1067,7 @@ export function registerImageManagementTools(server: McpServer): void {
             });
             const loaderHint =
               staged.kind === "video"
-                ? "the video file input in VHS_LoadVideo (or similar)"
+                ? "the video file input in VHS_LoadVideo / VHS_LoadVideoFFmpeg"
                 : staged.kind === "audio"
                   ? "the audio input in LoadAudio (or similar)"
                   : "the `image` input in LoadImage";
@@ -1077,21 +1077,43 @@ export function registerImageManagementTools(server: McpServer): void {
             const stagedRef = staged.subfolder
               ? `${staged.subfolder}/${staged.filename}`
               : staged.filename;
+            const pathRef = staged.pathReference;
             const loaderInstruction =
-              staged.loaderSelectable === "unverified"
-                ? `The staged reference is "${stagedRef}" for ${loaderHint}.`
-                : `Use "${stagedRef}" as ${loaderHint}.`;
+              staged.kind === "video" && pathRef
+                ? `Use "${stagedRef}" as the video file input in VHS_LoadVideo / VHS_LoadVideoFFmpeg (combo filename). ` +
+                  `VHS_LoadVideoPath / VHS_LoadVideoFFmpegPath take a filesystem path, not the combo filename — use "${pathRef}".`
+                : staged.loaderSelectable === "unverified"
+                  ? `The staged reference is "${stagedRef}" for ${loaderHint}.`
+                  : `Use "${stagedRef}" as ${loaderHint}.`;
             const selectabilityNote =
               staged.loaderSelectable === "verified"
                 ? `The fresh /object_info loader list verifies that "${stagedRef}" is selectable.`
                 : staged.loaderSelectable === "root-fallback"
                   ? `This ComfyUI stored the requested nested path "${staged.requestedFilename}" ` +
-                    `but did not enumerate it in its loader list, so the same bytes were also ` +
+                    `but VHS_LoadVideo enumerates only top-level input files, so the same bytes were ` +
                     `registered at the root as "${stagedRef}". The fresh /object_info loader ` +
-                    `list verifies the root reference; use that one.`
+                    `list verifies the root combo reference; use that one on VHS_LoadVideo. ` +
+                    (pathRef
+                      ? `VHS_LoadVideoPath must use the filesystem path "${pathRef}", not the combo filename.`
+                      : "")
                   : `The upload succeeded, but a fresh /object_info response did not prove that ` +
                     `"${stagedRef}" is present in a loader list. Do not assume the widget can ` +
                     `select it; inspect the loader or retry after panel_refresh_nodes.`;
+            const setWidgetNote =
+              staged.kind === "video" && pathRef
+                ? `NOTE: the open ComfyUI tab's loader dropdown was populated at page-load, ` +
+                  `so this just-registered input is not in it yet — call panel_refresh_nodes ` +
+                  `first (it re-pulls /object_info so the new file becomes selectable), THEN ` +
+                  `panel_set_widget VHS_LoadVideo.video to "${stagedRef}", or ` +
+                  `panel_set_widget VHS_LoadVideoPath.video to "${pathRef}". ` +
+                  `(panel_set_widget also self-refreshes on a rejected value, so a single ` +
+                  `retry after panel_refresh_nodes will always accept it.)`
+                : `NOTE: the open ComfyUI tab's loader dropdown was populated at page-load, ` +
+                  `so this just-registered input is not in it yet — call panel_refresh_nodes ` +
+                  `first (it re-pulls /object_info so the new file becomes selectable), THEN ` +
+                  `panel_set_widget the loader's widget to "${stagedRef}". ` +
+                  `(panel_set_widget also self-refreshes on a rejected value, so a single ` +
+                  `retry after panel_refresh_nodes will always accept it.)`;
             return {
               content: [
                 {
@@ -1100,15 +1122,12 @@ export function registerImageManagementTools(server: McpServer): void {
                     `Staged ${staged.kind} output as input via the server API.\n\n` +
                     `Input filename: ${stagedRef}\n` +
                     `subfolder: ${staged.subfolder || "(none)"}\n` +
-                    `type: ${staged.type}\n\n` +
+                    `type: ${staged.type}\n` +
+                    (pathRef ? `path: ${pathRef}\n` : "") +
+                    `\n` +
                     `${loaderInstruction}\n\n` +
                     `${selectabilityNote}\n\n` +
-                    `NOTE: the open ComfyUI tab's loader dropdown was populated at page-load, ` +
-                    `so this just-registered input is not in it yet — call panel_refresh_nodes ` +
-                    `first (it re-pulls /object_info so the new file becomes selectable), THEN ` +
-                    `panel_set_widget the loader's widget to "${stagedRef}". ` +
-                    `(panel_set_widget also self-refreshes on a rejected value, so a single ` +
-                    `retry after panel_refresh_nodes will always accept it.)`,
+                    setWidgetNote,
                 },
               ],
             };

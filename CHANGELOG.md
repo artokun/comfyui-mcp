@@ -9,6 +9,7 @@ All notable changes to this project are documented here. This project adheres to
 ### MCP
 
 #### Fixed
+- stage nested video as_filename values at the input root so VHS_LoadVideo can select them (#2083)
 - list_templates uses the live panel when the configured origin is unreachable (#2196)
 - panel_free_vram reports VRAM after CUDA release settles (#2050)
 - panel_open_workflow treats nested opened.routing_key as unsaved-open proof instead of failing a proven tmp: open as an unconfirmed filename (#2477)

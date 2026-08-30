@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { resolve } from "node:path";
 import { z } from "zod";
 import { DEAD_NAMES, MAX_TOOLS, TOOL_NAMES } from "../../tools/vocabulary.js";
 
@@ -557,6 +558,32 @@ describe("upload_image: each action writes to exactly one destination", () => {
     const t = text(res);
     expect(t).toContain('Use "assets/staged.png"');
     expect(t).toContain('panel_set_widget the loader\'s widget to "assets/staged.png"');
+  });
+
+  it('action:"stage" tells VHS_LoadVideoPath to use the filesystem path, not the combo name (#2083)', async () => {
+    stageOutputAsInputMock.mockResolvedValue({
+      filename: "clip.mp4",
+      subfolder: "",
+      type: "input",
+      kind: "video",
+      loaderSelectable: "root-fallback",
+      requestedFilename: "C0028/clip.mp4",
+      pathReference: resolve("/comfy", "input", "clip.mp4"),
+    });
+    const res = await uploadImage()({
+      action: "stage",
+      filename: "out.mp4",
+      as_filename: "C0028/clip.mp4",
+    });
+    const t = text(res);
+    const fsPath = resolve("/comfy", "input", "clip.mp4");
+    expect(t).toContain('Use "clip.mp4" as the video file input in VHS_LoadVideo');
+    expect(t).toContain("VHS_LoadVideoPath");
+    expect(t).toContain(fsPath);
+    expect(t).not.toContain(
+      'Use "clip.mp4" as the video file input in VHS_LoadVideoPath',
+    );
+    expect(t).toContain(`panel_set_widget VHS_LoadVideoPath.video to "${fsPath}"`);
   });
 });
 

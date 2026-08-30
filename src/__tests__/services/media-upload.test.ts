@@ -23,6 +23,12 @@ vi.mock("../../services/workspace-env.js", () => ({
   resolveEffectiveComfyUIBase: () => cfgRef.config.comfyuiPath,
 }));
 
+const resolveInputDirMock = vi.fn();
+vi.mock("../../services/output-dir.js", () => ({
+  resolveInputDir: (...a: unknown[]) => resolveInputDirMock(...a),
+  resolveOutputDir: vi.fn(),
+}));
+
 const copyFileMock = vi.fn();
 const readFileMock = vi.fn();
 vi.mock("node:fs/promises", () => ({
@@ -53,6 +59,7 @@ import {
   uploadAudioLocal,
   stageOutputAsInput,
   inferMediaKind,
+  stagedLoaderWidgetValue,
 } from "../../services/image-management.js";
 import { ValidationError } from "../../utils/errors.js";
 
@@ -63,6 +70,17 @@ beforeEach(() => {
   uploadImageHttpMock.mockResolvedValue({ name: "x" });
   getObjectInfoMock.mockResolvedValue({});
   copyFileMock.mockResolvedValue(undefined);
+  resolveInputDirMock.mockImplementation(async () => {
+    const base = cfgRef.config.comfyuiPath;
+    if (!base) {
+      throw new ValidationError(
+        "No local ComfyUI install path could be established: COMFYUI_PATH is not set and no " +
+          "default workspace is saved. Set COMFYUI_PATH, or save one with the workspace tool " +
+          "(action 'set_default').",
+      );
+    }
+    return resolve(base, "input");
+  });
 });
 
 describe("uploadVideoAuto (HTTP)", () => {
@@ -383,5 +401,133 @@ describe("stageOutputAsInput (output → input via server API)", () => {
     );
     expect(fetchImageMock).not.toHaveBeenCalled();
     expect(uploadImageHttpMock).not.toHaveBeenCalled();
+  });
+});
+
+describe("stageOutputAsInput video path mapping (#2083)", () => {
+  // VHS_LoadVideo combo enumerates only top-level input/ files. Staging a
+  // nested as_filename stored the MP4 under a subfolder that never appeared in
+  // that combo. The #2094 root fallback then returned a top-level name that
+  // VHS_LoadVideoPath.video (a STRING path widget) accepted, but panel_run
+  // failed with Invalid file path — Path loaders need a filesystem path, and
+  // the combo filename is not one (subfolder/path mismatch).
+  const vhsObjectInfo = (comboFiles: string[]) => ({
+    VHS_LoadVideo: {
+      input: { required: { video: [comboFiles, {}] } },
+    },
+    VHS_LoadVideoPath: {
+      input: {
+        required: {
+          video: ["STRING", { placeholder: "X://insert/path/here.mp4", vhs_path_extensions: ["mp4"] }],
+        },
+      },
+    },
+  });
+
+  beforeEach(() => {
+    fetchImageMock.mockResolvedValue({
+      base64: Buffer.from("bytes").toString("base64"),
+      mimeType: "application/octet-stream",
+    });
+  });
+
+  it("stages a nested video as_filename at the input root so VHS combo can select it", async () => {
+    uploadImageHttpMock.mockResolvedValueOnce({
+      name: "clip.mp4",
+      subfolder: "",
+      type: "input",
+    });
+    getObjectInfoMock.mockResolvedValueOnce(vhsObjectInfo(["clip.mp4", "other.mp4"]));
+
+    const r = await stageOutputAsInput({
+      filename: "source.mp4",
+      asFilename: "C0028/clip.mp4",
+    });
+
+    expect(uploadImageHttpMock).toHaveBeenCalledTimes(1);
+    expect(uploadImageHttpMock).toHaveBeenCalledWith(
+      "clip.mp4",
+      expect.any(Buffer),
+      "video/mp4",
+    );
+    expect(r).toMatchObject({
+      filename: "clip.mp4",
+      subfolder: "",
+      kind: "video",
+      loaderSelectable: "root-fallback",
+      requestedFilename: "C0028/clip.mp4",
+    });
+  });
+
+  it("maps the staged video to a filesystem path for VHS_LoadVideoPath, not the combo name", async () => {
+    uploadImageHttpMock.mockResolvedValueOnce({
+      name: "clip.mp4",
+      subfolder: "",
+      type: "input",
+    });
+    getObjectInfoMock.mockResolvedValueOnce(vhsObjectInfo(["clip.mp4"]));
+
+    const r = await stageOutputAsInput({
+      filename: "source.mp4",
+      asFilename: "C0028/clip.mp4",
+    });
+
+    const comboName = "clip.mp4";
+    const fsPath = resolve("/comfy", "input", "clip.mp4");
+    expect(r.pathReference).toBe(fsPath);
+    expect(stagedLoaderWidgetValue(r, "VHS_LoadVideo")).toBe(comboName);
+    expect(stagedLoaderWidgetValue(r, "VHS_LoadVideoFFmpeg")).toBe(comboName);
+    expect(stagedLoaderWidgetValue(r, "VHS_LoadVideoPath")).toBe(fsPath);
+    expect(stagedLoaderWidgetValue(r, "VHS_LoadVideoFFmpegPath")).toBe(fsPath);
+    // The recurrence: a top-level combo name is not a valid Path-loader value.
+    expect(stagedLoaderWidgetValue(r, "VHS_LoadVideoPath")).not.toBe(comboName);
+  });
+
+  it("never maps VHS_LoadVideoPath to a combo name while the file sits in a subfolder", async () => {
+    uploadImageHttpMock.mockResolvedValue({
+      name: "clip.mp4",
+      subfolder: "C0028",
+      type: "input",
+    });
+    getObjectInfoMock.mockResolvedValue(vhsObjectInfo(["other.mp4"]));
+
+    const r = await stageOutputAsInput({
+      filename: "source.mp4",
+      asFilename: "C0028/clip.mp4",
+    });
+
+    expect(r.subfolder).toBe("C0028");
+    expect(stagedLoaderWidgetValue(r, "VHS_LoadVideo")).toBe("C0028/clip.mp4");
+    expect(stagedLoaderWidgetValue(r, "VHS_LoadVideoPath")).toBe(
+      resolve("/comfy", "input", "C0028", "clip.mp4"),
+    );
+    expect(stagedLoaderWidgetValue(r, "VHS_LoadVideoPath")).not.toBe("clip.mp4");
+  });
+
+  it("does not treat a VHS_LoadVideoPath STRING widget as combo proof of a nested name", async () => {
+    uploadImageHttpMock.mockResolvedValueOnce({
+      name: "clip.mp4",
+      subfolder: "",
+      type: "input",
+    });
+    getObjectInfoMock.mockResolvedValueOnce({
+      VHS_LoadVideoPath: {
+        input: {
+          required: {
+            video: ["STRING", { placeholder: "X://insert/path/here.mp4" }],
+          },
+        },
+      },
+    });
+
+    const r = await stageOutputAsInput({
+      filename: "source.mp4",
+      asFilename: "C0028/clip.mp4",
+    });
+
+    expect(r.loaderSelectable).not.toBe("verified");
+    expect(stagedLoaderWidgetValue(r, "VHS_LoadVideoPath")).toBe(
+      resolve("/comfy", "input", "clip.mp4"),
+    );
   });
 });
