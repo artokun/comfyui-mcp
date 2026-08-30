@@ -28,7 +28,10 @@ Two questions, both must be YES:
 
 1. **Is it ours, and does it still reproduce?** On the CURRENT version — check
    before filing, not after. A defect already fixed upstream of the user's
-   install is noise.
+   install is noise. **Exception —** a crash, lost or corrupted work, or a
+   destroyed workflow is filed on a SINGLE occurrence, with whatever evidence
+   exists (log tail, stack, minidump, the failing call). Those are rarely
+   reproducible on demand, and they are the ones most expensive to lose.
 2. **Did it cost the user something?** It blocked them, produced a wrong result
    they would have kept, lost or corrupted their work, or crashed ComfyUI.
 
@@ -43,7 +46,9 @@ File when both hold:
 - You could not complete the task, and the reason is a defect in our software.
 
 **Do NOT file** — say it in chat and move on. None of these apply when the user
-asks: "report this" / "fix this bug" always files, whatever the bar says.
+asks: "report this" / "fix this bug" always files, whatever the bar says. For a
+THIRD-PARTY defect their request IS the go-ahead Step 6 exists to obtain, so
+route it to that project's GitHub and file it — do not ask a second time.
 
 - A transient you recovered from at no cost to the user — a retry that worked.
   This NEVER covers a crash, lost or corrupted work, or a wrong result the user
@@ -54,8 +59,9 @@ asks: "report this" / "fix this bug" always files, whatever the bar says.
   action.
 - Behaviour that surprised you but was correct, or that you have not actually
   diagnosed. An unverified hunch costs a maintainer the whole investigation.
-- A one-off you cannot reproduce. Note it; if it happens again, that second
-  occurrence is the report.
+- A one-off you cannot reproduce — EXCEPT a crash or lost/corrupted work,
+  which is filed the first time it happens (see the exception above). For
+  anything lesser, note it; if it recurs, that second occurrence is the report.
 
 **One report per root cause.** If several symptoms trace to one component in one
 session, file ONE report covering them, not one per symptom. Three separate
@@ -281,7 +287,10 @@ touched and nothing is done as the user. That is the default and needs no ask.
 Our Worker only files into OUR repos, so these go to their GitHub. Unlike
 our-repo defects (Steps 3 to 5, which you handle autonomously), third-party
 bugs are offer-and-ask at every step. Patching someone else's node and posting
-to someone else's tracker are the user's calls, not yours.
+to someone else's tracker are the user's calls, not yours — which is why an
+explicit "report this" from the user already settles it. When they have asked,
+file it without a second confirmation; ask only when the offer originated with
+you.
 
 - **Ask before patching.** You may offer a local workaround (for example, patch
   the custom node so the user is not blocked), but apply it only once the user
