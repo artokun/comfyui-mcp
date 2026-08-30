@@ -3011,6 +3011,46 @@ export async function resolvePackPresence(
 }
 
 /**
+ * #2530 — clone succeeded, but the dependency interpreter is unproven. Never
+ * recommend `python -m pip install` against the interpreter we just refused;
+ * that is the Stability Matrix base-python command that PEP 668 already rejected.
+ */
+function depsSkippedUnknownInterpreterWarning(reason: string, packId: string): string {
+  return (
+    `Python dependencies were NOT installed. ${reason} ` +
+    `The pack was cloned but this is a PARTIAL install: the dependency interpreter is unknown. ` +
+    `Do not run pip against an untrusted interpreter. ` +
+    `Use install_custom_node(action:"fix", id:"${packId}") so ComfyUI-Manager can restore/repair ` +
+    `dependencies in the connected environment, or set COMFYUI_PYTHON to the interpreter ` +
+    `ComfyUI actually imports from and retry.`
+  );
+}
+
+function isExternallyManagedPipError(text: string): boolean {
+  return (
+    /^\s*error: externally-managed-environment/im.test(text) ||
+    /interpreter at .+ is externally managed/i.test(text)
+  );
+}
+
+function depsPipFailedWarning(err: unknown, python: string, packId: string): string {
+  const e = err as Error & { stdout?: string | Buffer; stderr?: string | Buffer };
+  const output = `${e.stderr?.toString() ?? ""}\n${e.stdout?.toString() ?? ""}\n${e.message}`;
+  if (isExternallyManagedPipError(output)) {
+    return (
+      `Python dependencies (requirements.txt) failed to install: "${python}" is EXTERNALLY MANAGED ` +
+      `(PEP 668) and must not be modified. Do not re-run pip against that interpreter. ` +
+      `Use install_custom_node(action:"fix", id:"${packId}") so ComfyUI-Manager can restore/repair ` +
+      `the connected environment.`
+    );
+  }
+  return (
+    `Python dependencies (requirements.txt) failed to install (${e.message}); ` +
+    `install them manually with "${python} -m pip install -r requirements.txt".`
+  );
+}
+
+/**
  * Resolve the ComfyUI venv python for installing a cloned node's deps. Prefers
  * the install's own `.venv` (Windows Scripts/ or POSIX bin/), falling back to a
  * bare "python" on PATH. `basePath` is the CALL-SCOPED install root (apply_manifest
@@ -3653,14 +3693,16 @@ async function cloneCustomNodeFallback(
   }
 
   // Best-effort python deps. Don't fail the install if these don't.
+  // #2530 — never pip (or recommend pip) with an interpreter the environment
+  // probe would mark untrusted. resolveInstallInterpreter now shares that
+  // verdict; when it refuses, this is a PARTIAL install and Manager repair is
+  // the next step, not a copy-paste of the same unsafe python -m pip command.
   const requirements = join(nodeDir, "requirements.txt");
   const installScript = join(nodeDir, "install.py");
   if (existsSync(requirements) || existsSync(installScript)) {
     const resolved = await resolveVenvPython(comfyuiBase);
     if (!resolved.python) {
-      warnings.push(
-        `Python dependencies were NOT installed. ${resolved.reason} Set COMFYUI_PYTHON to the interpreter ComfyUI runs with, or restart ComfyUI through this MCP server and retry.`,
-      );
+      warnings.push(depsSkippedUnknownInterpreterWarning(resolved.reason, repoName));
     } else if (existsSync(requirements)) {
       const python = resolved.python;
       try {
@@ -3670,10 +3712,7 @@ async function cloneCustomNodeFallback(
           timeout: COMFY_CLI_TIMEOUT,
         });
       } catch (err) {
-        const e = err as Error;
-        warnings.push(
-          `Python dependencies (requirements.txt) failed to install (${e.message}); install them manually with "${python} -m pip install -r requirements.txt".`,
-        );
+        warnings.push(depsPipFailedWarning(err, python, repoName));
       }
     }
     if (resolved.python && existsSync(installScript)) {

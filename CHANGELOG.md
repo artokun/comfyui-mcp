@@ -6,6 +6,12 @@ All notable changes to this project are documented here. This project adheres to
 
 ## Unreleased
 
+### MCP
+
+#### Fixed
+- install_custom_node does not pip-install cloned-node requirements with an untrusted interpreter (Stability Matrix base Python / PEP 668) and does not recommend that same unsafe command (#2530)
+
+
 ## [0.52.164] - 2026-08-30
 
 ### MCP
