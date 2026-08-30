@@ -1016,6 +1016,33 @@ function safeManagerTaskDetails(
   };
 }
 
+/**
+ * #2490 — a drained Manager queue is not a successful repair. On v4 the
+ * queue-wide counts are identical for a task that succeeded and one that
+ * errored; the per-task history record is the structured verdict.
+ *
+ * `unified_fix` fails with `not found: <id>@<ver>` and the worker logs
+ * `An error occurred while fixing '…'`. Those two strings are Manager's own
+ * proven-negative literals, so they are treated as failure even when
+ * `status_str` is omitted — inferring failure from any other prose is still
+ * refused (#1999).
+ */
+function managerTaskLooksFailed(
+  record: ManagerTaskHistoryEntry | null | undefined,
+): { status: string; excerpt: string } | undefined {
+  if (!record) return undefined;
+  const status = record.statusStr?.trim().toLowerCase();
+  const excerpt = managerTaskResultExcerpt(record.result);
+  if (status === "failed" || status === "error") {
+    return { status, excerpt };
+  }
+  const result = typeof record.result === "string" ? record.result : "";
+  if (/\bnot found\s*:/i.test(result) || /an error occurred while fixing/i.test(result)) {
+    return { status: status || "error", excerpt };
+  }
+  return undefined;
+}
+
 /** Wrap a legacy-Manager failure with the upgrade guidance (keeps details). */
 function annotateLegacyError(
   err: unknown,
@@ -4949,11 +4976,40 @@ async function fixCustomNodeImpl(opts: FixOptions): Promise<NodeOpResult> {
 
   // FixPackParams requires node_ver; "" lets Manager resolve the installed
   // version (do_fix looks the pack up by name).
-  const status = await queueManagerTask("fix", { node_name: id, node_ver: "" });
+  // Pin the target before the first await so the enqueue, drain, and per-task
+  // history lookup stay on the same Manager even if the panel retargets.
+  const base = managerBaseUrl();
+  const queued = await queueManagerTaskTracked("fix", { node_name: id, node_ver: "" }, base);
+  const status = queued.status;
+  // #2490 — a drained queue / done_count is not a repair. Manager v4 records
+  // the real verdict on the per-task history row (status_str + result); a
+  // not-found / error there used to still print "Queued + repaired".
+  let taskRecord: ManagerTaskHistoryEntry | null | undefined;
+  try {
+    taskRecord = await fetchManagerTaskHistoryEntry(queued.uiId, base);
+  } catch {
+    taskRecord = undefined;
+  }
+  const failure = managerTaskLooksFailed(taskRecord);
+  if (failure) {
+    throw new NodeManagementError(
+      `ComfyUI-Manager recorded the fix of "${id}" as ${failure.status}. ` +
+        `The queue drained, but that only proves the task finished running; it does not prove ` +
+        `the pack was repaired.` +
+        (failure.excerpt ? ` Manager result: ${failure.excerpt}` : ""),
+      {
+        queueStatus: status,
+        managerTask: taskRecord ? safeManagerTaskDetails(taskRecord, failure.excerpt) : undefined,
+        uiId: queued.uiId,
+      },
+    );
+  }
   return {
     mechanism: "manager-http",
     message: `Queued + repaired "${id}" via ComfyUI-Manager.`,
     details: status,
+    managerBase: base,
+    taskUiId: queued.uiId,
   };
 }
 

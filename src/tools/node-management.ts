@@ -500,10 +500,11 @@ export function registerNodeManagementTools(server: McpServer): void {
           case "fix": {
             const id = requireId("fix", "the registry id / module name to repair, or 'all'");
             const mode = managerMode("fix"); // before the panel branch — see action:"install"
-            // `fix` has no verified equivalent (it reports success off the Manager
-            // queue, which proves nothing — #639), so a panel target is refused
-            // rather than redirected. Bulk "all" is handled by the pin guard inside
-            // the service.
+            // `fix` has no verified on-disk equivalent (a drained queue is not a
+            // repair — #639/#2490; the HTTP path now fails closed on Manager's
+            // per-task not-found/error, but still cannot prove the pack moved),
+            // so a panel target is refused rather than redirected. Bulk "all"
+            // is handled by the pin guard inside the service.
             if (targetsPanelPackExactly(id)) {
               assertPanelNotTargetedUnverifiable('install_custom_node action:"fix"', id);
             }

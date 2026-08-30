@@ -2311,6 +2311,7 @@ describe("node-management service", () => {
       const { calls } = stubFetch();
       const res = await fixCustomNode({ id: "my-pack" });
       expect(res.mechanism).toBe("manager-http");
+      expect(res.message).toMatch(/Queued \+ repaired/);
       expect(taskOf(calls, "fix").params).toMatchObject({ node_name: "my-pack" });
     });
 
@@ -2325,6 +2326,84 @@ describe("node-management service", () => {
       expect(args).toContain("all");
       expect(args).toContain("/split/data");
       expect(args).not.toContain("/split/code");
+    });
+
+    it("does not report repaired when Manager history records a not-found error (#2490)", async () => {
+      const { calls } = stubFetch({
+        managerTaskHistory: (uiId) => ({
+          history: {
+            ui_id: uiId,
+            kind: "fix",
+            result: "not found: ComfyUI-CacheDiT@",
+            status: { status_str: "error" },
+          },
+        }),
+      });
+      const err = await fixCustomNode({ id: "ComfyUI-CacheDiT" }).catch((e) => e as Error);
+      expect(err).toBeInstanceOf(NodeManagementError);
+      expect(err.message).toMatch(/not found: ComfyUI-CacheDiT@/);
+      expect(err.message).toMatch(/does not prove/);
+      expect(err.message).not.toMatch(/Queued \+ repaired/);
+      const { body } = taskOf(calls, "fix");
+      const historyCalls = calls.filter(
+        (c) => new URL(c.url).pathname === "/v2/manager/queue/history",
+      );
+      expect(historyCalls).toHaveLength(1);
+      expect(new URL(historyCalls[0].url).searchParams.get("ui_id")).toBe(body.ui_id);
+    });
+
+    it.each(["failed", "error"] as const)(
+      "surfaces a v4 per-task fix %s after queue drain (#2490)",
+      async (statusStr) => {
+        stubFetch({
+          managerTaskHistory: (uiId) => ({
+            history: {
+              ui_id: uiId,
+              kind: "fix",
+              result: `An error occurred while fixing 'ComfyUI-CacheDiT@'.`,
+              status: { status_str: statusStr },
+            },
+          }),
+        });
+        const err = await fixCustomNode({ id: "ComfyUI-CacheDiT" }).catch((e) => e as Error);
+        expect(err).toBeInstanceOf(NodeManagementError);
+        expect(err.message).toContain(`recorded the fix of "ComfyUI-CacheDiT" as ${statusStr}`);
+        expect(err.message).toMatch(/An error occurred while fixing/);
+        expect(err.message).not.toMatch(/Queued \+ repaired/);
+      },
+    );
+
+    it("does not report repaired when history result is not-found without status_str (#2490)", async () => {
+      stubFetch({
+        managerTaskHistory: (uiId) => ({
+          history: {
+            ui_id: uiId,
+            kind: "fix",
+            result: "not found: ComfyUI-CacheDiT@",
+          },
+        }),
+      });
+      const err = await fixCustomNode({ id: "ComfyUI-CacheDiT" }).catch((e) => e as Error);
+      expect(err).toBeInstanceOf(NodeManagementError);
+      expect(err.message).toMatch(/not found: ComfyUI-CacheDiT@/);
+      expect(err.message).not.toMatch(/Queued \+ repaired/);
+    });
+
+    it("still reports repaired when Manager history records success (#2490)", async () => {
+      const { calls } = stubFetch({
+        managerTaskHistory: (uiId) => ({
+          history: {
+            ui_id: uiId,
+            kind: "fix",
+            result: "success",
+            status: { status_str: "success" },
+          },
+        }),
+      });
+      const res = await fixCustomNode({ id: "my-pack" });
+      expect(res.mechanism).toBe("manager-http");
+      expect(res.message).toMatch(/Queued \+ repaired "my-pack"/);
+      expect(res.taskUiId).toBe(taskOf(calls, "fix").body.ui_id);
     });
   });
 
