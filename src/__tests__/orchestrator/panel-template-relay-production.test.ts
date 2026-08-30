@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { createServer, type Server } from "node:http";
 import { createServer as createSocketServer } from "node:net";
 import { createPanelTemplateRelayWiring } from "../../orchestrator/index.js";
@@ -433,6 +433,57 @@ describe("orchestrator panel template relay wiring (#2196)", () => {
     // the origin-gate clause goes, even while the deeper one still refuses.
     expect(wiring.resolveAllowedPanelOrigin("tab-1", target)).toBeUndefined();
     expect(wiring.resolvePanelUrl("tab-1", target)).toBeUndefined();
+  });
+
+  it("serves a remote matching origin through the live panel instead of HTTP (#2196)", async () => {
+    const seen: Array<{ cmd: string; operation?: string }> = [];
+    const remoteCalls: string[] = [];
+    const realFetch = globalThis.fetch;
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockImplementation((input, init) => {
+      const url = String(input);
+      if (url.startsWith("http://127.0.0.1:")) return realFetch(input, init);
+      remoteCalls.push(url);
+      return Promise.reject(new Error("matching remote must not be fetched by the orchestrator"));
+    });
+    try {
+      const index = { "remote-pack": [{ name: "live-template" }] };
+      const body = JSON.stringify(index);
+      const target = "https://remote.example/comfyapi";
+      const observedOrigin = "https://remote.example";
+      const bridge = {
+        canReach: () => true,
+        resolveFailure: () => undefined,
+        resolveSharedTabId: () => "tab-1",
+        tabServerOrigin: () => observedOrigin,
+        send: async (command: { cmd: "fetch_comfyui_read"; operation: "workflow_templates" }) => {
+          seen.push(command);
+          return {
+            operation: "workflow_templates" as const,
+            body,
+            contentType: "application/json",
+            bytes: Buffer.byteLength(body, "utf8"),
+          };
+        },
+      };
+      const wiring = createPanelTemplateRelayWiring({
+        bridge,
+        currentTarget: () => target,
+        currentTargetGeneration: () => 0,
+        secrets: new Map([[SECRET, "orchestrator::codex"]]),
+      });
+      // HTTP authorization stays loopback-only; the native path must not need it.
+      expect(wiring.resolveAllowedPanelOrigin("tab-1", target)).toBeUndefined();
+      const relay = await startPanelTemplateRelayServer({ bridge, ...wiring });
+      servers.push(relay);
+      process.env.COMFYUI_MCP_RELAY_SECRET = SECRET;
+      process.env.COMFYUI_MCP_TEMPLATE_RELAY_URL = relay.endpointUrl;
+
+      await expect(requestPanelTemplateIndex()).resolves.toEqual(index);
+      expect(seen).toEqual([{ cmd: "fetch_comfyui_read", operation: "workflow_templates" }]);
+      expect(remoteCalls).toEqual([]);
+    } finally {
+      fetchSpy.mockRestore();
+    }
   });
 
   it("still authorizes an https LITERAL loopback origin, which has no name to re-resolve (#2392)", async () => {

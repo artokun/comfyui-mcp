@@ -8,10 +8,11 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
  *
  * The list_packs child cannot reach the panel bridge directly. It sends only a
  * capability-bound request to the orchestrator; the orchestrator resolves the
- * live panel tab and fetches the fixed /api/workflow_templates route from that
- * tab's server-observed origin, but only when it is the current ComfyUI target.
- * No configured ComfyUI credentials or caller-supplied URL crosses this
- * boundary.
+ * live panel tab and asks that tab to fetch same-origin /api/workflow_templates
+ * (the SSRF-safe path for a remote or mixed-alias origin). Loopback HTTP to a
+ * corroborated origin remains a fallback for older panels that do not implement
+ * the workflow_templates read. No configured ComfyUI credentials or
+ * caller-supplied URL crosses this boundary.
  */
 export const PANEL_TEMPLATE_RELAY_VERSION = 1;
 export const PANEL_TEMPLATE_RELAY_TIMEOUT_MS = 8_000;
@@ -96,9 +97,21 @@ type Success = {
 type ResponseBody = Failure | Success;
 type TransportResponse = ResponseBody & { responseMac: string };
 
+export const PANEL_TEMPLATE_READ_OPERATION = "workflow_templates" as const;
+
 export interface PanelTemplateRelayBridge {
   canReach(tabId: string): boolean;
   resolveFailure?: (tabId: string) => "ambiguous" | "unresolved" | undefined;
+  /**
+   * Preferred production path: the authenticated panel fetches same-origin
+   * /api/workflow_templates. Optional so unit tests can exercise the loopback
+   * HTTP fallback without a live bridge.
+   */
+  send?(
+    command: { cmd: "fetch_comfyui_read"; operation: typeof PANEL_TEMPLATE_READ_OPERATION },
+    options: { tabId: string; timeoutMs: number },
+    // oxlint-disable-next-line anti-slop/no-unknown-returns -- UiBridge.send is Promise<unknown>; validatePanelTemplateReadPayload parses the reply
+  ): Promise<unknown>;
 }
 
 export interface PanelTemplateRelayResolvedAgent {
@@ -637,6 +650,91 @@ function isConnectionRefused(error: unknown): boolean {
   return false;
 }
 
+function isUnsupportedPanelTemplateRead(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error ?? "");
+  return (
+    /operation must be one of/i.test(message) ||
+    /unknown command/i.test(message) ||
+    /does not implement/i.test(message) ||
+    /too old for/i.test(message)
+  );
+}
+
+function validatePanelTemplateReadPayload(value: unknown): string | undefined {
+  if (!value || typeof value !== "object") return undefined;
+  const record = value as Record<string, unknown>;
+  if (
+    !hasOnlyKeys(record, ["operation", "body", "contentType", "bytes"]) ||
+    record.operation !== PANEL_TEMPLATE_READ_OPERATION ||
+    typeof record.body !== "string" ||
+    record.body.length === 0 ||
+    Buffer.byteLength(record.body, "utf8") > PANEL_TEMPLATE_RELAY_MAX_RESPONSE_BYTES ||
+    (record.contentType !== null &&
+      (typeof record.contentType !== "string" || !isSafeText(record.contentType, 128)))
+  ) return undefined;
+  const bytes = record.bytes;
+  if (
+    typeof bytes !== "number" ||
+    !Number.isSafeInteger(bytes) ||
+    bytes < 0 ||
+    bytes > PANEL_TEMPLATE_RELAY_MAX_RESPONSE_BYTES ||
+    Buffer.byteLength(record.body, "utf8") !== bytes
+  ) return undefined;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(record.body);
+  } catch {
+    return undefined;
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return undefined;
+  return record.body;
+}
+
+async function fetchPanelNativeIndex(
+  bridge: PanelTemplateRelayBridge,
+  panelTab: string,
+  deadlineAt: number,
+): Promise<string> {
+  if (typeof bridge.send !== "function") {
+    throw new PanelTemplateRelayError("The connected panel could not fetch the workflow-template index.", "PANEL_FETCH_FAILED");
+  }
+  const remaining = deadlineAt - Date.now();
+  if (remaining <= 0) throw new PanelTemplateRelayError("The panel template relay timed out.", "TIMEOUT");
+  const reply = await bridge.send(
+    { cmd: "fetch_comfyui_read", operation: PANEL_TEMPLATE_READ_OPERATION },
+    { tabId: panelTab, timeoutMs: Math.min(PANEL_TEMPLATE_RELAY_TIMEOUT_MS, remaining) },
+  );
+  const body = validatePanelTemplateReadPayload(reply);
+  if (!body) {
+    throw new PanelTemplateRelayError("The connected panel could not fetch the workflow-template index.", "PANEL_FETCH_FAILED");
+  }
+  return body;
+}
+
+async function fetchLivePanelIndex(
+  options: PanelTemplateRelayServerOptions,
+  panelTab: string,
+  currentTarget: string,
+  deadlineAt: number,
+): Promise<string> {
+  if (typeof options.bridge.send === "function") {
+    try {
+      return await fetchPanelNativeIndex(options.bridge, panelTab, deadlineAt);
+    } catch (error) {
+      // An older panel implements fetch_comfyui_read but not this operation.
+      // Keep the loopback HTTP fallback rather than failing closed on a
+      // version skew the child cannot see.
+      if (!isUnsupportedPanelTemplateRead(error)) throw error;
+    }
+  }
+  const allowedOrigin = options.resolveAllowedPanelOrigin(panelTab, currentTarget);
+  const panelUrl = safePanelTemplateUrl(options.resolvePanelUrl(panelTab, currentTarget), allowedOrigin);
+  if (!panelUrl) {
+    throw new PanelTemplateRelayError("The panel template relay refused a non-loopback destination.", "NO_PANEL_ORIGIN");
+  }
+  return fetchPinnedPanelIndex(panelUrl, deadlineAt);
+}
+
 async function fetchPanelIndex(url: URL, deadlineAt: number): Promise<string> {
   const remaining = deadlineAt - Date.now();
   if (remaining <= 0) throw new PanelTemplateRelayError("The panel template relay timed out.", "TIMEOUT");
@@ -729,25 +827,17 @@ export async function startPanelTemplateRelayServer(
           const targetAtStart = options.resolveCurrentTarget();
           const panelTab = options.resolvePanelTab(auth.agentKey);
           const panelReachable = panelTab ? options.bridge.canReach(panelTab) : false;
-          const allowedOrigin = panelTab && panelReachable
-            ? options.resolveAllowedPanelOrigin(panelTab, targetAtStart.url)
-            : undefined;
-          const panelUrl = panelTab && panelReachable
-            ? safePanelTemplateUrl(options.resolvePanelUrl(panelTab, targetAtStart.url), allowedOrigin)
-            : undefined;
           if (!panelTab || !panelReachable) {
             response = failureResponse(
               request.requestId,
               options.bridge.resolveFailure?.(auth.agentKey) === "ambiguous" ? "AMBIGUOUS_REQUESTER" : "NO_LIVE_PANEL",
             );
-          } else if (!panelUrl) {
-            // Any configured relay refusal is authoritative. Returning a
-            // sentinel here would let the child fall through to a stale
-            // getComfyUIBaseUrl() target after a mid-turn retarget.
-            response = failureResponse(request.requestId, "NO_PANEL_ORIGIN");
           } else {
             try {
-              const body = await withinDeadline(fetchPinnedPanelIndex(panelUrl, requestDeadline(request)), requestDeadline(request));
+              const body = await withinDeadline(
+                fetchLivePanelIndex(options, panelTab, targetAtStart.url, requestDeadline(request)),
+                requestDeadline(request),
+              );
               const targetNow = options.resolveCurrentTarget();
               if (targetNow.url !== targetAtStart.url || targetNow.generation !== targetAtStart.generation) {
                 throw new PanelTemplateRelayError(
