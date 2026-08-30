@@ -28,7 +28,7 @@ const { buildPanelToolDefs, makePanelToolCtx, __panelToolsTestHooks } = await im
 import { getBootLocalComfyUIBaseUrl } from "../../config.js";
 import { markReplyTimeout } from "../../services/ui-bridge.js";
 import { WorkflowTargetStore } from "../../services/workflow-target-store.js";
-import type { PanelToolCtx, ToolResult } from "../../orchestrator/panel-tools.js";
+import type { ToolResult } from "../../orchestrator/panel-tools.js";
 import {
   VRAM_SETTLE_INTERVAL_MS,
   VRAM_SETTLE_TIMEOUT_MS,
@@ -50,8 +50,7 @@ const ackTimeout = (cmd: string, ms: number): Error =>
 
 let sent: string[] = [];
 
-function bridge(reply: "timeout" | "ok"): PanelToolCtx["bridge"] {
-  // oxlint-disable-next-line anti-slop/no-chained-type-assertions -- test double for the panel bridge, not a live UiBridge
+function bridge(reply: "timeout" | "ok") {
   return {
     send: async (cmd: Record<string, unknown>) => {
       sent.push(String(cmd.cmd));
@@ -70,11 +69,11 @@ function bridge(reply: "timeout" | "ok"): PanelToolCtx["bridge"] {
     tabGraphMutationCapability: () => ({ known: true, canMutate: true }),
     tabIsLocal: () => true,
     tabServerOrigin: () => BOOT_BASE,
-  } as unknown as PanelToolCtx["bridge"];
+  };
 }
 
 async function run(reply: "timeout" | "ok"): Promise<{ text: string; isError: boolean }> {
-  const ctx = makePanelToolCtx(bridge(reply), TAB, new WorkflowTargetStore());
+  const ctx = makePanelToolCtx(bridge(reply) as never, TAB, new WorkflowTargetStore());
   const def = buildPanelToolDefs().find((d) => d.name === "panel_free_vram");
   if (!def) throw new Error("panel_free_vram is not registered");
   const pending = def.handler({} as never, ctx);

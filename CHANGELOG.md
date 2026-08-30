@@ -9,6 +9,7 @@ All notable changes to this project are documented here. This project adheres to
 ### MCP
 
 #### Fixed
+- panel_free_vram reports VRAM after CUDA release settles (#2050)
 - panel_open_workflow treats nested opened.routing_key as unsaved-open proof instead of failing a proven tmp: open as an unconfirmed filename (#2477)
 
 ## [0.52.150] - 2026-08-30
