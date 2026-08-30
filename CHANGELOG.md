@@ -6,6 +6,11 @@ All notable changes to this project are documented here. This project adheres to
 
 ## Unreleased
 
+### MCP
+
+#### Fixed
+- panel_set_widget reconciles a missing ACK with a graph read-back and mutation receipt instead of leaving an applied subgraph write as outcome-unknown (#2489)
+
 ## [0.52.166] - 2026-09-01
 
 ### MCP
@@ -24,7 +29,6 @@ All notable changes to this project are documented here. This project adheres to
 - a loader input naming a file the server does not have says where it looked, and how to fix it (#2679)
 - a Windows updater that cannot reach npm or git says so, and says what to do (#2672)
 
-
 ## [0.52.165] - 2026-08-30
 
 ### MCP
@@ -41,7 +45,6 @@ All notable changes to this project are documented here. This project adheres to
 #### Fixed
 - check_runtime does not classify environment-authenticated paid Gemini and WaveSpeed nodes as local/free (#2543, #2665)
 - install_comfyui action:"environment" reports the pip-installed ComfyUI-Manager version from a trusted interpreter instead of a disabled custom_nodes/ComfyUI-Manager checkout (#2538, #2664)
-
 
 ## [0.52.163] - 2026-08-30
 
@@ -64,7 +67,6 @@ All notable changes to this project are documented here. This project adheres to
 
 #### Fixed
 - get_image list_assets and get_system_stats logs fall back to the connected panel same-origin history/logs/view reads when the configured headless route is unreachable, and panel_run completion events name PreviewImage outputs with type temp (#2283)
-- panel_set_widget reconciles a missing ACK with a graph read-back and mutation receipt instead of leaving an applied subgraph write as outcome-unknown (#2489)
 - panel_set_widget does not treat a MiniMaxH3Director duration write as failed when the value landed and only a setting-store onValueChange callback threw (#2545, #2654)
 - panel_connect retries a LiteGraph wildcard-to-wildcard (`*` → `*`) pairing when the panel reports "No input accepts type *" — PrimitiveNode "connect to widget input" can land on LogicIF.when_true / when_false so the primitive becomes typed from the destination (#2542, #2653)
 - panel_query_graph inspects the unsaved live canvas after custom-widget / builder content-only [root-shape-mismatch] instead of recommending a destructive re-open (#2544, #2652)
