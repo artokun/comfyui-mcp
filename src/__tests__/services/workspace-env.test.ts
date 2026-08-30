@@ -760,6 +760,7 @@ describe("getEnvironment", () => {
       expect(env.local.code_path).toBe(codeRoot);
       expect(env.local.code_path_source).toBe("env");
       expect(env.local.git).toEqual({ rev: "abc123", branch: "main" });
+      // No trusted interpreter, so no pip Manager version — custom_nodes is fallback (#2538).
       expect(env.local.comfyui_manager_version).toBe("3.41");
       expect(env.local.note).toMatch(/Split install/);
     } finally {
@@ -961,6 +962,8 @@ describe("getEnvironment", () => {
       });
 
       const env = await getEnvironment();
+      // Offline / untrusted probe: no pip package list, so the custom_nodes
+      // checkout is the fallback — not a claim that this is the live Manager (#2538).
       expect(env.local.comfyui_manager_version).toBe("3.10.1");
       expect(env.local.git).toEqual({ rev: "abc1234", branch: "master" });
     } finally {
@@ -996,6 +999,126 @@ describe("getEnvironment", () => {
       devices: [],
     });
   }
+
+  async function writeLegacyManager(install: string, version: string): Promise<void> {
+    await mkdir(join(install, "custom_nodes", "ComfyUI-Manager"), { recursive: true });
+    await writeFile(
+      join(install, "custom_nodes", "ComfyUI-Manager", "pyproject.toml"),
+      `[project]\nname = "comfyui-manager"\nversion = "${version}"\n`,
+      "utf-8",
+    );
+  }
+
+  // -------------------------------------------------------------------------
+  // #2538 — a leftover custom_nodes/ComfyUI-Manager checkout is not the live
+  // Manager when ComfyUI --enable-manager serves the pip package instead.
+  // -------------------------------------------------------------------------
+
+  it("prefers a trusted pip comfyui-manager over a leftover custom_nodes checkout (#2538)", async () => {
+    const dir = await tmpDir();
+    const exe = await stageWorkspace(dir);
+    const install = join(dir, "ComfyUI");
+    await writeLegacyManager(install, "3.41");
+    try {
+      statsReachable("3.12.11");
+      h.mockLiveInterpreter.mockReturnValue({
+        python: exe,
+        source: "launched-by-us",
+        pid: 4242,
+      });
+      setExecFileResponder((_cmd, args) => {
+        if (args.includes("--version")) return { stdout: "Python 3.12.11\n" };
+        if (args.includes("pip")) {
+          const records = ["Name: torch\nVersion: 2.5.0"];
+          // Only emit the pip Manager if the probe actually asked for it — otherwise
+          // this would pass on a KEY_PACKAGES list that still ignores comfyui-manager.
+          if (args.includes("comfyui-manager") || args.includes("comfyui_manager")) {
+            records.push("Name: comfyui-manager\nVersion: 4.2.2");
+          }
+          return { stdout: `${records.join("\n---\n")}\n` };
+        }
+        return new Error("nope");
+      });
+
+      const env = await getEnvironment();
+      expect(env.local.python_probe_trusted).toBe(true);
+      expect(env.local.packages?.["comfyui-manager"]).toBe("4.2.2");
+      expect(env.local.comfyui_manager_version).toBe("4.2.2");
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("falls back to custom_nodes when a trusted probe has no pip comfyui-manager (#2538)", async () => {
+    const dir = await tmpDir();
+    const exe = await stageWorkspace(dir);
+    const install = join(dir, "ComfyUI");
+    await writeLegacyManager(install, "3.41");
+    try {
+      statsReachable("3.12.11");
+      h.mockLiveInterpreter.mockReturnValue({
+        python: exe,
+        source: "launched-by-us",
+        pid: 4242,
+      });
+      setExecFileResponder((_cmd, args) => {
+        if (args.includes("--version")) return { stdout: "Python 3.12.11\n" };
+        if (args.includes("pip")) return { stdout: "Name: torch\nVersion: 2.5.0\n" };
+        return new Error("nope");
+      });
+
+      const env = await getEnvironment();
+      expect(env.local.python_probe_trusted).toBe(true);
+      expect(env.local.packages?.["comfyui-manager"]).toBeUndefined();
+      expect(env.local.comfyui_manager_version).toBe("3.41");
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("does not invent a pip Manager version after a trusted probe is withdrawn (#2538)", async () => {
+    const dir = await tmpDir();
+    const exe = await stageWorkspace(dir);
+    const install = join(dir, "ComfyUI");
+    await writeLegacyManager(install, "3.41");
+    try {
+      mockGetSystemStats.mockResolvedValueOnce({
+        system: {
+          os: "nt",
+          python_version: "3.12.11",
+          comfyui_version: "0.27.1",
+          pytorch_version: "2.9.0",
+          embedded_python: false,
+          argv: [],
+        },
+        devices: [],
+      });
+      h.mockLiveInterpreter.mockReturnValue({
+        python: exe,
+        source: "process-table",
+        pid: 99,
+      });
+      setExecFileResponder((_cmd, args) => {
+        if (args.includes("--version")) return { stdout: "Python 3.12.11\n" };
+        if (args.includes("pip")) {
+          const records = ["Name: torch\nVersion: 1.0.0"];
+          if (args.includes("comfyui-manager") || args.includes("comfyui_manager")) {
+            records.push("Name: comfyui-manager\nVersion: 4.2.2");
+          }
+          return { stdout: `${records.join("\n---\n")}\n` };
+        }
+        return new Error("nope");
+      });
+
+      const env = await getEnvironment();
+      expect(env.local.python_probe_trusted).toBe(false);
+      expect(env.local.packages).toBeUndefined();
+      // Fail-closed: a withdrawn probe's pip 4.2.2 must not be reported as live.
+      expect(env.local.comfyui_manager_version).toBe("3.41");
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
 
   it("reports UNKNOWN (never a package list) when the interpreter was not observed", async () => {
     const dir = await tmpDir();
