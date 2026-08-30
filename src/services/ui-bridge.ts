@@ -1918,6 +1918,30 @@ export type LateMutation = {
   result?: unknown;
 };
 
+/**
+ * A mutation that was written to the panel and has not yet been acknowledged
+ * (#2527). Keyed by the dispatched rid so a late frontend reply, a graph read,
+ * or a retry_of can reconcile the exact delivered command instead of racing a
+ * stale snapshot.
+ */
+export type DeliveredMutationReceipt = {
+  rid: string;
+  cmd: string;
+  tabId: string;
+  ts: number;
+  frame: Record<string, unknown>;
+  status: "in_flight" | "timed_out";
+};
+
+/** Peek of a delivered mutation, including one that already settled late. */
+export type PeekedDeliveredMutation = {
+  rid: string;
+  cmd: string;
+  tabId: string;
+  frame: Record<string, unknown>;
+  status: "in_flight" | "timed_out" | "settled";
+};
+
 /** A prompt id captured by the Panel after the graph_run reply window (#1728). */
 export type LateRunReceipt = {
   runRid: string;
@@ -1970,6 +1994,19 @@ function retainableLateResult(result: unknown): { result?: unknown } {
   } catch {
     return {};
   }
+}
+
+/** Clone the dispatched command minus rid so a later retry can replay it. */
+function cloneDeliveredMutationFrame(frame: Record<string, unknown>): Record<string, unknown> {
+  let cloned: Record<string, unknown>;
+  try {
+    const json = JSON.stringify(frame);
+    cloned = typeof json === "string" ? (JSON.parse(json) as Record<string, unknown>) : { ...frame };
+  } catch {
+    cloned = { ...frame };
+  }
+  delete cloned.rid;
+  return cloned;
 }
 
 /** Tag an error as a reply-timeout and return it (for throw/reject). */
@@ -2338,22 +2375,23 @@ export class UiBridge {
   /** TTL for a BUFFERED late ask answer — see the exported LATE_ASK_TTL_MS. */
   private static readonly LATE_ASK_TTL_MS = LATE_ASK_TTL_MS;
   /**
-   * Mutations whose reply timer fired (rid -> what it was), so a reply arriving
-   * afterwards can be RECOGNISED as the late completion of a known write rather
-   * than an unknown rid to drop (#694).
+   * Mutations written to the panel and not yet acknowledged (#2527 / #694).
    *
-   * Deliberately narrow, and the negatives matter more than the positive:
-   *  - MUTATIONS only. A read that is abandoned costs nothing because you just
-   *    retry it (#1154's asymmetry); retaining reads would make this unbounded
-   *    noise for no recoverable information.
-   *  - populated when we STOP WAITING for a reply we already wrote — the reply
-   *    timer firing (#694), OR a mid-command disconnect of a filtered mutation
-   *    (panel#1524). A mutation that replies in time resolves its caller directly
-   *    and has nothing to report later. Without the disconnect arm, the panel's
-   *    lost-reply replay of a `graph_run` that already queued is an unknown rid
-   *    and is dropped — the caller is stuck with OUTCOME UNKNOWN for a paid render.
+   * Populated at dispatch (not only at timeout) so a graph read or retry_of can
+   * still name the exact delivered command while the frontend is settling.
+   * Status becomes `timed_out` when we STOP WAITING — the reply timer firing
+   * (#694) or a mid-command disconnect of a filtered mutation (panel#1524).
+   * A mutation that replies in time is forgotten: the caller already has the
+   * outcome. Without the disconnect arm, the panel's lost-reply replay of a
+   * `graph_run` that already queued is an unknown rid and is dropped.
+   *
+   * Deliberately mutations only. A read that is abandoned costs a retry
+   * (#1154's asymmetry); retaining reads would make this unbounded noise.
    */
-  private timedOutMutations = new Map<string, { cmd: string; tabId: string; ts: number }>();
+  private deliveredMutations = new Map<
+    string,
+    { cmd: string; tabId: string; ts: number; frame: Record<string, unknown>; status: "in_flight" | "timed_out" }
+  >();
   /** Installed by the retry-token layer; see setLateMutationFilter. Null means
    *  retain nothing. */
   private lateMutationFilter: ((cmdName: string) => boolean) | null = null;
@@ -2361,8 +2399,18 @@ export class UiBridge {
    *  takeLateMutation(). Success only: see the recordLateMutation comment. */
   private lateMutations = new Map<
     string,
-    { ok: true; cmd: string; tabId: string; ts: number; lateByMs: number; result?: unknown }
+    {
+      ok: true;
+      cmd: string;
+      tabId: string;
+      ts: number;
+      lateByMs: number;
+      result?: unknown;
+      frame: Record<string, unknown>;
+    }
   >();
+  /** Waiters blocked on a tab's outcome-unknown mutations settling (#2527). */
+  private mutationSettleWaiters: Array<{ tabId: string; finish: () => void }> = [];
   /** Exact prompt receipts sent by the Panel after its graph_run command returned. */
   private lateRunReceipts = new Map<
     string,
@@ -4585,10 +4633,13 @@ export class UiBridge {
    * caller does not already have.
    */
   private recordLateMutation(rid: string, msg: { ok?: unknown; result?: unknown }): void {
-    const started = this.timedOutMutations.get(rid);
+    const started = this.deliveredMutations.get(rid);
     if (!started) return;
-    this.timedOutMutations.delete(rid);
-    if (msg.ok !== true) return;
+    this.deliveredMutations.delete(rid);
+    if (msg.ok !== true) {
+      this.notifyMutationSettled(started.tabId);
+      return;
+    }
     const now = Date.now();
     this.pruneLateMutations();
     this.lateMutations.set(rid, {
@@ -4597,11 +4648,13 @@ export class UiBridge {
       tabId: started.tabId,
       ts: now,
       lateByMs: now - started.ts,
+      frame: started.frame,
       ...retainableLateResult(msg.result),
     });
     logger.debug(
       `[ui-bridge] "${started.cmd}" on tab ${started.tabId} completed ${now - started.ts} ms AFTER its reply timeout — retained for the caller (#694)`,
     );
+    this.notifyMutationSettled(started.tabId);
   }
 
   /**
@@ -4645,6 +4698,81 @@ export class UiBridge {
       lateByMs: hit.lateByMs,
       ...("result" in hit ? { result: hit.result } : {}),
     };
+  }
+
+  /**
+   * Outcome-unknown (timed-out, not yet settled) mutations on `tabId` (#2527).
+   * Graph reads wait on these, or disclose them when the frontend has not
+   * acknowledged yet.
+   */
+  listOutstandingMutations(tabId: string): DeliveredMutationReceipt[] {
+    this.pruneLateMutations();
+    const out: DeliveredMutationReceipt[] = [];
+    for (const [rid, e] of this.deliveredMutations) {
+      if (e.tabId !== tabId || e.status !== "timed_out") continue;
+      out.push({ rid, cmd: e.cmd, tabId: e.tabId, ts: e.ts, frame: e.frame, status: e.status });
+    }
+    return out;
+  }
+
+  /** Look up a delivered mutation by rid without draining a late completion. */
+  peekDeliveredMutation(rid: string): PeekedDeliveredMutation | undefined {
+    this.pruneLateMutations();
+    const settled = this.lateMutations.get(rid);
+    if (settled) {
+      return {
+        rid,
+        cmd: settled.cmd,
+        tabId: settled.tabId,
+        frame: settled.frame,
+        status: "settled",
+      };
+    }
+    const live = this.deliveredMutations.get(rid);
+    if (!live) return undefined;
+    return { rid, cmd: live.cmd, tabId: live.tabId, frame: live.frame, status: live.status };
+  }
+
+  /**
+   * Wait until every timed-out mutation on `tabId` has a frontend settlement,
+   * or `budgetMs` elapses (#2527). Resolves without throwing.
+   */
+  waitForOutstandingMutations(tabId: string, budgetMs: number): Promise<void> {
+    this.pruneLateMutations();
+    if (this.listOutstandingMutations(tabId).length === 0) return Promise.resolve();
+    const budget = Number.isFinite(budgetMs) ? Math.max(0, Math.floor(budgetMs)) : 0;
+    if (budget <= 0) return Promise.resolve();
+    return new Promise((resolve) => {
+      let done = false;
+      const finish = () => {
+        if (done) return;
+        done = true;
+        clearTimeout(timer);
+        this.mutationSettleWaiters = this.mutationSettleWaiters.filter((w) => w !== waiter);
+        resolve();
+      };
+      const waiter = { tabId, finish };
+      const timer = setTimeout(finish, budget);
+      this.mutationSettleWaiters.push(waiter);
+      if (this.listOutstandingMutations(tabId).length === 0) finish();
+    });
+  }
+
+  private outstandingTimedOutCount(tabId: string): number {
+    let n = 0;
+    for (const e of this.deliveredMutations.values()) {
+      if (e.tabId === tabId && e.status === "timed_out") n += 1;
+    }
+    return n;
+  }
+
+  private notifyMutationSettled(tabId: string): void {
+    if (this.mutationSettleWaiters.length === 0) return;
+    if (this.outstandingTimedOutCount(tabId) > 0) return;
+    const waiters = this.mutationSettleWaiters.filter((w) => w.tabId === tabId);
+    if (waiters.length === 0) return;
+    this.mutationSettleWaiters = this.mutationSettleWaiters.filter((w) => w.tabId !== tabId);
+    for (const waiter of waiters) waiter.finish();
   }
 
   /** Record one exact prompt id from the Panel's late graph_run capture. */
@@ -4776,8 +4904,12 @@ export class UiBridge {
   /** TTL + cardinality bound for both #694 maps. */
   private pruneLateMutations(): void {
     const now = Date.now();
-    for (const [rid, e] of this.timedOutMutations) {
-      if (now - e.ts > UiBridge.LATE_MUTATION_TTL_MS) this.timedOutMutations.delete(rid);
+    const prunedTabs = new Set<string>();
+    for (const [rid, e] of this.deliveredMutations) {
+      if (now - e.ts > UiBridge.LATE_MUTATION_TTL_MS) {
+        this.deliveredMutations.delete(rid);
+        prunedTabs.add(e.tabId);
+      }
     }
     for (const [rid, e] of this.lateMutations) {
       if (now - e.ts > UiBridge.LATE_MUTATION_TTL_MS) this.lateMutations.delete(rid);
@@ -4792,13 +4924,18 @@ export class UiBridge {
     // oldest. Quiet, unlike the ask-mapping overflow: losing one of 256 late
     // completions costs the caller a notice they can still get by looking, where
     // losing an ask mapping loses a user's answer outright.
-    for (const map of [this.timedOutMutations, this.lateMutations, this.lateRunReceipts, this.lateRunReceiptHandoffs]) {
+    for (const map of [this.deliveredMutations, this.lateMutations, this.lateRunReceipts, this.lateRunReceiptHandoffs]) {
       while (map.size > UiBridge.MAX_LATE_MUTATIONS) {
         const oldest = map.keys().next();
         if (oldest.done) break;
+        const dropped = map.get(oldest.value);
+        if (dropped && "tabId" in dropped && typeof dropped.tabId === "string") {
+          prunedTabs.add(dropped.tabId);
+        }
         map.delete(oldest.value);
       }
     }
+    for (const tabId of prunedTabs) this.notifyMutationSettled(tabId);
   }
 
   private pruneLateAsk(): void {
@@ -5106,6 +5243,7 @@ export class UiBridge {
     clearTimeout(pending.timer);
     this.pending.delete(rid);
     this.askRidToId.delete(rid);
+    this.forgetDeliveredMutation(rid);
     if (msg.ok) {
       // #422 — the panel DEMONSTRABLY served this command. Record it on the LIVE
       // connection (following a same-socket tmp:→wf: migration whose reply landed
@@ -6558,10 +6696,12 @@ export class UiBridge {
       if (ctx.workflowUuid) frame.workflow_uuid = ctx.workflowUuid;
       else delete frame.workflow_uuid;
       conn.sock.send(JSON.stringify(frame));
+      this.rememberDeliveredMutation(rid, cmd.cmd, ctx.tabId, frame);
       try { ctx.onDispatchedRid?.(rid); } catch { /* observer faults are non-fatal */ }
     } catch (err) {
       clearTimeout(timer);
       this.pending.delete(rid);
+      this.forgetDeliveredMutation(rid);
       // The write to the socket FAILED — the command was NEVER transmitted, so nothing
       // was dispatched (distinct from a POST-write mid-command drop). Surface that
       // explicitly so callers don't mistake it for an in-flight/accepted command (a
@@ -6582,6 +6722,34 @@ export class UiBridge {
   }
 
   /**
+   * Remember a mutation the moment it is written, so a graph read or retry_of
+   * can name the exact delivered command until the frontend settles (#2527).
+   */
+  private rememberDeliveredMutation(
+    rid: string,
+    cmd: string,
+    tabId: string,
+    frame: Record<string, unknown>,
+  ): void {
+    if (!rid || !this.lateMutationFilter?.(cmd)) return;
+    this.pruneLateMutations();
+    this.deliveredMutations.set(rid, {
+      cmd,
+      tabId,
+      ts: Date.now(),
+      frame: cloneDeliveredMutationFrame(frame),
+      status: "in_flight",
+    });
+  }
+
+  private forgetDeliveredMutation(rid: string): void {
+    const hit = this.deliveredMutations.get(rid);
+    if (!hit) return;
+    this.deliveredMutations.delete(rid);
+    if (hit.status === "timed_out") this.notifyMutationSettled(hit.tabId);
+  }
+
+  /**
    * Remember that we stopped waiting for `rid` so a later reply — a frozen tab
    * catching up, or a lost-reply replay after reconnect — is retained instead of
    * dropped as an unknown rid (#694, panel#1524).
@@ -6589,7 +6757,19 @@ export class UiBridge {
   private retainAbandonedMutation(rid: string, cmd: string, tabId: string): void {
     if (!rid || !this.lateMutationFilter?.(cmd)) return;
     this.pruneLateMutations();
-    this.timedOutMutations.set(rid, { cmd, tabId, ts: Date.now() });
+    const prior = this.deliveredMutations.get(rid);
+    if (prior) {
+      prior.status = "timed_out";
+      prior.ts = Date.now();
+      return;
+    }
+    this.deliveredMutations.set(rid, {
+      cmd,
+      tabId,
+      ts: Date.now(),
+      frame: { cmd },
+      status: "timed_out",
+    });
   }
 
   /** A pending command's socket died before its reply arrived. Decide, WITHOUT

@@ -383,12 +383,14 @@ import {
   requiresWorkflowStampEnforcement,
 } from "../services/ui-bridge.js";
 import {
+  GRAPH_READ_CMD_BY_TOOL,
   PANEL_TOOL_BY_GRAPH_CMD,
   QUEUE_BUSY_READ_TOOLS,
   RETRY_TOKEN_CMD_BY_TOOL,
   panelToolForGraphCmd,
 } from "../services/panel-graph-cmd-tools.js";
 export {
+  GRAPH_READ_CMD_BY_TOOL,
   PANEL_TOOL_BY_GRAPH_CMD,
   QUEUE_BUSY_READ_TOOLS,
   RETRY_TOKEN_CMD_BY_TOOL,
@@ -1322,6 +1324,10 @@ export const __panelToolsTestHooks = {
   setRunLateAckGraceMs(ms: number | null): void {
     runLateAckGraceMsOverride = ms;
   },
+  /** Shrink the #2527 graph-read wait for an outstanding timed-out mutation. */
+  setOutstandingMutationReadSettleMs(ms: number | null): void {
+    outstandingMutationReadSettleMsOverride = ms;
+  },
   /** Mark a synthetic graph_run result as the bridge's authoritative reply timeout. */
   markRunReplyTimeout(res: ToolResult): ToolResult {
     Object.defineProperty(res, REPLY_TIMEOUT_RESULT, {
@@ -1427,6 +1433,81 @@ const OBJECT_INFO_REFRESH_ACK_TIMEOUT_MS = 90_000;
  *  rather than "wait longer for a chance at completeness". 8 s is the same elective
  *  probe budget the graph_query / graph_serialize probes in this file already use. */
 const GET_ERRORS_COMPLETION_BUDGET_MS = 8_000;
+
+// #2527 — after a mutating graph command times out, the frontend may still be
+// applying it. An immediate graph read can then echo the pre-write value, and a
+// later write reports the timed-out value as `previous`. Graph reads wait this
+// long for that settlement, then disclose any still-outstanding receipt.
+const OUTSTANDING_MUTATION_READ_SETTLE_MS = 8_000;
+let outstandingMutationReadSettleMsOverride: number | null = null;
+function outstandingMutationReadSettleMs(): number {
+  return outstandingMutationReadSettleMsOverride ?? OUTSTANDING_MUTATION_READ_SETTLE_MS;
+}
+
+const GRAPH_READ_SETTLE_CMDS: ReadonlySet<string> = new Set([
+  ...Object.values(GRAPH_READ_CMD_BY_TOOL),
+  "graph_get_subgraph",
+  "graph_get_state",
+  "graph_serialize",
+]);
+
+function isGraphReadSettleCmd(cmd: Record<string, unknown>): boolean {
+  return typeof cmd.cmd === "string" && GRAPH_READ_SETTLE_CMDS.has(cmd.cmd);
+}
+
+function sameMutationScalar(a: unknown, b: unknown): boolean {
+  if (a === b) return true;
+  if (a == null || b == null) return a == null && b == null;
+  return String(a) === String(b);
+}
+
+/**
+ * Semantic identity of a delivered mutation vs a retry, ignoring bridge-owned
+ * stamps (`rid`, `retry_of`, `timeout_ms`, `workflow_uuid`) and write-fence
+ * witnesses that a later probe may reconstruct (`expected_*`).
+ */
+function mutationIdentityMatches(
+  retryCmd: Record<string, unknown>,
+  delivered: Record<string, unknown>,
+): boolean {
+  if (retryCmd.cmd !== delivered.cmd) return false;
+  if (retryCmd.cmd === "graph_set_widget") {
+    return (
+      sameMutationScalar(retryCmd.node_id, delivered.node_id) &&
+      sameMutationScalar(retryCmd.widget, delivered.widget) &&
+      sameMutationScalar(retryCmd.value, delivered.value)
+    );
+  }
+  if ("node_id" in delivered) return sameMutationScalar(retryCmd.node_id, delivered.node_id);
+  return true;
+}
+
+async function awaitOutstandingMutationSettle(
+  bridge: PanelToolCtx["bridge"],
+  tabId: string,
+): Promise<void> {
+  const wait = bridge.waitForOutstandingMutations;
+  if (typeof wait !== "function") return;
+  await wait.call(bridge, tabId, outstandingMutationReadSettleMs());
+}
+
+function discloseOutstandingMutations(
+  bridge: PanelToolCtx["bridge"],
+  tabId: string,
+  res: ToolResult,
+): ToolResult {
+  const list = bridge.listOutstandingMutations?.(tabId);
+  if (!list?.length) return res;
+  const named = list
+    .map((m) => `"${m.cmd}" retry_of:"${m.rid}"`)
+    .join(", ");
+  return appendReplyNote(
+    res,
+    `OUTCOME UNKNOWN: ${list.length} delivered mutation(s) still unsettled on this tab (${named}). ` +
+      `This graph read may show values from before those writes applied. Do not treat this snapshot ` +
+      `as proof the write failed; wait, or retry the named mutation with its retry_of token.`,
+  );
+}
 
 // #1639 — while a ComfyUI prompt is running the frontend main thread often
 // cannot service graph_* at all. Waiting out the 20/90 s ack bound only
@@ -15250,6 +15331,12 @@ export function makePanelToolCtx(
       // so they are dispatched on the bounded budget above instead.
       const blocked = graphCmdBlockedByRunningPrompt(cmd);
       if (blocked) return fail(blocked);
+      // #2527 — a timed-out mutation may still be applying. Graph reads wait for
+      // that settlement (or disclose the outstanding receipt) so they cannot
+      // certify a stale widget value as current.
+      if (isGraphReadSettleCmd(cmd)) {
+        await awaitOutstandingMutationSettle(bridge, ctx.tabId);
+      }
       // The bridge owns the graph lane and re-resolves the live connection after
       // waiting. Pass the fence through so it runs at the actual socket dispatch,
       // not before that retarget window.
@@ -15259,7 +15346,9 @@ export function makePanelToolCtx(
       // first-attempt success left the old run in place, and a later unrelated
       // switch inherited its age and was announced as stuck at once (codex r4).
       if (successProvesSwitchCleared(cmd.cmd)) clearSwitchHold(ctx.tabId);
-      return firstTry;
+      return isGraphReadSettleCmd(cmd)
+        ? discloseOutstandingMutations(bridge, ctx.tabId, firstTry)
+        : firstTry;
     } catch (err) {
       onFailure?.(err); // #1560 — the error this attempt failed on (see the wrapper).
       // Post-reconnect retry-once: a reboot/free_vram/reconnect can drop the tab's
@@ -15338,6 +15427,9 @@ export function makePanelToolCtx(
           await awaitReachable();
           ensureReachable(); // rebinds a current-mode session onto the reconnected tab
           holdTab = ctx.tabId;
+          if (isGraphReadSettleCmd(cmd)) {
+            await awaitOutstandingMutationSettle(bridge, ctx.tabId);
+          }
           const retried = ok(
             await sendRouted(cmd, timeoutMs, observeRid, beforeDispatch, options),
           );
@@ -15353,7 +15445,9 @@ export function makePanelToolCtx(
           if (isWorkflowSwitchGuardRefusal(err) && successProvesSwitchCleared(cmd.cmd)) {
             clearSwitchHold(holdTab);
           }
-          return retried;
+          return isGraphReadSettleCmd(cmd)
+            ? discloseOutstandingMutations(bridge, ctx.tabId, retried)
+            : retried;
         } catch (err2) {
           // #1560 — the RETRY's failure is the one every exit below describes, so it
           // supersedes the first. A retried read that comes back refused is a panel
@@ -15938,7 +16032,9 @@ export function makePanelToolCtx(
               if (fenceNow.known && fenceNow.uuid) corroborateTabStamp(ctx, fenceNow.uuid);
               const retried = ok(await sendRouted(cmd, timeoutMs, observeRid));
               if (successProvesSwitchCleared(cmd.cmd)) clearSwitchHold(ctx.tabId);
-              return retried;
+              return isGraphReadSettleCmd(cmd)
+                ? discloseOutstandingMutations(bridge, ctx.tabId, retried)
+                : retried;
             }
           } catch {
             // query refused, tab moved, or the outline retry still mismatched —
@@ -15969,7 +16065,9 @@ export function makePanelToolCtx(
             try {
               const retried = ok(await sendRouted(cmd, timeoutMs, observeRid));
               if (successProvesSwitchCleared(cmd.cmd)) clearSwitchHold(ctx.tabId);
-              return retried;
+              return isGraphReadSettleCmd(cmd)
+                ? discloseOutstandingMutations(bridge, ctx.tabId, retried)
+                : retried;
             } catch (retryErr) {
               onFailure?.(retryErr);
               return fail(retryErr instanceof Error ? retryErr : new Error(String(retryErr)));
@@ -15984,7 +16082,9 @@ export function makePanelToolCtx(
             try {
               const retried = ok(await sendRouted(cmd, timeoutMs, observeRid));
               if (successProvesSwitchCleared(cmd.cmd)) clearSwitchHold(ctx.tabId);
-              return retried;
+              return isGraphReadSettleCmd(cmd)
+                ? discloseOutstandingMutations(bridge, ctx.tabId, retried)
+                : retried;
             } catch (retryErr) {
               onFailure?.(retryErr);
               if (!isWorkflowInstanceMismatch(retryErr)) {
@@ -18412,22 +18512,42 @@ function withRetryToken(d: PanelToolDef): PanelToolDef {
       // they just named it. Drained here (once) and reported alongside the
       // retry's own outcome.
       //
-      // Deliberately NOT a short-circuit. Skipping the dispatch would be wrong
-      // whenever the token is stale or pasted onto different args -- the bridge
-      // stores the rid, not a fingerprint of what it carried, so "the write for
-      // this rid landed" does not prove "the write you are asking for now is
-      // that same write". Suppressing a real mutation on that inference is the
-      // #683 mistake with the arrow reversed, and #687 reverted it for cause.
-      // Double-apply is already the #521 panel ledger's job; this only makes the
-      // outcome VISIBLE, which is the half of #694 nothing else does.
+      // #683/#687 — do NOT short-circuit on rid alone. The token names an
+      // attempt, not a fingerprint of its args, so "this rid landed" does not
+      // prove "the write you are asking for now is that same write".
+      //
+      // #2527 — when the receipt for that rid is the SAME command (semantic
+      // identity) and the frontend has already settled it, re-dispatching is
+      // what gets rejected as "retry_of refers to a different command or
+      // workflow". Answer from the receipt instead. A sibling mutation inside
+      // the same handler (enter_subgraph during a set_widget retry) must not
+      // carry this token at all.
       const wrapped = Object.create(ctx) as PanelToolCtx;
       wrapped.call = (
         cmd: Record<string, unknown>,
         timeoutMs?: number,
         onDispatchedRid?: (rid: string) => void,
         beforeDispatch?: () => void,
-      ) =>
-        ctx.call(
+      ) => {
+        const cmdName = typeof cmd.cmd === "string" ? cmd.cmd : "";
+        const original = ctx.bridge?.peekDeliveredMutation?.(retryOf);
+        if (original) {
+          if (original.cmd !== cmdName) {
+            return ctx.call(cmd, timeoutMs, onDispatchedRid, beforeDispatch);
+          }
+          const settled = ctx.bridge.peekLateMutation?.(retryOf);
+          if (settled && mutationIdentityMatches(cmd, original.frame)) {
+            return Promise.resolve(
+              ok(settled.result !== undefined ? settled.result : { ok: true, retry_of: retryOf }),
+            );
+          }
+          if (mutationIdentityMatches(cmd, original.frame)) {
+            const replay: Record<string, unknown> = { ...original.frame, retry_of: retryOf };
+            delete replay.rid;
+            return ctx.call(replay, timeoutMs, onDispatchedRid, beforeDispatch);
+          }
+        }
+        return ctx.call(
           // Ask the RETRY MAP's question, not the workflow fence's (codex gate).
           // These were the same answer only while isMutatingGraphCommand
           // over-classified — the #778 defect. Once the fence got its own effect
@@ -18441,13 +18561,12 @@ function withRetryToken(d: PanelToolDef): PanelToolDef {
           // A read probe inside a mutating handler (panel_flatten_workflow's
           // graph_serialize) is still excluded — RETRY_TOKEN_CMDS contains no
           // reads, which is asserted in panel-retry-identity.test.ts.
-          RETRY_TOKEN_CMDS.has(typeof cmd.cmd === "string" ? cmd.cmd : "")
-            ? { ...cmd, retry_of: retryOf }
-            : cmd,
+          RETRY_TOKEN_CMDS.has(cmdName) ? { ...cmd, retry_of: retryOf } : cmd,
           timeoutMs,
           onDispatchedRid,
           beforeDispatch,
         );
+      };
       const out = await d.handler(args, wrapped);
       // Drained AFTER the handler, deliberately, for two measured reasons.
       //
