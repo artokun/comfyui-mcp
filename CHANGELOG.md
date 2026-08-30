@@ -9,6 +9,7 @@ All notable changes to this project are documented here. This project adheres to
 ### MCP
 
 #### Fixed
+- panel_run does not claim a /prompt left the panel when ComfyUI never logged a prompt; id-less queued_unknown fails closed as not queued (#2521)
 - panel_set_widget treats a root-scope promoted widget as the authoritative parent rail and suppresses the inner link-driven warning (#2514)
 - drain an empty-success Git install enqueue before using the verified local clone fallback (#2620)
 

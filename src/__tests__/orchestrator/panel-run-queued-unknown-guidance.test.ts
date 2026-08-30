@@ -44,9 +44,11 @@ function makeRunCtx(reply: ToolResult): { ctx: PanelToolCtx; calls: unknown[] } 
 
 beforeEach(() => {
   RunCompletions.reset();
+  __panelRunTestHooks.setGotPromptLinesProbe(async () => null);
 });
 
 afterEach(() => {
+  __panelRunTestHooks.setGotPromptLinesProbe(null);
   RunCompletions.reset();
 });
 
@@ -110,9 +112,9 @@ describe("panel_run queued_unknown guidance stays on this surface (#2438)", () =
     expect(text.toLowerCase()).not.toContain(UNFIXED_QUEUE_ACTION_LIST);
     expect(text).not.toContain(UNFIXED_FOLLOW_PANEL);
     expect(text).toContain("[UNCERTAIN]");
-    expect(text).toContain("Do NOT re-run panel_run");
-    expect(text).toContain("no render-queue inspection tool");
-    expect(text).toContain("UNDETERMINED completion");
+    expect(text).not.toContain("already left the panel");
+    expect(text.toLowerCase()).not.toContain("may have been accepted");
+    expect(text).toContain(__panelRunTestHooks.PANEL_QUEUED_UNKNOWN_UNOBSERVED_RETRY_GUIDANCE);
     expect(text).toContain("No second panel_run was dispatched");
   });
 

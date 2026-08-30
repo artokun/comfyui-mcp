@@ -438,6 +438,7 @@ import {
 } from "./ask-answer-journal.js";
 import {
   getClient,
+  getLogs,
   getQueueVerified,
   resetClient,
   resetObjectInfoCache,
@@ -9466,6 +9467,10 @@ function isPanelQueueUncertainty(parsed: Record<string, unknown> | null): boolea
  * headless stdio tool and may be unreachable (ECONNREFUSED) even while the
  * panel is connected. The only safe next step on this surface is to wait for
  * an eventual UNDETERMINED completion and not re-dispatch.
+ *
+ * #2521 — this string is only honest when something actually reached ComfyUI
+ * (a post-dispatch `got prompt` log line, or a new queue/history entry). An
+ * id-less `queued_unknown` with neither is fail-closed as not queued instead.
  */
 const PANEL_QUEUED_UNKNOWN_RETRY_GUIDANCE =
   `Do NOT re-run panel_run: the /prompt request already left the panel, and a second ` +
@@ -9474,10 +9479,42 @@ const PANEL_QUEUED_UNKNOWN_RETRY_GUIDANCE =
   `event for this tab; if one arrives, treat it as this run's possible outcome rather ` +
   `than queuing another.`;
 
-function applyQueuedUnknownRetryGuidance(res: ToolResult): ToolResult {
+/** #2521 — used when queued_unknown has no prompt_id and this tool also could
+ *  not prove a /prompt reached ComfyUI. Must not claim the request left the
+ *  panel or was accepted. */
+const PANEL_QUEUED_UNKNOWN_UNOBSERVED_RETRY_GUIDANCE =
+  `This tool is NOT claiming a /prompt request left the panel or was accepted: there is ` +
+  `no prompt_id, and it could not prove ComfyUI received the run. If ComfyUI is idle, ` +
+  `you MAY retry panel_run or use enqueue_workflow; if a render may already be in flight, ` +
+  `wait rather than stacking a duplicate.`;
+
+const GOT_PROMPT_RE = /got prompt/i;
+const COMFY_LOG_TS_RE = /^(\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}(?:\.\d+)?)/;
+const GOT_PROMPT_CLOCK_SLACK_MS = 2000;
+const GOT_PROMPT_LOG_BUDGET_MS = 2500;
+
+export type QueuedUnknownReach = {
+  kind: "reached" | "not-queued" | "unobserved";
+  gotPrompt: boolean;
+  queueIdle: boolean;
+  queueObserved: boolean;
+};
+
+export type QueuedUnknownReachInput = {
+  dispatchedAt: number;
+  logLines: string[] | null;
+  queueObserved: boolean;
+  queueIdle: boolean;
+  newPromptVisible: boolean;
+  completedAfterDispatch: boolean;
+};
+
+let gotPromptLinesProbe: (() => Promise<string[] | null>) | null = null;
+
+function rewriteQueuedUnknownRetryGuidance(res: ToolResult, guidance: string): ToolResult {
   const parsed = parseToolResultJson(res);
   if (!parsed || !isPanelQueueUncertainty(parsed)) return res;
-  if (parsed.retry_guidance === PANEL_QUEUED_UNKNOWN_RETRY_GUIDANCE) return res;
+  if (parsed.retry_guidance === guidance) return res;
   return {
     ...res,
     content: [
@@ -9485,12 +9522,133 @@ function applyQueuedUnknownRetryGuidance(res: ToolResult): ToolResult {
         type: "text",
         text: JSON.stringify({
           ...parsed,
-          retry_guidance: PANEL_QUEUED_UNKNOWN_RETRY_GUIDANCE,
+          retry_guidance: guidance,
         }),
       },
       ...res.content.slice(1),
     ],
   };
+}
+
+function applyQueuedUnknownRetryGuidance(res: ToolResult): ToolResult {
+  return rewriteQueuedUnknownRetryGuidance(res, PANEL_QUEUED_UNKNOWN_RETRY_GUIDANCE);
+}
+
+function applyUnobservedQueuedUnknownRetryGuidance(res: ToolResult): ToolResult {
+  return rewriteQueuedUnknownRetryGuidance(res, PANEL_QUEUED_UNKNOWN_UNOBSERVED_RETRY_GUIDANCE);
+}
+
+function logLineTimestampMs(line: string): number | null {
+  const m = line.match(COMFY_LOG_TS_RE);
+  if (!m) return null;
+  const raw = m[1]!;
+  const ts = Date.parse(raw.includes("T") ? raw : raw.replace(" ", "T"));
+  return Number.isFinite(ts) ? ts : null;
+}
+
+/** True when `/internal/logs` contains a `got prompt` that is not clearly
+ *  earlier than this dispatch. Untimestamped lines are possible evidence: the
+ *  in-memory deque is recent, so fail-closed would be a guess. */
+function logHasGotPromptAfter(lines: readonly string[], dispatchedAt: number): boolean {
+  let untimestamped = false;
+  for (const line of lines) {
+    if (!GOT_PROMPT_RE.test(line)) continue;
+    const ts = logLineTimestampMs(line);
+    if (ts === null) {
+      untimestamped = true;
+      continue;
+    }
+    if (ts >= dispatchedAt - GOT_PROMPT_CLOCK_SLACK_MS) return true;
+  }
+  return untimestamped;
+}
+
+function classifyQueuedUnknownReach(input: QueuedUnknownReachInput): QueuedUnknownReach {
+  const gotPrompt =
+    input.logLines !== null && logHasGotPromptAfter(input.logLines, input.dispatchedAt);
+  if (gotPrompt || input.newPromptVisible || input.completedAfterDispatch) {
+    return {
+      kind: "reached",
+      gotPrompt,
+      queueIdle: input.queueIdle,
+      queueObserved: input.queueObserved,
+    };
+  }
+  const logNegative = input.logLines !== null;
+  if (logNegative || (input.queueObserved && input.queueIdle)) {
+    return {
+      kind: "not-queued",
+      gotPrompt: false,
+      queueIdle: input.queueIdle,
+      queueObserved: input.queueObserved,
+    };
+  }
+  return {
+    kind: "unobserved",
+    gotPrompt: false,
+    queueIdle: input.queueIdle,
+    queueObserved: input.queueObserved,
+  };
+}
+
+function panelQueueNotQueuedMessage(reach: QueuedUnknownReach): string {
+  const logBit = reach.gotPrompt
+    ? ""
+    : "and ComfyUI never logged 'got prompt' for this dispatch";
+  const queueBit = reach.queueObserved && reach.queueIdle ? ", and the queue is idle" : "";
+  return (
+    `panel_run did not queue this run. The Panel returned queued_unknown with no prompt_id, ` +
+    `${logBit}${queueBit}. This tool is NOT claiming a /prompt request left the panel or was ` +
+    `accepted — that request never reached ComfyUI. You MAY retry panel_run, or use ` +
+    `enqueue_workflow. Nothing was queued.`
+  );
+}
+
+async function readGotPromptLines(): Promise<string[] | null> {
+  if (gotPromptLinesProbe) {
+    try {
+      return await gotPromptLinesProbe();
+    } catch {
+      return null;
+    }
+  }
+  try {
+    return await Promise.race([
+      // unknown-ok: failed log read and empty log both fail closed as not queued (#2521)
+      getLogs({ keyword: "got prompt" }).catch(() => null),
+      sleep(GOT_PROMPT_LOG_BUDGET_MS).then(() => null),
+    ]);
+  } catch {
+    return null;
+  }
+}
+
+async function observeQueuedUnknownReach(opts: {
+  dispatchedAt: number;
+  preRunningPromptId: string | null;
+  preQueueDepth: number;
+}): Promise<QueuedUnknownReach> {
+  try {
+    await QueueMonitor.poll();
+  } catch {
+    /* best-effort — classify from whatever snapshot we already have */
+  }
+  const snap = QueueMonitor.snapshot();
+  const newPromptVisible =
+    promptAppearedAfterDispatch(opts.preRunningPromptId) !== null ||
+    snap.queueDepth > opts.preQueueDepth;
+  const completedAfterDispatch =
+    snap.lastCompleted !== null && snap.lastCompleted.at >= opts.dispatchedAt;
+  const queueIdle = !snap.running && snap.queueDepth === 0;
+  const logLines = await readGotPromptLines();
+  return classifyQueuedUnknownReach({
+    dispatchedAt: opts.dispatchedAt,
+    logLines,
+    queueObserved: snap.connected,
+    queueIdle,
+    newPromptVisible,
+    completedAfterDispatch,
+  });
 }
 
 function detectRunRejection(res: ToolResult): ToolResult | null {
@@ -9654,7 +9812,15 @@ export const __panelRunTestHooks = {
   isSeedRunToNodeStampRace,
   describeDroppedOutputs,
   applyQueuedUnknownRetryGuidance,
+  applyUnobservedQueuedUnknownRetryGuidance,
   PANEL_QUEUED_UNKNOWN_RETRY_GUIDANCE,
+  PANEL_QUEUED_UNKNOWN_UNOBSERVED_RETRY_GUIDANCE,
+  classifyQueuedUnknownReach,
+  logHasGotPromptAfter,
+  panelQueueNotQueuedMessage,
+  setGotPromptLinesProbe(fn: (() => Promise<string[] | null>) | null): void {
+    gotPromptLinesProbe = fn;
+  },
 };
 
 /** Drop a trailing .json (case-insensitive) so filename/path forms compare equal. */
@@ -17099,6 +17265,11 @@ function panelLateReceiptNote(promptId: string): string {
  * #2143 / #2438 — a normal Panel timeout receipt is neither a confirmed queue
  * nor a refusal. Name the next step that exists on THIS surface rather than
  * forwarding Panel retry_guidance that points at a headless queue inspector.
+ *
+ * #2521 — the "left the panel" wording is only used when this tool saw a
+ * post-dispatch `got prompt` or a new queue/history entry. An id-less receipt
+ * with neither is fail-closed as not queued; an unread/unobserved case uses
+ * panelQueueUnobservedNote instead of this string.
  */
 function panelQueueUncertaintyNote(queuedPromptIds: readonly string[]): string {
   if (queuedPromptIds.length > 0) {
@@ -17113,6 +17284,17 @@ function panelQueueUncertaintyNote(queuedPromptIds: readonly string[]): string {
     `\n\n[UNCERTAIN] The Panel could not determine whether this run entered ComfyUI's queue. ` +
     `This is not a confirmed refusal, and no completion ticket can be opened without a prompt id. ` +
     `${PANEL_QUEUED_UNKNOWN_RETRY_GUIDANCE} No second panel_run was dispatched.`
+  );
+}
+
+/** #2521 — id-less queued_unknown, and this tool could not read a prompt
+ *  reaching ComfyUI either. Honest about the gap; does not forbid a retry. */
+function panelQueueUnobservedNote(): string {
+  return (
+    `\n\n[UNCERTAIN] The Panel could not confirm whether this run entered ComfyUI's queue, ` +
+    `and this tool also could not prove a /prompt reached ComfyUI (no prompt_id; logs unread; ` +
+    `no live queue observation). It is NOT claiming a request left the panel or was accepted. ` +
+    `${PANEL_QUEUED_UNKNOWN_UNOBSERVED_RETRY_GUIDANCE} No second panel_run was dispatched.`
   );
 }
 
@@ -21004,6 +21186,22 @@ export function buildPanelToolDefs(): PanelToolDef[] {
           }
         }
         const panelQueueUncertain = isPanelQueueUncertainty(runReply);
+        // #2521 — an id-less queued_unknown is not proof that /prompt left the
+        // panel. Check ComfyUI's log + queue before claiming acceptance: no
+        // prompt_id and no `got prompt` (or an observed idle queue) fails closed
+        // as not queued. A late Panel receipt can still open a ticket.
+        let queuedUnknownReach: QueuedUnknownReach | null = null;
+        if (panelQueueUncertain && queuedIds.length === 0) {
+          queuedUnknownReach = await observeQueuedUnknownReach({
+            dispatchedAt: runDispatchedAt,
+            preRunningPromptId: pre.runningPromptId,
+            preQueueDepth: pre.queueDepth,
+          });
+          if (queuedUnknownReach.kind === "not-queued") {
+            installLateReceiptHandoff();
+            return fail(panelQueueNotQueuedMessage(queuedUnknownReach));
+          }
+        }
         // #944: a run ComfyUI accepted while dropping some outputs reaches here
         // (a minted prompt id outranks the rejection signals). Say which outputs
         // were dropped, or the caller waits for files that will never be written.
@@ -21025,12 +21223,15 @@ export function buildPanelToolDefs(): PanelToolDef[] {
               `and this dispatch stacked a duplicate.`
             : "";
         // markSelfQueued with NO id still stamps the recent-self-queue timestamp,
-        // so both the id-less genuine queue and the Panel's explicit uncertainty
-        // receipt must call it exactly once (#559/#2143). The latter must not be
-        // mistaken for a definite queue, but it is still unsafe to immediately
-        // redispatch a request that the Panel says left its tab.
-        if (queuedIds.length === 0 || panelQueueUncertain) QueueMonitor.markSelfQueued(null);
-        for (const id of queuedIds) QueueMonitor.markSelfQueued(id);
+        // so both the id-less genuine queue and a queued_unknown that DID reach
+        // ComfyUI must call it (#559/#2143/#2521). An unobserved id-less receipt
+        // must not pretend a request left the tab.
+        if (queuedIds.length > 0) {
+          if (panelQueueUncertain) QueueMonitor.markSelfQueued(null);
+          for (const id of queuedIds) QueueMonitor.markSelfQueued(id);
+        } else if (!panelQueueUncertain || queuedUnknownReach?.kind === "reached") {
+          QueueMonitor.markSelfQueued(null);
+        }
         // #468 — open a run ticket so the render's completion can be CORRELATED
         // to this exact call by prompt id. This is what lets the orchestrator
         // journal an undelivered completion and replay it into the right run
@@ -21115,7 +21316,9 @@ export function buildPanelToolDefs(): PanelToolDef[] {
             ? ""
             : ` (this run queued ${queuedIds.length} prompts, so the check is the queue as a whole; get_history settles the outcome of any that are no longer in flight)`;
         const note = panelQueueUncertain
-          ? panelQueueUncertaintyNote(ticketedPromptIds)
+          ? queuedUnknownReach?.kind === "unobserved"
+            ? panelQueueUnobservedNote()
+            : panelQueueUncertaintyNote(ticketedPromptIds)
           : correlatable
           ? "\n\n[IMPORTANT] You will be notified automatically with the output image(s)/video when the render finishes — do NOT poll queue (action:\"list\"), get_history, or get_image (action:\"list_outputs\"). Just end your turn now and wait for the result to be delivered to you." +
             `\n[FALLBACK] That notification is journaled and replayed if an agent is not there to take it, and the orchestrator will fill one in from ComfyUI itself — its execution event or its history record — if the panel never reports the finish. But it cannot be GUARANTEED, so do not wait forever on it. If nothing has arrived LONG after this render should have finished (roughly twice the time you expect it to take), make ONE check with ${fallbackCheck} instead of idling indefinitely${fallbackTail}. One check, not a loop — and not before then.`
@@ -21170,7 +21373,13 @@ export function buildPanelToolDefs(): PanelToolDef[] {
         // #2438 — rewrite Panel retry_guidance BEFORE the notes are spliced so
         // a headless `queue (action:"list")` inspector is not left in the JSON
         // for a surface that cannot call it.
-        if (panelQueueUncertain) res = applyQueuedUnknownRetryGuidance(res);
+        // #2521 — the "left the panel" wording is only for a reach we observed.
+        if (panelQueueUncertain) {
+          res =
+            queuedUnknownReach?.kind === "unobserved"
+              ? applyUnobservedQueuedUnknownRetryGuidance(res)
+              : applyQueuedUnknownRetryGuidance(res);
+        }
         if (res.content?.[0]?.type === "text") {
           return {
             ...res,
