@@ -185,3 +185,52 @@ export function normalizeTodoItems<T extends { status?: unknown }>(items: T[]): 
     typeof item?.status === "string" ? { ...item, status: normalizeTodoStatus(item.status) } : item,
   );
 }
+
+/** One checklist row after the aliases and the implied default are folded away.
+ *  Used to compare a delivered `set_todo` against a later `get_todo` read (#2481). */
+export interface CanonicalTodoEntry {
+  text: string;
+  status: string;
+}
+
+function todoStatusOrDefault(status: unknown): string {
+  return typeof status === "string" && status.trim() !== ""
+    ? normalizeTodoStatus(status)
+    : "pending";
+}
+
+function todoTextOf(entry: Record<string, unknown>): string | null {
+  if (typeof entry.text === "string") return entry.text;
+  if (typeof entry.content === "string") return entry.content;
+  return null;
+}
+
+/**
+ * Fold a checklist into comparable `{text, status}` rows, or null when the
+ * payload is not a list of items with a step description. Empty is valid (clear
+ * the tray). Missing status is `pending` — the schema's default, which the panel
+ * applies even when the caller omitted it.
+ */
+export function canonicalTodoEntries(items: unknown): CanonicalTodoEntry[] | null {
+  if (!Array.isArray(items)) return null;
+  const out: CanonicalTodoEntry[] = [];
+  for (const entry of items) {
+    if (entry === null || typeof entry !== "object" || Array.isArray(entry)) return null;
+    const rec = entry as Record<string, unknown>;
+    const text = todoTextOf(rec);
+    if (text === null) return null;
+    out.push({ text, status: todoStatusOrDefault(rec.status) });
+  }
+  return out;
+}
+
+/** True when both payloads describe the same ordered checklist. */
+export function todoListsMatch(sent: unknown, observed: unknown): boolean {
+  const a = canonicalTodoEntries(sent);
+  const b = canonicalTodoEntries(observed);
+  if (!a || !b || a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i++) {
+    if (a[i].text !== b[i].text || a[i].status !== b[i].status) return false;
+  }
+  return true;
+}

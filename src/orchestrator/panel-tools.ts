@@ -391,7 +391,13 @@ import {
 } from "../services/panel-secrets.js";
 import { flattenUiWorkflow } from "../services/flatten-workflow.js";
 import { describeUnappliedFilters } from "./civitai-filter-guard.js";
-import { recordTodo, normalizeTodoItems, TODO_STATUS_INPUTS } from "./todo-state.js";
+import {
+  recordTodo,
+  normalizeTodoItems,
+  TODO_STATUS_INPUTS,
+  canonicalTodoEntries,
+  todoListsMatch,
+} from "./todo-state.js";
 import { applyCapturedWidgetValues } from "../services/live-widget-overlay.js";
 import { listWorkflowLibraryKeys, userdataFetch } from "../services/userdata-library.js";
 import {
@@ -3764,6 +3770,138 @@ async function settleExitSubgraphAfterAckTimeout(
     };
   }
   return timedOut;
+}
+
+// ---- panel_set_todo settle-after-ack-timeout (#2481) ----------------------
+// set_todo was delivered but the tab did not ACK. The generic mutating
+// disclosure then leaves the caller guessing and warns that a retry may
+// duplicate — even though set_todo is a full-replace. Take ONE get_todo
+// read on the same tab and report applied / not-applied, or return the
+// original timeout WITH a mutation receipt when the read cannot answer.
+
+/** Same elective probe budget as the graph_query / graph_serialize reads. */
+const SET_TODO_RECONCILE_MS = 8_000;
+
+function setTodoAppliedNote(): string {
+  return (
+    `CHECKED FOR YOU: the tab did not ACKNOWLEDGE the checklist write within the window, but a ` +
+    `todo read taken immediately afterwards, on that same tab, reports the exact list this call ` +
+    `delivered. No recovery step is needed and a retry would be wasted work. A missing ` +
+    `acknowledgement is not evidence the write failed; here it is evidence the tab was too busy ` +
+    `to answer in time. set_todo is a full-replace, so re-issuing this same list is a no-op.`
+  );
+}
+
+function setTodoNotAppliedNote(): string {
+  return (
+    `CHECKED FOR YOU: a todo read taken immediately after the missing acknowledgement does NOT ` +
+    `show the list this call delivered. The write has not applied (or was overwritten). ` +
+    `Re-issuing the same list is safe — set_todo is a full-replace, not an append.`
+  );
+}
+
+function setTodoUnknownNote(): string {
+  return (
+    `The tray could not be read after the missing acknowledgement, so this result cannot say ` +
+    `whether the write applied. mutation_id is the delivery receipt for this attempt; requested ` +
+    `is the list that was sent. set_todo is a full-replace: re-issuing that exact list cannot ` +
+    `duplicate it. Do not guess.`
+  );
+}
+
+function todoItemsFromProbe(res: ToolResult): unknown[] | null {
+  const parsed = parseToolResultValue(res);
+  if (Array.isArray(parsed)) return parsed;
+  if (!parsed || typeof parsed !== "object") return null;
+  const rec = parsed as Record<string, unknown>;
+  if (Array.isArray(rec.items)) return rec.items;
+  if (Array.isArray(rec.todos)) return rec.todos;
+  return null;
+}
+
+async function readTodoFromTab(ctx: PanelToolCtx, tabId: string): Promise<ToolResult> {
+  if (tabId === ctx.tabId) return ctx.call({ cmd: "get_todo" }, SET_TODO_RECONCILE_MS);
+  return dispatchToTab(ctx, tabId, { cmd: "get_todo" }, SET_TODO_RECONCILE_MS);
+}
+
+function setTodoTimeoutUnknown(
+  timedOut: ToolResult,
+  sentItems: unknown,
+  mutationId: string | undefined,
+): ToolResult {
+  return appendReplyNote(
+    timedOut,
+    JSON.stringify(
+      {
+        applied: "unknown",
+        acknowledged: false,
+        mutation_id: mutationId ?? null,
+        requested: canonicalTodoEntries(sentItems) ?? sentItems,
+        note: setTodoUnknownNote(),
+      },
+      null,
+      2,
+    ),
+  );
+}
+
+/**
+ * After an ack timeout on `set_todo`, take ONE todo read and report whether the
+ * tray holds the list that was delivered. Returns the original timeout plus a
+ * mutation receipt when the read cannot answer — #1473's rule: an unknown
+ * answer claims nothing in either direction.
+ */
+async function settleSetTodoAfterAckTimeout(
+  ctx: PanelToolCtx,
+  timedOut: ToolResult,
+  sentItems: unknown,
+  mutationId: string | undefined,
+  dispatchTab: string,
+): Promise<ToolResult> {
+  // Probe the tab the write was DISPATCHED to. A desktop redirect writes to a
+  // different tab than ctx.tabId; a silent rebind of an unpinned session would
+  // otherwise let a different tab's tray certify this write.
+  const probeOnSessionTab = ctx.tabId === dispatchTab;
+  const probe = await readTodoFromTab(ctx, dispatchTab);
+  if (probeOnSessionTab && ctx.tabId !== dispatchTab) {
+    return setTodoTimeoutUnknown(timedOut, sentItems, mutationId);
+  }
+  const observed = todoItemsFromProbe(probe);
+  if (observed === null) return setTodoTimeoutUnknown(timedOut, sentItems, mutationId);
+  const requested = canonicalTodoEntries(sentItems) ?? sentItems;
+  const observedCanonical = canonicalTodoEntries(observed);
+  if (todoListsMatch(sentItems, observed)) {
+    return ok({
+      ok: true,
+      applied: true,
+      acknowledged: false,
+      mutation_id: mutationId ?? null,
+      items: observedCanonical ?? observed,
+      confirmed_by: "todo read after ack timeout",
+      note: setTodoAppliedNote(),
+    });
+  }
+  return {
+    isError: true,
+    content: [
+      {
+        type: "text",
+        text: JSON.stringify(
+          {
+            applied: false,
+            acknowledged: false,
+            mutation_id: mutationId ?? null,
+            requested,
+            items: observedCanonical ?? observed,
+            confirmed_by: "todo read after ack timeout",
+            note: setTodoNotAppliedNote(),
+          },
+          null,
+          2,
+        ),
+      },
+    ],
+  };
 }
 
 // ---- panel_free_vram: verifiable when the canvas tab is frozen (#1249) -----
@@ -16021,9 +16159,12 @@ async function dispatchToTab(
   cmd: Record<string, unknown>,
   timeoutMs: number,
   reResolve?: () => string | undefined,
+  onDispatchedRid?: (rid: string) => void,
 ): Promise<ToolResult> {
   try {
-    return ok(await ctx.bridge.send(cmd as { cmd: string }, { tabId, timeoutMs }));
+    return ok(
+      await ctx.bridge.send(cmd as { cmd: string }, { tabId, timeoutMs, onDispatchedRid }),
+    );
   } catch (err) {
     if (
       isRetrySafeCmd(cmd) &&
@@ -16033,12 +16174,18 @@ async function dispatchToTab(
       try {
         await sleep(retrySettleMs());
         const fresh = reResolve?.() ?? tabId;
-        return ok(await ctx.bridge.send(cmd as { cmd: string }, { tabId: fresh, timeoutMs }));
+        return ok(
+          await ctx.bridge.send(cmd as { cmd: string }, {
+            tabId: fresh,
+            timeoutMs,
+            onDispatchedRid,
+          }),
+        );
       } catch (err2) {
-        return fail(err2);
+        return carryReplyTimeoutMark(err2, fail(err2));
       }
     }
-    return fail(err);
+    return carryReplyTimeoutMark(err, fail(err));
   }
 }
 
@@ -21216,24 +21363,34 @@ export function buildPanelToolDefs(): PanelToolDef[] {
         const items = normalizeTodoItems(keyed.value as Array<{ text?: unknown; status?: unknown }>);
         const redirect = desktopCanvasRedirect(ctx, "panel_set_todo");
         if (redirect?.error) return fail(redirect.error);
-        if (redirect?.tabId) {
-          // #977 — the desktop redirect writes the checklist to ANOTHER tab, so
-          // record it against that one. Keying it on ctx.tabId would leave the
-          // tab that actually holds the plan looking planless.
-          recordTodo(redirect.tabId, items);
-          return dispatchToTab(
-            ctx,
-            redirect.tabId,
-            { cmd: "set_todo", items },
-            15000,
-            () => reResolveDesktopTab(ctx, "panel_set_todo"),
-          );
-        }
         // #977 — retain what the agent DECLARED, so a later render completion can
         // tell "you are mid-sweep" from "that was the last thing you were doing".
         // The panel keeps the UI copy; this is the orchestrator's own record.
-        recordTodo(ctx.tabId, items);
-        return ctx.call({ cmd: "set_todo", items }, 15000);
+        // The desktop redirect writes the checklist to ANOTHER tab, so record it
+        // against that one. Keying it on ctx.tabId would leave the tab that
+        // actually holds the plan looking planless.
+        const targetTab = redirect?.tabId ?? ctx.tabId;
+        recordTodo(targetTab, items);
+        let mutationId: string | undefined;
+        const observeRid = (rid: string): void => {
+          mutationId = rid;
+        };
+        const cmd = { cmd: "set_todo", items };
+        const res = redirect?.tabId
+          ? await dispatchToTab(
+              ctx,
+              redirect.tabId,
+              cmd,
+              15000,
+              () => reResolveDesktopTab(ctx, "panel_set_todo"),
+              observeRid,
+            )
+          : await ctx.call(cmd, 15000, observeRid);
+        // #2481 — ONLY a no-reply is settled by a read. An acked executor error
+        // is a definite outcome; re-deciding it from a later tray read would
+        // overwrite a better-informed verdict.
+        if (!isReplyTimeoutResult(res)) return res;
+        return settleSetTodoAfterAckTimeout(ctx, res, items, mutationId, targetTab);
       },
     ),
     def(

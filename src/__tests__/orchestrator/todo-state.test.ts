@@ -18,10 +18,12 @@
 import { beforeEach, describe, expect, it } from "vitest";
 import {
   __resetTodoState,
+  canonicalTodoEntries,
   planInFlight,
   recordTodo,
   runCompletionDirective,
   todoFor,
+  todoListsMatch,
 } from "../../orchestrator/todo-state.js";
 
 const item = (text: string, status: string) => ({ text, status });
@@ -216,5 +218,39 @@ describe("#2369: replayed completions omit the CONTINUE instruction", () => {
     __resetTodoState();
     const noPlan = runCompletionDirective("t1");
     expect(replayed).toBe(noPlan);
+  });
+});
+
+describe("#2481: a delivered checklist can be compared to a later tray read", () => {
+  it("treats a missing status as pending, matching the schema default", () => {
+    expect(todoListsMatch([{ text: "a" }], [{ text: "a", status: "pending" }])).toBe(true);
+    expect(canonicalTodoEntries([{ text: "a" }])).toEqual([{ text: "a", status: "pending" }]);
+  });
+
+  it("folds content/text and status aliases before comparing", () => {
+    expect(
+      todoListsMatch(
+        [{ text: "a", status: "in_progress" }],
+        [{ content: "a", status: "active" }],
+      ),
+    ).toBe(true);
+  });
+
+  it("does not treat a different list as a match", () => {
+    expect(todoListsMatch([{ text: "a" }], [{ text: "b" }])).toBe(false);
+    expect(todoListsMatch([{ text: "a" }], [{ text: "a" }, { text: "b" }])).toBe(false);
+    expect(todoListsMatch([{ text: "a", status: "done" }], [{ text: "a", status: "active" }])).toBe(
+      false,
+    );
+  });
+
+  it("accepts two empty lists as the same cleared tray", () => {
+    expect(todoListsMatch([], [])).toBe(true);
+  });
+
+  it("refuses a payload that is not a checklist", () => {
+    expect(canonicalTodoEntries("nope")).toBeNull();
+    expect(canonicalTodoEntries([{ status: "pending" }])).toBeNull();
+    expect(todoListsMatch([{ text: "a" }], { items: [{ text: "a" }] })).toBe(false);
   });
 });

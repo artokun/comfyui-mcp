@@ -6,6 +6,11 @@ All notable changes to this project are documented here. This project adheres to
 
 ## Unreleased
 
+### MCP
+
+#### Fixed
+- panel_set_todo reconciles a missing ACK with a todo read-back and mutation receipt instead of leaving the outcome as a guess (#2481)
+
 ## [0.52.149] - 2026-08-30
 
 ### MCP
