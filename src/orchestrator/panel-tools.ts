@@ -169,6 +169,7 @@ import {
   promotedScopeWitnessFromEnvelope,
   promotedViewingMatchesScope,
   resolveLegacyInnerPromotedTarget,
+  promotedInnerWidgetIsLinkDriven,
   resolveInnerPromotedTarget,
   validatePromotedSubgraphEnvelope,
   isInnerLinkDrivenWriteWarning,
@@ -7319,6 +7320,8 @@ type PromotedWritePlan = {
     parentRail?: PromotedParentRailWitness;
   };
   innerNodeType: string;
+  /** Inner widget is a live input driven by the promoted parent rail. */
+  innerLinkDriven: boolean;
   terminal?: PromotedTerminalWitness;
   scope: PromotedScopeWitness;
   binding: PromotedWriteBinding;
@@ -7956,8 +7959,11 @@ const PROMOTED_PRIMITIVE_INNER_TYPES = new Set([
 /** #2488 — a promoted subgraph INPUT whose inner widget is a different name
  * (frame_counts → length) or a linked primitive must be written on the host.
  * Same-name proxyWidgets promotions keep the inner write so #2314's known-bad
- * live probe still runs before any container mutation. */
+ * live probe still runs before any container mutation.
+ * #2500 — a Primitive* `value` that exists as a live input is driven by the
+ * promoted rail even when the parent-rail witness is missing; write the host. */
 function shouldWritePromotedHostFirst(plan: PromotedWritePlan): boolean {
+  if (plan.innerLinkDriven) return true;
   if (!plan.inner.parentRail) return false;
   if (plan.hostWidget.toLowerCase() !== plan.inner.widget.toLowerCase()) return true;
   return PROMOTED_PRIMITIVE_INNER_TYPES.has(plan.innerNodeType);
@@ -8634,6 +8640,7 @@ async function preparePromotedWidgetWrite(
     ...(outerNodeIdentity ? { outerNodeIdentity } : {}),
     inner,
     innerNodeType,
+    innerLinkDriven: promotedInnerWidgetIsLinkDriven(innerNode, inner.widget, inner.terminal),
     ...(inner.terminal ? { terminal: inner.terminal } : {}),
     scope,
     binding: {
@@ -20621,6 +20628,58 @@ export function buildPanelToolDefs(): PanelToolDef[] {
             }
             const afterMappingError = currentPromotedBindingError(ctx, plan.binding);
             if (afterMappingError) return promotedWriteRefusal(args.widget as string, afterMappingError);
+
+            // #2500 — a link-driven inner Primitive (duration/value_2, fps/value_3)
+            // accepts a write and warns that rendering still reads the enclosing
+            // subgraph widget. Write that container first, at the caller's current
+            // graph, and do not enter the inner scope. This is the #1655 fallback
+            // path when the #2488 host-rail write already contradicted.
+            if (plan.innerLinkDriven) {
+              if (plan.terminal) {
+                const terminalBlocked = refuseKnownBadPromotedTerminal(plan.terminal);
+                if (terminalBlocked) return terminalBlocked;
+              }
+              const hostWidget = plan.hostWidget;
+              const hostScope = plan.outerScope;
+              const written = await write(
+                plan.outerNodeId,
+                hostWidget,
+                plan.outerNodeType,
+                () => {
+                  const error = currentPromotedBindingError(ctx, plan.binding);
+                  if (error) {
+                    throw new Error(
+                      `Refusing promoted container graph_set_widget: ${error}. No graph_set_widget was dispatched.`,
+                    );
+                  }
+                  if (hostScope) {
+                    const scopeError = currentPromotedExpectedScopeError(ctx, hostScope);
+                    if (scopeError) {
+                      throw new Error(
+                        `Refusing promoted container graph_set_widget: ${scopeError}. No graph_set_widget was dispatched.`,
+                      );
+                    }
+                  }
+                },
+                hostScope,
+                plan.outerNodeIdentity,
+              );
+              if (written.isError) {
+                return appendToolResultText(
+                  written,
+                  `\n\n(Tried the enclosing subgraph widget on node ${plan.outerNodeId} ` +
+                    `"${hostWidget}" first because the promoted inner widget is link-driven. ` +
+                    `Navigation scope was left unchanged.)`,
+                );
+              }
+              markPanelSchemaReady(panelSchemaKey(ctx));
+              const persisted = await persistUnpromotedControlAfterGenerate(
+                written,
+                ctx,
+                plan.outerNodeId,
+              );
+              return appendToolResultText(persisted, promotedHostAppliedNote(plan));
+            }
 
             const enter = await ctx.call(
               { cmd: "graph_enter_subgraph", node_id: plan.outerNodeId },

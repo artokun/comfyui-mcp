@@ -329,6 +329,45 @@ function resolveRailBackedInnerFromEnvelope(
   };
 }
 
+function inputName(value: unknown): string | null {
+  if (!isRecord(value) || typeof value.name !== "string" || value.name.length === 0) return null;
+  return value.name;
+}
+
+const PRIMITIVE_NODE_TYPE_RE =
+  /^Primitive(?:Int|Float|Boolean|String|StringMultiline)$/;
+
+function primitiveNodeType(innerNode: Record<string, unknown> | null | undefined, terminal?: PromotedTerminalWitness): string | null {
+  if (isRecord(innerNode) && typeof innerNode.type === "string" && innerNode.type.length > 0) {
+    return innerNode.type;
+  }
+  return terminal?.nodeType ?? null;
+}
+
+/**
+ * #2500 — a Primitive* `value` widget that exists as a live input is driven by
+ * the subgraph's promoted rail. Writing that inner widget reports success and
+ * leaves the enclosing container (the value that serializes and renders)
+ * unchanged. The enclosing subgraph widget is the write target. Converted
+ * widgets on ordinary nodes (dynamic-combo children, etc.) are not this shape.
+ */
+export function promotedInnerWidgetIsLinkDriven(
+  innerNode: Record<string, unknown> | null | undefined,
+  innerWidget: string,
+  terminal?: PromotedTerminalWitness,
+): boolean {
+  if (innerWidget.toLowerCase() !== "value") return false;
+  const nodeType = primitiveNodeType(innerNode, terminal);
+  if (!nodeType || !PRIMITIVE_NODE_TYPE_RE.test(nodeType)) return false;
+  if (isRecord(innerNode) && Array.isArray(innerNode.inputs)) {
+    for (const raw of innerNode.inputs) {
+      const name = inputName(raw);
+      if (name && name.toLowerCase() === "value") return true;
+    }
+  }
+  return terminal?.inputs.some((input) => input.name.toLowerCase() === "value") === true;
+}
+
 function innerNodeId(node: Record<string, unknown>): number | string | null {
   const id = node.id;
   return isNodeId(id) ? id : null;
