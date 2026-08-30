@@ -6,6 +6,11 @@ All notable changes to this project are documented here. This project adheres to
 
 ## Unreleased
 
+### MCP
+
+#### Fixed
+- panel_set_widget writes the enclosing subgraph widget before a link-driven promoted inner (#2500)
+
 ## [0.52.162] - 2026-08-30
 
 ### MCP

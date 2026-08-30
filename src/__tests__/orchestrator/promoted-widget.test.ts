@@ -29,6 +29,7 @@ import {
   parseContradictoryPromotedWidgetRefusal,
   parseLinkDrivenPromotedWriteWarning,
   parseSubgraphScopeRefusal,
+  promotedInnerWidgetIsLinkDriven,
   resolveInnerPromotedTarget,
   validatePromotedSubgraphEnvelope,
 } from "../../orchestrator/promoted-widget.js";
@@ -1187,6 +1188,89 @@ describe("panel_set_widget promoted subgraph input routing (#2488)", () => {
     ]);
     expect(text).toMatch(/link-driven/);
     expect(text).toMatch(/enclosing subgraph node 78/);
+    expect(text).not.toMatch(/Applied via the validated promoted inner widget/);
+  });
+});
+
+/** #2500 — inner PrimitiveInt.value is a live input driven by the promoted
+ * duration/fps rail. Without a parent-rail witness, #2488 host-first would
+ * skip and the inner write would succeed while leaving the container at 5s. */
+const DURATION_PROMOTED_SUBGRAPH = {
+  subgraph_of: { node_id: 42, title: "First-Last-Frame to Video (LTX-2.3)" },
+  node_count: 1,
+  nodes: [
+    {
+      id: 198,
+      type: "PrimitiveInt",
+      widgets: { value: 5 },
+      inputs: [{ name: "value", type: "INT" }],
+    },
+  ],
+  promoted_terminals: [
+    {
+      widget: "value_2",
+      parent_rail: { authoritative: true, widget: "value_2" },
+      immediate_node_id: 198,
+      immediate_widget: "value",
+      terminal_node_id: 198,
+      terminal_node_type: "PrimitiveInt",
+      terminal_widget: "value",
+      terminal_inputs: [{ name: "value", type: "INT" }],
+      chain_depth: 0,
+    },
+  ],
+};
+
+describe("panel_set_widget promoted Primitive value misroute (#2500)", () => {
+  const hostDetail = {
+    text:
+      '1 match(es) of 1 in scope (viewing: 1 nodes)\n' +
+      '{"id":42,"type":"SubgraphNode","is_subgraph":true}',
+  };
+
+  it("writes duration/value_2 on the enclosing subgraph when the inner value input is link-driven", async () => {
+    const { text, isError, calls, mutations } = await setWidget(
+      { node_id: 42, widget: "value_2", value: 4 },
+      {
+        ownerNodeId: 42,
+        firstWrite: "ok",
+        promotedTerminalWitnesses: true,
+        promotedDetail: hostDetail,
+        subgraph: DURATION_PROMOTED_SUBGRAPH,
+      },
+    );
+
+    expect(isError).toBe(false);
+    expect(mutations).toBe(1);
+    expect(calls.filter((call) => call.cmd === "graph_enter_subgraph")).toHaveLength(0);
+    expect(calls.filter((call) => call.cmd === "graph_set_widget")).toEqual([
+      expect.objectContaining({ node_id: 42, widget: "value_2", value: 4 }),
+    ]);
+    expect(calls.some((call) => Number(call.node_id) === 198)).toBe(false);
+    expect(text).toMatch(/enclosing subgraph node 42 widget "value_2"/);
+    expect(text).not.toMatch(/will NOT change the render|Set the enclosing subgraph node/);
+  });
+
+  it("does not misroute a contradictory host write onto a link-driven Primitive value inner", async () => {
+    const { text, isError, calls } = await setWidget(
+      { node_id: 42, widget: "value_2", value: 4 },
+      {
+        ownerNodeId: 42,
+        firstWriteError:
+          `Cannot set widget on subgraph node 42: "value_2" is not a promoted widget ` +
+          `on this subgraph (promoted: value_2).`,
+        promotedTerminalWitnesses: true,
+        promotedDetail: hostDetail,
+        subgraph: DURATION_PROMOTED_SUBGRAPH,
+        innerWriteLinkDriven: true,
+      },
+    );
+
+    expect(isError).toBe(true);
+    expect(calls.filter((call) => call.cmd === "graph_enter_subgraph")).toHaveLength(0);
+    expect(
+      calls.some((call) => call.cmd === "graph_set_widget" && Number(call.node_id) === 198),
+    ).toBe(false);
     expect(text).not.toMatch(/Applied via the validated promoted inner widget/);
   });
 });
@@ -2903,6 +2987,71 @@ describe("panel_set_widget promoted container success guards (#2314)", () => {
     expect(calls.filter((c) => c.cmd === "graph_set_widget")).toHaveLength(1);
   });
 
+});
+
+describe("promotedInnerWidgetIsLinkDriven (#2500)", () => {
+  it("detects a PrimitiveInt whose value widget is a live input", () => {
+    expect(
+      promotedInnerWidgetIsLinkDriven(
+        {
+          id: 198,
+          type: "PrimitiveInt",
+          widgets: { value: 5 },
+          inputs: [{ name: "value", type: "INT" }],
+        },
+        "value",
+      ),
+    ).toBe(true);
+  });
+
+  it("detects the same shape from the terminal witness when the inner row omits inputs", () => {
+    expect(
+      promotedInnerWidgetIsLinkDriven(
+        { id: 198, type: "PrimitiveInt", widgets: { value: 5 } },
+        "value",
+        {
+          nodeId: 198,
+          nodeType: "PrimitiveInt",
+          widget: "value",
+          inputs: [{ name: "value", type: "INT" }],
+          chainDepth: 0,
+        },
+      ),
+    ).toBe(true);
+  });
+
+  it("does not treat an unconverted inner widget as link-driven", () => {
+    expect(
+      promotedInnerWidgetIsLinkDriven(
+        { id: 76, type: "PrimitiveStringMultiline", widgets: { quality_prompt: "old" } },
+        "quality_prompt",
+        {
+          nodeId: 76,
+          nodeType: "PrimitiveStringMultiline",
+          widget: "quality_prompt",
+          inputs: [],
+          chainDepth: 0,
+        },
+      ),
+    ).toBe(false);
+  });
+
+  it("does not treat a converted ordinary-node child as this Primitive shape", () => {
+    expect(
+      promotedInnerWidgetIsLinkDriven(
+        {
+          id: 76,
+          type: "MinimaxHailuo03TextToVideoNode",
+          widgets: { "model.prompt": "" },
+          inputs: [
+            { name: "model", type: "COMFY_DYNAMICCOMBO_V3" },
+            { name: "model.prompt", type: "STRING" },
+          ],
+        },
+        "model.prompt",
+      ),
+    ).toBe(false);
+  });
 });
 
 describe("parseContradictoryPromotedWidgetRefusal", () => {
