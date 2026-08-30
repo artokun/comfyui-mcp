@@ -7389,16 +7389,28 @@ function panelBindingDriftReason(
   tabBefore: string,
 ): string | undefined {
   if (!hasIdentityApi) return `the receiver identity was unavailable ${where}`;
-  if (!isUsablePanelConnectionIdentity(identityBefore)) {
-    return `the panel connection identity was unavailable ${where}`;
-  }
   let identityAfter: { generation: number; tabSessionId: string } | undefined;
   try {
     identityAfter = ctx.panelConnectionIdentity?.();
   } catch {
     return `the panel connection identity became unreadable ${where}`;
   }
-  if (ctx.tabId !== tabBefore || !isUsablePanelConnectionIdentity(identityAfter)) {
+  if (ctx.tabId !== tabBefore) {
+    return `the panel tab or connection changed ${where}`;
+  }
+  // #2551 / remaining #2475 path: a missing fingerprint is cannot-compare, not a
+  // rebind. Graph reads already answered on this binding. A usable-then-gone
+  // tuple is still drift. Call the type guard directly so TS narrows the pair.
+  if (
+    !isUsablePanelConnectionIdentity(identityBefore) &&
+    !isUsablePanelConnectionIdentity(identityAfter)
+  ) {
+    return undefined;
+  }
+  if (!isUsablePanelConnectionIdentity(identityBefore)) {
+    return `the panel connection identity was unavailable ${where}`;
+  }
+  if (!isUsablePanelConnectionIdentity(identityAfter)) {
     return `the panel tab or connection changed ${where}`;
   }
   if (!samePanelConnectionIdentity(identityBefore, identityAfter)) {

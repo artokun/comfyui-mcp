@@ -88,8 +88,11 @@ function bridge(opts: {
   preflightNodeIsSubgraph?: boolean;
   /** #2401: change the routing or panel connection identity after the async
    * ordinary-node scope probe has produced its result, before the caller can
-   * take the fast path. */
-  scopeProbeIdentityChange?: "tab" | "connection";
+   * take the fast path. `"gone"` drops a previously usable fingerprint. */
+  scopeProbeIdentityChange?: "tab" | "connection" | "gone";
+  /** #2551: the panel answers graph reads, but tab_session_id is never published
+   * so panelConnectionIdentity stays unusable both before and after the probe. */
+  unusableConnectionIdentity?: boolean;
   /** #2409: the same, one exit lower — change identity after the async
    * graph_get_subgraph read, before the definitive-non-subgraph exit returns. */
   subgraphReadIdentityChange?: "tab" | "connection";
@@ -190,7 +193,10 @@ function bridge(opts: {
   let currentOwnerNodeId = opts.ownerNodeId ?? 78;
   const targetGraphIdentity = "graph:workflow-a-container-a";
   let currentGraphIdentity = inSubgraph ? targetGraphIdentity : "graph:workflow-a-root";
-  let connectionIdentity = { generation: 1, tabSessionId: "browser-tab-a" };
+  let connectionIdentity: { generation: number; tabSessionId: string } | undefined =
+    opts.unusableConnectionIdentity === true
+      ? undefined
+      : { generation: 1, tabSessionId: "browser-tab-a" };
   let identityFenceCapability = opts.identityFenceChange === "upgrade" ? false : true;
   let identityFenceChangeApplied = false;
   let liveInnerNodeIdentity = opts.innerNodeIdentity;
@@ -488,6 +494,8 @@ function bridge(opts: {
           if (cmd.fields === "detail" && cmd.max_chars === undefined) {
             if (opts.scopeProbeIdentityChange === "connection") {
               connectionIdentity = { generation: 2, tabSessionId: "browser-tab-a" };
+            } else if (opts.scopeProbeIdentityChange === "gone") {
+              connectionIdentity = undefined;
             }
             const mutation = afterScopeProbe.mutate;
             afterScopeProbe.mutate = undefined;
@@ -1221,6 +1229,93 @@ describe("panel_set_widget ordinary-node scope probe fence (#2401)", () => {
       "graph_get_subgraph",
       "graph_get_subgraph",
     ]);
+    expect(writesApplied).toBe(0);
+    expect(mutations).toBe(0);
+  });
+});
+
+describe("panel_set_widget ordinary-root write with missing connection identity (#2551)", () => {
+  const promotedLookingOrdinaryRoots = [
+    {
+      name: "PrimitiveFloat.value",
+      node_id: 132,
+      type: "PrimitiveFloat",
+      widget: "value",
+      value: 0.65,
+      inputs: [{ name: "value", type: "FLOAT", widget: { name: "value" } }],
+      widgets: { value: 1 },
+    },
+    {
+      name: "DenoResolutionSetup.ratio_preset",
+      node_id: 145,
+      type: "DenoResolutionSetup",
+      widget: "ratio_preset",
+      value: "16:9",
+      inputs: [
+        { name: "ratio_preset", type: "COMBO", widget: { name: "ratio_preset" } },
+        { name: "megapixels", type: "FLOAT", widget: { name: "megapixels" } },
+      ],
+      widgets: { ratio_preset: "1:1", megapixels: 1 },
+    },
+    {
+      name: "PrimitiveStringMultiline.value",
+      node_id: 196,
+      type: "PrimitiveStringMultiline",
+      widget: "value",
+      value: "a prompt",
+      inputs: [{ name: "value", type: "STRING", widget: { name: "value" } }],
+      widgets: { value: "" },
+    },
+  ] as const;
+
+  it.each(promotedLookingOrdinaryRoots)(
+    "writes $name on the ordinary path when the connection identity is missing",
+    async ({ node_id, type, widget, value, inputs, widgets }) => {
+      const { text, isError, calls, writesApplied, mutations } = await setWidget(
+        { node_id, widget, value },
+        {
+          firstWrite: "ok",
+          unusableConnectionIdentity: true,
+          promotedDetail: {
+            nodes: [{ id: node_id, type, is_subgraph: false, inputs: [...inputs], widgets }],
+          },
+        },
+      );
+
+      expect(isError).toBe(false);
+      expect(text).not.toMatch(/panel connection identity was unavailable/);
+      expect(calls.map((call) => call.cmd)).toEqual(["graph_query", "graph_set_widget"]);
+      expect(calls.filter((call) => call.cmd === "graph_set_widget")).toEqual([
+        expect.objectContaining({ node_id, widget, value }),
+      ]);
+      expect(writesApplied).toBe(1);
+      expect(mutations).toBe(1);
+    },
+  );
+
+  it("still refuses the ordinary fast path when a usable identity disappears after the scope probe", async () => {
+    const { text, isError, calls, writesApplied, mutations } = await setWidget(
+      { node_id: 132, widget: "value", value: 0.65 },
+      {
+        firstWrite: "ok",
+        scopeProbeIdentityChange: "gone",
+        promotedDetail: {
+          nodes: [
+            {
+              id: 132,
+              type: "PrimitiveFloat",
+              is_subgraph: false,
+              inputs: [{ name: "value", type: "FLOAT", widget: { name: "value" } }],
+              widgets: { value: 1 },
+            },
+          ],
+        },
+      },
+    );
+
+    expect(isError).toBe(true);
+    expect(text).toMatch(/panel tab or connection changed after the scope probe/);
+    expect(calls.map((call) => call.cmd)).toEqual(["graph_query"]);
     expect(writesApplied).toBe(0);
     expect(mutations).toBe(0);
   });
