@@ -1917,7 +1917,10 @@ async function probeGitRev(
   return { rev, branch };
 }
 
-/** Read ComfyUI-Manager version from its local install if present. */
+/** Read ComfyUI-Manager version from a custom_nodes checkout.
+ *  Fallback only — ComfyUI with --enable-manager serves the pip package and
+ *  disables this folder ("Blocked by policy"), so a live version must come
+ *  from a trusted interpreter probe first (#2538). */
 async function readManagerVersion(
   workspacePath: string,
 ): Promise<string | undefined> {
@@ -1991,6 +1994,8 @@ export interface EnvironmentInfo {
      *  "we couldn't determine it" apart from "we determined it's absent" (#401). */
     python_probe_reason?: string;
     git?: { rev?: string; branch?: string };
+    /** Live Manager version: trusted pip `comfyui-manager` when observed,
+     *  else a custom_nodes checkout (unverified when the pip probe is not). */
     comfyui_manager_version?: string;
     packages?: Record<string, string>;
     note?: string;
@@ -2006,6 +2011,9 @@ const KEY_PACKAGES = [
   "transformers",
   "diffusers",
   "comfyui-frontend-package",
+  // pip Manager (ComfyUI --enable-manager). Must outrank a leftover
+  // custom_nodes/ComfyUI-Manager checkout that core has blocked (#2538).
+  "comfyui-manager",
 ];
 
 export async function getEnvironment(): Promise<EnvironmentInfo> {
@@ -2307,11 +2315,19 @@ export async function getEnvironment(): Promise<EnvironmentInfo> {
   // Manager lives under custom_nodes/, which --base-directory runtimes scan
   // from the data/base root (#1770). Fall back to the checkout only when no
   // data root is known (legacy layout next to main.py).
+  //
+  // A trusted pip `comfyui-manager` is the live Manager when ComfyUI is
+  // started with --enable-manager: core then blocks custom_nodes/ComfyUI-Manager
+  // ("Blocked by policy") and the leftover 3.x folder is not what HTTP serves
+  // (#2538). An untrusted probe must not invent that pip version.
   const managerRoot = localRoot ?? codeRoot;
-  if (managerRoot) {
-    const managerVersion = await readManagerVersion(managerRoot);
-    if (managerVersion) local.comfyui_manager_version = managerVersion;
-  }
+  const pipManager =
+    local.python_probe_trusted === true
+      ? (local.packages?.["comfyui-manager"] ?? local.packages?.["comfyui_manager"])
+      : undefined;
+  const managerVersion =
+    pipManager ?? (managerRoot ? await readManagerVersion(managerRoot) : undefined);
+  if (managerVersion) local.comfyui_manager_version = managerVersion;
 
   return { running_instance: running, local };
 }

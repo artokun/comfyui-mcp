@@ -6,6 +6,12 @@ All notable changes to this project are documented here. This project adheres to
 
 ## Unreleased
 
+### MCP
+
+#### Fixed
+- install_comfyui action:"environment" reports the pip-installed ComfyUI-Manager version from a trusted interpreter instead of a disabled custom_nodes/ComfyUI-Manager checkout (#2538)
+
+
 ## [0.52.163] - 2026-08-30
 
 ### MCP
