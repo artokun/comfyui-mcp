@@ -264,15 +264,33 @@ describe("resolveKimiCodeOAuth", () => {
     expect(urls).toEqual(["https://auth.kimi.com/api/oauth/token"]);
   });
 
-  it("#2534 falls back to the base-URL host when there is no region file", async () => {
+  it("#2534 an explicit base-URL override pins the region for BOTH hosts", async () => {
     process.env.COMFYUI_MCP_KIMI_BASE_URL = "https://api.kimi.ai/coding/v1";
     try {
       const { urls, fetchMock } = await armRefresh();
-      await resolveKimiCodeOAuth({ home, fetch: fetchMock as typeof fetch, now: () => Date.now() });
+      const creds = await resolveKimiCodeOAuth({ home, fetch: fetchMock as typeof fetch, now: () => Date.now() });
       expect(urls).toEqual(["https://auth.kimi.ai/api/oauth/token"]);
+      expect(creds.baseUrl).toBe("https://api.kimi.ai/coding/v1");
     } finally {
       delete process.env.COMFYUI_MCP_KIMI_BASE_URL;
     }
+  });
+
+  it("#2534 a global region moves the CODING host too, not just the OAuth host", async () => {
+    // Deriving only the OAuth host left a global install refreshing at
+    // auth.kimi.ai and then sending the fresh token to the mainland coding API
+    // (gate r2 P1) — a split-brain pair worse than being consistently wrong.
+    const { urls, fetchMock } = await armRefresh("global");
+    const creds = await resolveKimiCodeOAuth({ home, fetch: fetchMock as typeof fetch, now: () => Date.now() });
+    expect(urls).toEqual(["https://auth.kimi.ai/api/oauth/token"]);
+    expect(creds.baseUrl).toBe("https://api.kimi.ai/coding/v1");
+  });
+
+  it("#2534 mainland keeps both hosts on .com", async () => {
+    const { urls, fetchMock } = await armRefresh("mainland-cn");
+    const creds = await resolveKimiCodeOAuth({ home, fetch: fetchMock as typeof fetch, now: () => Date.now() });
+    expect(urls).toEqual(["https://auth.kimi.com/api/oauth/token"]);
+    expect(creds.baseUrl).toBe("https://api.kimi.com/coding/v1");
   });
 
   it("#2534 sends the form-encoded refresh_token grant the endpoint accepts", async () => {

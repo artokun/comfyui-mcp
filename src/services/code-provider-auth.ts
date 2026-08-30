@@ -4,6 +4,7 @@ import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { randomBytes } from "node:crypto";
 import { ValidationError } from "../utils/errors.js";
+import { logger } from "../utils/logger.js";
 import { assertAllowedTokenHost, OAUTH_PROVIDERS, redactTokens, type OAuthTokens } from "./oauth-flow.js";
 import {
   setOAuthStatus,
@@ -266,41 +267,73 @@ async function refreshOpenAICodexTokens(
 }
 
 /**
- * Which regional OAuth host serves this install (#2534).
+ * Which region serves this install (#2534).
  *
  * The Kimi Code CLI writes its region beside `credentials/` — `mainland-cn` on
- * the reporter's machine — and splits every host on it: `api.kimi.com` +
- * `auth.kimi.com` for mainland, `api.kimi.ai` + `auth.kimi.ai` for global. The
- * region file is read from the SAME install directory the credentials were read
- * from, so a KIMI_CODE_HOME / KIMI_SHARE_DIR override cannot pair one install's
- * tokens with another's region.
+ * the reporter's machine — and splits BOTH hosts on it: `api.kimi.com` +
+ * `auth.kimi.com` for mainland, `api.kimi.ai` + `auth.kimi.ai` for global.
  *
- * Falls back to the coding base URL's host, which carries the same split and
- * honours COMFYUI_MCP_KIMI_BASE_URL, and finally to mainland — the region of
- * KIMI_CODE_DEFAULT_BASE, so an install with neither signal keeps today's host.
+ * One resolver for both hosts, deliberately. Deriving only the OAuth host from
+ * the region left a global install refreshing at `auth.kimi.ai` and then sending
+ * the fresh token to the mainland coding API, because the base URL kept its
+ * mainland default (gate r2 P1) — a split-brain pair that is worse than being
+ * consistently wrong.
+ *
+ * Order: an explicit COMFYUI_MCP_KIMI_BASE_URL is operator intent and wins; then
+ * the CLI's own region file, read from the SAME install the credentials came
+ * from, so a KIMI_CODE_HOME / KIMI_SHARE_DIR override cannot pair one install's
+ * tokens with another's region; then mainland, the region of the historical
+ * default base, so an install with neither signal keeps today's hosts.
  */
-function kimiOAuthTokenUrl(authPath: string, baseUrl: string): string {
-  const regionFile = join(dirname(dirname(authPath)), "region");
+type KimiRegion = "mainland" | "global";
+
+function kimiRegionFromHost(url: string): KimiRegion | null {
   try {
-    if (existsSync(regionFile)) {
+    return new URL(url).hostname.toLowerCase().endsWith("kimi.ai") ? "global" : "mainland";
+  } catch {
+    return null; // malformed override — no signal
+  }
+}
+
+function kimiRegion(authPath: string, baseUrlOverride: string | undefined): KimiRegion {
+  if (baseUrlOverride) {
+    const fromOverride = kimiRegionFromHost(baseUrlOverride);
+    if (fromOverride) return fromOverride;
+  }
+  const regionFile = join(dirname(dirname(authPath)), "region");
+  if (existsSync(regionFile)) {
+    try {
       const region = readFileSync(regionFile, "utf8").trim().toLowerCase();
       // Match on "cn" rather than the exact string: the CLI's value is
       // `mainland-cn`, and anything else it may write for the global region
       // (`global`, `intl`, …) is not enumerable from here. A non-empty region
       // that is not mainland is global.
-      if (region) return region.includes("cn") ? KIMI_OAUTH_TOKEN_URL_MAINLAND : KIMI_OAUTH_TOKEN_URL_GLOBAL;
+      if (region) return region.includes("cn") ? "mainland" : "global";
+    } catch (err) {
+      // An existing-but-unreadable region file is NOT the same as no region file
+      // (gate r2 P1). We still cannot know the region — there is no second
+      // source — so the default stands, but it is an assumption and it is said
+      // out loud rather than silently becoming "mainland". Refusing outright
+      // would turn a transient read error into a failed Connect, which is the
+      // worse trade for a file this small and this local.
+      logger.warn(
+        `[kimi-auth] region file ${regionFile} exists but could not be read (${
+          err instanceof Error ? err.message : String(err)
+        }) — assuming mainland. Set COMFYUI_MCP_KIMI_BASE_URL to pin the region explicitly.`,
+      );
     }
-  } catch {
-    // Unreadable region file — fall through to the base-URL reading below.
   }
-  let host = "";
-  try {
-    host = new URL(baseUrl).hostname.toLowerCase();
-  } catch {
-    /* malformed override — treated as no signal */
-  }
-  if (host.endsWith("kimi.ai")) return KIMI_OAUTH_TOKEN_URL_GLOBAL;
-  return KIMI_OAUTH_TOKEN_URL_MAINLAND;
+  return "mainland";
+}
+
+const KIMI_CODE_GLOBAL_BASE = "https://api.kimi.ai/coding/v1";
+
+function kimiOAuthTokenUrl(region: KimiRegion): string {
+  return region === "global" ? KIMI_OAUTH_TOKEN_URL_GLOBAL : KIMI_OAUTH_TOKEN_URL_MAINLAND;
+}
+
+function kimiCodingBase(region: KimiRegion): string {
+  return region === "global" ? KIMI_CODE_GLOBAL_BASE : KIMI_CODE_DEFAULT_BASE;
 }
 
 async function refreshKimiCodeTokens(
@@ -659,16 +692,20 @@ export function resolveOpenAiKeyCredentials(id: string): { apiKey: string; baseU
 export async function resolveKimiCodeOAuth(
   deps: CodeProviderAuthDeps = {},
 ): Promise<KimiCodeOAuthCredentials> {
-  const baseUrl =
-    process.env.COMFYUI_MCP_KIMI_BASE_URL?.trim().replace(/\/$/, "") || KIMI_CODE_DEFAULT_BASE;
+  const baseOverride = process.env.COMFYUI_MCP_KIMI_BASE_URL?.trim().replace(/\/$/, "") || undefined;
+
+  const home = deps.home ?? homedir();
+  const path = kimiCodeAuthPath(home);
+  // One region decision drives BOTH hosts, so a global install cannot refresh at
+  // auth.kimi.ai and then talk to the mainland coding API (#2534, gate r2).
+  const region = kimiRegion(path, baseOverride);
+  const baseUrl = baseOverride ?? kimiCodingBase(region);
 
   const apiKey = process.env.KIMI_API_KEY?.trim();
   if (apiKey) {
     return { accessToken: apiKey, baseUrl };
   }
 
-  const home = deps.home ?? homedir();
-  const path = kimiCodeAuthPath(home);
   if (!existsSync(path)) {
     throw new ValidationError(
       "Kimi Code OAuth requires ~/.kimi-code/credentials/kimi-code.json (run `kimi login`) or KIMI_API_KEY.",
@@ -694,7 +731,7 @@ export async function resolveKimiCodeOAuth(
     if (!refreshToken) {
       throw new ValidationError("Kimi Code access token expired and refresh_token is missing. Re-run Kimi Code login.");
     }
-    creds = await refreshKimiCodeTokens(refreshToken, kimiOAuthTokenUrl(path, baseUrl), deps);
+    creds = await refreshKimiCodeTokens(refreshToken, kimiOAuthTokenUrl(region), deps);
     await atomicWriteJson(path, creds);
   }
 
