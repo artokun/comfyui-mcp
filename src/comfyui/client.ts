@@ -1336,6 +1336,21 @@ export interface HistoryEntry {
 
 export { MAX_HISTORY_RESPONSE_BYTES } from "./bounded-response.js";
 
+/** The panel `fetch_comfyui_read` command has one fixed global `/history`
+ * route. A prompt-scoped caller still uses that body, then we keep only the
+ * requested id — never the rest of the map. */
+function historyForPrompt(
+  history: Record<string, HistoryEntry>,
+  promptId: string | undefined,
+): Record<string, HistoryEntry> {
+  if (!promptId) return history;
+  if (!history || typeof history !== "object" || Array.isArray(history)) return {};
+  if (!Object.prototype.hasOwnProperty.call(history, promptId)) return {};
+  const entry = history[promptId];
+  if (!entry || typeof entry !== "object" || Array.isArray(entry)) return {};
+  return { [promptId]: entry };
+}
+
 export async function getHistory(
   promptId?: string,
   options: { signal?: AbortSignal } = {},
@@ -1346,17 +1361,20 @@ export async function getHistory(
   try {
     res = await comfyApiFetch(path, options.signal ? { signal: options.signal } : {});
   } catch (err) {
-    // The panel command has one fixed global /history route. A prompt-scoped
-    // request is therefore deliberately not eligible for this fallback.
-    if (!promptId && isComfyTransportFailure(err)) {
+    // #2532 — prompt-scoped `/history/<id>` used to skip this fallback because
+    // the panel command is global-only. That left get_history(action:"list")
+    // and the run-completion journal unable to name a finished panel_run's
+    // outputs while queue.status still reported done:true from local cache.
+    if (isComfyTransportFailure(err)) {
       const relayed = await panelReadFallback("history", err);
       if (relayed) {
-        return await readComfyJson<Record<string, HistoryEntry>>(panelReadResponse(relayed), {
-          url: path,
+        const all = await readComfyJson<Record<string, HistoryEntry>>(panelReadResponse(relayed), {
+          url: "/history",
           maxBytes: MAX_HISTORY_RESPONSE_BYTES,
           bodyTimeoutMs: Math.round(comfyHttpTimeoutSeconds() * 1000),
           signal: options.signal,
         });
+        return historyForPrompt(all, promptId);
       }
     }
     throw err;

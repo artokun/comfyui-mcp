@@ -9,6 +9,7 @@ import {
   enqueuePrompt as clientEnqueuePrompt,
   freeMemory as clientFreeMemory,
 } from "../comfyui/client.js";
+import { isComfyTransportFailure } from "../comfyui/fetch.js";
 import * as cloudClient from "../comfyui/cloud-client.js";
 import { isCloudMode } from "../config.js";
 import type { QueueItem, WorkflowJSON } from "../comfyui/types.js";
@@ -59,7 +60,22 @@ export interface JobStatus {
    *  These write no file, so without this a text-producing workflow finishes
    *  with nothing for the agent to report. Omitted when the run produced none. */
   text_outputs?: TextOutput[];
+  /** Present only when `done` came from this client's cached prompt status
+   *  because ComfyUI `/history` was unreachable from this process (#2532). */
+  done_from?: "local_cache";
+  note?: string;
 }
+
+/** True when history enrichment failed because the headless target (and any
+ * panel fallback) could not be reached — not a parse/HTTP-status failure. */
+function historyUnreachableFromHere(err: unknown): boolean {
+  if (isComfyTransportFailure(err)) return true;
+  const msg = err instanceof Error ? err.message : String(err);
+  return msg.includes("read fallback failed safely");
+}
+
+const LOCAL_CACHE_DONE_NOTE =
+  'done:true is from this client\'s cached prompt status; ComfyUI /history was unreachable from this process (COMFYUI_URL). A connected sidebar panel can still read the completed run. Retry get_history (action:"list") for this prompt_id — it uses a panel-origin fallback when available — or inspect the live canvas.';
 
 function asRecord(value: unknown): Record<string, unknown> | undefined {
   return value && typeof value === "object" && !Array.isArray(value)
@@ -304,6 +320,13 @@ export async function getJobStatus(
       prompt_id: promptId,
       error: err instanceof Error ? err.message : err,
     });
+    if (status.done && historyUnreachableFromHere(err)) {
+      return {
+        ...status,
+        done_from: "local_cache",
+        note: LOCAL_CACHE_DONE_NOTE,
+      };
+    }
     return status;
   }
 }

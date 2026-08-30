@@ -193,7 +193,7 @@ describe("authenticated panel-backed ComfyUI read fallback (#2283)", () => {
     expect(panelRead).toHaveBeenCalledTimes(2);
   });
 
-  it("does not use the panel for a configured-route HTTP error, timeout, or prompt-scoped history", async () => {
+  it("does not use the panel for a configured-route HTTP error, timeout, or fetchImage", async () => {
     fetchApi.mockResolvedValue(new Response("gateway down", { status: 503 }));
     await expect(getHistory()).rejects.toThrow();
     expect(panelRead).not.toHaveBeenCalled();
@@ -207,7 +207,6 @@ describe("authenticated panel-backed ComfyUI read fallback (#2283)", () => {
     expect(panelRead).not.toHaveBeenCalled();
 
     vi.stubGlobal("fetch", vi.fn(async () => { throw transportFailure(); }));
-    await expect(getHistory("prompt-1")).rejects.toThrow(/fetch failed/);
     await expect(fetchImage("render.png")).rejects.toThrow(/fetch failed/);
     expect(panelRead).not.toHaveBeenCalled();
 
