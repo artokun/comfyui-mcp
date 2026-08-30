@@ -126,6 +126,23 @@ export function clearRememberedViewingScope(tabId?: string): void {
   rememberedByTab.delete(tabId);
 }
 
+/** Drop a remembered subgraph owner. A later live root read or an explicit
+ * current-mode rebind must not keep authorizing the promoted-subgraph path. */
+export function clearStaleSubgraphIdentity(tabId: string): void {
+  if (!tabId) return;
+  const rec = rememberedByTab.get(tabId);
+  if (rec?.scope === "subgraph") rememberedByTab.delete(tabId);
+}
+
+/** Record a live root viewing so a prior subgraph confirmation cannot linger. */
+export function applyLiveRootViewing(tabId: string, viewing: unknown): boolean {
+  if (!tabId) return false;
+  const parsed = parseViewingScope(viewing);
+  if (parsed?.scope !== "root") return false;
+  rememberedByTab.set(tabId, parsed);
+  return true;
+}
+
 export function noteConfirmedViewing(
   tabId: string,
   payload: unknown,

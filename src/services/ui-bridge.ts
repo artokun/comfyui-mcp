@@ -4158,6 +4158,34 @@ export class UiBridge {
     return this.promotedScopes.get(key) ?? unknown;
   }
 
+  /** Overwrite a stale subgraph witness with a live root viewing. */
+  applyLiveRootViewing(tabId: string, viewing: unknown): void {
+    const parsed = this.parsePromotedScopeResult({ viewing });
+    if (!parsed || parsed.known !== true || parsed.scope !== "root") return;
+    let key = tabId;
+    try {
+      key = this.resolveTarget(tabId).tabId;
+    } catch {
+      key = tabId;
+    }
+    this.promotedScopes.set(key, parsed);
+  }
+
+  /** Drop a cached subgraph/promoted current-view identity after a root read
+   * or a successful mode:current rebind. */
+  clearPromotedSubgraphIdentity(tabId: string): void {
+    let key = tabId;
+    try {
+      key = this.resolveTarget(tabId).tabId;
+    } catch {
+      key = tabId;
+    }
+    const current = this.promotedScopes.get(key);
+    if (current?.known === true && current.scope === "subgraph") {
+      this.promotedScopes.delete(key);
+    }
+  }
+
   /** Read the current panel view from the live graph immediately before a
    *  promoted write. `promotedScopeFor` is intentionally only a cached witness
    *  for synchronous dispatch fences; this method performs the authoritative

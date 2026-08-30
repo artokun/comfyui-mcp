@@ -164,6 +164,8 @@ function bridge(opts: {
   };
   omitWorkflowUuid?: boolean;
   workflowUuid?: string;
+  /** Leave graph_query without a viewing witness so the scope is genuinely unknown. */
+  omitViewing?: boolean;
   /** The outer node id used by the current fake viewing scope. */
   ownerNodeId?: number;
   /** #2394: begin the fake panel inside a subgraph for active-view scope tests. */
@@ -221,9 +223,11 @@ function bridge(opts: {
     ...(opts.omitWorkflowUuid ? {} : { workflow_uuid: workflowUuid }),
   });
   const withCurrentViewing = (value: Record<string, unknown>): Record<string, unknown> => {
-    let result = Object.prototype.hasOwnProperty.call(value, "viewing")
+    let result = opts.omitViewing
       ? value
-      : { ...value, viewing: currentViewing() };
+      : Object.prototype.hasOwnProperty.call(value, "viewing")
+        ? value
+        : { ...value, viewing: currentViewing() };
     if (
       !legacyBuild &&
       identityFenceCapability &&
@@ -1217,6 +1221,7 @@ describe("panel_set_widget ordinary-node scope probe fence (#2401)", () => {
       { node_id: 82, widget: "lora_1", value },
       {
         firstWrite: "ok",
+        omitViewing: true,
         promotedDetail: { nodes: [{ id: 82, type: "Power Lora Loader (rgthree)" }] },
         subgraph: new Error("graph_get_subgraph unavailable"),
       },
@@ -1231,6 +1236,76 @@ describe("panel_set_widget ordinary-node scope probe fence (#2401)", () => {
     ]);
     expect(writesApplied).toBe(0);
     expect(mutations).toBe(0);
+  });
+});
+
+describe("panel_set_widget root-scope write after a root graph read (#2518)", () => {
+  const STRING_CONCAT_ID = 53;
+  const ROOT_GRAPH_IDENTITY = "graph:workflow-a-root";
+  const stalePromotedEnvelope = {
+    subgraph_of: { node_id: STRING_CONCAT_ID, title: "stale-subgraph" },
+    instance_widgets: { string_a: "old" },
+    node_count: 1,
+    nodes: [{ id: 99, type: "PrimitiveStringMultiline", widgets: { value: "old" } }],
+  };
+
+  it("writes a truncated root StringConcatenate widget without the promoted-subgraph path", async () => {
+    const { text, isError, calls, writesApplied, mutations } = await setWidget(
+      { node_id: STRING_CONCAT_ID, widget: "string_a", value: "hello" },
+      {
+        firstWrite: "ok",
+        unusableConnectionIdentity: true,
+        subgraph: stalePromotedEnvelope,
+        promotedDetail: {
+          truncated: true,
+          viewing: {
+            scope: "root",
+            graph_identity: ROOT_GRAPH_IDENTITY,
+            workflow_uuid: "workflow-a",
+          },
+          nodes: [
+            {
+              id: STRING_CONCAT_ID,
+              type: "StringConcatenate",
+              is_subgraph: false,
+              widgets: { string_a: "old", string_b: "world", delimiter: " " },
+            },
+          ],
+        },
+      },
+    );
+
+    expect(isError).toBe(false);
+    expect(text).not.toMatch(/refused the promoted/);
+    expect(text).not.toMatch(/panel connection identity was unavailable/);
+    expect(calls.filter((call) => call.cmd === "graph_get_subgraph")).toHaveLength(0);
+    expect(calls.filter((call) => call.cmd === "graph_set_widget")).toEqual([
+      expect.objectContaining({
+        node_id: STRING_CONCAT_ID,
+        widget: "string_a",
+        value: "hello",
+      }),
+    ]);
+    expect(writesApplied).toBe(1);
+    expect(mutations).toBe(1);
+  });
+
+  it("still maps a root subgraph container through the promoted path", async () => {
+    const { isError, calls, writesApplied, mutations } = await setWidget(
+      { node_id: 78, widget: "width", value: 1920 },
+      {
+        firstWrite: "ok",
+        promotedDetail: {
+          truncated: false,
+          nodes: [{ id: 78, type: "Krea2", is_subgraph: true, widgets: { width: 1024 } }],
+        },
+      },
+    );
+
+    expect(isError).toBe(false);
+    expect(calls.filter((call) => call.cmd === "graph_get_subgraph").length).toBeGreaterThan(0);
+    expect(writesApplied).toBe(1);
+    expect(mutations).toBe(1);
   });
 });
 

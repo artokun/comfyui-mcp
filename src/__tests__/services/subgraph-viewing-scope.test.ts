@@ -4,9 +4,11 @@
 import { afterEach, describe, expect, it } from "vitest";
 
 import {
+  applyLiveRootViewing,
   callAndRememberViewing,
   callWithRememberedSubgraph,
   clearRememberedViewingScope,
+  clearStaleSubgraphIdentity,
   isOutsideSubgraphRefusal,
   noteConfirmedViewing,
   parseViewingScope,
@@ -82,6 +84,22 @@ describe("noteConfirmedViewing", () => {
     noteConfirmedViewing(TAB, { viewing: { scope: "root" } });
     expect(rememberedSubgraphOwner(TAB)).toBeNull();
     expect(rememberedViewingScope(TAB)).toEqual({ scope: "root", ownerNodeId: null });
+  });
+
+  it("applyLiveRootViewing and clearStaleSubgraphIdentity drop a leftover subgraph owner (#2518)", () => {
+    noteConfirmedViewing(TAB, { viewing: { scope: "subgraph", owner_node_id: 96 } });
+    expect(applyLiveRootViewing(TAB, { scope: "root", workflow_uuid: "aaa" })).toBe(true);
+    expect(rememberedSubgraphOwner(TAB)).toBeNull();
+    expect(rememberedViewingScope(TAB)).toEqual({
+      scope: "root",
+      ownerNodeId: null,
+      workflowUuid: "aaa",
+    });
+
+    noteConfirmedViewing(TAB, { viewing: { scope: "subgraph", owner_node_id: 12 } });
+    clearStaleSubgraphIdentity(TAB);
+    expect(rememberedSubgraphOwner(TAB)).toBeNull();
+    expect(rememberedViewingScope(TAB)).toBeNull();
   });
 });
 

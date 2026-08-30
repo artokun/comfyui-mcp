@@ -700,6 +700,52 @@ describe("UiBridge (typed dispatch outcome — panel #442 defect 4)", () => {
     a.close();
   });
 
+  it("clears a cached subgraph identity after a live root viewing (#2518)", async () => {
+    const a = await connectPanel("tab-scope-2518");
+    a.on("message", (buf) => {
+      const msg = JSON.parse(buf.toString());
+      if (msg.rid && msg.cmd === "graph_query") {
+        a.send(
+          JSON.stringify({
+            rid: msg.rid,
+            ok: true,
+            result: {
+              viewing: {
+                scope: "subgraph",
+                owner_node_id: 12,
+                workflow_uuid: "25180000-0000-4000-8000-000000000000",
+                graph_identity: "graph:stale-subgraph",
+              },
+              nodes: [{ id: 53, type: "StringConcatenate" }],
+            },
+          }),
+        );
+      }
+    });
+    await waitFor(() => expect(bridge.connected()).toBe(true));
+    await bridge.send(
+      { cmd: "graph_query", ids: [53], fields: "detail", limit: 1 },
+      { tabId: "tab-scope-2518" },
+    );
+    expect(bridge.promotedScopeFor("tab-scope-2518")).toMatchObject({
+      known: true,
+      scope: "subgraph",
+    });
+    bridge.clearPromotedSubgraphIdentity("tab-scope-2518");
+    expect(bridge.promotedScopeFor("tab-scope-2518").known).toBe(false);
+    bridge.applyLiveRootViewing("tab-scope-2518", {
+      scope: "root",
+      workflow_uuid: "25180000-0000-4000-8000-000000000000",
+      graph_identity: "graph:2518-root",
+    });
+    expect(bridge.promotedScopeFor("tab-scope-2518")).toMatchObject({
+      known: true,
+      scope: "root",
+      graphIdentity: "graph:2518-root",
+    });
+    a.close();
+  });
+
   it("freshly reads the current promoted owner after the cached owner goes stale (#2314)", async () => {
     const a = await connectPanel("tab-scope-read-2314");
     let ownerNodeId = 78;

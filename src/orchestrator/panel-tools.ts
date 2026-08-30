@@ -87,9 +87,12 @@ import {
 import { retryConnectAgainstLiveGraph } from "../services/connect-live-graph.js";
 import { retryExposeSubgraphInput } from "../services/expose-ae-wildcard.js";
 import {
+  applyLiveRootViewing,
   callAndRememberViewing,
   callWithRememberedSubgraph,
+  clearStaleSubgraphIdentity,
   noteConfirmedViewingFromToolResult,
+  parseViewingScope,
 } from "../services/subgraph-viewing-scope.js";
 import {
   assertScreenshotPersistAllowed,
@@ -6344,23 +6347,29 @@ type QueriedNodeScope = {
   graphIdentity?: string;
 };
 
+function rememberLiveRootViewing(ctx: PanelToolCtx, viewing: unknown): void {
+  applyLiveRootViewing(ctx.tabId, viewing);
+  ctx.bridge?.applyLiveRootViewing?.(ctx.tabId, viewing);
+}
+
+function forgetStaleSubgraphIdentity(ctx: PanelToolCtx): void {
+  clearStaleSubgraphIdentity(ctx.tabId);
+  ctx.bridge?.clearPromotedSubgraphIdentity?.(ctx.tabId);
+}
+
 /** Read the active viewing scope and node's explicit container bit before
  * attempting promoted-widget resolution. The pinpoint detail projection carries
  * the node bit even when the widget list is empty (which is how a fresh rgthree
- * Power Lora Loader appears). Anything short of one exact, non-truncated row
- * with an explicit root/subgraph witness is deliberately indeterminate; callers
- * retain the existing fail-closed promoted-container path in that case. */
+ * Power Lora Loader appears). A clipped widget value (`truncated: true`) is not
+ * a reason to discard a one-row pinpoint: that is how a root StringConcatenate
+ * appears after a long-string detail read (#2518). A missing `is_subgraph` is
+ * still indeterminate. Anything short of a root/subgraph witness plus an
+ * explicit container bit retains the fail-closed promoted-container path. */
 function parseVerifiedQueriedNodeScope(
   payload: Record<string, unknown> | null,
   nodeId: unknown,
 ): QueriedNodeScope | null {
   if (!payload) return null;
-  if (
-    Object.prototype.hasOwnProperty.call(payload, "truncated") &&
-    payload.truncated !== false
-  ) {
-    return null;
-  }
   const viewing = payload.viewing;
   if (!viewing || typeof viewing !== "object" || Array.isArray(viewing)) return null;
   const viewingRecord = viewing as Record<string, unknown>;
@@ -7178,7 +7187,11 @@ async function readPromotedTargetScope(
     limit: 1,
   }, undefined, undefined, undefined, options);
   if (probe.isError) return null;
-  return parseVerifiedQueriedNodeScope(parseToolResultJson(probe), nodeId);
+  const payload = parseToolResultJson(probe);
+  if (parseViewingScope(payload?.viewing)?.scope === "root") {
+    rememberLiveRootViewing(ctx, payload?.viewing);
+  }
+  return parseVerifiedQueriedNodeScope(payload, nodeId);
 }
 
 function currentPromotedBindingError(
@@ -7652,6 +7665,11 @@ async function preparePromotedWidgetWrite(
     nodeId,
     PROMOTED_PREFLIGHT_READ_OPTIONS,
   );
+  // #2518 — a live root query names the current root workflow instance. Do not
+  // enter the promoted-subgraph identity path for an ordinary (or unproven)
+  // root node; a truncated StringConcatenate pinpoint used to fall through,
+  // reuse a stale subgraph envelope, and refuse because connection identity
+  // was unavailable after that subgraph read.
   if (targetScope?.activeView === "root" && targetScope.node === "ordinary") {
     // The scope probe crossed an await. Re-read the binding before taking the
     // ordinary fast path; otherwise a tab/connection rebind can make this
@@ -14416,6 +14434,8 @@ interface BridgeProbe {
   workflowUuidFor?: (tabId: string) => TabWorkflowUuidRead;
   promotedScopeFor?: (tabId: string) => TabPromotedScopeRead;
   readPromotedScope?: (tabId: string, innerNodeId: number | string) => Promise<TabPromotedScopeRead>;
+  applyLiveRootViewing?: (tabId: string, viewing: unknown) => void;
+  clearPromotedSubgraphIdentity?: (tabId: string) => void;
   tabPromotedTerminalWitnessCapability?: (tabId: string) => boolean;
   tabPromotedParentRailFenceCapability?: (tabId: string) => boolean;
   tabExpectedNodeIdentityFenceCapability?: (tabId: string) => boolean;
@@ -18228,6 +18248,7 @@ export function buildPanelToolDefs(): PanelToolDef[] {
           },
           (cmd, timeoutMs) => ctx.call(cmd, timeoutMs),
         );
+        rememberLiveRootViewing(ctx, parseToolResultJson(panelReply)?.viewing);
         return fitQueryGraphReply(
           panelReply,
           args.max_chars,
@@ -23116,6 +23137,7 @@ CHECKED FOR YOU: the graph read this message prescribes was just run, and it ` +
                 ? fenceRebind.before.uuid
                 : undefined;
             if (turnPinStillAmbiguous()) return refuseBoundWhileAmbiguous();
+            forgetStaleSubgraphIdentity(ctx);
             return ok({
               ...target,
               graph_binding: "bound",
@@ -23158,6 +23180,12 @@ CHECKED FOR YOU: the graph read this message prescribes was just run, and it ` +
               : "";
         if (fence?.binding === "bound" && turnPinStillAmbiguous()) {
           return refuseBoundWhileAmbiguous();
+        }
+        if (mode === "current" && !deferredBind) {
+          // #2518 — mode:"current" already named the live canvas; a leftover
+          // subgraph/promoted identity from an earlier inspect must not keep
+          // classifying root widgets as promoted.
+          forgetStaleSubgraphIdentity(ctx);
         }
         return ok({
           ...target,
