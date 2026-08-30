@@ -2294,7 +2294,11 @@ export async function runPanelOrchestrator(): Promise<void> {
         "127.0.0.1",
         workflowTargets,
         (promptIds) => runCompletionWatchdog?.markTicketed(promptIds),
-        (panelTabId) => agentKeyFor(panelTabId),
+        // The HTTP lane is keyed by the backend-qualified agent address already
+        // (makeHttpBackendMcpServers passes `key` to urlFor). Preserve that exact
+        // scope for the signed outcome reader; agentKeyFor() expects a real panel
+        // tab id and would remap non-default lanes to the wrong credential.
+        (agentKey) => agentKey,
         () => manifestOutcomeTarget,
       );
     } catch (err) {
