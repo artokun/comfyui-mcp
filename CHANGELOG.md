@@ -6,10 +6,14 @@ All notable changes to this project are documented here. This project adheres to
 
 ## Unreleased
 
+## [0.52.159] - 2026-08-30
+
 ### MCP
 
 #### Fixed
-- download_model can target a configured extra-model root when the live server is unreachable (#2499)
+- download_model can target a configured extra-model root when the live server is unreachable (#2499, #2600)
+- don't report a queue clear as failed when the queue verifiably holds no pending jobs (#2517, #2594)
+
 
 ## [0.52.158] - 2026-08-30
 
