@@ -9,6 +9,7 @@ All notable changes to this project are documented here. This project adheres to
 ### MCP
 
 #### Fixed
+- retry panel_connect against the live graph when a node reported by panel_graph_outline is refused as missing (#2502)
 - panel_open_workflow no longer treats frontend-normalized node fields as a failed load after reconnect (#2501)
 - make `resolve_missing` suggest `models/clip_vision/` for missing `CLIPVisionLoader.clip_name` models while keeping ordinary CLIP loaders on `models/text_encoders/` (#2604)
 

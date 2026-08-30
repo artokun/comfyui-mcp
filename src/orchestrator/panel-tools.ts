@@ -84,6 +84,7 @@ import {
   laterSlotsFromUnexposePayload,
   unexposeHostLinkShiftNote,
 } from "../services/unexpose-host-link-shift.js";
+import { retryConnectAgainstLiveGraph } from "../services/connect-live-graph.js";
 import { retryExposeSubgraphInput } from "../services/expose-ae-wildcard.js";
 import {
   callAndRememberViewing,
@@ -18938,14 +18939,16 @@ export function buildPanelToolDefs(): PanelToolDef[] {
         input: slotRef.optional().describe("Alias for to_input."),
       },
       async (args: A, ctx) =>
-        ctx.call({
-          cmd: "graph_connect",
-          from_node_id: args.from_node_id,
-          from_output: args.from_output ?? args.from_slot_name ?? args.from_slot ?? args.output,
-          to_node_id: args.to_node_id,
-          to_input: args.to_input ?? args.to_slot_name ?? args.to_slot ?? args.input,
-          auto_match: args.auto_match,
-        }),
+        retryConnectAgainstLiveGraph(
+          {
+            from_node_id: args.from_node_id,
+            from_output: args.from_output ?? args.from_slot_name ?? args.from_slot ?? args.output,
+            to_node_id: args.to_node_id,
+            to_input: args.to_input ?? args.to_slot_name ?? args.to_slot ?? args.input,
+            auto_match: args.auto_match,
+          },
+          (cmd, timeoutMs) => ctx.call(cmd, timeoutMs),
+        ),
     ),
     def(
       "panel_disconnect",
