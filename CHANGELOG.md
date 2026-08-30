@@ -10,6 +10,7 @@ All notable changes to this project are documented here. This project adheres to
 
 #### Fixed
 - get_workflow strip resolves an absolute path under the live ComfyUI userdata/workflows tree without dropping the workflows segment or mangling Unicode dashes (#2528)
+- panel_run accepts VHS_VideoCombine (and any class with live object_info output_node true) as a run-to-node target instead of refusing it as not an output node (#2529)
 
 ## [0.52.174] - 2026-09-02
 
@@ -138,7 +139,6 @@ All notable changes to this project are documented here. This project adheres to
 
 #### Fixed
 - get_image list_assets and get_system_stats logs fall back to the connected panel same-origin history/logs/view reads when the configured headless route is unreachable, and panel_run completion events name PreviewImage outputs with type temp (#2283)
-- panel_run accepts VHS_VideoCombine (and any class with live object_info output_node true) as a run-to-node target instead of refusing it as not an output node (#2529)
 - panel_set_widget does not treat a MiniMaxH3Director duration write as failed when the value landed and only a setting-store onValueChange callback threw (#2545, #2654)
 - panel_connect retries a LiteGraph wildcard-to-wildcard (`*` → `*`) pairing when the panel reports "No input accepts type *" — PrimitiveNode "connect to widget input" can land on LogicIF.when_true / when_false so the primitive becomes typed from the destination (#2542, #2653)
 - panel_query_graph inspects the unsaved live canvas after custom-widget / builder content-only [root-shape-mismatch] instead of recommending a destructive re-open (#2544, #2652)
