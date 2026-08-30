@@ -52,6 +52,10 @@ export interface JobStatus {
   running: boolean;
   pending: boolean;
   done: boolean;
+  /** Present only as `false`: neither running nor queued, and a SUCCESSFUL
+   *  /history read found no record of the prompt — so `done` is not
+   *  knowable rather than true. Omitted in every other reply. */
+  found?: boolean;
   status_str?: string;
   error?: ExecutionErrorDetails;
   execution_stats?: ExecutionStats;
@@ -59,6 +63,8 @@ export interface JobStatus {
    *  These write no file, so without this a text-producing workflow finishes
    *  with nothing for the agent to report. Omitted when the run produced none. */
   text_outputs?: TextOutput[];
+  /** Narrates the `found:false` reply — what to check instead of waiting. */
+  message?: string;
 }
 
 function asRecord(value: unknown): Record<string, unknown> | undefined {
@@ -289,7 +295,24 @@ export async function getJobStatus(
   try {
     const history = await getHistory(promptId);
     const entry = history[promptId];
-    if (!entry) return status;
+    if (!entry) {
+      // Both reads answered and NEITHER has seen this prompt — not a
+      // completion. A restart wipes queue and history together, so the
+      // `done = !running && !pending` derivation used to call a lost job (or a
+      // mistyped id) finished. Absence is only claimed on a read that SUCCEEDED;
+      // a failed history read falls to the catch below and keeps the old answer.
+      return {
+        running: false,
+        pending: false,
+        done: false,
+        found: false,
+        message:
+          `ComfyUI has no record of this prompt — not running, not queued, and absent ` +
+          `from /history. It may have been lost to a restart or was never queued. Do not ` +
+          `wait for outputs; verify with get_history (action:"diagnose") and ` +
+          `get_image (action:"list_outputs").`,
+      };
+    }
 
     const analysis = analyzeHistoryEntry(entry);
     return {
