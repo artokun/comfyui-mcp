@@ -97,7 +97,7 @@ describe("bindImportedTmpWorkflowUuid (#2503)", () => {
 });
 
 describe("unsavedTmpWorkflowKey (#2503)", () => {
-  it("accepts the exact tmp: token list_workflows publishes, including non-RFC suffixes", () => {
+  it("accepts the exact tmp: token panel_list_workflows publishes, including non-RFC suffixes", () => {
     expect(unsavedTmpWorkflowKey(TMP_KEY)).toBe(TMP_KEY);
     expect(unsavedTmpWorkflowKey("tmp:unsaved-imported")).toBe("tmp:unsaved-imported");
     expect(unsavedTmpWorkflowKey("wf:workflows/a.json")).toBeNull();

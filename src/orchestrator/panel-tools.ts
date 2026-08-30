@@ -12147,7 +12147,7 @@ async function refreshOpenWorkflowUuid(
       : undefined;
   const openedPath = typeof openedRecord?.path === "string" ? openedRecord.path : undefined;
   // #2477 / #2503 — a tmp: request is never a filename alias. Accept any
-  // non-empty tmp: token list_workflows publishes (not only RFC-uuid suffixes),
+  // non-empty tmp: token panel_list_workflows publishes (not only RFC-uuid suffixes),
   // or an already-active imported tab is rejected as an unresolved filename.
   // Fence adoption stays RFC-strict on the key (#812): a malformed tmp: suffix
   // must not stamp the session even if the reply echoes it.

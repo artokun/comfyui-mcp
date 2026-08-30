@@ -42,7 +42,7 @@ export function extraWorkflowUuid(graph: unknown): string | null {
 
 /**
  * Exact unsaved routing handle (`tmp:<id>`). OPEN must accept any non-empty
- * tmp: token list_workflows publishes — not only RFC-uuid suffixes — or an
+ * tmp: token panel_list_workflows publishes — not only RFC-uuid suffixes — or an
  * already-active imported tab cannot rebind (#2503).
  */
 export function unsavedTmpWorkflowKey(value: unknown): string | null {
