@@ -620,18 +620,23 @@ export function registerImageManagementTools(server: McpServer): void {
             // So the history branch states the OMISSION as a property of the source,
             // and names the check that does work on a remote target.
             const scannedTemp = Boolean(source.tempDirectory);
+            const historyWhereFrom =
+              "Read from ComfyUI's generation history over HTTP — NOT from disk. This listing is " +
+              "INCOMPLETE BY CONSTRUCTION: VHS_VideoCombine and similar video nodes write their " +
+              "file without registering an output entry, so those videos never appear here even " +
+              "though they are on disk, and a server restart clears the history besides. Absence " +
+              "from this list is NOT evidence the file is missing. To check a specific file, fetch " +
+              'it by name with action:"get" or upload_image (action:"stage") — both read the server\'s ' +
+              "/view endpoint, which serves straight from the output directory.";
             const whereFrom =
               source.basis === "local-scan"
                 ? scannedTemp
                   ? `Read from \`${source.directory}\` and \`${source.tempDirectory}\` (scanned on disk).`
                   : `Read from \`${source.directory}\` (scanned on disk).`
-                : "Read from ComfyUI's generation history over HTTP — NOT from disk. This listing is " +
-                  "INCOMPLETE BY CONSTRUCTION: VHS_VideoCombine and similar video nodes write their " +
-                  "file without registering an output entry, so those videos never appear here even " +
-                  "though they are on disk, and a server restart clears the history besides. Absence " +
-                  "from this list is NOT evidence the file is missing. To check a specific file, fetch " +
-                  'it by name with action:"get" or upload_image (action:"stage") — both read the server\'s ' +
-                  "/view endpoint, which serves straight from the output directory.";
+                : source.basis === "server-history-fallback"
+                  ? `Local scan of \`${source.directory}\` found nothing; listing comes from ComfyUI's /history instead (the same source action:"get" /view uses). ` +
+                    historyWhereFrom
+                  : historyWhereFrom;
             // Only when temp/ could not be scanned: VHS with save_output unchecked
             // writes the completed .mp4 there, and an empty output/ listing without
             // that scan is not evidence the file is missing (#2370). Production
