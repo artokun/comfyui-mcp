@@ -39,6 +39,10 @@ import { getBootLocalComfyUIBaseUrl, getComfyUIBaseUrl, setComfyuiTarget } from 
 import { markReplyTimeout } from "../../services/ui-bridge.js";
 import { WorkflowTargetStore } from "../../services/workflow-target-store.js";
 import type { PanelToolCtx, ToolResult } from "../../orchestrator/panel-tools.js";
+import {
+  VRAM_SETTLE_INTERVAL_MS,
+  VRAM_SETTLE_TIMEOUT_MS,
+} from "../../services/vram-settle.js";
 
 const TAB = "11111111-2222-3333-4444-555555555555";
 const BOOT_BASE = (getBootLocalComfyUIBaseUrl() ?? "http://127.0.0.1:8188").replace(/\/+$/, "");
@@ -93,6 +97,11 @@ function bridge(opts: {
   } as unknown as PanelToolCtx["bridge"];
 }
 
+async function flushVramSettle<T>(pending: Promise<T>): Promise<T> {
+  await vi.advanceTimersByTimeAsync(VRAM_SETTLE_TIMEOUT_MS + VRAM_SETTLE_INTERVAL_MS);
+  return await pending;
+}
+
 async function run(
   reply: "timeout" | "ok",
   opts?: { origin?: string | null },
@@ -100,7 +109,7 @@ async function run(
   const ctx = makePanelToolCtx(bridge({ reply, origin: opts?.origin }), TAB, new WorkflowTargetStore());
   const def = buildPanelToolDefs().find((d) => d.name === "panel_free_vram");
   if (!def) throw new Error("panel_free_vram is not registered");
-  const res: ToolResult = await def.handler({} as never, ctx);
+  const res: ToolResult = await flushVramSettle(def.handler({} as never, ctx));
   return { text: textOf(res), isError: res.isError === true, ctx };
 }
 
@@ -126,7 +135,8 @@ function setDevices(
 function expectQueriedProven(ctx: PanelToolCtx): void {
   const proven = __panelToolsTestHooks.captureRebootHealthBase(ctx);
   expect(proven).toBeTruthy();
-  expect(queriedBases).toEqual([proven]);
+  expect(queriedBases.length).toBeGreaterThan(0);
+  expect(queriedBases.every((b) => b === proven)).toBe(true);
 }
 
 const FREED_ACK_BODY = { freed: true, unload_models: true, free_memory: true };
@@ -184,9 +194,12 @@ beforeEach(() => {
   sent = [];
   queriedBases = [];
   originalTarget = getComfyUIBaseUrl();
+  vi.useFakeTimers();
+  vi.setSystemTime(new Date("2026-08-29T00:00:00Z"));
 });
 
 afterEach(() => {
+  vi.useRealTimers();
   setComfyuiTarget(originalTarget);
   __panelToolsTestHooks.setFreeVramDirect(null);
   __panelToolsTestHooks.setReadVramDevices(null);
@@ -265,7 +278,8 @@ describe("panel_free_vram reads occupancy from this tab's server, not the global
     const proven = __panelToolsTestHooks.captureRebootHealthBase(out.ctx);
     expect(proven).toBeTruthy();
     expect(__panelToolsTestHooks.sameHttpBase(proven, getComfyUIBaseUrl())).toBe(false);
-    expect(queriedBases).toEqual([proven]);
+    expect(queriedBases.length).toBeGreaterThan(0);
+    expect(queriedBases.every((b) => b === proven)).toBe(true);
     // Occupancy is THIS tab's GPU 2, not whatever the retargeted host would show.
     expect(out.isError).toBe(true);
     expect(out.text).toMatch(/"index": 2/);
@@ -356,7 +370,7 @@ describe("annotateFreeVramAck discloses occupied-but-not-torch-pinned (#1895)", 
   it("keeps isError false, names device 0, and prints the live 795579336 counter", async () => {
     setDevices(otherProcessHoldsCard);
     const ctx = makePanelToolCtx(bridge({ reply: "ok" }), TAB, new WorkflowTargetStore());
-    const out = await __panelToolsTestHooks.annotateFreeVramAck(ctx, ackFreed());
+    const out = await flushVramSettle(__panelToolsTestHooks.annotateFreeVramAck(ctx, ackFreed()));
 
     expectQueriedProven(ctx);
     expect(out.isError === true).toBe(false);
@@ -379,12 +393,13 @@ describe("annotateFreeVramAck discloses occupied-but-not-torch-pinned (#1895)", 
     setDevices(otherProcessHoldsCard);
     expect(setComfyuiTarget(OTHER_BASE)).toBe(true);
     const ctx = makePanelToolCtx(bridge({ reply: "ok" }), TAB, new WorkflowTargetStore());
-    const out = await __panelToolsTestHooks.annotateFreeVramAck(ctx, ackFreed());
+    const out = await flushVramSettle(__panelToolsTestHooks.annotateFreeVramAck(ctx, ackFreed()));
 
     const proven = __panelToolsTestHooks.captureRebootHealthBase(ctx);
     expect(proven).toBeTruthy();
     expect(__panelToolsTestHooks.sameHttpBase(proven, getComfyUIBaseUrl())).toBe(false);
-    expect(queriedBases).toEqual([proven]);
+    expect(queriedBases.length).toBeGreaterThan(0);
+    expect(queriedBases.every((b) => b === proven)).toBe(true);
     expect(out.isError === true).toBe(false);
     expect(textOf(out)).toContain("795579336");
   });
@@ -397,7 +412,7 @@ describe("annotateFreeVramAck discloses occupied-but-not-torch-pinned (#1895)", 
       new WorkflowTargetStore(),
     );
     const ack = ackFreed();
-    const out = await __panelToolsTestHooks.annotateFreeVramAck(ctx, ack);
+    const out = await flushVramSettle(__panelToolsTestHooks.annotateFreeVramAck(ctx, ack));
 
     expect(__panelToolsTestHooks.captureRebootHealthBase(ctx)).toBeNull();
     expect(queriedBases).toEqual([]);

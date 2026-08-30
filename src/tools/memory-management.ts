@@ -6,17 +6,13 @@ import type { SystemStats } from "../comfyui/types.js";
 import { ComfyUIError, errorToToolResult } from "../utils/errors.js";
 import { bodyPrefixOf, describeStatus } from "../comfyui/json-guard.js";
 import { logger } from "../utils/logger.js";
+import { settleUntilStable } from "../services/vram-settle.js";
 
-/** Poll interval between /system_stats reads after /free (#2050). */
-export const CLEAR_VRAM_SETTLE_INTERVAL_MS = 250;
-/** Do not treat an unchanged first reading as settled — CUDA may not have started releasing yet. */
-export const CLEAR_VRAM_SETTLE_MIN_MS = 1_000;
-/** Hard cap so a card that never plateaus still returns a number. */
-export const CLEAR_VRAM_SETTLE_TIMEOUT_MS = 5_000;
-
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
+export {
+  VRAM_SETTLE_INTERVAL_MS as CLEAR_VRAM_SETTLE_INTERVAL_MS,
+  VRAM_SETTLE_MIN_MS as CLEAR_VRAM_SETTLE_MIN_MS,
+  VRAM_SETTLE_TIMEOUT_MS as CLEAR_VRAM_SETTLE_TIMEOUT_MS,
+} from "../services/vram-settle.js";
 
 /** The counters `clear_vram` prints — device 0's VRAM + torch pool. */
 function vramSignature(stats: SystemStats): string {
@@ -41,41 +37,13 @@ function formatVramStats(stats: SystemStats): string {
  * printed value matches a follow-up get_system_stats (action:"stats") (#2050).
  */
 async function readSettledSystemStats(): Promise<SystemStats | null> {
-  const started = Date.now();
-  const deadline = started + CLEAR_VRAM_SETTLE_TIMEOUT_MS;
-  let last: SystemStats | null = null;
-  let lastSig: string | null = null;
-  let sawChange = false;
-
-  for (;;) {
-    let current: SystemStats;
+  return settleUntilStable(async () => {
     try {
-      current = await getSystemStats();
+      return await getSystemStats();
     } catch {
-      // A prior sample is not a valid substitute for the current one: /free may
-      // have released memory between the two reads, so returning `last` would
-      // print a known-stale VRAM figure as if it were current.
       return null;
     }
-
-    const sig = vramSignature(current);
-    const elapsed = Date.now() - started;
-    if (lastSig !== null && sig !== lastSig) sawChange = true;
-    const stable = lastSig !== null && sig === lastSig;
-    last = current;
-    lastSig = sig;
-
-    if (stable && (sawChange || elapsed >= CLEAR_VRAM_SETTLE_MIN_MS)) {
-      return current;
-    }
-    if (elapsed >= CLEAR_VRAM_SETTLE_TIMEOUT_MS) {
-      return current;
-    }
-
-    const wait = Math.min(CLEAR_VRAM_SETTLE_INTERVAL_MS, Math.max(0, deadline - Date.now()));
-    if (wait <= 0) return current;
-    await sleep(wait);
-  }
+  }, vramSignature);
 }
 
 export function registerMemoryManagementTools(server: McpServer): void {

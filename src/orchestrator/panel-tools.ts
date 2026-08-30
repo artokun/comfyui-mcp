@@ -52,6 +52,7 @@ import {
 import { extname, isAbsolute, join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { comfyuiFetch } from "../comfyui/fetch.js";
+import { settleUntilStable } from "../services/vram-settle.js";
 import { assertPanelNotTargetedUnverifiable } from "../services/panel-pin-guard.js";
 import {
   findPackOnDisk,
@@ -4137,6 +4138,29 @@ async function readVramDevicesMaybe(
   return (readVramDevicesOverride ?? readVramDevices)(base, timeoutMs);
 }
 
+/** Device 0-N occupancy signature — any GPU's vram or torch pool changing is not settled. */
+function vramDevicesSignature(devices: VramDeviceSample[]): string {
+  return devices
+    .map((d) => `${d.index ?? d.name ?? ""}:${d.vram_free ?? ""}:${d.torch_vram_free ?? ""}`)
+    .join("|");
+}
+
+/**
+ * #2050 — POST /free returns when ComfyUI drops model refs; CUDA can still be
+ * releasing. The 0.52.146 recurrence: panel_free_vram reported freed:true, a
+ * ~32 MB torch pool, occupied_devices:[cuda:0] at 1.2 GB free; a health read
+ * 0.2s later showed 10.7 GB free. Poll until the counters stop changing.
+ */
+async function readSettledVramDevices(
+  base: string,
+  timeoutMs: number,
+): Promise<VramDeviceSample[] | null> {
+  return settleUntilStable(
+    () => readVramDevicesMaybe(base, timeoutMs),
+    vramDevicesSignature,
+  );
+}
+
 interface FreeVramDirectOutcome {
   ok: boolean;
   /** Failure detail when !ok (HTTP status / transport error), already worded
@@ -4174,7 +4198,7 @@ async function freeVramDirect(base: string): Promise<FreeVramDirectOutcome> {
   } finally {
     clearTimeout(timer);
   }
-  const after = await readVramDevicesMaybe(base, FREE_VRAM_DIRECT_TIMEOUT_MS);
+  const after = await readSettledVramDevices(base, FREE_VRAM_DIRECT_TIMEOUT_MS);
   return { ok: true, before, after };
 }
 
@@ -4263,9 +4287,10 @@ async function settleFreeVramAfterAckTimeout(
 
 /**
  * #1866 — a panel ack of `{freed:true}` is the /free HTTP 2xx, not a measured
- * GPU. After the tab says it posted /free, re-read /system_stats and refuse to
- * claim VRAM was freed when a device is still occupied. Unreadable stats leave
- * the original ack UNTOUCHED: an unknown answer claims nothing extra.
+ * GPU. After the tab says it posted /free, re-read /system_stats (after CUDA
+ * occupancy settles — #2050) and refuse to claim VRAM was freed when a device
+ * is still occupied. Unreadable stats leave the original ack UNTOUCHED: an
+ * unknown answer claims nothing extra.
  *
  * #1887 — occupancy is read from the same proven local base the frozen-tab
  * settle uses (`captureRebootHealthBase(ctx)`), never `getComfyUIBaseUrl()`.
@@ -4290,7 +4315,7 @@ async function annotateFreeVramAck(ctx: PanelToolCtx, res: ToolResult): Promise<
       note: UNOBSERVED_OCCUPANCY_NOTE,
     });
   }
-  const devices = await readVramDevicesMaybe(base, FREE_VRAM_DIRECT_TIMEOUT_MS);
+  const devices = await readSettledVramDevices(base, FREE_VRAM_DIRECT_TIMEOUT_MS);
   if (devices == null) return res;
   const pinned = pinnedVramDevices(devices);
   if (pinned.length > 0) {
