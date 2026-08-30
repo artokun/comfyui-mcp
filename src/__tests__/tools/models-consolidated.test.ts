@@ -253,6 +253,7 @@ describe("registration (14 → 2)", () => {
       "id",
       "limit",
       "model_id",
+      "model_root",
       "model_version_id",
       "nsfw",
       "query",
@@ -339,6 +340,9 @@ describe("download_model dispatch", () => {
       "checkpoints",
       "x.safetensors",
       auth,
+      undefined,
+      undefined,
+      undefined,
     );
   });
 
@@ -448,6 +452,49 @@ describe("download_model dispatch", () => {
       "v.safetensors",
       auth,
       expect.any(Function), // postDownload completion hook (sidecars, not-a-model guard)
+      undefined,
+      undefined,
+    );
+  });
+
+  it('action:"download" / action:"download_civitai" forward model_root (#2499)', async () => {
+    const extra = "E:\\models";
+    await download()({
+      action: "download",
+      url: "https://example.com/x.safetensors",
+      target_subfolder: "loras",
+      filename: "x.safetensors",
+      model_root: extra,
+    });
+    expect(mocks.startDownloadJob).toHaveBeenCalledWith(
+      "https://example.com/x.safetensors",
+      "loras",
+      "x.safetensors",
+      undefined,
+      undefined,
+      undefined,
+      extra,
+    );
+
+    mocks.resolveCivitaiModelVersion.mockResolvedValueOnce({
+      downloadUrl: "https://civitai.com/api/download/models/55",
+      filename: "v.safetensors",
+      versionId: 55,
+    });
+    await download()({
+      action: "download_civitai",
+      model_version_id: 55,
+      target_subfolder: "loras",
+      model_root: extra,
+    });
+    expect(mocks.startDownloadJob).toHaveBeenLastCalledWith(
+      "https://civitai.com/api/download/models/55",
+      "loras",
+      "v.safetensors",
+      undefined,
+      expect.any(Function),
+      undefined,
+      extra,
     );
   });
 

@@ -6,6 +6,11 @@ All notable changes to this project are documented here. This project adheres to
 
 ## Unreleased
 
+### MCP
+
+#### Fixed
+- download_model can target a configured extra-model root when the live server is unreachable (#2499)
+
 ## [0.52.158] - 2026-08-30
 
 ### MCP
