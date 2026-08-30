@@ -9,6 +9,7 @@ All notable changes to this project are documented here. This project adheres to
 ### MCP
 
 #### Fixed
+- panel_set_widget writes promoted unet_name/clip_name and labelled prompt rails on the enclosing subgraph instead of the link-driven inner (#2533)
 - install_custom_node does not pip-install cloned-node requirements with an untrusted interpreter (Stability Matrix base Python / PEP 668) and does not recommend that same unsafe command (#2530)
 
 

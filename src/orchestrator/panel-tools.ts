@@ -7961,7 +7961,9 @@ const PROMOTED_PRIMITIVE_INNER_TYPES = new Set([
  * Same-name proxyWidgets promotions keep the inner write so #2314's known-bad
  * live probe still runs before any container mutation.
  * #2500 — a Primitive* `value` that exists as a live input is driven by the
- * promoted rail even when the parent-rail witness is missing; write the host. */
+ * promoted rail even when the parent-rail witness is missing; write the host.
+ * #2533 — an authoritative parent rail whose inner widget is a live input
+ * (unet_name, clip_name, labelled prompt) is the same store; write the host. */
 function shouldWritePromotedHostFirst(plan: PromotedWritePlan): boolean {
   if (plan.innerLinkDriven) return true;
   if (!plan.inner.parentRail) return false;
@@ -8640,7 +8642,12 @@ async function preparePromotedWidgetWrite(
     ...(outerNodeIdentity ? { outerNodeIdentity } : {}),
     inner,
     innerNodeType,
-    innerLinkDriven: promotedInnerWidgetIsLinkDriven(innerNode, inner.widget, inner.terminal),
+    innerLinkDriven: promotedInnerWidgetIsLinkDriven(
+      innerNode,
+      inner.widget,
+      inner.terminal,
+      inner.parentRail,
+    ),
     ...(inner.terminal ? { terminal: inner.terminal } : {}),
     scope,
     binding: {
@@ -20629,11 +20636,12 @@ export function buildPanelToolDefs(): PanelToolDef[] {
             const afterMappingError = currentPromotedBindingError(ctx, plan.binding);
             if (afterMappingError) return promotedWriteRefusal(args.widget as string, afterMappingError);
 
-            // #2500 — a link-driven inner Primitive (duration/value_2, fps/value_3)
-            // accepts a write and warns that rendering still reads the enclosing
-            // subgraph widget. Write that container first, at the caller's current
-            // graph, and do not enter the inner scope. This is the #1655 fallback
-            // path when the #2488 host-rail write already contradicted.
+            // #2500/#2533 — a link-driven inner (Primitive value, or a same-name
+            // COMBO/STRING live input with an authoritative parent rail) accepts
+            // a write and warns that rendering still reads the enclosing subgraph
+            // widget. Write that container first, at the caller's current graph,
+            // and do not enter the inner scope. This is the #1655 fallback path
+            // when the #2488 host-rail write already contradicted.
             if (plan.innerLinkDriven) {
               if (plan.terminal) {
                 const terminalBlocked = refuseKnownBadPromotedTerminal(plan.terminal);

@@ -344,28 +344,47 @@ function primitiveNodeType(innerNode: Record<string, unknown> | null | undefined
   return terminal?.nodeType ?? null;
 }
 
+function innerHasNamedInput(
+  innerNode: Record<string, unknown> | null | undefined,
+  widget: string,
+  terminal?: PromotedTerminalWitness,
+): boolean {
+  const wanted = widget.toLowerCase();
+  if (isRecord(innerNode) && Array.isArray(innerNode.inputs)) {
+    for (const raw of innerNode.inputs) {
+      const name = inputName(raw);
+      if (name && name.toLowerCase() === wanted) return true;
+    }
+  }
+  return terminal?.inputs.some((input) => input.name.toLowerCase() === wanted) === true;
+}
+
 /**
  * #2500 — a Primitive* `value` widget that exists as a live input is driven by
  * the subgraph's promoted rail. Writing that inner widget reports success and
  * leaves the enclosing container (the value that serializes and renders)
  * unchanged. The enclosing subgraph widget is the write target. Converted
- * widgets on ordinary nodes (dynamic-combo children, etc.) are not this shape.
+ * widgets on ordinary nodes (dynamic-combo children, etc.) are not this shape
+ * unless an authoritative parent rail proves the inner input is that rail.
+ * #2533 — same-name COMBO/STRING rails (unet_name, clip_name, labelled prompt)
+ * with a parent-rail witness are the same store: the inner widget is live and
+ * the container is what serializes. Incomplete own-entries (#2393) omit the
+ * rail and keep the inner COMBO write.
  */
 export function promotedInnerWidgetIsLinkDriven(
   innerNode: Record<string, unknown> | null | undefined,
   innerWidget: string,
   terminal?: PromotedTerminalWitness,
+  parentRail?: PromotedParentRailWitness,
 ): boolean {
-  if (innerWidget.toLowerCase() !== "value") return false;
-  const nodeType = primitiveNodeType(innerNode, terminal);
-  if (!nodeType || !PRIMITIVE_NODE_TYPE_RE.test(nodeType)) return false;
-  if (isRecord(innerNode) && Array.isArray(innerNode.inputs)) {
-    for (const raw of innerNode.inputs) {
-      const name = inputName(raw);
-      if (name && name.toLowerCase() === "value") return true;
+  if (innerWidget.toLowerCase() === "value") {
+    const nodeType = primitiveNodeType(innerNode, terminal);
+    if (nodeType && PRIMITIVE_NODE_TYPE_RE.test(nodeType) && innerHasNamedInput(innerNode, "value", terminal)) {
+      return true;
     }
   }
-  return terminal?.inputs.some((input) => input.name.toLowerCase() === "value") === true;
+  if (!parentRail) return false;
+  return innerHasNamedInput(innerNode, innerWidget, terminal);
 }
 
 function innerNodeId(node: Record<string, unknown>): number | string | null {

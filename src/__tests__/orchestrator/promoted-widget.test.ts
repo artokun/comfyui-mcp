@@ -1181,13 +1181,12 @@ describe("panel_set_widget promoted subgraph input routing (#2488)", () => {
     );
 
     expect(isError).toBe(true);
-    expect(mutations).toBe(1);
-    expect(calls.filter((call) => call.cmd === "graph_set_widget")).toEqual([
-      expect.objectContaining({ node_id: 78, widget: "frame_counts", value: 49 }),
-      expect.objectContaining({ node_id: 12, widget: "length", value: 49 }),
-    ]);
-    expect(text).toMatch(/link-driven/);
-    expect(text).toMatch(/enclosing subgraph node 78/);
+    expect(mutations).toBe(0);
+    expect(calls.filter((call) => call.cmd === "graph_enter_subgraph")).toHaveLength(0);
+    expect(
+      calls.some((call) => call.cmd === "graph_set_widget" && Number(call.node_id) === 12),
+    ).toBe(false);
+    expect(text).toMatch(/enclosing subgraph widget on node 78/);
     expect(text).not.toMatch(/Applied via the validated promoted inner widget/);
   });
 });
@@ -1272,6 +1271,183 @@ describe("panel_set_widget promoted Primitive value misroute (#2500)", () => {
       calls.some((call) => call.cmd === "graph_set_widget" && Number(call.node_id) === 198),
     ).toBe(false);
     expect(text).not.toMatch(/Applied via the validated promoted inner widget/);
+  });
+});
+
+/** #2533 — Krea-2 Turbo promoted STRING (`value`, labelled `prompt`). Both
+ * caller names must resolve to the same inner PrimitiveString.value, and the
+ * enclosing subgraph widget is the durable store. */
+const KREA_PROMPT_PROMOTED_SUBGRAPH = {
+  subgraph_of: { node_id: 12, title: "Text to Image (Krea-2 Turbo)" },
+  node_count: 1,
+  nodes: [
+    {
+      id: 131,
+      type: "PrimitiveString",
+      widgets: { value: "a cat" },
+      inputs: [{ name: "value", type: "STRING" }],
+    },
+  ],
+  promoted_terminals: [
+    {
+      widget: "prompt",
+      parent_rail: { authoritative: true, widget: "value" },
+      immediate_node_id: 131,
+      immediate_widget: "value",
+      terminal_node_id: 131,
+      terminal_node_type: "PrimitiveString",
+      terminal_widget: "value",
+      terminal_inputs: [{ name: "value", type: "STRING" }],
+      chain_depth: 0,
+    },
+  ],
+};
+
+/** #2533 — MiniMax audio_minimax_music_3. Root container 37 has authoritative
+ * unet_name/clip_name rails; the inners are ordinary COMBO widgets that are
+ * live inputs, not Primitive* value. */
+const MINIMAX_MUSIC_PROMOTED_SUBGRAPH = {
+  subgraph_of: { node_id: 37, title: "audio_minimax_music_3" },
+  node_count: 2,
+  nodes: [
+    {
+      id: 6,
+      type: "UNETLoader",
+      widgets: { unet_name: "music_fp16.safetensors", weight_dtype: "default" },
+      inputs: [
+        { name: "unet_name", type: "COMBO" },
+        { name: "weight_dtype", type: "COMBO" },
+      ],
+    },
+    {
+      id: 8,
+      type: "CLIPLoader",
+      widgets: { clip_name: "clip_fp16.safetensors", type: "stable_diffusion" },
+      inputs: [
+        { name: "clip_name", type: "COMBO" },
+        { name: "type", type: "COMBO" },
+      ],
+    },
+  ],
+  promoted_terminals: [
+    {
+      widget: "unet_name",
+      parent_rail: { authoritative: true, widget: "unet_name" },
+      immediate_node_id: 6,
+      immediate_widget: "unet_name",
+      terminal_node_id: 6,
+      terminal_node_type: "UNETLoader",
+      terminal_widget: "unet_name",
+      terminal_inputs: [
+        { name: "unet_name", type: "COMBO" },
+        { name: "weight_dtype", type: "COMBO" },
+      ],
+      chain_depth: 0,
+    },
+    {
+      widget: "clip_name",
+      parent_rail: { authoritative: true, widget: "clip_name" },
+      immediate_node_id: 8,
+      immediate_widget: "clip_name",
+      terminal_node_id: 8,
+      terminal_node_type: "CLIPLoader",
+      terminal_widget: "clip_name",
+      terminal_inputs: [
+        { name: "clip_name", type: "COMBO" },
+        { name: "type", type: "COMBO" },
+      ],
+      chain_depth: 0,
+    },
+  ],
+};
+
+describe("panel_set_widget promoted STRING prompt/value (#2533)", () => {
+  const hostDetail = {
+    text:
+      '1 match(es) of 1 in scope (viewing: 1 nodes)\n' +
+      '{"id":12,"type":"SubgraphNode","is_subgraph":true}',
+  };
+
+  it.each(["prompt", "value"] as const)(
+    "writes the enclosing subgraph when the labelled STRING is addressed as %s",
+    async (widget) => {
+      const { text, isError, calls, mutations } = await setWidget(
+        { node_id: 12, widget, value: "a red bicycle at dusk" },
+        {
+          ownerNodeId: 12,
+          firstWrite: "ok",
+          promotedTerminalWitnesses: true,
+          promotedDetail: hostDetail,
+          subgraph: KREA_PROMPT_PROMOTED_SUBGRAPH,
+        },
+      );
+
+      expect(isError).toBe(false);
+      expect(mutations).toBe(1);
+      expect(calls.filter((call) => call.cmd === "graph_enter_subgraph")).toHaveLength(0);
+      expect(calls.filter((call) => call.cmd === "graph_set_widget")).toEqual([
+        expect.objectContaining({ node_id: 12, widget: "value", value: "a red bicycle at dusk" }),
+      ]);
+      expect(calls.some((call) => Number(call.node_id) === 131)).toBe(false);
+      expect(text).toMatch(/enclosing subgraph node 12 widget "value"/);
+      expect(text).not.toMatch(/will NOT change the render|The container was not written/);
+    },
+  );
+});
+
+describe("panel_set_widget promoted MiniMax unet_name/clip_name (#2533)", () => {
+  const hostDetail = {
+    text:
+      '1 match(es) of 1 in scope (viewing: 1 nodes)\n' +
+      '{"id":37,"type":"SubgraphNode","is_subgraph":true}',
+  };
+
+  it("writes unet_name on the enclosing container instead of inner UNETLoader 6", async () => {
+    const { text, isError, calls, mutations } = await setWidget(
+      { node_id: 37, widget: "unet_name", value: "music_fp8.safetensors" },
+      {
+        ownerNodeId: 37,
+        firstWrite: "ok",
+        promotedTerminalWitnesses: true,
+        promotedDetail: hostDetail,
+        subgraph: MINIMAX_MUSIC_PROMOTED_SUBGRAPH,
+        innerWriteLinkDriven: true,
+      },
+    );
+
+    expect(isError).toBe(false);
+    expect(mutations).toBe(1);
+    expect(calls.filter((call) => call.cmd === "graph_enter_subgraph")).toHaveLength(0);
+    expect(calls.filter((call) => call.cmd === "graph_set_widget")).toEqual([
+      expect.objectContaining({ node_id: 37, widget: "unet_name", value: "music_fp8.safetensors" }),
+    ]);
+    expect(calls.some((call) => Number(call.node_id) === 6)).toBe(false);
+    expect(text).toMatch(/enclosing subgraph node 37 widget "unet_name"/);
+    expect(text).not.toMatch(/will NOT change the render|The container was not written/);
+  });
+
+  it("writes clip_name on the enclosing container instead of inner CLIPLoader 8", async () => {
+    const { text, isError, calls, mutations } = await setWidget(
+      { node_id: 37, widget: "clip_name", value: "clip_fp8.safetensors" },
+      {
+        ownerNodeId: 37,
+        firstWrite: "ok",
+        promotedTerminalWitnesses: true,
+        promotedDetail: hostDetail,
+        subgraph: MINIMAX_MUSIC_PROMOTED_SUBGRAPH,
+        innerWriteLinkDriven: true,
+      },
+    );
+
+    expect(isError).toBe(false);
+    expect(mutations).toBe(1);
+    expect(calls.filter((call) => call.cmd === "graph_enter_subgraph")).toHaveLength(0);
+    expect(calls.filter((call) => call.cmd === "graph_set_widget")).toEqual([
+      expect.objectContaining({ node_id: 37, widget: "clip_name", value: "clip_fp8.safetensors" }),
+    ]);
+    expect(calls.some((call) => Number(call.node_id) === 8)).toBe(false);
+    expect(text).toMatch(/enclosing subgraph node 37 widget "clip_name"/);
+    expect(text).not.toMatch(/will NOT change the render|The container was not written/);
   });
 });
 
@@ -3051,6 +3227,65 @@ describe("promotedInnerWidgetIsLinkDriven (#2500)", () => {
         "model.prompt",
       ),
     ).toBe(false);
+  });
+
+  it("detects a PrimitiveString whose value widget is a live STRING input (#2533)", () => {
+    expect(
+      promotedInnerWidgetIsLinkDriven(
+        {
+          id: 131,
+          type: "PrimitiveString",
+          widgets: { value: "a cat" },
+          inputs: [{ name: "value", type: "STRING" }],
+        },
+        "value",
+      ),
+    ).toBe(true);
+  });
+
+  it("detects a UNETLoader unet_name live input only when the parent rail is authoritative (#2533)", () => {
+    const inner = {
+      id: 6,
+      type: "UNETLoader",
+      widgets: { unet_name: "music_fp16.safetensors", weight_dtype: "default" },
+      inputs: [
+        { name: "unet_name", type: "COMBO" },
+        { name: "weight_dtype", type: "COMBO" },
+      ],
+    };
+    const terminal = {
+      nodeId: 6,
+      nodeType: "UNETLoader",
+      widget: "unet_name",
+      inputs: [
+        { name: "unet_name", type: "COMBO" },
+        { name: "weight_dtype", type: "COMBO" },
+      ],
+      chainDepth: 0,
+    };
+    expect(promotedInnerWidgetIsLinkDriven(inner, "unet_name", terminal)).toBe(false);
+    expect(
+      promotedInnerWidgetIsLinkDriven(inner, "unet_name", terminal, {
+        authoritative: true as const,
+        widget: "unet_name",
+      }),
+    ).toBe(true);
+  });
+
+  it("detects a CLIPLoader clip_name live input only when the parent rail is authoritative (#2533)", () => {
+    const inner = {
+      id: 8,
+      type: "CLIPLoader",
+      widgets: { clip_name: "clip_fp16.safetensors" },
+      inputs: [{ name: "clip_name", type: "COMBO" }],
+    };
+    expect(promotedInnerWidgetIsLinkDriven(inner, "clip_name")).toBe(false);
+    expect(
+      promotedInnerWidgetIsLinkDriven(inner, "clip_name", undefined, {
+        authoritative: true as const,
+        widget: "clip_name",
+      }),
+    ).toBe(true);
   });
 });
 
