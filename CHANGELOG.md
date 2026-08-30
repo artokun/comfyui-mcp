@@ -127,6 +127,13 @@ All notable changes to this project are documented here. This project adheres to
 #### Fixed
 - queue action:"status" confirms an idle prompt against /history before calling it done, and does not report a completed run when ComfyUI has no record of it (#2507, #2661)
 
+## Unreleased
+
+### MCP
+
+#### Fixed
+- get_workflow strip resolves an absolute path under the live ComfyUI userdata/workflows tree without dropping the workflows segment or mangling Unicode dashes (#2528)
+
 ## [0.52.161] - 2026-08-30
 
 ### MCP
