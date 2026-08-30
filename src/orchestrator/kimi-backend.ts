@@ -74,7 +74,7 @@ export class KimiBackend extends OllamaBackend {
    * path — a `result:false` the user sees — rather than an unhandled rejection
    * that could park the panel's turn gate.
    */
-  private async *wrapChannel(channel: AsyncIterable<NeutralTurn>): AsyncGenerator<NeutralTurn> {
+  protected async *wrapChannel(channel: AsyncIterable<NeutralTurn>): AsyncGenerator<NeutralTurn> {
     for await (const turn of channel) {
       try {
         await this.ensureFreshKimiAuth();
