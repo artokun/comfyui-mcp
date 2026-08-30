@@ -51,6 +51,22 @@ export function unsavedTmpWorkflowKey(value: unknown): string | null {
 }
 
 /**
+ * Saved-file path encoded in a panel tab id. `wf:<path>` (legacy handle) and
+ * `wf:<tabRouteId>:<path>` (current route) both name dest A. `tmp:` and bare
+ * uuids do not — those tabs have no saved identity (#2503).
+ */
+export function savedPathFromTabId(tabId: unknown): string | null {
+  if (typeof tabId !== "string" || !tabId.startsWith("wf:")) return null;
+  const rest = tabId.slice(3);
+  if (!rest) return null;
+  const sep = rest.indexOf(":");
+  const head = sep === -1 ? "" : rest.slice(0, sep);
+  const isRoute = sep > 1 && !/[/\\]/.test(head);
+  const path = isRoute ? rest.slice(sep + 1) : rest;
+  return normalizeWorkflowPath(path);
+}
+
+/**
  * #2503 — importing/loading onto a new tmp tab must not keep the source graph's
  * extra.comfyui_mcp.workflow_uuid. Replace it with the tab's assigned uuid.
  * Leaves workflow_path untouched (#2505).
@@ -70,6 +86,38 @@ export function bindImportedTmpWorkflowUuid(
   const extra = isPlainObject(next.extra) ? { ...next.extra } : {};
   const meta = isPlainObject(extra.comfyui_mcp) ? { ...extra.comfyui_mcp } : {};
   meta.workflow_uuid = destUuid;
+  extra.comfyui_mcp = meta;
+  next.extra = extra;
+  return next;
+}
+
+/**
+ * #2505 — loading a graph onto another tab must not keep the source
+ * extra.comfyui_mcp.workflow_path. Replace path (and uuid when destUuid is
+ * known) with the active dest identity so a later in-place save is not refused
+ * by the #1667 stale-canvas guard.
+ *
+ * Returns a cloned graph when a rewrite is needed; null when dest/graph are
+ * unusable or the stamp already names dest.
+ */
+export function bindLoadedWorkflowIdentity(
+  graph: unknown,
+  destPath: string,
+  destUuid?: string,
+): Record<string, unknown> | null {
+  if (!isPlainObject(graph)) return null;
+  const dest = normalizeWorkflowPath(destPath);
+  if (!dest) return null;
+  const stampedPath = normalizeWorkflowPath(extraWorkflowPath(graph));
+  const stampedUuid = extraWorkflowUuid(graph);
+  const pathNeeds = stampedPath !== dest;
+  const uuidNeeds = Boolean(destUuid) && stampedUuid !== destUuid;
+  if (!pathNeeds && !uuidNeeds) return null;
+  const next: Record<string, unknown> = structuredClone(graph);
+  const extra = isPlainObject(next.extra) ? { ...next.extra } : {};
+  const meta = isPlainObject(extra.comfyui_mcp) ? { ...extra.comfyui_mcp } : {};
+  meta.workflow_path = dest;
+  if (destUuid) meta.workflow_uuid = destUuid;
   extra.comfyui_mcp = meta;
   next.extra = extra;
   return next;

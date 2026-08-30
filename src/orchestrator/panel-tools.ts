@@ -178,11 +178,13 @@ import {
 } from "./rgthree-fast-groups-property.js";
 import {
   bindImportedTmpWorkflowUuid,
+  bindLoadedWorkflowIdentity,
   isPlainObject,
   isStampMismatchSaveRefusal,
   openLiveMatchesDestAfterReconnect,
   openLiveMatchesDestContent,
   patchOpenIdentity,
+  savedPathFromTabId,
   shouldRebindOpenIdentity,
   unsavedTmpWorkflowKey,
   workflowFromSerializeReply,
@@ -19023,12 +19025,19 @@ export function buildPanelToolDefs(): PanelToolDef[] {
           const fenceBefore = currentWorkflowFence(ctx);
           // #2503 — a UI import onto this tab must not keep the source file's
           // extra.comfyui_mcp.workflow_uuid. Dest is the tab uuid already
-          // assigned (fence). workflow_path is left alone (#2505).
+          // assigned (fence).
+          // #2505 — a load onto a *saved* tab must also replace
+          // extra.comfyui_mcp.workflow_path with that tab's identity, or a later
+          // in-place save is refused by the #1667 stale-canvas guard.
           const destUuid =
             fenceBefore.known && typeof fenceBefore.uuid === "string" && fenceBefore.uuid
               ? fenceBefore.uuid
               : undefined;
-          if (destUuid) {
+          const destPath = savedPathFromTabId(tabAtDispatch);
+          if (destPath) {
+            const bound = bindLoadedWorkflowIdentity(data, destPath, destUuid);
+            if (bound) data = bound;
+          } else if (destUuid) {
             const bound = bindImportedTmpWorkflowUuid(data, destUuid);
             if (bound) data = bound;
           }
