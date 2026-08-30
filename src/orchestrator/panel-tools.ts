@@ -10286,11 +10286,53 @@ function isSeedRunToNodeStampRace(res: ToolResult, rejection: ToolResult): boole
   );
 }
 
+/**
+ * #2537 — the ONE full-graph (and scoped) graph_run throw that is safe to re-issue:
+ * ComfyUI's V3 dynamic-combo serializer racing a widget rebuild.
+ *
+ * After a burst of panel_* mutations, `graphToPrompt` can throw the bare frontend
+ * error `Dynamic widget doesn't exist on node` because a COMFY_DYNAMICCOMBO_V3
+ * sub-widget (SaveVideo `format.codec` / `format.codec.encoding`, MinimaxH3
+ * `mode.scale`, …) has not been recreated yet. The user's Queue button works on
+ * the same graph, and an identical `panel_run` a few seconds later succeeds —
+ * nothing about the widget VALUES was wrong. The throw is inside serialization,
+ * which runs BEFORE POST /prompt, so the first dispatch queued nothing.
+ *
+ * FAILS CLOSED in every other direction, because a wrong "yes" here queues a
+ * second render:
+ *  - a tagged reply-timeout or mid-command disconnect is UNKNOWN — the command
+ *    may already be queued — and an unknown must never be retried;
+ *  - STRUCTURED queue evidence VETOES the retry (`queued:true` / any prompt id);
+ *  - a timeout/transport wrapper that merely QUOTES the phrase is not this
+ *    throw (those carry `did not reply`, `outcome is UNKNOWN`, or a minted
+ *    `retry_of:"…"` token);
+ *  - the text must actually name the frontend throw. A generic widget/validation
+ *    failure is terminal.
+ */
+const DYNAMIC_WIDGET_MISSING_RE = /Dynamic widget doesn't exist on node/i;
+const MAX_DYNAMIC_WIDGET_RACE_RETRIES = 1;
+
+function isRetryableDynamicWidgetRace(res: ToolResult, rejection: ToolResult): boolean {
+  if (isReplyTimeoutResult(res) || isMidCommandDisconnectResult(res)) return false;
+  const parsed = parseToolResultJson(res);
+  if (parsed) {
+    if (parsed.queued === true) return false;
+    if (acceptedPromptIds(parsed).length > 0) return false;
+  }
+  const text = toolResultText(rejection);
+  if (!DYNAMIC_WIDGET_MISSING_RE.test(text)) return false;
+  if (/\bdid not reply to\b/i.test(text)) return false;
+  if (/\boutcome is UNKNOWN\b/i.test(text)) return false;
+  if (/\bretry_of:"/i.test(text)) return false;
+  return true;
+}
+
 export const __panelRunTestHooks = {
   detectRunRejection,
   formatRunRejection,
   isRetryableRunToNodeStampRace,
   isSeedRunToNodeStampRace,
+  isRetryableDynamicWidgetRace,
   describeDroppedOutputs,
   applyQueuedUnknownRetryGuidance,
   applyUnobservedQueuedUnknownRetryGuidance,
@@ -21920,6 +21962,49 @@ export function buildPanelToolDefs(): PanelToolDef[] {
         // "you'll be notified automatically" guidance. Only a genuine queue
         // gets the anti-poll note below.
         let rejection = detectRunRejection(res);
+        // #2537 — the frontend's dynamic-combo serializer can throw
+        // "Dynamic widget doesn't exist on node" on the first queue after graph
+        // edits, then succeed on an identical retry once those widgets exist.
+        // Serialization is pre-/prompt, so the first dispatch queued nothing.
+        // One settle-and-retry, same pause #1050 uses for the stamp race; a
+        // second miss is surfaced rather than spent again.
+        let dynamicWidgetRetryCount = 0;
+        while (
+          rejection &&
+          isRetryableDynamicWidgetRace(res, rejection) &&
+          dynamicWidgetRetryCount < MAX_DYNAMIC_WIDGET_RACE_RETRIES
+        ) {
+          dynamicWidgetRetryCount += 1;
+          let retryResultReceived = false;
+          try {
+            await sleep(retrySettleMs());
+            runDispatchedAt = Date.now();
+            res = await ctx.call(runCmd, 20000, observeRunRid);
+            retryResultReceived = true;
+            await reconcileRun();
+            rejection = detectRunRejection(res);
+          } catch (err) {
+            installLateReceiptHandoff();
+            if (retryResultReceived) {
+              return appendToolResultText(
+                res,
+                `\n\n(Dispatch history: the retry dispatch returned the result above, but local ` +
+                  `late-ack reconciliation failed before this handler could finish ` +
+                  `interpreting it. That result is preserved and no further dispatch was ` +
+                  `made. Do not infer an additional queue entry from the reconciliation ` +
+                  `failure alone. (${err instanceof Error ? err.message : String(err)})`,
+              );
+            }
+            return fail(
+              `panel_run re-issued the run after ComfyUI's frontend threw ` +
+                `"Dynamic widget doesn't exist on node" during graph serialization, and that ` +
+                `SECOND dispatch failed before any reply could be read — its outcome is UNKNOWN ` +
+                `and it may have queued a render. The FIRST dispatch threw inside graphToPrompt, ` +
+                `which runs before /prompt is posted, so it queued nothing. Do NOT re-run blindly: ` +
+                `check the queue (action:"list") or get_history before deciding. (${err instanceof Error ? err.message : String(err)})`,
+            );
+          }
+        }
         // #772/#2120 — re-issue only the scoped-run stamp race the panel explicitly
         // certifies as not-queued. Gated on OUR OWN args (this really was a scoped run)
         // and on the panel having ANSWERED, so an unknown outcome is never retried.
@@ -22029,6 +22114,20 @@ export function buildPanelToolDefs(): PanelToolDef[] {
           // as the failure it is — but it still has to say it arrived late, or the
           // caller reads a refusal for a dispatch they were told was unknown and
           // cannot tell whether these are one event or two.
+          if (dynamicWidgetRetryCount > 0) {
+            return appendToolResultText(
+              rejection,
+              `\n\n(Dispatch history: the first graph_run failed because ComfyUI's frontend threw ` +
+                `"Dynamic widget doesn't exist on node" while serializing the graph — a race after ` +
+                `recent graph edits while dynamic-combo sub-widgets were still rebuilding. That throw ` +
+                `happens BEFORE /prompt is posted, so the first dispatch queued nothing. The run was ` +
+                `re-issued once after a short pause to let those widgets settle (#2537). The failure ` +
+                `above is that SECOND dispatch; it was not retried again. You MAY re-issue panel_run ` +
+                `after a brief wait — do NOT pass retry_of: nothing was applied to dedupe. The ` +
+                `frontend error names no node id or widget.)` +
+                lateAckNote,
+            );
+          }
           if (!scopeRebuilt)
             return lateAckNote ? appendToolResultText(rejection, lateAckNote) : rejection;
           return appendToolResultText(
@@ -22251,16 +22350,25 @@ export function buildPanelToolDefs(): PanelToolDef[] {
         // dispatch can enqueue several, and the panel reports one prompt id, not a count.
         // The certified fact is about DISPATCHES, not renders: the prior dispatches
         // queued nothing, so everything in the queue came from the final dispatch.
+        const dynamicWidgetRetryNote =
+          dynamicWidgetRetryCount === 0
+            ? ""
+            : `\n\n[NOTE] The first dispatch failed with "Dynamic widget doesn't exist on node" ` +
+              `(ComfyUI's frontend serializer racing a dynamic-combo widget rebuild after graph edits). ` +
+              `That throw is pre-queue, so nothing was queued; the run was re-issued once after a short ` +
+              `pause, and THAT is the run above (#2537).`;
         const retryNote =
           scopeRetryCount === 0
-            ? ""
+            ? dynamicWidgetRetryNote
             : scopeRetryCount === 1
-              ? "\n\n[NOTE] The first dispatch of this scoped run was refused by the panel's run-to-node " +
+              ? dynamicWidgetRetryNote +
+                "\n\n[NOTE] The first dispatch of this scoped run was refused by the panel's run-to-node " +
                 "graph-stamp race (the graph changed between dispatch and apply); the panel certified that " +
                 "nothing was queued, so the scope was rebuilt and re-issued once, and THAT is the run above. " +
                 "The first dispatch contributed NOTHING to the queue, so whatever this run queued was " +
                 "queued once, not twice."
-              : `\n\n[NOTE] The first ${scopeRetryCount} dispatches of this scoped run were refused by the ` +
+              : dynamicWidgetRetryNote +
+                `\n\n[NOTE] The first ${scopeRetryCount} dispatches of this scoped run were refused by the ` +
                 `panel's run-to-node graph-stamp race (the graph changed between dispatch and apply), ` +
                 `and each was certified to have queued NOTHING. The scope was rebuilt and re-issued ` +
                 `${scopeRetryCount} times, and THAT is the run above. Whatever this run queued came ` +
