@@ -9,6 +9,7 @@ All notable changes to this project are documented here. This project adheres to
 ### MCP
 
 #### Fixed
+- a root SubgraphNode promoted COMBO write uses the unique rail-backed inner mapping when the terminal witness is incomplete after loading an official template (#2393)
 - get_image action:"list_outputs" lists completed VHS mp4 outputs written to ComfyUI's temp/ (save_output unchecked), tagged type:"temp" (#2370)
 - panel_expose_subgraph_input retries Anything Everywhere? wildcard sockets against the live LiteGraph slot array after Convert to Subgraph (#2493)
 - panel_search_nodes and panel_list_nodes serve host Manager HTTP when the panel's browser Manager request does not complete (Failed to fetch) (#2492)

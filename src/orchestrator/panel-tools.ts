@@ -7668,14 +7668,24 @@ async function preparePromotedWidgetWrite(
       "graph_get_subgraph did not publish a verifiable workflow and viewing-scope identity",
     );
   }
-  const terminalEvidenceError = promotedTerminalEvidenceError(payload, widget);
-  if (terminalEvidenceError) return promotedWriteRefusal(widget, terminalEvidenceError);
   const inner = resolvePromotedWriteTarget(
     payload,
     widget,
     nodeId as number | string,
     publishesCompleteTerminalWitness,
   );
+  const terminalEvidenceError = promotedTerminalEvidenceError(payload, widget);
+  if (terminalEvidenceError) {
+    // #2393 — an incomplete OWN entry may still uniquely name a rail-backed
+    // inner COMBO. Any other witness error, including an unadvertised duplicate
+    // that would otherwise fall through to the legacy same-name scan, stays a
+    // hard refusal.
+    const railBackedCombo =
+      terminalEvidenceError === "the promoted-terminal witness was incomplete or unresolved" &&
+      inner?.terminal?.chainDepth === 0 &&
+      !inner.parentRail;
+    if (!railBackedCombo) return promotedWriteRefusal(widget, terminalEvidenceError);
+  }
   if (!inner) {
     if (publishesCompleteTerminalWitness) {
       const terminalAliases = promotedTerminalAliasCount(payload, widget);
@@ -7705,10 +7715,16 @@ async function preparePromotedWidgetWrite(
     );
   }
   if (publishesCompleteTerminalWitness && !inner.parentRail) {
-    return promotedWriteRefusal(
-      widget,
-      "the current promoted-terminal witness did not prove an authoritative parent rail",
-    );
+    // #2393 — official-template COMBOs can load with a name-only host stub, so
+    // the parent rail is unauthenticatable while the unique rail-backed inner
+    // widget is still the subgraph-definition store. Nested promotions still
+    // require the parent rail; a one-hop terminal is the only exception.
+    if (!inner.terminal || inner.terminal.chainDepth !== 0) {
+      return promotedWriteRefusal(
+        widget,
+        "the current promoted-terminal witness did not prove an authoritative parent rail",
+      );
+    }
   }
   const scopeError = currentPromotedScopeError(ctx, scope);
   if (scopeError) return promotedWriteRefusal(widget, scopeError);

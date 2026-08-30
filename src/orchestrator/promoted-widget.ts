@@ -211,6 +211,77 @@ function widgetNamesOnInner(node: Record<string, unknown>): string[] {
   return Object.keys(widgets as Record<string, unknown>).filter((n) => n.length > 0);
 }
 
+/** True when `widget` is an inner input that is wired from another node — the
+ * subgraph input-rail shape official templates use for promoted COMBOs. */
+function innerWidgetIsRailBacked(node: Record<string, unknown>, widget: string): boolean {
+  const inputs = node.inputs;
+  if (!Array.isArray(inputs)) return false;
+  const wanted = widget.toLowerCase();
+  for (const raw of inputs) {
+    if (!isRecord(raw) || typeof raw.name !== "string" || raw.name.toLowerCase() !== wanted) continue;
+    const from = raw.connected_from;
+    if (!isRecord(from)) continue;
+    if (from.node_id === undefined || from.node_id === null) continue;
+    if (typeof from.node_id !== "number" && typeof from.node_id !== "string") continue;
+    return true;
+  }
+  return false;
+}
+
+function terminalInputsFromInnerNode(node: Record<string, unknown>): PromotedTerminalInput[] | null {
+  if (!Object.prototype.hasOwnProperty.call(node, "inputs")) return [];
+  const inputs = node.inputs;
+  if (!Array.isArray(inputs)) return null;
+  const out: PromotedTerminalInput[] = [];
+  for (const raw of inputs) {
+    if (!isRecord(raw) || typeof raw.name !== "string" || raw.name.length === 0) return null;
+    if (raw.type !== undefined && typeof raw.type !== "string") return null;
+    out.push({ name: raw.name, ...(raw.type !== undefined ? { type: raw.type } : {}) });
+  }
+  return out;
+}
+
+/**
+ * #2393 recurrence — after an official template load, a promoted COMBO such as
+ * `unet_name` can publish an incomplete own-entry (the host rail is a name-only
+ * stub, so `_subgraphSlot` / parent-rail authentication fail) while the inner
+ * listing still uniquely names the rail-backed loader. That inner widget is the
+ * subgraph-definition store the queue reads when no per-instance widgetId exists.
+ * Do not reuse an error entry's `immediate_node_id`: the live slot can point at
+ * a different inner node after instance/definition input-count drift.
+ */
+function resolveRailBackedInnerFromEnvelope(
+  envelope: { nodes: Array<Record<string, unknown>> },
+  displayedWidget: string,
+): InnerPromotedTarget | null {
+  const hits: Array<{ node: Record<string, unknown>; id: number | string; widget: string }> = [];
+  for (const node of envelope.nodes) {
+    const id = innerNodeId(node);
+    if (id == null) continue;
+    const matched = matchListedName(displayedWidget, widgetNamesOnInner(node));
+    if (!matched || !innerWidgetIsRailBacked(node, matched)) continue;
+    hits.push({ node, id, widget: matched });
+  }
+  if (hits.length !== 1) return null;
+  const hit = hits[0];
+  const nodeType = hit.node.type;
+  if (typeof nodeType !== "string" || nodeType.length === 0) return null;
+  const inputs = terminalInputsFromInnerNode(hit.node);
+  if (!inputs) return null;
+  return {
+    innerNodeId: hit.id,
+    widget: hit.widget,
+    ...(typeof hit.node.node_identity === "string" ? { nodeIdentity: hit.node.node_identity } : {}),
+    terminal: {
+      nodeId: hit.id,
+      nodeType,
+      widget: hit.widget,
+      inputs,
+      chainDepth: 0,
+    },
+  };
+}
+
 function innerNodeId(node: Record<string, unknown>): number | string | null {
   const id = node.id;
   return isNodeId(id) ? id : null;
@@ -494,8 +565,11 @@ export function resolveInnerPromotedTarget(
     );
     if (entries.length !== 1) return null;
     const entry = entries[0];
+    // A complete own-entry is still the preferred mapping. An incomplete own-entry
+    // is not authorization to trust its immediate ids — those can be the drifted
+    // live slot. Fall back only to a unique rail-backed same-name inner widget.
+    if (entry.error) return resolveRailBackedInnerFromEnvelope(envelope, displayedWidget);
     if (
-      entry.error ||
       !entry.terminal ||
       !entry.parentRail ||
       entry.immediateNodeId === undefined ||

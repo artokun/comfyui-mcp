@@ -967,6 +967,53 @@ const QWEN_EDIT_INCOMPLETE_PROMOTED_SUBGRAPH = {
   ],
 };
 
+/** #2393 recurrence — official-template COMBO `unet_name` on a root SubgraphNode.
+ * The own-entry is incomplete (parent rail is a name-only stub) and the live
+ * immediate ids can point at the WRONG inner node after input-count drift.
+ * Query maps through input-rail output 6 to UNETLoader 37. */
+const UNet_COMBO_TEMPLATE_SUBGRAPH = {
+  subgraph_of: { node_id: 472, title: "Official Template" },
+  node_count: 2,
+  nodes: [
+    {
+      id: 37,
+      type: "UNETLoader",
+      widgets: { unet_name: "model.safetensors", weight_dtype: "default" },
+      inputs: [
+        { slot: 0, name: "unet_name", type: "COMBO", connected_from: { node_id: -10, output_slot: 6 } },
+        { slot: 1, name: "weight_dtype", type: "COMBO" },
+      ],
+    },
+    {
+      id: 38,
+      type: "CLIPLoader",
+      widgets: { clip_name: "clip.safetensors" },
+      inputs: [
+        { slot: 0, name: "clip_name", type: "COMBO", connected_from: { node_id: -10, output_slot: 7 } },
+      ],
+    },
+  ],
+  promoted_terminals: [
+    {
+      widget: "unet_name",
+      immediate_node_id: 99,
+      immediate_widget: "value",
+      error: "the promoted parent rail was missing, externally linked, or not authoritative",
+    },
+    {
+      widget: "lora_name",
+      error:
+        "properties.proxyWidgets named a promoted relation that had no live node.widgets/_subgraphSlot projection",
+    },
+  ],
+};
+
+const UNet_COMBO_TEMPLATE_DETAIL = {
+  text:
+    '1 match(es) of 1 in scope (viewing: 1 nodes)\n' +
+    '{"id":472,"type":"SubgraphNode","is_subgraph":true}',
+};
+
 describe("panel_set_widget coordinated promoted-widget fixes (#2393, #2394)", () => {
   it("refreshes one incomplete post-template terminal witness before the guarded inner write (#2393)", async () => {
     const { isError, calls, mutations } = await setWidget(
@@ -3470,6 +3517,98 @@ describe("#2393 promoted-terminal witness is judged on the requested alias", () 
     expect(isError).toBe(true);
     expect(text).toMatch(/malformed, stale, or incomplete ownership envelope/);
     expect(calls.filter((c) => c.cmd === "graph_set_widget")).toHaveLength(0);
+  });
+});
+
+describe("#2393 promoted COMBO unet_name after official template load", () => {
+  it("maps the unique rail-backed UNETLoader, not the drifted immediate id", () => {
+    expect(resolveInnerPromotedTarget(UNet_COMBO_TEMPLATE_SUBGRAPH, "unet_name", 472)).toEqual({
+      innerNodeId: 37,
+      widget: "unet_name",
+      terminal: {
+        nodeId: 37,
+        nodeType: "UNETLoader",
+        widget: "unet_name",
+        inputs: [
+          { name: "unet_name", type: "COMBO" },
+          { name: "weight_dtype", type: "COMBO" },
+        ],
+        chainDepth: 0,
+      },
+    });
+  });
+
+  it("still refuses when two inner UNETLoaders are rail-backed on the same alias", () => {
+    const ambiguous = {
+      ...UNet_COMBO_TEMPLATE_SUBGRAPH,
+      node_count: 3,
+      nodes: [
+        ...UNet_COMBO_TEMPLATE_SUBGRAPH.nodes,
+        {
+          id: 39,
+          type: "UNETLoader",
+          widgets: { unet_name: "other.safetensors" },
+          inputs: [
+            { slot: 0, name: "unet_name", type: "COMBO", connected_from: { node_id: -10, output_slot: 8 } },
+          ],
+        },
+      ],
+    };
+    expect(resolveInnerPromotedTarget(ambiguous, "unet_name", 472)).toBeNull();
+  });
+
+  it("writes the rail-backed inner COMBO instead of refusing the incomplete own-entry", async () => {
+    const { isError, calls, mutations } = await setWidget(
+      { node_id: 472, widget: "unet_name", value: "model.safetensors" },
+      {
+        ownerNodeId: 472,
+        firstWrite: "ok",
+        promotedTerminalWitnesses: true,
+        promotedDetail: UNet_COMBO_TEMPLATE_DETAIL,
+        subgraph: UNet_COMBO_TEMPLATE_SUBGRAPH,
+      },
+    );
+
+    expect(isError).toBe(false);
+    expect(mutations).toBe(1);
+    expect(calls.filter((call) => call.cmd === "graph_set_widget")).toEqual([
+      expect.objectContaining({ node_id: 37, widget: "unet_name", value: "model.safetensors" }),
+    ]);
+    const write = calls.find((call) => call.cmd === "graph_set_widget");
+    const scope = write?.expected_scope as Record<string, unknown> | undefined;
+    expect(scope?.parent_rail).toBeUndefined();
+    expect(scope?.terminal).toEqual(
+      expect.objectContaining({ node_id: 37, type: "UNETLoader", widget: "unet_name" }),
+    );
+    expect(calls.some((call) => call.cmd === "graph_set_widget" && call.node_id === 99)).toBe(false);
+  });
+
+  it("still refuses the incomplete own-entry when the inner COMBO is not rail-backed", async () => {
+    const { text, isError, calls } = await setWidget(
+      { node_id: 472, widget: "unet_name", value: "model.safetensors" },
+      {
+        ownerNodeId: 472,
+        firstWrite: "ok",
+        promotedTerminalWitnesses: true,
+        promotedDetail: UNet_COMBO_TEMPLATE_DETAIL,
+        subgraph: {
+          ...UNet_COMBO_TEMPLATE_SUBGRAPH,
+          nodes: [
+            {
+              id: 37,
+              type: "UNETLoader",
+              widgets: { unet_name: "model.safetensors" },
+              inputs: [{ slot: 0, name: "unet_name", type: "COMBO" }],
+            },
+            UNet_COMBO_TEMPLATE_SUBGRAPH.nodes[1],
+          ],
+        },
+      },
+    );
+
+    expect(isError).toBe(true);
+    expect(text).toMatch(/witness was incomplete or unresolved/);
+    expect(calls.filter((call) => call.cmd === "graph_set_widget")).toHaveLength(0);
   });
 });
 
