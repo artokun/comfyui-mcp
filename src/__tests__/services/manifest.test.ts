@@ -1608,8 +1608,10 @@ describe("applyManifest", () => {
     const prevBudget = process.env.COMFYUI_MCP_MANIFEST_NODE_BUDGET_MS;
     process.env.COMFYUI_MCP_MANIFEST_NODE_BUDGET_MS = "40";
     installCustomNodeMock.mockImplementationOnce(
-      (opts: { onLocalFallback?: () => void }) => {
-        opts.onLocalFallback?.();
+      (opts: { onLocalFallback?: (binding: unknown) => void; localFallbackBinding?: unknown }) => {
+        // Production-shaped ordering: node-management can select the fallback
+        // synchronously, before apply_manifest records its final aggregate.
+        opts.onLocalFallback?.(opts.localFallbackBinding);
         return new Promise(() => {});
       },
     );
@@ -1631,8 +1633,18 @@ describe("applyManifest", () => {
       expect(result.results[0].message).not.toMatch(/poll panel_node_queue_status/i);
       expect(result.partial).toMatchObject({
         not_started: ["next-pack"],
-        still_installing: [],
+        still_installing: ["https://github.com/example/local-fallback-pack"],
+        local_fallback: ["https://github.com/example/local-fallback-pack"],
       });
+      expect(result.partial?.message).toMatch(/Reconciliation:.*local direct-install fallback/i);
+      const binding = installCustomNodeMock.mock.calls[0]?.[0]?.localFallbackBinding;
+      expect(binding).toMatchObject({
+        itemId: "https://github.com/example/local-fallback-pack",
+        target: "http://127.0.0.1:8188",
+        targetGeneration: 0,
+      });
+      expect(binding.operationId).toEqual(expect.any(String));
+      expect(binding.scope).toEqual(expect.any(String));
       expect(installCustomNodeMock).toHaveBeenCalledWith(
         expect.objectContaining({ onLocalFallback: expect.any(Function) }),
       );

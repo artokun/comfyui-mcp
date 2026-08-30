@@ -64,7 +64,7 @@ import {
 import { sanitizePanelUpdateNodeResult } from "../services/manager-update-error.js";
 import {
   formatQueueStatusPartialNote,
-  getManifestPartialLeftover,
+  readManifestPartials,
 } from "../services/manifest-partial.js";
 import { readPublishedManifestOutcomes } from "../services/manifest-outcome-channel.js";
 import { searchPanelNodes } from "../services/manager-node-search.js";
@@ -4853,12 +4853,19 @@ async function settleDroppedEnqueue(
  * Keep the panel payload parseable (do not append prose after the JSON) and
  * name the outstanding entries on the object.
  */
-function annotateQueueStatusWithManifestPartial(res: ToolResult): ToolResult {
-  const local = getManifestPartialLeftover();
-  const published = readPublishedManifestOutcomes(getComfyUIBaseUrl());
-  const partials = [local, ...published].filter(
-    (partial): partial is NonNullable<typeof partial> => partial !== null,
-  );
+function annotateQueueStatusWithManifestPartial(
+  res: ToolResult,
+  target: { url: string; generation: number } | undefined,
+  scope: string | undefined,
+): ToolResult {
+  // Both records are scoped to the target snapshot captured for this poll. An
+  // absent scope/target is UNKNOWN and therefore cannot authorize an annotation.
+  // In particular, do not fall back to getComfyUIBaseUrl() here: a retarget can
+  // occur while the panel status request is in flight.
+  if (!target || !scope) return res;
+  const local = readManifestPartials(target.url, scope, target.generation);
+  const published = readPublishedManifestOutcomes(target.url, scope, target.generation);
+  const partials = [...local, ...published];
   const uniquePartials = partials.filter((partial, index, all) => {
     const key = JSON.stringify(partial);
     return all.findIndex((candidate) => JSON.stringify(candidate) === key) === index;
@@ -14053,6 +14060,12 @@ export interface PanelToolCtx {
   modelInventoryDisclosure?: ModelInventoryDisclosureProbe;
   /** Per-tab workflow pin store (optional for tests). */
   workflowTarget?: WorkflowTargetStore;
+  /** Immutable lane identity used to read apply_manifest outcome records. */
+  manifestOutcomeScope?: string;
+  /** Capture the ComfyUI target at the start/end of a queue-status poll. */
+  manifestOutcomeTarget?: () =>
+    | { url: string; generation: number }
+    | undefined;
   /**
    * EXPLICIT self-heal: re-point THIS session at the currently active/sole
    * connected tab. The tabId captured at session creation is frozen; a full
@@ -14242,6 +14255,12 @@ export interface PanelToolCtxLane {
   inheritsUserMcpServers?: boolean;
   /** See {@link PanelToolCtx.userMcpServersAtSpawn}. */
   userMcpServersAtSpawn?: readonly string[];
+  /** Scope capability minted for this agent lane; never derive it from ctx.tabId. */
+  manifestOutcomeScope?: string;
+  /** Target resolver supplied by the owning orchestrator scope. */
+  manifestOutcomeTarget?: () =>
+    | { url: string; generation: number }
+    | undefined;
 }
 
 /** Build a tab-bound execution context shared by both transports. */
@@ -14270,6 +14289,12 @@ export function makePanelToolCtx(
     ...(lane?.userMcpServersAtSpawn === undefined
       ? {}
       : { userMcpServersAtSpawn: lane.userMcpServersAtSpawn }),
+    ...(lane?.manifestOutcomeScope === undefined
+      ? {}
+      : { manifestOutcomeScope: lane.manifestOutcomeScope }),
+    ...(lane?.manifestOutcomeTarget === undefined
+      ? {}
+      : { manifestOutcomeTarget: lane.manifestOutcomeTarget }),
   } as PanelToolCtx;
 
   // AUTO-HEAL an orphaned session in place. When THIS session's captured tabId no
@@ -23308,8 +23333,25 @@ CHECKED FOR YOU: the graph read this message prescribes was just run, and it ` +
         "those entries are verified (re-run apply_manifest only when the result authorizes it).",
       {},
       async (_args, ctx) => {
+        const targetBeforePoll = ctx.manifestOutcomeTarget?.();
         const res = await ctx.call({ cmd: "nodes_queue_status" }, 20000);
-        return annotateQueueStatusWithManifestPartial(res);
+        const targetAfterPoll = ctx.manifestOutcomeTarget?.();
+        // A status reply that crosses a retarget boundary is not attributable to
+        // either instance. Fail closed instead of annotating it with the old
+        // instance's partial.
+        if (
+          !targetBeforePoll ||
+          !targetAfterPoll ||
+          targetBeforePoll.generation !== targetAfterPoll.generation ||
+          targetBeforePoll.url !== targetAfterPoll.url
+        ) {
+          return res;
+        }
+        return annotateQueueStatusWithManifestPartial(
+          res,
+          targetBeforePoll,
+          ctx.manifestOutcomeScope,
+        );
       },
     ),
     def(
@@ -25738,6 +25780,9 @@ export function createPanelMcpServer(
   tabId: string,
   workflowTargets?: WorkflowTargetStore,
   onRunTicketOpened?: (promptIds: readonly string[]) => void,
+  manifestOutcomeTarget?: () =>
+    | { url: string; generation: number }
+    | undefined,
 ): McpSdkServerConfigWithInstance {
   // #2311 — record whether this agent was handed the user's own MCP servers, so
   // panel_list_mcp / panel_add_mcp report the session and not the config file.
@@ -25757,6 +25802,8 @@ export function createPanelMcpServer(
     keyBackend === undefined ? undefined : backendInheritsUserMcpServers(keyBackend);
   const ctx = makePanelToolCtx(bridge, tabId, workflowTargets, onRunTicketOpened, {
     inheritsUserMcpServers,
+    manifestOutcomeScope: tabId,
+    ...(manifestOutcomeTarget ? { manifestOutcomeTarget } : {}),
     // Snapshot the names THIS spawn was given, not the file. makeAgent() builds
     // `mcpServers` (which re-reads ~/.claude.json) and `panelServer` (this call)
     // as two properties of one synchronous object literal, so these are the same

@@ -4,7 +4,7 @@
 //
 // This file drives the SHIPPED applyManifest + panel_node_queue_status path
 // (I/O is mocked; the result assembly and queue-status annotation are real).
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -32,8 +32,10 @@ import { applyManifest } from "../../services/manifest.js";
 import {
   buildManifestPartial,
   clearManifestPartialLeftover,
+  createManifestPartialOperation,
   describeManifestSource,
   getManifestPartialLeftover,
+  readManifestPartials,
   recordManifestPartial,
 } from "../../services/manifest-partial.js";
 import {
@@ -50,6 +52,9 @@ import {
 } from "../../orchestrator/panel-tools.js";
 
 const TAB = "11111111-2222-3333-4444-555555555555";
+const TARGET = "http://127.0.0.1:8188";
+const SCOPE = "orchestrator::test";
+let previousOutcomeScope: string | undefined;
 
 const textOf = (r: ToolResult): string =>
   r.content.map((c) => (c as { text?: string }).text ?? "").join(" ");
@@ -85,8 +90,14 @@ function drainedBridge(): PanelToolCtx["bridge"] {
   } as unknown as PanelToolCtx["bridge"];
 }
 
-async function queueStatus(): Promise<{ text: string; parsed: Record<string, unknown> | null }> {
-  const ctx = makePanelToolCtx(drainedBridge(), TAB, new WorkflowTargetStore());
+async function queueStatus(opts: {
+  bridge?: PanelToolCtx["bridge"];
+  target?: () => { url: string; generation: number } | undefined;
+} = {}): Promise<{ text: string; parsed: Record<string, unknown> | null }> {
+  const ctx = makePanelToolCtx(opts.bridge ?? drainedBridge(), TAB, new WorkflowTargetStore(), undefined, {
+    manifestOutcomeScope: SCOPE,
+    manifestOutcomeTarget: opts.target ?? (() => ({ url: TARGET, generation: 0 })),
+  });
   const def = buildPanelToolDefs().find((d) => d.name === "panel_node_queue_status");
   if (!def) throw new Error("panel_node_queue_status is not registered");
   const res: ToolResult = await def.handler({} as never, ctx);
@@ -102,8 +113,16 @@ async function queueStatus(): Promise<{ text: string; parsed: Record<string, unk
 
 beforeEach(() => {
   clearManifestPartialLeftover();
+  previousOutcomeScope = process.env.COMFYUI_MCP_TAB;
+  process.env.COMFYUI_MCP_TAB = SCOPE;
   listInstalledNodesMock.mockReset().mockResolvedValue([]);
   installCustomNodeMock.mockReset();
+});
+
+afterEach(() => {
+  clearManifestPartialLeftover();
+  if (previousOutcomeScope === undefined) delete process.env.COMFYUI_MCP_TAB;
+  else process.env.COMFYUI_MCP_TAB = previousOutcomeScope;
 });
 
 describe("apply_manifest leftover + panel_node_queue_status (#1699)", () => {
@@ -207,7 +226,7 @@ describe("apply_manifest leftover + panel_node_queue_status (#1699)", () => {
     expect(partial?.message).toMatch(/outcome is UNKNOWN/i);
     expect(partial?.message).toMatch(/no local direct-install fallback is authorized/i);
 
-    recordManifestPartial(partial);
+    recordManifestPartial(partial, { target: TARGET, scope: SCOPE });
     expect(getManifestPartialLeftover()).toMatchObject({
       not_started: [],
       still_installing: [id],
@@ -242,11 +261,13 @@ describe("apply_manifest leftover + panel_node_queue_status (#1699)", () => {
         publishManifestOutcome(partial, {
           dir,
           secret: "orchestrator-issued-child-secret",
-          scope: "orchestrator::codex",
-          target: "http://127.0.0.1:8188",
+          scope: SCOPE,
+          target: TARGET,
         }),
       ).toBe(true);
-      configureManifestOutcomeReader(dir, () => ["orchestrator-issued-child-secret"]);
+      configureManifestOutcomeReader(dir, () => [
+        { secret: "orchestrator-issued-child-secret", scope: SCOPE },
+      ]);
 
       clearManifestPartialLeftover();
       const { parsed, text } = await queueStatus();
@@ -260,5 +281,88 @@ describe("apply_manifest leftover + panel_node_queue_status (#1699)", () => {
       resetManifestOutcomeReader();
       rmSync(dir, { recursive: true, force: true });
     }
+  });
+
+  it("refuses to annotate a status poll that crosses a ComfyUI retarget", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "cmcp-manifest-retarget-"));
+    const id = "https://github.com/example/old-target-pack";
+    const partial = buildManifestPartial({
+      source: "this inline manifest",
+      notStarted: [],
+      stillInstalling: [id],
+      outcomeUnknown: [id],
+    });
+    if (!partial) throw new Error("expected partial fixture");
+    let current = { url: TARGET, generation: 1 };
+    const bridge = drainedBridge();
+    const send = bridge.send;
+    bridge.send = async (cmd: Record<string, unknown>) => {
+      const result = await send(cmd);
+      if (cmd.cmd === "nodes_queue_status") current = { url: "http://127.0.0.1:8189", generation: 2 };
+      return result;
+    };
+    try {
+      expect(
+        publishManifestOutcome(partial, {
+          dir,
+          secret: "retarget-child-secret",
+          scope: SCOPE,
+          target: TARGET,
+          operationId: "retarget-operation",
+        }),
+      ).toBe(true);
+      configureManifestOutcomeReader(dir, () => [
+        { secret: "retarget-child-secret", scope: SCOPE },
+      ]);
+      const { parsed } = await queueStatus({ bridge, target: () => current });
+      expect(parsed?.apply_manifest_partial).toBeUndefined();
+      expect(parsed?.queue_complete_for_apply_manifest).toBeUndefined();
+    } finally {
+      resetManifestOutcomeReader();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects a late callback from an older operation after a newer record supersedes it", () => {
+    const id = "https://github.com/example/old-operation-pack";
+    const oldOperation = createManifestPartialOperation({
+      operationId: "old-operation",
+      source: "this inline manifest",
+      scope: SCOPE,
+      target: TARGET,
+      targetGeneration: 1,
+    });
+    const oldBinding = oldOperation.bindItem(id);
+    const oldPartial = buildManifestPartial({
+      source: "this inline manifest",
+      notStarted: [],
+      stillInstalling: [id],
+      outcomeUnknown: [id],
+    });
+    if (!oldPartial) throw new Error("expected old partial fixture");
+    expect(
+      oldOperation.reconcile({ ...oldBinding }, "selected"),
+    ).toBe(false);
+    expect(oldOperation.reconcile(oldBinding, "selected")).toBe(true);
+    oldOperation.record(oldPartial);
+
+    const newId = "https://github.com/example/new-operation-pack";
+    const newOperation = createManifestPartialOperation({
+      operationId: "new-operation",
+      source: "this inline manifest",
+      scope: SCOPE,
+      target: TARGET,
+      targetGeneration: 1,
+    });
+    const newPartial = buildManifestPartial({
+      source: "this inline manifest",
+      notStarted: [newId],
+      stillInstalling: [],
+    });
+    if (!newPartial) throw new Error("expected new partial fixture");
+    newOperation.record(newPartial);
+
+    expect(oldOperation.reconcile(oldBinding, "failed")).toBe(false);
+    expect(readManifestPartials(TARGET, SCOPE, 1)).toEqual([newPartial]);
   });
 });

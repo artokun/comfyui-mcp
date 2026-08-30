@@ -1016,6 +1016,42 @@ describe("node-management service", () => {
       ).toBeDefined();
     });
 
+    it("carries the operation and target binding through local fallback phase hooks", async () => {
+      stubFetch({ queueOpStatus: 403 });
+      let cloned = false;
+      mockedExists.mockImplementation((p: unknown) => {
+        const s = String(p);
+        if (s.includes("requirements.txt") || s.includes("install.py")) return false;
+        if (s.includes(NODE_DIR_UTILS) || s.endsWith("comfyui-teskors-utils")) return cloned;
+        return false;
+      });
+      mockedExec.mockImplementation(((bin: string, args: string[]) => {
+        if (bin === "git" && args[0] === "clone") cloned = true;
+        return "";
+      }) as never);
+      const binding = Object.freeze({
+        operationId: "operation-bound-to-node-management",
+        itemId: "https://github.com/teskor-hub/comfyui-teskors-utils",
+        scope: "orchestrator::codex",
+        target: "http://127.0.0.1:8188",
+        targetGeneration: 7,
+      });
+      const selected = vi.fn();
+      const settled = vi.fn();
+
+      const res = await installCustomNode({
+        id: binding.itemId,
+        source: "git",
+        localFallbackBinding: binding,
+        onLocalFallback: selected,
+        onLocalFallbackSettled: settled,
+      });
+
+      expect(res.mechanism).toBe("git-clone");
+      expect(selected).toHaveBeenCalledWith(binding);
+      expect(settled).toHaveBeenCalledWith(binding, "applied");
+    });
+
     it("keeps apply_manifest truthful when a late Manager drain selects local fallback (#1129)", async () => {
       const previousBudget = process.env.COMFYUI_MCP_MANIFEST_NODE_BUDGET_MS;
       process.env.COMFYUI_MCP_MANIFEST_NODE_BUDGET_MS = "80";

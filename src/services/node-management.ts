@@ -3674,6 +3674,19 @@ async function cloneCustomNodeFallback(
 // Public API — install
 // ---------------------------------------------------------------------------
 
+export interface LocalFallbackBinding {
+  /** The apply_manifest operation that owns this fallback. */
+  readonly operationId: string;
+  /** The manifest custom_node entry bound to this fallback. */
+  readonly itemId: string;
+  /** The agent scope authorized to observe the operation. */
+  readonly scope: string;
+  /** The exact Manager target captured at operation entry. */
+  readonly target: string;
+  /** The monotonic target generation captured at operation entry. */
+  readonly targetGeneration: number;
+}
+
 export interface InstallOptions {
   id: string;
   source?: InstallSource;
@@ -3697,19 +3710,26 @@ export interface InstallOptions {
   managerBase?: string;
   /** Monotonic ComfyUI target generation captured with managerBase. */
   targetGeneration?: number;
+  /** Binding required by the internal fallback phase hooks. */
+  localFallbackBinding?: LocalFallbackBinding;
   /**
    * Internal apply_manifest phase hook. Called once when this operation has
    * selected its local git fallback, before it waits for the local writer lock.
    * It is observational only and does not change the install decision.
    */
-  onLocalFallback?: () => void;
+  onLocalFallback?: (binding: LocalFallbackBinding) => void;
   /** Internal apply_manifest hook called after a selected local fallback settles. */
-  onLocalFallbackSettled?: (state: "applied" | "failed") => void;
+  onLocalFallbackSettled?: (
+    binding: LocalFallbackBinding,
+    state: "applied" | "failed",
+  ) => void;
 }
 
 function notifyLocalFallbackSelected(opts: InstallOptions): void {
+  const binding = opts.localFallbackBinding;
+  if (!binding) return;
   try {
-    opts.onLocalFallback?.();
+    opts.onLocalFallback?.(binding);
   } catch (err) {
     // This is an observational hook used by apply_manifest; a reporting
     // callback must never prevent the selected local fallback from running.
@@ -3723,8 +3743,10 @@ function notifyLocalFallbackSettled(
   opts: InstallOptions,
   state: "applied" | "failed",
 ): void {
+  const binding = opts.localFallbackBinding;
+  if (!binding) return;
   try {
-    opts.onLocalFallbackSettled?.(state);
+    opts.onLocalFallbackSettled?.(binding, state);
   } catch (err) {
     // This is an observational hook used by apply_manifest; a reporting
     // callback must never change the install result.

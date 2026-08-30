@@ -82,6 +82,8 @@ export function startPanelMcpHttpServer(
   host = "127.0.0.1",
   workflowTargets?: WorkflowTargetStore,
   onRunTicketOpened?: (promptIds: readonly string[]) => void,
+  manifestOutcomeScopeForTab?: (tabId: string) => string | undefined,
+  manifestOutcomeTarget?: () => { url: string; generation: number } | undefined,
 ): Promise<PanelMcpHttpServer> {
   // tabId -> (sessionId -> Session). A tab can hold multiple Codex sessions
   // across reconnects; each is its own server+transport over the SAME tab ctx.
@@ -122,6 +124,8 @@ export function startPanelMcpHttpServer(
       server,
       makePanelToolCtx(bridge, tabId, workflowTargets, onRunTicketOpened, {
         inheritsUserMcpServers: false,
+        manifestOutcomeScope: manifestOutcomeScopeForTab?.(tabId),
+        ...(manifestOutcomeTarget ? { manifestOutcomeTarget } : {}),
       }),
     );
     const transport = new StreamableHTTPServerTransport({

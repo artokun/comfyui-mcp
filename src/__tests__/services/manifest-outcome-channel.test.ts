@@ -14,6 +14,7 @@ import { buildManifestPartial } from "../../services/manifest-partial.js";
 
 const TARGET = "http://127.0.0.1:8188";
 const SECRET = "child-secret-for-1129";
+const SCOPE = "orchestrator::codex";
 
 function partial(id = "https://github.com/example/slow-pack") {
   const value = buildManifestPartial({
@@ -43,9 +44,10 @@ describe("manifest outcome cross-process channel (#1129)", () => {
         target: TARGET,
       }),
     ).toBe(true);
-    configureManifestOutcomeReader(dir, () => [SECRET]);
+    configureManifestOutcomeReader(dir, () => [{ secret: SECRET, scope: SCOPE }]);
 
-    expect(readPublishedManifestOutcomes(TARGET)).toEqual([partial()]);
+    expect(readPublishedManifestOutcomes(TARGET, SCOPE, 0)).toEqual([partial()]);
+    expect(readPublishedManifestOutcomes(TARGET, SCOPE, 1)).toEqual([]);
   });
 
   it("publishes through the real stdio-child environment boundary", () => {
@@ -64,6 +66,8 @@ describe("manifest outcome cross-process channel (#1129)", () => {
           ...process.env,
           COMFYUI_MCP_PROGRESS_DIR: dir,
           COMFYUI_MCP_MANIFEST_OUTCOME_SECRET: SECRET,
+          COMFYUI_MCP_MANIFEST_OPERATION: "child-operation",
+          COMFYUI_MCP_TARGET_GENERATION: "0",
           COMFYUI_MCP_TAB: "orchestrator::codex",
           COMFYUI_URL: TARGET,
         },
@@ -73,8 +77,8 @@ describe("manifest outcome cross-process channel (#1129)", () => {
     );
     expect(child.status, child.stderr).toBe(0);
 
-    configureManifestOutcomeReader(dir, () => [SECRET]);
-    expect(readPublishedManifestOutcomes(TARGET)).toEqual([value]);
+    configureManifestOutcomeReader(dir, () => [{ secret: SECRET, scope: SCOPE }]);
+    expect(readPublishedManifestOutcomes(TARGET, SCOPE, 0)).toEqual([value]);
   });
 
   it("rejects forged, stale-target, and malformed records before annotation", () => {
@@ -98,26 +102,60 @@ describe("manifest outcome cross-process channel (#1129)", () => {
         signature: "0".repeat(64),
       }),
     );
-    configureManifestOutcomeReader(dir, () => [SECRET]);
+    configureManifestOutcomeReader(dir, () => [{ secret: SECRET, scope: SCOPE }]);
 
-    expect(readPublishedManifestOutcomes("http://127.0.0.1:8189")).toEqual([]);
-    expect(readPublishedManifestOutcomes(TARGET)).toHaveLength(1);
+    expect(readPublishedManifestOutcomes("http://127.0.0.1:8189", SCOPE, 0)).toEqual([]);
+    expect(readPublishedManifestOutcomes(TARGET, SCOPE, 0)).toHaveLength(1);
     expect(readFileSync(file, "utf8")).toContain("attacker");
   });
 
   it("removes the child record when the outcome settles", () => {
-    publishManifestOutcome(partial(), { dir, secret: SECRET, target: TARGET });
-    configureManifestOutcomeReader(dir, () => [SECRET]);
-    expect(readPublishedManifestOutcomes(TARGET)).toHaveLength(1);
+    publishManifestOutcome(partial(), { dir, secret: SECRET, scope: SCOPE, target: TARGET });
+    configureManifestOutcomeReader(dir, () => [{ secret: SECRET, scope: SCOPE }]);
+    expect(readPublishedManifestOutcomes(TARGET, SCOPE, 0)).toHaveLength(1);
 
-    expect(publishManifestOutcome(null, { dir, secret: SECRET, target: TARGET })).toBe(true);
-    expect(readPublishedManifestOutcomes(TARGET)).toEqual([]);
+    expect(
+      publishManifestOutcome(null, { dir, secret: SECRET, scope: SCOPE, target: TARGET }),
+    ).toBe(true);
+    expect(readPublishedManifestOutcomes(TARGET, SCOPE, 0)).toEqual([]);
   });
 
   it("canonicalizes only safe HTTP target identities", () => {
     expect(canonicalManifestOutcomeTarget("http://127.0.0.1:8188/")).toBe(TARGET);
     expect(canonicalManifestOutcomeTarget("http://user:pass@127.0.0.1:8188")).toBeNull();
     expect(canonicalManifestOutcomeTarget("http://127.0.0.1:8188/?token=secret")).toBeNull();
+  });
+
+  it("does not let a valid credential for another scope annotate this scope", () => {
+    const otherSecret = "child-secret-for-other-scope";
+    const otherScope = "orchestrator::other";
+    expect(
+      publishManifestOutcome(partial("https://github.com/example/other-pack"), {
+        dir,
+        secret: otherSecret,
+        scope: otherScope,
+        target: TARGET,
+        operationId: "other-operation",
+      }),
+    ).toBe(true);
+    expect(
+      publishManifestOutcome(partial(), {
+        dir,
+        secret: SECRET,
+        scope: SCOPE,
+        target: TARGET,
+        operationId: "expected-operation",
+      }),
+    ).toBe(true);
+    configureManifestOutcomeReader(dir, () => [
+      { secret: SECRET, scope: SCOPE },
+      { secret: otherSecret, scope: otherScope },
+    ]);
+
+    expect(readPublishedManifestOutcomes(TARGET, SCOPE, 0)).toEqual([partial()]);
+    expect(readPublishedManifestOutcomes(TARGET, otherScope, 0)).toEqual([
+      partial("https://github.com/example/other-pack"),
+    ]);
   });
 
   afterEach(() => {

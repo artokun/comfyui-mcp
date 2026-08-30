@@ -22,11 +22,14 @@ import {
 import { join } from "node:path";
 import type { ManifestPartialInstall } from "./manifest-partial.js";
 
-export const MANIFEST_OUTCOME_CHANNEL_VERSION = 1 as const;
+// The operation and target-generation fields make this incompatible with the
+// pre-follow-up envelope; stale version-1 files must never be interpreted here.
+export const MANIFEST_OUTCOME_CHANNEL_VERSION = 2 as const;
 export const MANIFEST_OUTCOME_TTL_MS = 6 * 60 * 60 * 1000;
 
 const FILE_PREFIX = "cmcp-manifest-outcome-";
 const MAX_RECORD_BYTES = 128 * 1024;
+const MAX_OPERATION_ID_LENGTH = 128;
 const MAX_SCOPE_LENGTH = 512;
 const MAX_TARGET_LENGTH = 2048;
 const MAX_SOURCE_LENGTH = 1024;
@@ -36,28 +39,38 @@ const MAX_ITEMS = 512;
 
 export interface ManifestOutcomeEnvelope {
   version: typeof MANIFEST_OUTCOME_CHANNEL_VERSION;
+  operation_id: string;
   scope: string;
   target: string;
+  target_generation: number;
   updated: number;
   partial: ManifestPartialInstall | null;
   signature: string;
 }
 
+export interface ManifestOutcomeReaderCredential {
+  /** Secret minted by this orchestrator for exactly one scope. */
+  secret: string;
+  /** The scope that this secret is authorized to read. */
+  scope: string;
+}
+
 interface ReaderConfig {
   dir: string;
-  secrets: () => Iterable<string>;
+  credentials: () => Iterable<ManifestOutcomeReaderCredential>;
 }
 
 let readerConfig: ReaderConfig | undefined;
 let writeSequence = 0;
 
-/** Configure the orchestrator-side reader. The callback keeps the secret set
- * live as new agent sessions are spawned, without exposing secrets to a file. */
+/** Configure the orchestrator-side reader. The callback keeps the scoped
+ * credentials live as new agent sessions are spawned, without exposing secrets
+ * to a file. A valid secret for another scope is deliberately not enough. */
 export function configureManifestOutcomeReader(
   dir: string,
-  secrets: () => Iterable<string>,
+  credentials: () => Iterable<ManifestOutcomeReaderCredential>,
 ): void {
-  readerConfig = { dir: dir.trim(), secrets };
+  readerConfig = { dir: dir.trim(), credentials };
 }
 
 function configuredWriterDir(): string {
@@ -70,6 +83,15 @@ function configuredWriterSecret(): string {
 
 function configuredWriterScope(): string {
   return process.env.COMFYUI_MCP_TAB?.trim() || `stdio:${process.pid}`;
+}
+
+function configuredWriterOperationId(): string {
+  return process.env.COMFYUI_MCP_MANIFEST_OPERATION?.trim() || "legacy";
+}
+
+function configuredWriterTargetGeneration(): number {
+  const value = Number(process.env.COMFYUI_MCP_TARGET_GENERATION);
+  return Number.isSafeInteger(value) && value >= 0 ? value : 0;
 }
 
 /** Keep only the identity-bearing URL components. Query strings may contain
@@ -126,8 +148,10 @@ function validPartial(value: unknown): value is ManifestPartialInstall {
 function payloadFor(envelope: Omit<ManifestOutcomeEnvelope, "signature">): string {
   return JSON.stringify({
     version: envelope.version,
+    operation_id: envelope.operation_id,
     scope: envelope.scope,
     target: envelope.target,
+    target_generation: envelope.target_generation,
     updated: envelope.updated,
     partial: envelope.partial,
   });
@@ -137,8 +161,11 @@ function signatureFor(payload: string, secret: string): string {
   return createHmac("sha256", secret).update(payload).digest("hex");
 }
 
-function fileFor(dir: string, secret: string): string {
-  const key = createHash("sha256").update(secret).digest("hex").slice(0, 32);
+function fileFor(dir: string, secret: string, operationId: string): string {
+  const key = createHash("sha256")
+    .update(`${secret}\0${operationId}`)
+    .digest("hex")
+    .slice(0, 32);
   return join(dir, `${FILE_PREFIX}${key}.json`);
 }
 
@@ -162,23 +189,39 @@ export function publishManifestOutcome(
   options: {
     dir?: string;
     secret?: string;
+    operationId?: string;
     scope?: string;
     target?: string;
+    targetGeneration?: number;
   } = {},
 ): boolean {
   const dir = options.dir?.trim() ?? configuredWriterDir();
   const secret = options.secret?.trim() ?? configuredWriterSecret();
+  const operationId = options.operationId?.trim() ?? configuredWriterOperationId();
   const scope = options.scope?.trim() ?? configuredWriterScope();
+  const targetGeneration = options.targetGeneration ?? configuredWriterTargetGeneration();
   const target = canonicalManifestOutcomeTarget(
     options.target?.trim() || process.env.COMFYUI_URL?.trim() || "",
   );
-  if (!dir || !secret || !scope || scope.length > MAX_SCOPE_LENGTH || !target) return false;
+  if (
+    !dir ||
+    !secret ||
+    !operationId ||
+    operationId.length > MAX_OPERATION_ID_LENGTH ||
+    !scope ||
+    scope.length > MAX_SCOPE_LENGTH ||
+    !Number.isSafeInteger(targetGeneration) ||
+    targetGeneration < 0 ||
+    !target
+  ) return false;
   if (partial !== null && !validPartial(partial)) return false;
 
   const envelopeWithoutSignature = {
     version: MANIFEST_OUTCOME_CHANNEL_VERSION,
+    operation_id: operationId,
     scope,
     target,
+    target_generation: targetGeneration,
     updated: Date.now(),
     partial: copyPartial(partial),
   } satisfies Omit<ManifestOutcomeEnvelope, "signature">;
@@ -186,7 +229,7 @@ export function publishManifestOutcome(
     ...envelopeWithoutSignature,
     signature: signatureFor(payloadFor(envelopeWithoutSignature), secret),
   };
-  const finalPath = fileFor(dir, secret);
+  const finalPath = fileFor(dir, secret, operationId);
   try {
     mkdirSync(dir, { recursive: true, mode: 0o700 });
     if (partial === null) {
@@ -216,10 +259,16 @@ function parseEnvelope(raw: unknown, secret: string): ManifestOutcomeEnvelope | 
   const envelope = raw as Partial<ManifestOutcomeEnvelope>;
   if (
     envelope.version !== MANIFEST_OUTCOME_CHANNEL_VERSION ||
+    typeof envelope.operation_id !== "string" ||
+    envelope.operation_id.length === 0 ||
+    envelope.operation_id.length > MAX_OPERATION_ID_LENGTH ||
     typeof envelope.scope !== "string" ||
     envelope.scope.length === 0 ||
     envelope.scope.length > MAX_SCOPE_LENGTH ||
     typeof envelope.target !== "string" ||
+    typeof envelope.target_generation !== "number" ||
+    !Number.isSafeInteger(envelope.target_generation) ||
+    envelope.target_generation < 0 ||
     typeof envelope.updated !== "number" ||
     !Number.isFinite(envelope.updated) ||
     typeof envelope.signature !== "string" ||
@@ -232,8 +281,10 @@ function parseEnvelope(raw: unknown, secret: string): ManifestOutcomeEnvelope | 
   if (!target || target !== envelope.target) return null;
   const unsigned = {
     version: envelope.version,
+    operation_id: envelope.operation_id,
     scope: envelope.scope,
     target: envelope.target,
+    target_generation: envelope.target_generation,
     updated: envelope.updated,
     partial: copyPartial(envelope.partial ?? null),
   } satisfies Omit<ManifestOutcomeEnvelope, "signature">;
@@ -248,10 +299,24 @@ function parseEnvelope(raw: unknown, secret: string): ManifestOutcomeEnvelope | 
 
 /** Read only records authenticated by the orchestrator and bound to its
  * current target. Invalid, stale, or foreign-target records are ignored. */
-export function readPublishedManifestOutcomes(target: string): ManifestPartialInstall[] {
+export function readPublishedManifestOutcomes(
+  target: string,
+  scope: string,
+  targetGeneration: number,
+): ManifestPartialInstall[] {
   const cfg = readerConfig;
   const expectedTarget = canonicalManifestOutcomeTarget(target);
-  if (!cfg?.dir || !expectedTarget) return [];
+  const expectedScope = scope.trim();
+  if (
+    !cfg?.dir ||
+    !expectedTarget ||
+    !expectedScope ||
+    expectedScope.length > MAX_SCOPE_LENGTH ||
+    !Number.isSafeInteger(targetGeneration) ||
+    targetGeneration < 0
+  ) {
+    return [];
+  }
   let files: string[];
   try {
     files = readdirSync(cfg.dir).filter(
@@ -261,7 +326,13 @@ export function readPublishedManifestOutcomes(target: string): ManifestPartialIn
     return [];
   }
 
-  const secrets = [...cfg.secrets()].filter((secret) => typeof secret === "string" && secret.length > 0);
+  const credentials = [...cfg.credentials()].filter(
+    (credential): credential is ManifestOutcomeReaderCredential =>
+      typeof credential?.secret === "string" &&
+      credential.secret.length > 0 &&
+      typeof credential.scope === "string" &&
+      credential.scope === expectedScope,
+  );
   const out: Array<{ updated: number; partial: ManifestPartialInstall }> = [];
   for (const name of files.slice(0, 128)) {
     let text: string;
@@ -279,9 +350,15 @@ export function readPublishedManifestOutcomes(target: string): ManifestPartialIn
     } catch {
       continue;
     }
-    for (const secret of secrets) {
-      const envelope = parseEnvelope(raw, secret);
-      if (!envelope || envelope.target !== expectedTarget) continue;
+    for (const credential of credentials) {
+      const envelope = parseEnvelope(raw, credential.secret);
+      if (
+        !envelope ||
+        envelope.scope !== credential.scope ||
+        envelope.scope !== expectedScope ||
+        envelope.target !== expectedTarget ||
+        envelope.target_generation !== targetGeneration
+      ) continue;
       if (Date.now() - envelope.updated > MANIFEST_OUTCOME_TTL_MS) {
         try {
           rmSync(join(cfg.dir, name), { force: true });

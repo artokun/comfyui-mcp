@@ -548,7 +548,7 @@ describe("the wiring that makes the above reachable in production", () => {
   it("the loopback HTTP lane declares itself non-inheriting when it builds its ctx", () => {
     const src = read("../../orchestrator/panel-mcp-http.ts");
     expect(src).toMatch(
-      /registerPanelTools\(\s*server,\s*makePanelToolCtx\(bridge, tabId, workflowTargets, onRunTicketOpened, \{\s*inheritsUserMcpServers: false,\s*\}\),\s*\)/,
+      /registerPanelTools\(\s*server,\s*makePanelToolCtx\(bridge, tabId, workflowTargets, onRunTicketOpened, \{\s*inheritsUserMcpServers: false,[\s\S]*?\}\),\s*\)/,
     );
   });
 

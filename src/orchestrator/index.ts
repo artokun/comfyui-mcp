@@ -1340,6 +1340,15 @@ export async function runPanelOrchestrator(): Promise<void> {
   // whatever ComfyUI (local or a RunPod proxy) the browser is actually on. No
   // `connect <url>` needed.
   let comfyuiUrl = process.env.COMFYUI_URL ?? "http://127.0.0.1:8188";
+  // Queue-status annotations use this orchestrator-owned target state rather
+  // than re-reading config's mutable global URL inside a poll. Retarget events
+  // update it synchronously before any new child is spawned or status reply is
+  // annotated; a poll that crosses the update is rejected by its generation
+  // check in panel-tools.
+  let manifestOutcomeTarget = {
+    url: comfyuiUrl,
+    generation: getComfyuiTargetGeneration(),
+  };
   // Dead-target guard: a `connect` aimed at a TERMINATED pod (an old URL
   // recalled from shell history) otherwise looks perfectly alive — bridge up,
   // tunnel up — while its advertise goes to a dead host, so the panel never
@@ -1821,17 +1830,17 @@ export async function runPanelOrchestrator(): Promise<void> {
   // #2149 — a child may write to the shared progress directory, so its tab
   // identity must never come from request JSON. Capabilities are minted here,
   // injected into the child environment, and resolved only by this process.
-  const manifestOutcomeSecrets = new Set<string>();
+  const manifestOutcomeCredentials = new Map<string, { secret: string; scope: string }>();
   const manifestOutcomeSecretByAgent = new Map<string, string>();
   const manifestOutcomeSecretFor = (agentKey: string): string => {
     const existing = manifestOutcomeSecretByAgent.get(agentKey);
     if (existing) return existing;
     const secret = randomBytes(32).toString("hex");
     manifestOutcomeSecretByAgent.set(agentKey, secret);
-    manifestOutcomeSecrets.add(secret);
+    manifestOutcomeCredentials.set(agentKey, { secret, scope: agentKey });
     return secret;
   };
-  configureManifestOutcomeReader(progressDir, () => manifestOutcomeSecrets);
+  configureManifestOutcomeReader(progressDir, () => manifestOutcomeCredentials.values());
   const panelImageRelaySecrets = new Map<string, string>();
   const panelImageRelaySecretFor = (agentKey: string): string => {
     const existing = [...panelImageRelaySecrets.entries()].find(([, key]) => key === agentKey)?.[0];
@@ -2285,6 +2294,8 @@ export async function runPanelOrchestrator(): Promise<void> {
         "127.0.0.1",
         workflowTargets,
         (promptIds) => runCompletionWatchdog?.markTicketed(promptIds),
+        (panelTabId) => agentKeyFor(panelTabId),
+        () => manifestOutcomeTarget,
       );
     } catch (err) {
       logger.error(
@@ -2360,6 +2371,7 @@ export async function runPanelOrchestrator(): Promise<void> {
         // downloads resolved to nobody and the owning conversation stalled).
         // `tabId` here IS the agent key (the scope address the lane binds).
         COMFYUI_MCP_TAB: tabId,
+        COMFYUI_MCP_TARGET_GENERATION: String(getComfyuiTargetGeneration()),
         COMFYUI_MCP_MANIFEST_OUTCOME_SECRET: manifestOutcomeSecretFor(tabId),
         COMFYUI_MCP_RELAY_SECRET: panelImageRelaySecretFor(tabId),
         ...(panelImageRelayEndpoint ? { COMFYUI_MCP_RELAY_URL: panelImageRelayEndpoint } : {}),
@@ -2702,6 +2714,7 @@ export async function runPanelOrchestrator(): Promise<void> {
         COMFYUI_URL: comfyuiUrl,
         // Where download_model writes live progress for the panel tray.
         COMFYUI_MCP_PROGRESS_DIR: progressDir,
+        COMFYUI_MCP_TARGET_GENERATION: String(getComfyuiTargetGeneration()),
         // Self-scope downloads to the owning CONVERSATION (#547/#884) — the
         // child stamps its own COMFYUI_MCP_TAB into each progress row, and the
         // settle path resolves an agent-key-shaped stamp directly.
@@ -2750,6 +2763,7 @@ export async function runPanelOrchestrator(): Promise<void> {
             key,
             workflowTargets,
             (promptIds) => runCompletionWatchdog?.markTicketed(promptIds),
+            () => manifestOutcomeTarget,
           )
         : undefined,
     mcpServers: buildMcpServers(),
@@ -6882,6 +6896,10 @@ export async function runPanelOrchestrator(): Promise<void> {
   // a fresh tab knows the host without waiting for a switch.
   let lastRetargetUrl: string | null = comfyuiUrl; // seeded: a first same-URL event must not restart everything
   onComfyuiTargetChanged((url, isLocal) => {
+    manifestOutcomeTarget = {
+      url,
+      generation: getComfyuiTargetGeneration(),
+    };
     // ANY target event — a change OR a reaffirmation of the current target —
     // supersedes ALL pending auto-connects (codex findings: direct
     // setComfyuiTarget callers bypass applyComfyuiUrl, and an explicit
