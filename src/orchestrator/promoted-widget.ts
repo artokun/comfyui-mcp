@@ -101,6 +101,12 @@ export type AmbiguousPromotedWidgetRefusal = {
   matches: number;
 };
 
+/** Panel warning when an inner write landed on a link-driven widget. The stored
+ *  value is verified, but the enclosing subgraph input is what actually renders. */
+export type LinkDrivenPromotedWriteWarning = {
+  widget: string;
+};
+
 export type SubgraphScopeRefusal = {
   nodeId: string;
   enterPath: string[];
@@ -112,6 +118,9 @@ const CONTRADICTORY_RE =
 const AMBIGUOUS_RE =
   /(?:panel_set_widget refused "([^"]+)" on node (\S+)[\s\S]*?)?promoted widget "([^"]+)" is ambiguous\s*[—-]\s*(\d+)\s+promoted inputs? match/i;
 
+const LINK_DRIVEN_RE =
+  /will NOT change the render[\s\S]*widget "([^"]+)" on inner node is link-driven[\s\S]*ENCLOSING subgraph node/i;
+
 const SCOPED_NODE_RE = /No node with id (\S+) in the current graph[\s\S]*?lives INSIDE a subgraph/i;
 const ENTER_PATH_RE = /panel_enter_subgraph\((?:node_id=)?\s*([^)]+)\)/gi;
 
@@ -121,6 +130,21 @@ export function matchListedName(wanted: string, listed: readonly string[]): stri
   if (listed.includes(wanted)) return wanted;
   const ci = listed.filter((n) => n.toLowerCase() === wanted.toLowerCase());
   return ci.length === 1 ? ci[0] : null;
+}
+
+/**
+ * Parse the panel's link-driven inner-write warning. Null unless the write was
+ * verified AND the panel named the enclosing subgraph node as the durable target.
+ * A success that does not carry both halves is left alone — that is often a
+ * genuine inner widget, not a promoted input.
+ */
+export function parseLinkDrivenPromotedWriteWarning(
+  text: string,
+): LinkDrivenPromotedWriteWarning | null {
+  const m = LINK_DRIVEN_RE.exec(text);
+  if (!m) return null;
+  const widget = m[1];
+  return widget ? { widget } : null;
 }
 
 /**
@@ -203,6 +227,29 @@ export function parseContradictoryPromotedWidgetRefusal(
   const widget =
     requestedWidget != null ? (matchListedName(requestedWidget, listed) ?? fromError) : fromError;
   return { nodeId: m[1].replace(/[,:]$/, ""), widget, listed };
+}
+
+function terminalEntryMatchesDisplayedWidget(
+  entry: PromotedTerminalEntry,
+  displayedWidget: string,
+): boolean {
+  const wanted = displayedWidget.toLowerCase();
+  if (entry.widget.toLowerCase() === wanted) return true;
+  if (entry.immediateWidget && entry.immediateWidget.toLowerCase() === wanted) return true;
+  return entry.terminal?.widget.toLowerCase() === wanted;
+}
+
+function selectPromotedTerminalEntries(
+  entries: readonly PromotedTerminalEntry[],
+  displayedWidget: string,
+): PromotedTerminalEntry[] {
+  const wanted = displayedWidget.toLowerCase();
+  const byHostAlias = entries.filter((entry) => entry.widget.toLowerCase() === wanted);
+  // Prefer the host/displayed alias. Inner/terminal names are only consulted
+  // when no host alias matches, so a duplicated unrelated alias that happens
+  // to carry the same immediate widget cannot veto this write (#2393 vs #2488).
+  if (byHostAlias.length > 0) return byHostAlias;
+  return entries.filter((entry) => terminalEntryMatchesDisplayedWidget(entry, displayedWidget));
 }
 
 function widgetNamesOnInner(node: Record<string, unknown>): string[] {
@@ -560,9 +607,10 @@ export function resolveInnerPromotedTarget(
     // relation. Prefer it over the legacy same-name scan: renamed outer and
     // intermediate aliases are valid addresses, while the inner node summary
     // intentionally contains only the concrete widget's programmatic name.
-    const entries = promotedTerminals.filter(
-      (entry) => entry.widget.toLowerCase() === displayedWidget.toLowerCase(),
-    );
+    // #2488 — the caller may address the host with either the displayed alias
+    // (`frame_counts`) or the inner programmatic name (`length`). Both names
+    // identify the same unique promotion; uniqueness is still required.
+    const entries = selectPromotedTerminalEntries(promotedTerminals, displayedWidget);
     if (entries.length !== 1) return null;
     const entry = entries[0];
     // A complete own-entry is still the preferred mapping. An incomplete own-entry
