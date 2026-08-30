@@ -416,6 +416,7 @@ describe("applyManifest", () => {
       expect.any(Function), // onLanded callback — commits done synchronously at the destination rename (#515)
       expect.any(Function), // onDownloadRoute callback — records the download-only network route
       expect.any(Function), // onStagedPartialPath callback — persists the writer's cache identity (#2356)
+      undefined, // optional explicit model root for multi-root installs (#2499)
     );
   });
 
@@ -889,6 +890,7 @@ describe("applyManifest", () => {
       expect.any(Function), // onLanded callback — commits done synchronously at the destination rename (#515)
       expect.any(Function), // onDownloadRoute callback — records the download-only network route
       expect.any(Function), // onStagedPartialPath callback — persists the writer's cache identity (#2356)
+      undefined, // optional explicit model root for multi-root installs (#2499)
     );
     expect(String(downloadModelMock.mock.calls[0]?.[1]).replaceAll("\\", "/")).toBe(
       "checkpoints/foo",
@@ -923,6 +925,7 @@ describe("applyManifest", () => {
       expect.any(Function), // onLanded callback — commits done synchronously at the destination rename (#515)
       expect.any(Function), // onDownloadRoute callback — records the download-only network route
       expect.any(Function), // onStagedPartialPath callback — persists the writer's cache identity (#2356)
+      undefined, // optional explicit model root for multi-root installs (#2499)
     );
   });
 
