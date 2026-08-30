@@ -16,7 +16,25 @@ const OPENAI_CODEX_CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann";
 const OPENAI_OAUTH_TOKEN_URL = "https://auth.openai.com/oauth/token";
 
 const KIMI_CODE_CLIENT_ID = "17e5f671-d194-4dfb-9706-5516cb48c098";
-const KIMI_OAUTH_TOKEN_URL = "https://api.kimi.com/oauth/token";
+/**
+ * Kimi Code's OAuth token endpoint, per REGION (#2534).
+ *
+ * The old constant was `https://api.kimi.com/oauth/token`, which does not exist
+ * — it answers 404 from nginx, so EVERY refresh failed and a Connect landing
+ * inside the 15-minute token's refresh skew (which is most of them) reported
+ * "Kimi Code OAuth refresh failed (404)". The token host is a DIFFERENT host
+ * from the coding API host: `auth.kimi.*`, not `api.kimi.*`, and the path is
+ * `/api/oauth/token`, not `/oauth/token`.
+ *
+ * Verified against both endpoints with the client_id below and this function's
+ * exact form-encoded body: a bogus refresh_token returns
+ * `400 {"error":"invalid_grant"}`, which is the endpoint accepting the grant
+ * TYPE and rejecting only the token — the proof that the request shape is right.
+ * (The same probe sent as JSON returns `unsupported_grant_type`; the body here
+ * is URLSearchParams, so this path was always correctly encoded.)
+ */
+const KIMI_OAUTH_TOKEN_URL_MAINLAND = "https://auth.kimi.com/api/oauth/token";
+const KIMI_OAUTH_TOKEN_URL_GLOBAL = "https://auth.kimi.ai/api/oauth/token";
 
 export const GLM_CODE_DEFAULT_BASE = "https://api.z.ai/api/coding/paas/v4";
 export const KIMI_CODE_DEFAULT_BASE = "https://api.kimi.com/coding/v1";
@@ -247,8 +265,47 @@ async function refreshOpenAICodexTokens(
   return { access_token: access, refresh_token: payload.refresh_token?.trim() };
 }
 
+/**
+ * Which regional OAuth host serves this install (#2534).
+ *
+ * The Kimi Code CLI writes its region beside `credentials/` — `mainland-cn` on
+ * the reporter's machine — and splits every host on it: `api.kimi.com` +
+ * `auth.kimi.com` for mainland, `api.kimi.ai` + `auth.kimi.ai` for global. The
+ * region file is read from the SAME install directory the credentials were read
+ * from, so a KIMI_CODE_HOME / KIMI_SHARE_DIR override cannot pair one install's
+ * tokens with another's region.
+ *
+ * Falls back to the coding base URL's host, which carries the same split and
+ * honours COMFYUI_MCP_KIMI_BASE_URL, and finally to mainland — the region of
+ * KIMI_CODE_DEFAULT_BASE, so an install with neither signal keeps today's host.
+ */
+function kimiOAuthTokenUrl(authPath: string, baseUrl: string): string {
+  const regionFile = join(dirname(dirname(authPath)), "region");
+  try {
+    if (existsSync(regionFile)) {
+      const region = readFileSync(regionFile, "utf8").trim().toLowerCase();
+      // Match on "cn" rather than the exact string: the CLI's value is
+      // `mainland-cn`, and anything else it may write for the global region
+      // (`global`, `intl`, …) is not enumerable from here. A non-empty region
+      // that is not mainland is global.
+      if (region) return region.includes("cn") ? KIMI_OAUTH_TOKEN_URL_MAINLAND : KIMI_OAUTH_TOKEN_URL_GLOBAL;
+    }
+  } catch {
+    // Unreadable region file — fall through to the base-URL reading below.
+  }
+  let host = "";
+  try {
+    host = new URL(baseUrl).hostname.toLowerCase();
+  } catch {
+    /* malformed override — treated as no signal */
+  }
+  if (host.endsWith("kimi.ai")) return KIMI_OAUTH_TOKEN_URL_GLOBAL;
+  return KIMI_OAUTH_TOKEN_URL_MAINLAND;
+}
+
 async function refreshKimiCodeTokens(
   refreshToken: string,
+  tokenUrl: string,
   deps: CodeProviderAuthDeps,
 ): Promise<KimiCodeAuthFile> {
   const fetchFn = deps.fetch ?? fetch;
@@ -257,7 +314,7 @@ async function refreshKimiCodeTokens(
     refresh_token: refreshToken,
     client_id: KIMI_CODE_CLIENT_ID,
   });
-  const res = await fetchFn(KIMI_OAUTH_TOKEN_URL, {
+  const res = await fetchFn(tokenUrl, {
     method: "POST",
     headers: {
       Accept: "application/json",
@@ -637,7 +694,7 @@ export async function resolveKimiCodeOAuth(
     if (!refreshToken) {
       throw new ValidationError("Kimi Code access token expired and refresh_token is missing. Re-run Kimi Code login.");
     }
-    creds = await refreshKimiCodeTokens(refreshToken, deps);
+    creds = await refreshKimiCodeTokens(refreshToken, kimiOAuthTokenUrl(path, baseUrl), deps);
     await atomicWriteJson(path, creds);
   }
 

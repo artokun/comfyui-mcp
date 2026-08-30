@@ -771,6 +771,34 @@ export class OllamaBackend implements AgentBackend {
     return this.apiKey ? { authorization: `Bearer ${this.apiKey}` } : {};
   }
 
+  /**
+   * This backend's default sampling temperature, or `undefined` to send none
+   * and let the endpoint choose (#2535).
+   *
+   * Base default is 0 — the tool-precision recipe used everywhere else. Hosted
+   * OpenAI-compatible endpoints may REFUSE it: Kimi's K3 answers
+   * `400 invalid temperature: only 1 is allowed for this model`, which made that
+   * backend unusable. Overriding per backend is what keeps that from being
+   * settled by the shared COMFYUI_MCP_OLLAMA_TEMPERATURE knob, which is global
+   * and would trade one backend's breakage for local Ollama's tool precision.
+   */
+  protected defaultTemperature(): number | undefined {
+    return 0;
+  }
+
+  /** The `temperature` field to spread into a chat body, or nothing at all. */
+  private temperatureField(): { temperature?: number } {
+    const override = process.env.COMFYUI_MCP_OLLAMA_TEMPERATURE?.trim();
+    if (override) {
+      const n = Number(override);
+      // A non-numeric override must not become `temperature: NaN`, which
+      // serialises to null and is rejected by strict endpoints.
+      if (Number.isFinite(n)) return { temperature: n };
+    }
+    const fallback = this.defaultTemperature();
+    return fallback === undefined ? {} : { temperature: fallback };
+  }
+
   /** True for our fine-tuned ladder (artokun/gemma4-comfyui-mcp:*), whose
    *  Ollama tags bake num_ctx 65536 into the Modelfile. */
   private isFinetune(): boolean {
@@ -1235,9 +1263,12 @@ export class OllamaBackend implements AgentBackend {
                 // default (LM Studio serving a raw GGUF) otherwise sample at
                 // ~0.8, where small models nondeterministically emit an EMPTY
                 // final message after tool results (found live on e2b).
-                temperature: process.env.COMFYUI_MCP_OLLAMA_TEMPERATURE
-                  ? Number(process.env.COMFYUI_MCP_OLLAMA_TEMPERATURE)
-                  : 0,
+                //
+                // …but the pin is not universal, so the DEFAULT is per-backend
+                // and the key is omitted entirely when there is none (#2535).
+                // An explicit COMFYUI_MCP_OLLAMA_TEMPERATURE still wins for
+                // every backend: it is a deliberate operator instruction.
+                ...this.temperatureField(),
               }),
               signal,
             })
