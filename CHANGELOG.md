@@ -10,6 +10,7 @@ All notable changes to this project are documented here. This project adheres to
 
 #### Fixed
 - panel_set_todo reconciles a missing ACK with a todo read-back and mutation receipt instead of leaving the outcome as a guess (#2481)
+- recognise ComfyUI Desktop-2 (`Comfy Desktop.exe` under `Programs/ComfyUI`, `.comfyui-desktop-2` / `.launcher/snapshots`, parent process) so `restart_comfyui action:"stop"` records a start path and does not report `stopped:false` when the server is already gone (#2482)
 
 ## [0.52.149] - 2026-08-30
 
