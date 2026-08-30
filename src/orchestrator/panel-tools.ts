@@ -77,7 +77,13 @@ import {
   type WorkflowListReadinessRefusal,
 } from "../services/panel-workflow-readiness.js";
 import { isPreExecutorRefusal } from "../services/panel-refusal.js";
-import { unexposeHostLinkShiftNote } from "../services/unexpose-host-link-shift.js";
+import {
+  hostLinksAlreadyReindexed,
+  isLandedUnexpose,
+  laterSlotsAfterUnexpose,
+  laterSlotsFromUnexposePayload,
+  unexposeHostLinkShiftNote,
+} from "../services/unexpose-host-link-shift.js";
 import {
   assertScreenshotPersistAllowed,
   decodePngBase64,
@@ -586,11 +592,27 @@ export function appendReplyNote(res: ToolResult, note: string): ToolResult {
  * #2437 — remaining host links after unexpose are positional and not re-pointed.
  * A post-removal snapshot of `node.inputs[i].link` cannot see the bug, so this
  * attaches the a-priori repair (reconnect by name) to a landed `removed` reply.
- * Refusals and unparseable bodies are left alone.
+ * Refusals, reindexed replies (#2473), and a last-slot removal (#2491) are
+ * left alone. An unknown later list still warns — skipping on "we did not look"
+ * is how the original reporter queued a broken graph.
  */
-function withUnexposeHostLinkShiftNote(res: ToolResult): ToolResult {
+async function withUnexposeHostLinkShiftNote(
+  res: ToolResult,
+  ctx: PanelToolCtx,
+): Promise<ToolResult> {
   if (res.isError) return res;
-  const note = unexposeHostLinkShiftNote(parseToolResultJson(res));
+  const payload = parseToolResultJson(res);
+  let remainingGraph: Record<string, unknown> | null = null;
+  if (
+    isLandedUnexpose(payload) &&
+    !hostLinksAlreadyReindexed(payload) &&
+    laterSlotsFromUnexposePayload(payload) === undefined
+  ) {
+    // Cheapest graph_query still carries `rails` while inside a subgraph.
+    const probe = await ctx.call({ cmd: "graph_query", fields: "ids", limit: 1 }, 8000);
+    if (!probe.isError) remainingGraph = parseToolResultJson(probe);
+  }
+  const note = unexposeHostLinkShiftNote(payload, laterSlotsAfterUnexpose(payload, remainingGraph));
   return note ? appendReplyNote(res, note) : res;
 }
 
@@ -23206,7 +23228,7 @@ CHECKED FOR YOU: the graph read this message prescribes was just run, and it ` +
       },
       async (args: A, ctx) => {
         const res = await ctx.call({ cmd: "graph_unexpose_subgraph_output", name: args.name }, 15000);
-        return withUnexposeHostLinkShiftNote(res);
+        return withUnexposeHostLinkShiftNote(res, ctx);
       },
     ),
     def(
@@ -23217,7 +23239,7 @@ CHECKED FOR YOU: the graph read this message prescribes was just run, and it ` +
       },
       async (args: A, ctx) => {
         const res = await ctx.call({ cmd: "graph_unexpose_subgraph_input", name: args.name }, 15000);
-        return withUnexposeHostLinkShiftNote(res);
+        return withUnexposeHostLinkShiftNote(res, ctx);
       },
     ),
     def(
