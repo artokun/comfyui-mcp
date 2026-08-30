@@ -50,12 +50,12 @@ function toolText(res: ToolResultLike): string {
   return res.content.map((c) => (c.type === "text" ? (c.text ?? "") : "")).join("\n");
 }
 
-function parseJsonPayload(res: ToolResultLike): unknown {
+function parseJsonPayload(res: ToolResultLike): Record<string, unknown> | null {
   if (res.isError) return null;
   const text = res.content.find((c) => c.type === "text")?.text;
   if (typeof text !== "string") return null;
   try {
-    return JSON.parse(text) as unknown;
+    return asRecord(JSON.parse(text));
   } catch {
     return null;
   }
