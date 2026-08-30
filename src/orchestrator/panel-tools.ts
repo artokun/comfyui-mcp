@@ -10712,6 +10712,70 @@ function responseWorkflowUuid(value: unknown): string | undefined {
   return WORKFLOW_UUID_RE.test(raw) ? raw : undefined;
 }
 
+/**
+ * #2483 — the two sides of a workflow-instance mismatch, as the panel names them.
+ *
+ * "issued for" is the stamp the command carried (expected); "active canvas reports"
+ * is what the panel compared it against (observed). Older or shorter refusals omit
+ * one or both; the caller fills those from the session fence / a live probe rather
+ * than inventing values.
+ */
+function workflowInstanceIdsFromMismatchMessage(raw: string): {
+  expected: string | null;
+  observed: string | null;
+} {
+  const expected =
+    /this command was issued for workflow instance ([0-9a-f-]{36})/i.exec(raw)?.[1] ?? null;
+  const observed =
+    /the active canvas reports ([0-9a-f-]{36})/i.exec(raw)?.[1] ?? null;
+  return { expected, observed };
+}
+
+function instanceIdsDiagnostic(expected: string | null, observed: string | null): string {
+  return `instance expected=${expected ?? "unknown"} observed=${observed ?? "unknown"}`;
+}
+
+/**
+ * A successful graph_query is proof the current instance is readable on this tab.
+ * A payload that names a DIFFERENT workflow_uuid is not — that would be reading
+ * someone else's graph. No uuid on the reply is still proof: the panel accepted
+ * the fenced query, and query is the read the reporter already saw succeed.
+ */
+function graphQueryProvesCurrentInstance(
+  payload: unknown,
+  expectedUuid: string | null,
+): boolean {
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) return false;
+  const rec = payload as Record<string, unknown>;
+  if (typeof rec.error === "string" && rec.error.length > 0) return false;
+  const uuid = responseWorkflowUuid(rec);
+  if (!uuid || !expectedUuid) return true;
+  return uuid === expectedUuid;
+}
+
+/**
+ * Tab identity for the #2483 outline retry: same routing id, and the same
+ * connection generation when the bridge exposes one. Lightweight test ctxs
+ * have no generation; for those the tab id is the identity. A generation that
+ * WAS readable at refusal and then moved (or became unreadable) is a reconnect
+ * or tab replace — not the post-save race this retry covers.
+ */
+function sameTabIdentityForOutlineRetry(
+  ctx: PanelToolCtx,
+  tabAtRefusal: string,
+  identityAtRefusal: { generation: number; tabSessionId: string } | undefined,
+): boolean {
+  if (ctx.tabId !== tabAtRefusal) return false;
+  if (!isUsablePanelConnectionIdentity(identityAtRefusal)) return true;
+  let now: { generation: number; tabSessionId: string } | undefined;
+  try {
+    now = ctx.panelConnectionIdentity?.();
+  } catch {
+    return false;
+  }
+  return isUsablePanelConnectionIdentity(now) && samePanelConnectionIdentity(identityAtRefusal, now);
+}
+
 /** Refresh only the bridge-owned command stamp, never caller data. */
 /** #1656 — tell the orchestrator that a live read confirmed the routed tab's CURRENT
  *  stamp, so a value inherited on a same-socket re-hello stops being treated as
@@ -15800,10 +15864,54 @@ export function makePanelToolCtx(
         const refusedLead = inertRead
           ? `${name} was refused before it ran — no graph data was read.`
           : `${name} was refused before it ran — nothing was applied.`;
+        // #2483 — outline can lag a post-save instance/generation flip while a
+        // fresh graph_query already reads the same tab. Retry the inert outline
+        // ONCE when tab identity is unchanged and that query proves the current
+        // instance. sendRouted, not ctx.call: a nested mismatch diagnosis on the
+        // probe would recurse into this branch. Unstamped reads keep the #1519
+        // mint path; this is the stamped (and unstated) race after save.
+        if (
+          options?.retry !== false &&
+          name === "graph_outline" &&
+          inertRead &&
+          shape !== "unstamped"
+        ) {
+          const tabAtRefusal = ctx.tabId;
+          let identityAtRefusal: { generation: number; tabSessionId: string } | undefined;
+          try {
+            identityAtRefusal = ctx.panelConnectionIdentity?.();
+          } catch {
+            identityAtRefusal = undefined;
+          }
+          const fenceAtRefusal = currentWorkflowFence(ctx);
+          const expectedUuid =
+            stamped ?? (fenceAtRefusal.known ? fenceAtRefusal.uuid ?? null : null);
+          try {
+            const proved = await sendRouted(
+              { cmd: "graph_query", fields: "ids", limit: 1 },
+              Math.min(timeoutMs ?? 8000, 8000),
+            );
+            if (
+              sameTabIdentityForOutlineRetry(ctx, tabAtRefusal, identityAtRefusal) &&
+              graphQueryProvesCurrentInstance(proved, expectedUuid)
+            ) {
+              const fenceNow = currentWorkflowFence(ctx);
+              if (fenceNow.known && fenceNow.uuid) corroborateTabStamp(ctx, fenceNow.uuid);
+              const retried = ok(await sendRouted(cmd, timeoutMs, observeRid));
+              if (successProvesSwitchCleared(cmd.cmd)) clearSwitchHold(ctx.tabId);
+              return retried;
+            }
+          } catch {
+            // query refused, tab moved, or the outline retry still mismatched —
+            // fall through to the existing diagnosis, with both instance ids named.
+          }
+        }
         let verdict: string;
+        let liveForIds: string | null = null;
         try {
           const probe = await rebindWorkflowFence(ctx, { adopt: false });
           const live = "uuid" in probe ? probe.uuid : null;
+          liveForIds = typeof live === "string" ? live : null;
           const priorAbsent =
             "before" in probe && probe.before.known === true && !probe.before.uuid;
           const admitUnstampedRead =
@@ -15924,7 +16032,18 @@ export function makePanelToolCtx(
             `refusal stands on its own terms and the fence is unchanged. ` +
             `(${probeErr instanceof Error ? probeErr.message : String(probeErr)})`;
         }
-        return fail(`${refusedLead} ${raw}${verdict}`);
+        const fromRefusal = workflowInstanceIdsFromMismatchMessage(raw);
+        const fenceForIds = currentWorkflowFence(ctx);
+        const expectedId =
+          fromRefusal.expected ??
+          stamped ??
+          (fenceForIds.known ? fenceForIds.uuid ?? null : null);
+        const observedId = fromRefusal.observed ?? liveForIds;
+        const idsNote =
+          expectedId || observedId
+            ? `\n\n${instanceIdsDiagnostic(expectedId, observedId)}`
+            : "";
+        return fail(`${refusedLead} ${raw}${verdict}${idsNote}`);
       }
       // #1480 — NAME A REMEDY THE TAB CAN ACTUALLY ACCEPT.
       //
