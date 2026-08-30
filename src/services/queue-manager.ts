@@ -53,6 +53,10 @@ export interface JobStatus {
   running: boolean;
   pending: boolean;
   done: boolean;
+  /** Present only as `false`: neither running nor queued, and a successful
+   *  /history read found no record of the prompt — so `done` is not a
+   *  completion. Omitted in every other reply (#2507). */
+  found?: boolean;
   status_str?: string;
   error?: ExecutionErrorDetails;
   execution_stats?: ExecutionStats;
@@ -64,6 +68,8 @@ export interface JobStatus {
    *  because ComfyUI `/history` was unreachable from this process (#2532). */
   done_from?: "local_cache";
   note?: string;
+  /** Narrates the `found:false` reply — what to check instead of waiting. */
+  message?: string;
 }
 
 /** True when history enrichment failed because the headless target (and any
@@ -305,7 +311,23 @@ export async function getJobStatus(
   try {
     const history = await getHistory(promptId);
     const entry = history[promptId];
-    if (!entry) return status;
+    if (!entry) {
+      // Both reads answered and neither has seen this prompt — not a
+      // completion. `done = !running && !pending` used to call a lost job
+      // (restart wipe, mistyped id) finished. Absence is only claimed on a
+      // read that succeeded; a failed history read falls to the catch.
+      return {
+        running: false,
+        pending: false,
+        done: false,
+        found: false,
+        message:
+          `ComfyUI has no record of this prompt — not running, not queued, and absent ` +
+          `from /history. It may have been lost to a restart or was never queued. Do not ` +
+          `wait for outputs; verify with get_history (action:"diagnose") and ` +
+          `get_image (action:"list_outputs").`,
+      };
+    }
 
     const analysis = analyzeHistoryEntry(entry);
     return {

@@ -6,6 +6,11 @@ All notable changes to this project are documented here. This project adheres to
 
 ## Unreleased
 
+### MCP
+
+#### Fixed
+- queue action:"status" confirms an idle prompt against /history before calling it done, and does not report a completed run when ComfyUI has no record of it (#2507)
+
 ## [0.52.161] - 2026-08-30
 
 ### MCP
