@@ -6,6 +6,12 @@ All notable changes to this project are documented here. This project adheres to
 
 ## Unreleased
 
+### MCP
+
+#### Fixed
+- panel_strip_workflow applies live capturedWidgetValues to promoted subgraph widgets instead of stale definition defaults (#2522)
+
+
 ## [0.52.156] - 2026-08-30
 
 ### MCP

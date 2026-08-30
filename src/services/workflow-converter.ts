@@ -1848,9 +1848,14 @@ function expandSingleComponent(
   const proxyWidgets: [string, string][] = Array.isArray(compNode.properties?.proxyWidgets)
     ? (compNode.properties!.proxyWidgets as [string, string][])
     : [];
-  // Typed `unknown` on purpose: `widgets_values` is declared as an array, but the
-  // name-keyed capture below arrives in the same field as a plain object.
-  const rawWidgetValues: unknown = compNode.widgets_values ?? [];
+  // Typed `unknown` on purpose: `widgets_values` is declared as an array, but a
+  // name-keyed capture arrives as a plain object. Prefer capturedWidgetValues
+  // (the live-canvas overlay) over widgets_values — the same preference the
+  // main converter uses — because graph_get_state puts current name-keyed
+  // values in the former and leaves the latter as the serialized snapshot,
+  // which for a subgraph instance is often STALE (#2522).
+  const rawWidgetValues: unknown =
+    compNode.capturedWidgetValues ?? compNode.widgets_values ?? [];
   // A subgraph instance normally serializes its promoted values POSITIONALLY,
   // parallel to proxyWidgets. Some captures key every widget BY NAME instead (the
   // shape the main converter already accepts). Read both, or a name-keyed capture
