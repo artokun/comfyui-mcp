@@ -10,6 +10,12 @@ import {
   isRemoteMode,
 } from "../config.js";
 import { getClient, getLogs, getSystemStats, comfyApiFetch } from "../comfyui/client.js";
+import { isComfyTransportFailure } from "../comfyui/fetch.js";
+import {
+  requestPanelComfyUIRead,
+  type PanelComfyUIReadOperation,
+  type PanelComfyUIReadSuccess,
+} from "./panel-image-relay.js";
 import { getExtraModelRoots, getLiveExtraModelRoots } from "./extra-paths.js";
 import {
   liveRootFromArgv,
@@ -390,6 +396,56 @@ function makeModelDeduper(): { add: (category: string, name: string) => boolean 
   };
 }
 
+const MODELS_TRANSPORT_CODES = new Set([
+  "EHOSTUNREACH",
+  "ENETUNREACH",
+  "ECONNREFUSED",
+  "ENOTFOUND",
+  "EAI_AGAIN",
+  "ECONNRESET",
+]);
+
+function isModelsTransportFailure(err: unknown): boolean {
+  if (isComfyTransportFailure(err)) return true;
+  const seen = new Set<unknown>();
+  let current: unknown = err;
+  while (current instanceof Error && !seen.has(current)) {
+    const code = "code" in current ? current.code : undefined;
+    if (typeof code === "string" && MODELS_TRANSPORT_CODES.has(code)) return true;
+    if (/\b(EHOSTUNREACH|ENETUNREACH|ECONNREFUSED)\b/.test(current.message)) return true;
+    seen.add(current);
+    current = "cause" in current ? current.cause : undefined;
+  }
+  return false;
+}
+
+function modelsReadOperationFor(path: string): PanelComfyUIReadOperation | undefined {
+  if (path === "/models") return "models";
+  const match = /^\/models\/([A-Za-z0-9][A-Za-z0-9._-]{0,63})$/.exec(path);
+  if (!match) return undefined;
+  return `models/${match[1]}`;
+}
+
+function panelModelsResponse(read: PanelComfyUIReadSuccess): Response {
+  const headers = new Headers();
+  if (read.contentType) headers.set("content-type", read.contentType);
+  return new Response(read.body, { status: 200, headers });
+}
+
+/** Headless `/models` first; on transport failure, the #2283 panel read relay. */
+async function fetchModelsRoute(path: string): Promise<Response> {
+  try {
+    return await comfyApiFetch(path);
+  } catch (err) {
+    if (!isModelsTransportFailure(err)) throw err;
+    const operation = modelsReadOperationFor(path);
+    if (!operation) throw err;
+    const relayed = await requestPanelComfyUIRead(operation);
+    if (!relayed) throw err;
+    return panelModelsResponse(relayed);
+  }
+}
+
 /**
  * Weight-file extensions. The gate that makes discovering the WHOLE registry
  * safe (#962).
@@ -423,7 +479,7 @@ async function discoverExtraCategories(
   client: ReturnType<typeof getClient>,
 ): Promise<string[]> {
   try {
-    const res = await comfyApiFetch("/models");
+    const res = await fetchModelsRoute("/models");
     if (!res.ok) return [];
     const json = (await res.json()) as unknown;
     if (!Array.isArray(json)) return [];
@@ -669,7 +725,7 @@ export async function listLocalModelsWithCoverage(
  */
 async function otherRegisteredCategories(asked: string): Promise<string[] | undefined> {
   try {
-    const res = await comfyApiFetch("/models");
+    const res = await fetchModelsRoute("/models");
     if (!res.ok) return undefined;
     const json = (await res.json()) as unknown;
     if (!Array.isArray(json)) return undefined;
@@ -733,7 +789,7 @@ async function collectLocalModels(
     const dedup = makeModelDeduper();
     for (const dir of dirsToScan) {
       try {
-        const res = await comfyApiFetch(`/models/${dir}`);
+        const res = await fetchModelsRoute(`/models/${dir}`);
         if (refuseStaleModelListing(target, coverage)) return [];
         // A non-OK status or a non-array body means we did NOT learn what this
         // category holds. Recording the reason is the whole point: continuing

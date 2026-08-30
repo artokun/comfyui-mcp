@@ -28,6 +28,7 @@ import {
   startPanelImageRelayServer,
   verifyPanelImageRelayCapability,
   verifyPanelComfyUIReadRelayCapability,
+  isPanelComfyUIReadOperation,
   type PanelComfyUIReadRelayRequest,
   type PanelImageRelayRequest,
 } from "../../services/panel-image-relay.js";
@@ -782,6 +783,47 @@ describe("authenticated loopback panel image relay", () => {
       }
     },
   );
+
+  it("relays models/checkpoints without widening the object_info contract", async () => {
+    expect(isPanelComfyUIReadOperation("models")).toBe(true);
+    expect(isPanelComfyUIReadOperation("models/checkpoints")).toBe(true);
+    expect(isPanelComfyUIReadOperation("models/../object_info")).toBe(false);
+    expect(isPanelComfyUIReadOperation("object_info")).toBe(true);
+    const seen: Array<{ cmd: string; operation?: string }> = [];
+    const body = JSON.stringify(["remote-ckpt.safetensors"]);
+    const server = await startPanelImageRelayServer({
+      resolvePanelAgent: (value) =>
+        "operation" in value && verifyPanelComfyUIReadRelayCapability(SECRET, value)
+          ? { agentKey: "orchestrator::claude", secret: SECRET }
+          : undefined,
+      resolvePanelTab: () => "panel-tab",
+      bridge: {
+        canReach: () => true,
+        send: async (command) => {
+          seen.push(command);
+          return {
+            operation: "models/checkpoints",
+            body,
+            contentType: "application/json",
+            bytes: Buffer.byteLength(body, "utf8"),
+          };
+        },
+      },
+    });
+    try {
+      process.env.COMFYUI_MCP_RELAY_SECRET = SECRET;
+      process.env.COMFYUI_MCP_RELAY_URL = server.endpointUrl;
+      await expect(requestPanelComfyUIRead("models/checkpoints")).resolves.toEqual({
+        operation: "models/checkpoints",
+        body,
+        contentType: "application/json",
+        bytes: Buffer.byteLength(body, "utf8"),
+      });
+      expect(seen).toEqual([{ cmd: "fetch_comfyui_read", operation: "models/checkpoints" }]);
+    } finally {
+      await server.close();
+    }
+  });
 
   it("rejects an invalid viewing witness instead of widening the read contract", async () => {
     const body = JSON.stringify({ KSampler: { input: { required: {} } } });

@@ -41,11 +41,25 @@ const RELAY_ID_RE = /^[A-Za-z0-9_-]{16,80}$/;
 const RELAY_CAPABILITY_RE = /^[a-f0-9]{64}$/;
 const RELAY_SECRET_RE = /^[a-f0-9]{64}$/;
 const IMAGE_TYPES = new Set<PanelImageType>(["output", "input", "temp"]);
-const READ_OPERATIONS = new Set<PanelComfyUIReadOperation>(["history", "system_stats", "logs", "object_info"]);
+const FIXED_READ_OPERATIONS = new Set<string>(["history", "system_stats", "logs", "object_info", "models"]);
+const MODELS_FOLDER_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
 const MIME_RE = /^[A-Za-z0-9][A-Za-z0-9!#$&^_.+-]{0,62}\/[A-Za-z0-9][A-Za-z0-9!#$&^_.+-]{0,62}$/;
 
 export type PanelImageType = "output" | "input" | "temp";
-export type PanelComfyUIReadOperation = "history" | "system_stats" | "logs" | "object_info";
+export type PanelComfyUIReadOperation =
+  | "history"
+  | "system_stats"
+  | "logs"
+  | "object_info"
+  | "models"
+  | `models/${string}`;
+
+/** Closed allowlist: the four diagnostics reads, `/models`, or `/models/<folder>`. */
+export function isPanelComfyUIReadOperation(value: string): value is PanelComfyUIReadOperation {
+  if (FIXED_READ_OPERATIONS.has(value)) return true;
+  if (!value.startsWith("models/")) return false;
+  return MODELS_FOLDER_RE.test(value.slice("models/".length));
+}
 
 export interface PanelImageRelayRequest {
   version: typeof PANEL_IMAGE_RELAY_VERSION;
@@ -271,7 +285,7 @@ export function verifyPanelComfyUIReadRelayCapability(
   if (
     !isSafeRelaySecret(secret) ||
     !isSafeRelayCapability(request.capability) ||
-    !READ_OPERATIONS.has(request.operation)
+    !isPanelComfyUIReadOperation(request.operation)
   ) return false;
   const expected = makePanelComfyUIReadRelayCapability(secret, request);
   return timingSafeEqual(Buffer.from(request.capability, "hex"), Buffer.from(expected, "hex"));
@@ -413,11 +427,12 @@ function validateReadPayload(value: unknown): PanelComfyUIReadSuccess | undefine
   if (
     !hasOnlyKeys(record, ["operation", "body", "contentType", "bytes", "viewing"]) ||
     typeof record.operation !== "string" ||
-    !READ_OPERATIONS.has(record.operation as PanelComfyUIReadOperation) ||
+    !isPanelComfyUIReadOperation(record.operation) ||
     typeof record.body !== "string" ||
     (record.contentType !== null &&
       (typeof record.contentType !== "string" || !isSafeText(record.contentType, 128)))
   ) return undefined;
+  const operation = record.operation;
   if (hasOwn(record, "viewing")) {
     const viewing = record.viewing;
     if (!viewing || typeof viewing !== "object" || Array.isArray(viewing)) return undefined;
@@ -443,13 +458,15 @@ function validateReadPayload(value: unknown): PanelComfyUIReadSuccess | undefine
     typeof bytes !== "number" ||
     !Number.isSafeInteger(bytes) ||
     bytes < 0 ||
-    bytes > readMaxBytes(record.operation as PanelComfyUIReadOperation) ||
+    bytes > readMaxBytes(operation) ||
     Buffer.byteLength(record.body, "utf8") !== bytes
   ) return undefined;
+  const contentType = record.contentType === null ? null : record.contentType;
+  if (contentType !== null && typeof contentType !== "string") return undefined;
   return {
-    operation: record.operation as PanelComfyUIReadOperation,
+    operation,
     body: record.body,
-    contentType: record.contentType as string | null,
+    contentType,
     bytes,
   };
 }
@@ -488,13 +505,13 @@ function validateReadRequest(value: unknown, requestId: string): PanelComfyUIRea
     record.requestId !== requestId ||
     !isSafeRelayCapability(capability) ||
     typeof record.operation !== "string" ||
-    !READ_OPERATIONS.has(record.operation as PanelComfyUIReadOperation) ||
+    !isPanelComfyUIReadOperation(record.operation) ||
     typeof createdAt !== "number" ||
     typeof deadlineAt !== "number" ||
     !Number.isSafeInteger(createdAt) ||
     !Number.isSafeInteger(deadlineAt) ||
     deadlineAt < createdAt ||
-    deadlineAt - createdAt > readTimeoutMs(record.operation as PanelComfyUIReadOperation)
+    deadlineAt - createdAt > readTimeoutMs(record.operation)
   ) return undefined;
   return record as unknown as PanelComfyUIReadRelayRequest;
 }
@@ -1104,7 +1121,7 @@ export async function requestPanelImage(
 export async function requestPanelComfyUIRead(
   operation: PanelComfyUIReadOperation,
 ): Promise<PanelComfyUIReadSuccess | undefined> {
-  if (!READ_OPERATIONS.has(operation)) {
+  if (!isPanelComfyUIReadOperation(operation)) {
     throw new PanelComfyUIReadRelayError("The ComfyUI read operation was refused.", "UNSAFE_OPERATION");
   }
   const endpoint = relayEndpoint();
