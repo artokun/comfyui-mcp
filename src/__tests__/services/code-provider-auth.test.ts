@@ -286,6 +286,29 @@ describe("resolveKimiCodeOAuth", () => {
     expect(creds.baseUrl).toBe("https://api.kimi.ai/coding/v1");
   });
 
+  it("#2534 REFUSES when the region file exists but cannot be read", async () => {
+    // Guessing mainland would send a global install's refresh_token to
+    // auth.kimi.com and fail as invalid_grant — an error that points at the
+    // token and says nothing about the region (gate r2/r3 P1).
+    const { fetchMock } = await armRefresh();
+    const regionFile = join(home, ".kimi-code", "region");
+    await mkdir(regionFile, { recursive: true }); // a DIRECTORY: read throws EISDIR
+    await expect(
+      resolveKimiCodeOAuth({ home, fetch: fetchMock as typeof fetch, now: () => Date.now() }),
+    ).rejects.toThrow(/region file .* could not be read/i);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("#2534 an unreadable region file does NOT break the KIMI_API_KEY path", async () => {
+    // That path needs no OAuth, so it must not fail on a file it never consults.
+    const regionFile = join(home, ".kimi-code", "region");
+    await mkdir(regionFile, { recursive: true });
+    process.env.KIMI_API_KEY = "kimi-api-key";
+    const creds = await resolveKimiCodeOAuth({ home });
+    expect(creds.accessToken).toBe("kimi-api-key");
+    expect(creds.baseUrl).toBe(__testing.KIMI_CODE_DEFAULT_BASE);
+  });
+
   it("#2534 mainland keeps both hosts on .com", async () => {
     const { urls, fetchMock } = await armRefresh("mainland-cn");
     const creds = await resolveKimiCodeOAuth({ home, fetch: fetchMock as typeof fetch, now: () => Date.now() });

@@ -311,15 +311,23 @@ function kimiRegion(authPath: string, baseUrlOverride: string | undefined): Kimi
       if (region) return region.includes("cn") ? "mainland" : "global";
     } catch (err) {
       // An existing-but-unreadable region file is NOT the same as no region file
-      // (gate r2 P1). We still cannot know the region — there is no second
-      // source — so the default stands, but it is an assumption and it is said
-      // out loud rather than silently becoming "mainland". Refusing outright
-      // would turn a transient read error into a failed Connect, which is the
-      // worse trade for a file this small and this local.
-      logger.warn(
-        `[kimi-auth] region file ${regionFile} exists but could not be read (${
+      // (gate r2/r3 P1), and there is no second source to fall back on. Guessing
+      // mainland here sends a GLOBAL install's refresh_token to auth.kimi.com,
+      // which fails as `invalid_grant` — an error that points at the token and
+      // says nothing about the region, leaving the user to debug the wrong
+      // thing. Refuse instead, and name both the file and the way past it.
+      //
+      // Same rule the crash-log reader follows for a log it cannot open: a
+      // signal that was never read must not be reported as a known-good default.
+      // Only reachable on the OAuth path (KIMI_API_KEY returns before this) and
+      // only when the file EXISTS but cannot be read, which is an already-broken
+      // install directory rather than a normal state.
+      throw new ValidationError(
+        `Kimi Code region file ${regionFile} exists but could not be read (${
           err instanceof Error ? err.message : String(err)
-        }) — assuming mainland. Set COMFYUI_MCP_KIMI_BASE_URL to pin the region explicitly.`,
+        }), so the mainland/global region is unknown and a refresh could be sent to the wrong host. ` +
+          `Fix that file's permissions, or set COMFYUI_MCP_KIMI_BASE_URL ` +
+          `(${KIMI_CODE_DEFAULT_BASE} or ${KIMI_CODE_GLOBAL_BASE}) to pin the region explicitly.`,
       );
     }
   }
@@ -694,17 +702,20 @@ export async function resolveKimiCodeOAuth(
 ): Promise<KimiCodeOAuthCredentials> {
   const baseOverride = process.env.COMFYUI_MCP_KIMI_BASE_URL?.trim().replace(/\/$/, "") || undefined;
 
+  // BEFORE any region resolution: a pay-per-token / CI key needs no OAuth, so it
+  // must not be able to fail on an unreadable region file it never consults.
+  // Keeps this path byte-identical to its previous behaviour.
+  const apiKey = process.env.KIMI_API_KEY?.trim();
+  if (apiKey) {
+    return { accessToken: apiKey, baseUrl: baseOverride ?? KIMI_CODE_DEFAULT_BASE };
+  }
+
   const home = deps.home ?? homedir();
   const path = kimiCodeAuthPath(home);
   // One region decision drives BOTH hosts, so a global install cannot refresh at
   // auth.kimi.ai and then talk to the mainland coding API (#2534, gate r2).
   const region = kimiRegion(path, baseOverride);
   const baseUrl = baseOverride ?? kimiCodingBase(region);
-
-  const apiKey = process.env.KIMI_API_KEY?.trim();
-  if (apiKey) {
-    return { accessToken: apiKey, baseUrl };
-  }
 
   if (!existsSync(path)) {
     throw new ValidationError(
