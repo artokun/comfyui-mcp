@@ -84,6 +84,7 @@ import {
   laterSlotsFromUnexposePayload,
   unexposeHostLinkShiftNote,
 } from "../services/unexpose-host-link-shift.js";
+import { retryExposeSubgraphInput } from "../services/expose-ae-wildcard.js";
 import {
   assertScreenshotPersistAllowed,
   decodePngBase64,
@@ -23209,21 +23210,16 @@ CHECKED FOR YOU: the graph read this message prescribes was just run, and it ` +
     ),
     def(
       "panel_expose_subgraph_input",
-      "Wire an interior node's INPUT to the subgraph's INPUT RAIL — i.e. expose it as a SUBGRAPH INPUT on the boundary so the PARENT graph can feed the subgraph node's new input slot. You MUST be INSIDE the subgraph first (panel_enter_subgraph). This is the correct way to wire an internal input to the subgraph's input rail: do NOT panel_connect to a guessed rail node id — call this with the interior node + the input you want exposed. Read panel_query_graph's `rails` to see the resulting boundary slots. `to_input` is an input slot NAME ('model', 'pixels') or numeric index. Optional `name` titles the new boundary input (defaults from the target slot) — but it is IGNORED when this slot is ALREADY exposed: the call then returns the existing boundary input unchanged, with `reused:true` and its ORIGINAL `name`. Check `reused` before relying on the name you asked for — there is currently NO tool that renames an existing boundary slot, so a name is only applied on FIRST exposure. Undoable with Ctrl+Z.",
+      "Wire an interior node's INPUT to the subgraph's INPUT RAIL — i.e. expose it as a SUBGRAPH INPUT on the boundary so the PARENT graph can feed the subgraph node's new input slot. You MUST be INSIDE the subgraph first (panel_enter_subgraph). This is the correct way to wire an internal input to the subgraph's input rail: do NOT panel_connect to a guessed rail node id — call this with the interior node + the input you want exposed. Read panel_query_graph's `rails` to see the resulting boundary slots. `to_input` is an input slot NAME ('model', 'pixels') or numeric index. Optional `name` titles the new boundary input (defaults from the target slot) — but it is IGNORED when this slot is ALREADY exposed: the call then returns the existing boundary input unchanged, with `reused:true` and its ORIGINAL `name`. Check `reused` before relying on the name you asked for — there is currently NO tool that renames an existing boundary slot, so a name is only applied on FIRST exposure. After Convert to Subgraph, Anything Everywhere? may keep its wildcard source as a live LiteGraph socket whose DISPLAY label is \"anything\" while the panel's name lookup only lists widget sockets such as group_regex (artokun/comfyui-mcp#2493). This tool retries against that live slot array (label / unique `*` wildcard) and will not expose a STRING widget socket as the virtual bus. Undoable with Ctrl+Z.",
       {
         to_node_id: nodeId().describe("Interior (inner) node id whose input to expose (from panel_query_graph while inside the subgraph)."),
         to_input: slotRef.describe("Input slot name (e.g. 'model', 'pixels') or numeric index on that node."),
         name: z.string().optional().describe("Optional name for the new subgraph input (boundary slot). Defaults from the target slot. IGNORED when the slot is already exposed — the reply carries reused:true and the existing name."),
       },
       async (args: A, ctx) =>
-        ctx.call(
-          {
-            cmd: "graph_expose_subgraph_input",
-            to_node_id: args.to_node_id,
-            to_input: args.to_input,
-            name: args.name,
-          },
-          15000,
+        retryExposeSubgraphInput(
+          { to_node_id: args.to_node_id, to_input: args.to_input, name: args.name },
+          (cmd, timeoutMs) => ctx.call(cmd, timeoutMs),
         ),
     ),
     def(
