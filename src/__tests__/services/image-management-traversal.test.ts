@@ -100,6 +100,45 @@ describe("getOutputImage — happy path (legitimate ComfyUI references)", () => 
     );
   });
 
+  it("accepts a get_history filename that already includes a relative subfolder (#2526)", async () => {
+    // get_history (action:"list") prints media as `subfolder/filename` so
+    // callers paste that combined string into get_image. That is a valid
+    // ComfyUI output reference, not a traversal.
+    await expect(
+      getOutputImage(
+        "out_F/qwen_baseline_face016_2807_00001_.png",
+        "output",
+        "",
+      ),
+    ).resolves.toBeDefined();
+    expect(fetchImageMock).toHaveBeenCalledWith(
+      "qwen_baseline_face016_2807_00001_.png",
+      "output",
+      "out_F",
+    );
+  });
+
+  it("accepts a nested relative prefix in filename and splits it for /view (#2526)", async () => {
+    await expect(
+      getOutputImage("video/clip/frame.png", "output", ""),
+    ).resolves.toBeDefined();
+    expect(fetchImageMock).toHaveBeenCalledWith("frame.png", "output", "video/clip");
+  });
+
+  it("joins a filename prefix with an explicit subfolder (#2526)", async () => {
+    await expect(
+      getOutputImage("clip/frame.png", "output", "video"),
+    ).resolves.toBeDefined();
+    expect(fetchImageMock).toHaveBeenCalledWith("frame.png", "output", "video/clip");
+  });
+
+  it("treats a Windows-style relative prefix as a subfolder too (#2526)", async () => {
+    await expect(
+      getOutputImage("out_F\\face.png", "output", ""),
+    ).resolves.toBeDefined();
+    expect(fetchImageMock).toHaveBeenCalledWith("face.png", "output", "out_F");
+  });
+
   it("accepts an empty subfolder (top-level output)", async () => {
     await expect(
       getOutputImage("a.png", "temp", ""),
@@ -284,7 +323,7 @@ describe("getOutputImage — path-traversal sanitisation (CWE-22)", () => {
     expect(fetchImageMock).not.toHaveBeenCalled();
   });
 
-  it("rejects a filename containing path separators", async () => {
+  it("still rejects a filename whose separators are traversal, not a subfolder", async () => {
     await expect(
       getOutputImage("../../etc/passwd", "output", ""),
     ).rejects.toBeInstanceOf(ValidationError);
