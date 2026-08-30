@@ -29,7 +29,7 @@ Return, list, summarize or query a SAVED workflow FILE — files on disk, named 
   Options: `action:"get"`, `action:"list"`, `action:"strip"`, `action:"slice"`, `action:"from_image"`, `action:"analyze"`, `action:"query"`, `action:"prompt_director"`.
 </ParamField>
 <ParamField path="filename" type="string">
-  Workflow library name, exactly as action:"list" reports it. A workflow filed in a folder keeps its folder in the name ('VIDEO/MiniMaxH3/clip.json') and that whole string goes here. REQUIRED for action:"get" and action:"analyze"; one of the three sources for "strip", "slice" and "query".
+  Workflow library name, exactly as action:"list" reports it. A workflow filed in a folder keeps its folder in the name ('VIDEO/MiniMaxH3/clip.json') and that whole string goes here. An absolute path under the live ComfyUI workspace (e.g. a JSON in data/_downloads) is read from disk, not the user library. REQUIRED for action:"get" and action:"analyze"; one of the three sources for "strip", "slice" and "query".
 </ParamField>
 <ParamField path="format" type="enum" default="api">
   action:"get" — 'api' (default, recommended) converts to compact API format with named inputs, connection references, and _meta.mode flags for muted/bypassed nodes; 'ui' returns the raw UI format with layout positions and links arrays. action:"strip" — 'api' (default) strips to the flat resolved graph; 'raw' returns the file/graph unchanged. Each action accepts only its own two values (this field is the union of what the two tools it replaces accepted) and refuses the third rather than guessing at an alias.
