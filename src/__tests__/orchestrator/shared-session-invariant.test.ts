@@ -215,7 +215,7 @@ describe("sessions are orchestrator-scoped, never workflow-scoped (#884)", () =>
       /createPanelMcpServer\(\s*bridge,\s*key,\s*workflowTargets,\s*\(promptIds\)\s*=>\s*runCompletionWatchdog\?\.markTicketed\(promptIds\),\s*\(\)\s*=>\s*manifestOutcomeTarget,\s*\)/s,
     );
     expect(src).toMatch(
-      /startPanelMcpHttpServer\(\s*bridge,\s*panelMcpPort,\s*"127\.0\.0\.1",\s*workflowTargets,\s*\(promptIds\)\s*=>\s*runCompletionWatchdog\?\.markTicketed\(promptIds\),\s*\(agentKey\)\s*=>\s*agentKey,\s*\(\)\s*=>\s*manifestOutcomeTarget,\s*\)/s,
+      /startPanelMcpHttpServer\(\s*bridge,\s*panelMcpPort,\s*"127\.0\.0\.1",\s*workflowTargets,\s*\(promptIds\)\s*=>\s*runCompletionWatchdog\?\.markTicketed\(promptIds\),[\s\S]*?\(agentKey\)\s*=>\s*agentKey,\s*\(\)\s*=>\s*manifestOutcomeTarget,\s*\)/s,
     );
     expect(src.match(/runCompletionWatchdog\?\.markTicketed\(promptIds\)/g) ?? []).toHaveLength(2);
 
