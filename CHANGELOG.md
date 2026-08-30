@@ -6,6 +6,8 @@ All notable changes to this project are documented here. This project adheres to
 
 ## Unreleased
 
+## [0.52.154] - 2026-08-30
+
 ### MCP
 
 #### Fixed
@@ -17,6 +19,8 @@ All notable changes to this project are documented here. This project adheres to
 - fall back to ComfyUI-Manager for install_custom_node action:"list" when the local comfy-cli version is unrecognized (#2603)
 - fence ordinary `panel_set_widget` writes against the current panel graph identity across reconnects, with an actionable rebind refusal (#2550)
 - clear terminal MCP panel refresh coordination state and reclaim only bounded, stale refresh records while keeping unknown completion fail-closed (#2549)
+
+
 
 ## [0.52.153] - 2026-08-30
 
