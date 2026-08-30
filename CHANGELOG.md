@@ -6,16 +6,19 @@ All notable changes to this project are documented here. This project adheres to
 
 ## Unreleased
 
+## [0.52.156] - 2026-08-30
+
 ### MCP
 
 #### Fixed
-- deliver interrupted run-completions at interrupt time with duration from ComfyUI's execution record, not from the next prompt (#2512)
-- panel_set_widget does not classify a root widget as promoted after a root-scope graph read, and a successful mode:current rebind clears leftover subgraph identity (#2518)
-- panel_run does not claim a /prompt left the panel when ComfyUI never logged a prompt; id-less queued_unknown fails closed as not queued (#2521)
-- panel_set_widget treats a root-scope promoted widget as the authoritative parent rail and suppresses the inner link-driven warning (#2514)
-- drain an empty-success Git install enqueue before using the verified local clone fallback (#2620)
-- panel_graph_outline retries once after save when query_graph already reads the same tab instead of refusing a transient instance mismatch (#2483)
-- uninstall disk verification uses the live ComfyUI Desktop custom_nodes scan root instead of COMFYUI_PATH (#2485)
+- deliver interrupted run-completions at interrupt time with duration from ComfyUI's execution record, not from the next prompt (#2512, #2629)
+- panel_set_widget does not classify a root widget as promoted after a root-scope graph read, and a successful mode:current rebind clears leftover subgraph identity (#2518, #2632)
+- panel_run does not claim a /prompt left the panel when ComfyUI never logged a prompt; id-less queued_unknown fails closed as not queued (#2521, #2630)
+- panel_set_widget treats a root-scope promoted widget as the authoritative parent rail and suppresses the inner link-driven warning (#2514, #2627)
+- drain an empty-success Git install enqueue before using the verified local clone fallback (#2620, #2625)
+- panel_graph_outline retries once after save when query_graph already reads the same tab instead of refusing a transient instance mismatch (#2483, #2578)
+- uninstall disk verification uses the live ComfyUI Desktop custom_nodes scan root instead of COMFYUI_PATH (#2485, #2577)
+- save allowlisted OBJ attachments through get_image action:"get" (#2623)
 
 ## [0.52.155] - 2026-08-30
 
