@@ -6,15 +6,17 @@ All notable changes to this project are documented here. This project adheres to
 
 ## Unreleased
 
+## [0.52.160] - 2026-08-30
+
 ### MCP
 
 #### Fixed
-- get_image list_outputs scans the live server's output dir (and /history if that scan is empty) instead of an unrelated COMFYUI_PATH (#2539)
-- panel_connect refuses a frontend PrimitiveNode wired to a forceInput-only STRING instead of reporting a LiteGraph link that panel_run omits from the prompt (#2536)
-- panel_run retries once after a "Dynamic widget doesn't exist on node" serializer throw so the first queue after graph edits is not a false failure (#2537)
-- get_history and panel_run completion journaling fall back to the connected panel's global /history when the headless `/history/<prompt_id>` is unreachable, and queue.status discloses a cached done when that history still cannot be read (#2532)
-- panel_graph_outline accepts the documented `detail`:"full" argument instead of rejecting it as an unrecognized key (#2541)
-
+- get_image list_outputs scans the live server's output dir (and /history if that scan is empty) instead of an unrelated COMFYUI_PATH (#2539, #2642)
+- panel_connect refuses a frontend PrimitiveNode wired to a forceInput-only STRING instead of reporting a LiteGraph link that panel_run omits from the prompt (#2536, #2646)
+- panel_run retries once after a "Dynamic widget doesn't exist on node" serializer throw so the first queue after graph edits is not a false failure (#2537, #2643)
+- get_history and panel_run completion journaling fall back to the connected panel's global /history when the headless `/history/<prompt_id>` is unreachable, and queue.status discloses a cached done when that history still cannot be read (#2532, #2644)
+- panel_graph_outline accepts the documented `detail`:"full" argument instead of rejecting it as an unrecognized key (#2541, #2645)
+- panel_set_widget writes a promoted subgraph input on the enclosing host node instead of the link-driven inner widget (#2488, #2583)
 
 ## [0.52.159] - 2026-08-30
 
