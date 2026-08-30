@@ -6,11 +6,13 @@ All notable changes to this project are documented here. This project adheres to
 
 ## Unreleased
 
+## [0.52.164] - 2026-08-30
+
 ### MCP
 
 #### Fixed
-- check_runtime does not classify environment-authenticated paid Gemini and WaveSpeed nodes as local/free (#2543)
-- install_comfyui action:"environment" reports the pip-installed ComfyUI-Manager version from a trusted interpreter instead of a disabled custom_nodes/ComfyUI-Manager checkout (#2538)
+- check_runtime does not classify environment-authenticated paid Gemini and WaveSpeed nodes as local/free (#2543, #2665)
+- install_comfyui action:"environment" reports the pip-installed ComfyUI-Manager version from a trusted interpreter instead of a disabled custom_nodes/ComfyUI-Manager checkout (#2538, #2664)
 
 
 ## [0.52.163] - 2026-08-30
