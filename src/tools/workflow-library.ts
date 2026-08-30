@@ -1,5 +1,6 @@
 import { z } from "zod";
-import { readFile } from "node:fs/promises";
+import { readFile, realpath } from "node:fs/promises";
+import { isAbsolute, relative, resolve as pathResolve } from "node:path";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { UiWorkflow, WorkflowJSON } from "../comfyui/types.js";
 import { getObjectInfo, backfillObjectInfo, comfyApiFetch } from "../comfyui/client.js";
@@ -24,6 +25,7 @@ import {
   MAX_CHARS_FLOOR,
 } from "../services/graph-query.js";
 import { listWorkflowLibraryKeys } from "../services/userdata-library.js";
+import { resolveEffectiveComfyUIBaseLive } from "../services/workspace-env.js";
 import { detectSections } from "../services/workflow-sections.js";
 import {
   generateOverview,
@@ -74,6 +76,46 @@ async function loadRawFromSource(
     );
   }
   return await res.json();
+}
+
+function isInsideRoot(root: string, candidate: string): boolean {
+  const rel = relative(root, candidate);
+  return rel !== "" && !rel.startsWith("..") && !isAbsolute(rel);
+}
+
+/**
+ * #2506 — get/analyze used to send every `filename` to /api/userdata/workflows/.
+ * An absolute path under the live ComfyUI workspace (e.g. data/_downloads/*.json)
+ * is not a library key; ComfyUI 500s and nothing is read. Read those from disk.
+ * Returns undefined when this is not a workspace-file read so the caller can
+ * use the userdata library. A path that IS under the workspace but missing
+ * throws not-found rather than falling through to a userdata 500.
+ */
+async function tryReadWorkspaceWorkflow(filename: string): Promise<unknown | undefined> {
+  if (!isAbsolute(filename)) return undefined;
+  const workspace = await resolveEffectiveComfyUIBaseLive();
+  if (!workspace) return undefined;
+
+  const resolvedRoot = pathResolve(workspace);
+  const resolvedFile = pathResolve(filename);
+  if (!isInsideRoot(resolvedRoot, resolvedFile)) return undefined;
+
+  let realRoot: string;
+  try {
+    realRoot = await realpath(resolvedRoot);
+  } catch {
+    throw new ValidationError(`Workflow not found: ${filename} (404)`);
+  }
+  let realFile: string;
+  try {
+    realFile = await realpath(resolvedFile);
+  } catch {
+    throw new ValidationError(`Workflow not found: ${filename} (404)`);
+  }
+  if (!isInsideRoot(realRoot, realFile)) {
+    throw new ValidationError(`Workflow not found: ${filename} (404)`);
+  }
+  return JSON.parse(await readFile(realFile, "utf8"));
 }
 
 /** Keep every saved-workflow UI conversion on the same schema-backed path. */
@@ -186,6 +228,7 @@ export function registerWorkflowLibraryTools(server: McpServer): void {
         .describe(
           'Workflow library name, exactly as action:"list" reports it. A workflow filed in a folder ' +
             "keeps its folder in the name ('VIDEO/MiniMaxH3/clip.json') and that whole string goes here. " +
+            "An absolute path under the live ComfyUI workspace (e.g. a JSON in data/_downloads) is read from disk, not the user library. " +
             'REQUIRED for action:"get" and action:"analyze"; one of the three sources for "strip", "slice" and "query".',
         ),
       format: z
@@ -594,39 +637,43 @@ async function listWorkflowsAction(): Promise<TextResult> {
 
 /** `get_workflow (action:"get")` — the body of the surviving get_workflow tool. */
 async function getWorkflowAction(filename: string, format: "ui" | "api"): Promise<TextResult> {
-        const encoded = encodeURIComponent(`workflows/${filename}`);
-        const res = await comfyApiFetch(
-          `/api/userdata/${encoded}`,
-        );
+        const fromDisk = await tryReadWorkspaceWorkflow(filename);
+        let raw: unknown;
+        if (fromDisk !== undefined) {
+          raw = fromDisk;
+        } else {
+          const encoded = encodeURIComponent(`workflows/${filename}`);
+          const res = await comfyApiFetch(`/api/userdata/${encoded}`);
 
-        if (!res.ok) {
-          // The worst of the four not-found sites (#385 review finding 4): it
-          // returns a NORMAL text block, so nothing marks it as a failure at all.
-          // An agent told its workflow does not exist is one step from recreating
-          // or overwriting it, and before #385 made this reachable the user got a
-          // neutral transport error instead. Only 404 may claim absence.
-          //
-          // The non-404 case THROWS rather than returning text (round-2 review
-          // residual 1). A plain TextResult leaves `isError` unset, so the
-          // orchestrator reports `ok: true` and the Ollama/Grok/ChatGPT backends
-          // mark the call succeeded — the machine-readable flag contradicting the
-          // prose. Pre-PR a 502 threw and surfaced as `ok: false`; throwing keeps
-          // that, and the handler's own `catch` renders it identically to this
-          // block's three siblings. The 404 wording stays a return, byte for byte,
-          // because a test pins it.
-          if (res.status !== 404) {
-            throw new ValidationError(
-              `Could NOT read "${filename}": the server answered ${describeStatus(res.status, res.statusText)}. ` +
-                `That is NOT a report that the workflow is missing — nothing was read. Do not recreate it on ` +
-                `the strength of this; check the server with get_system_stats (action:"health") first.`,
-            );
+          if (!res.ok) {
+            // The worst of the four not-found sites (#385 review finding 4): it
+            // returns a NORMAL text block, so nothing marks it as a failure at all.
+            // An agent told its workflow does not exist is one step from recreating
+            // or overwriting it, and before #385 made this reachable the user got a
+            // neutral transport error instead. Only 404 may claim absence.
+            //
+            // The non-404 case THROWS rather than returning text (round-2 review
+            // residual 1). A plain TextResult leaves `isError` unset, so the
+            // orchestrator reports `ok: true` and the Ollama/Grok/ChatGPT backends
+            // mark the call succeeded — the machine-readable flag contradicting the
+            // prose. Pre-PR a 502 threw and surfaced as `ok: false`; throwing keeps
+            // that, and the handler's own `catch` renders it identically to this
+            // block's three siblings. The 404 wording stays a return, byte for byte,
+            // because a test pins it.
+            if (res.status !== 404) {
+              throw new ValidationError(
+                `Could NOT read "${filename}": the server answered ${describeStatus(res.status, res.statusText)}. ` +
+                  `That is NOT a report that the workflow is missing — nothing was read. Do not recreate it on ` +
+                  `the strength of this; check the server with get_system_stats (action:"health") first.`,
+              );
+            }
+            return {
+              content: [{ type: "text", text: `Workflow not found: ${filename} (404)` }],
+            };
           }
-          return {
-            content: [{ type: "text", text: `Workflow not found: ${filename} (404)` }],
-          };
-        }
 
-        const raw = await res.json();
+          raw = await res.json();
+        }
 
         // If API format requested and workflow is in UI format, convert
         if (format === "api" && isUiFormat(raw)) {
@@ -866,24 +913,30 @@ async function loadWorkflowApi(filename: string): Promise<{
   /** Defined only for UI input, where zero means a valid empty conversion. */
   potentiallyExecutableNodeCount?: number;
 }> {
-  const encoded = encodeURIComponent(`workflows/${filename}`);
-  const res = await comfyApiFetch(`/api/userdata/${encoded}`);
+  const fromDisk = await tryReadWorkspaceWorkflow(filename);
+  let raw: unknown;
+  if (fromDisk !== undefined) {
+    raw = fromDisk;
+  } else {
+    const encoded = encodeURIComponent(`workflows/${filename}`);
+    const res = await comfyApiFetch(`/api/userdata/${encoded}`);
 
-  if (!res.ok) {
-    // Gate the ABSENCE wording on 404, the way fetchImage does (#385 review
-    // finding 4). This branch was dead until #385 made it reachable, so it had
-    // never had to distinguish "the server says it is not there" from "an auth
-    // gate, a 502, or a proxy that does not forward /api/userdata answered".
-    // Reporting the second as the first is the #796 fold, and an agent told its
-    // workflow does not exist is one step from recreating or overwriting it.
-    throw new ValidationError(
-      res.status === 404
-        ? `Workflow not found: ${filename} (404)`
-        : `Could NOT read "${filename}": the server answered ${describeStatus(res.status, res.statusText)}. That is not a report that it is missing — nothing was read.`,
-    );
+    if (!res.ok) {
+      // Gate the ABSENCE wording on 404, the way fetchImage does (#385 review
+      // finding 4). This branch was dead until #385 made it reachable, so it had
+      // never had to distinguish "the server says it is not there" from "an auth
+      // gate, a 502, or a proxy that does not forward /api/userdata answered".
+      // Reporting the second as the first is the #796 fold, and an agent told its
+      // workflow does not exist is one step from recreating or overwriting it.
+      throw new ValidationError(
+        res.status === 404
+          ? `Workflow not found: ${filename} (404)`
+          : `Could NOT read "${filename}": the server answered ${describeStatus(res.status, res.statusText)}. That is not a report that it is missing — nothing was read.`,
+      );
+    }
+
+    raw = await res.json();
   }
-
-  const raw = await res.json();
 
   if (isUiFormat(raw)) {
     const converted = await convertUiWorkflow(raw);
