@@ -9,6 +9,7 @@ All notable changes to this project are documented here. This project adheres to
 ### MCP
 
 #### Fixed
+- panel_load_workflow path: loads API/prompt graphs (including graph.api.json) onto the canvas instead of refusing them as non-UI (panel#2011)
 - panel_expose_subgraph_input retries Anything Everywhere? wildcard sockets against the live LiteGraph slot array after Convert to Subgraph (#2493)
 - panel_search_nodes and panel_list_nodes serve host Manager HTTP when the panel's browser Manager request does not complete (Failed to fetch) (#2492)
 - stage nested video as_filename values at the input root so VHS_LoadVideo can select them (#2083)

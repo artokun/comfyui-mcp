@@ -13372,7 +13372,58 @@ function assertUiWorkflow(parsed: unknown, sourceLabel: string): UiWorkflow & Re
 }
 
 /**
- * Read + parse a UI workflow JSON by path.
+ * Is this the API/prompt shape — a map of node id to `{class_type, inputs}`?
+ *
+ * Same test the panel's `graph_load` uses (panel#775 / panel#2011): every key
+ * numeric, at least one entry carrying `class_type`. A UI workflow has a
+ * top-level `nodes` array and fails the first condition.
+ */
+function looksLikeApiWorkflow(data: unknown): boolean {
+  if (!data || typeof data !== "object" || Array.isArray(data)) return false;
+  if (Array.isArray((data as Record<string, unknown>).nodes)) return false;
+  const keys = Object.keys(data);
+  if (keys.length === 0) return false;
+  if (!keys.every((k) => /^\d+$/.test(k))) return false;
+  return keys.some((k) => {
+    const v = (data as Record<string, unknown>)[k];
+    return v && typeof v === "object" && "class_type" in v;
+  });
+}
+
+/** Bare API map, or the `{prompt: <api map>}` wrap some exporters write. */
+function apiWorkflowPayload(parsed: unknown): Record<string, unknown> | null {
+  if (looksLikeApiWorkflow(parsed)) return parsed as Record<string, unknown>;
+  if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+    const prompt = (parsed as Record<string, unknown>).prompt;
+    if (looksLikeApiWorkflow(prompt)) return prompt as Record<string, unknown>;
+  }
+  return null;
+}
+
+/**
+ * UI/litegraph OR API/prompt — the shapes `graph_load` can put on the canvas.
+ *
+ * Strip / flatten / slice still go through `assertUiWorkflow` because they
+ * walk `nodes[]`. `panel_load_workflow` uses this so an explicit
+ * `graph.api.json` path is imported rather than refused (panel#2011).
+ */
+function assertLoadableWorkflow(parsed: unknown, sourceLabel: string): Record<string, unknown> {
+  if (!parsed || typeof parsed !== "object") {
+    throw new Error(`${sourceLabel} did not parse to a workflow object.`);
+  }
+  const rec = parsed as Record<string, unknown>;
+  if (Array.isArray(rec.nodes)) return rec;
+  const api = apiWorkflowPayload(parsed);
+  if (api) return api;
+  throw new Error(
+    `${sourceLabel} is not a UI workflow (missing a top-level \`nodes\` array) and is not ` +
+      `API/prompt format. Provide a UI/litegraph workflow JSON, or an API/prompt graph ` +
+      `(numeric keys with \`class_type\`, as in graph.api.json).`,
+  );
+}
+
+/**
+ * Read + parse a loadable workflow JSON by path (UI/litegraph or API/prompt).
  *
  * An ABSOLUTE path is read off the orchestrator's own disk, unchanged.
  *
@@ -13401,8 +13452,11 @@ function assertUiWorkflow(parsed: unknown, sourceLabel: string): UiWorkflow & Re
  * authority. See userdataFetch for why the request bypasses the client's
  * throw-on-non-2xx wrapper to make that distinction sound.
  *
- * Guards: must be .json and must parse to a UI workflow (a top-level `nodes`
- * array). Every failure names exactly what was tried.
+ * Guards: must be .json and must parse to a loadable workflow — UI/litegraph
+ * (a top-level `nodes` array) or API/prompt (numeric keys with `class_type`,
+ * including files named graph.api.json). `graph_load` dispatches. Strip /
+ * flatten / slice still require UI via assertUiWorkflow. Every failure names
+ * exactly what was tried.
  */
 async function readWorkflowFromPath(
   rawPath: string,
@@ -13421,7 +13475,7 @@ async function readWorkflowFromPath(
     } catch (err) {
       throw new Error(`"${resolved}" is not valid JSON: ${(err as Error).message}`);
     }
-    return assertUiWorkflow(parsed, `"${resolved}"`);
+    return assertLoadableWorkflow(parsed, `"${resolved}"`);
   };
 
   // ABSOLUTE path → the orchestrator's own disk, unchanged.
@@ -13661,8 +13715,8 @@ async function readWorkflowFromPath(
   }
 
   if (outcome.kind === "found") {
-    // A found-but-non-UI file must surface its own honest error, not silence.
-    return assertUiWorkflow(
+    // A found-but-unloadable file must surface its own honest error, not silence.
+    return assertLoadableWorkflow(
       outcome.parsed,
       `The workflow "${p}" from the ComfyUI userdata library (read as "${resolvedKey}")`,
     );
@@ -15973,9 +16027,10 @@ async function resolveWorkflowInput(
   //   • panel_flatten_workflow(apply:true) reported SUCCESS and loaded a
   //     0-node graph — a false success on a canvas-replacing operation;
   //   • panel_slice_workflow shares the path and had the same latent bug.
-  // panel_load_workflow already refused this correctly via assertUiWorkflow;
-  // routing the other three through the SAME check makes all four agree
-  // instead of one refusing, one crashing and one lying.
+  // panel_load_workflow PASSES API format through to graph_load, which imports
+  // it (panel#775 / panel#2011). Strip / flatten / slice still need UI — they
+  // walk `nodes[]` — and keep this guard so an API file is refused here rather
+  // than crashing or loading a 0-node graph.
   //
   // The LIVE-CANVAS path below is deliberately NOT validated here: it is
   // built by graph_serialize/graph_get_state and already carries its own
@@ -18689,7 +18744,7 @@ export function buildPanelToolDefs(): PanelToolDef[] {
     ),
     def(
       "panel_load_workflow",
-      "Load a full ComfyUI workflow onto the live canvas in one shot (replaces the current graph). Three ways to specify it: `pack:<name>` for a bundled installer pack's local-GPU workflow; `path:<file>` to read an arbitrary workflow .json off DISK server-side (absolute, or relative to the ComfyUI workflows folder) — use this to open a staged/downloaded example without shuttling its JSON through chat; or an inline `graph` object/JSON string. `pack` and `path` are read SERVER-SIDE so a large graph never enters your context. The replaced graph is captured as an undo point (double-Esc / revert). Pack workflows are LOCAL/free; for a `path`/`graph` that may use API nodes, check the runtime first (list_packs action:\"check_runtime\") and ASK the user before spending paid api credits.",
+      "Load a full ComfyUI workflow onto the live canvas in one shot (replaces the current graph). Three ways to specify it: `pack:<name>` for a bundled installer pack's local-GPU workflow; `path:<file>` to read an arbitrary workflow .json off DISK server-side (absolute, or relative to the ComfyUI workflows folder) — UI/litegraph or API/prompt format (including files named graph.api.json); or an inline `graph` object/JSON string. `pack` and `path` are read SERVER-SIDE so a large graph never enters your context. The replaced graph is captured as an undo point (double-Esc / revert). Pack workflows are LOCAL/free; for a `path`/`graph` that may use API nodes, check the runtime first (list_packs action:\"check_runtime\") and ASK the user before spending paid api credits.",
       {
         pack: z
           .string()
@@ -18698,11 +18753,11 @@ export function buildPanelToolDefs(): PanelToolDef[] {
         path: z
           .string()
           .optional()
-          .describe("Path to a workflow .json — an ABSOLUTE path on the ComfyUI machine's disk, or a name from get_workflow (action:\"list\"), which is looked up in the connected ComfyUI's own saved-workflow library (so a custom --user-directory resolves correctly). Read + parsed server-side and loaded onto the canvas (keeps a large JSON out of chat). A name the library does not have is REFUSED rather than guessed at from a local path."),
+          .describe("Path to a workflow .json — an ABSOLUTE path on the ComfyUI machine's disk, or a name from get_workflow (action:\"list\"), which is looked up in the connected ComfyUI's own saved-workflow library (so a custom --user-directory resolves correctly). UI/litegraph (a `nodes` array) or API/prompt format (numeric keys with `class_type`, including graph.api.json) both load. Read + parsed server-side and loaded onto the canvas (keeps a large JSON out of chat). A name the library does not have is REFUSED rather than guessed at from a local path."),
         graph: z
           .union([z.string(), z.record(z.string(), z.unknown())])
           .optional()
-          .describe("A UI workflow graph (object or JSON string) to load instead of a pack/path. Must be UI/litegraph format (a `nodes` array), NOT API/prompt format."),
+          .describe("A workflow graph (object or JSON string) to load instead of a pack/path. UI/litegraph format (a `nodes` array) or API/prompt format (numeric keys with `class_type`) both load — the panel imports API format via the frontend's own importer."),
       },
       async (args: A, ctx) => {
         try {
@@ -18718,7 +18773,7 @@ export function buildPanelToolDefs(): PanelToolDef[] {
           } else if (args.graph != null) {
             data = typeof args.graph === "string" ? JSON.parse(args.graph as string) : args.graph;
           } else {
-            throw new Error("Provide one of `pack` (a bundled pack name), `path` (a workflow .json on disk), or `graph` (a UI workflow).");
+            throw new Error("Provide one of `pack` (a bundled pack name), `path` (a workflow .json on disk), or `graph` (a UI or API/prompt workflow).");
           }
           // Generous timeout — loading a large graph onto the live canvas can take a moment.
           const tabAtDispatch = ctx.tabId;
