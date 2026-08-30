@@ -91,9 +91,11 @@ export function isApiNode(def: ComfyUINodeDef): boolean {
  *    Shipping just this would have closed #1483 with the reporter's own graph still
  *    reported as free.
  *
- * So it takes both, and they cover different populations: the registry catches packs whose
- * nodes advertise nothing at all, the credential signal catches packs nobody has
- * enumerated yet (49 classes on the measured install — Novita, Gemini, joyCaption…).
+ * So it takes three signals, and they cover different populations: the registry catches
+ * packs whose nodes advertise nothing at all, the credential signal catches packs nobody
+ * has enumerated yet (49 classes on the measured install — Novita, Gemini, joyCaption…),
+ * and an explicit `external_api_node` / `EXTERNAL_API_NODE` opt-in on the node def lets
+ * the next env-only pack mark itself without a code change here (#2543).
  *
  * DELIBERATELY SEPARATE FROM `isApiNode`, not folded into it: that predicate also drives
  * `listApiNodes` and the 3D-generation picker, which enumerate COMFY PARTNER nodes and
@@ -169,6 +171,32 @@ const EXTERNAL_SERVICE_PACKS: readonly ExternalServicePack[] = [
     localCategoryPrefixes: ["seed/video"],
     provider: "BytePlus",
   },
+  // #2543 — Nicole Social env-auth backends (the report's own category is
+  // "Nicole Social/backends"). GEMINI_API_KEY / WAVESPEED_API_KEY live in the
+  // environment, never as workflow inputs, and api_node is absent — so every
+  // generic signal says free while the nodes spend the user's Google Gemini /
+  // WaveSpeed balance. The category prefix carries the match through a directory
+  // rename the way the fal and PoYo entries do.
+  //
+  // Two entries so a graph that uses the pack names BOTH providers rather than a
+  // slash-joined string. They share the match on purpose: /object_info does not
+  // distinguish which env var a class reads. Deliberately NOT a generic "gemini"
+  // / "wavespeed" match — that is the keyword-regex hole #1483 refused, and it
+  // would flag local packs (Impact, KJNodes, Comfy-WaveSpeed's local optimizer)
+  // plus any merely similar category. Official Comfy partner Gemini nodes stay
+  // isApiNode (`api_node: true`) and never enter this list.
+  {
+    module: "nicole-social",
+    categoryPrefixes: ["nicole social"],
+    provider: "Google Gemini",
+  },
+  {
+    module: "nicole-social",
+    categoryPrefixes: ["nicole social"],
+    provider: "WaveSpeed",
+  },
+  { module: "nicole_social", provider: "Google Gemini" },
+  { module: "nicole_social", provider: "WaveSpeed" },
 ];
 
 /**
@@ -216,30 +244,86 @@ function packMatches(pack: ExternalServicePack, category: string, pythonModule: 
 }
 
 /**
- * Which known paid pack does this node belong to, if any — or null.
+ * Every known paid pack this node belongs to — empty if none.
  *
- * EVERY matching entry is considered, and a single one that does NOT exempt the node wins
+ * EVERY matching entry is considered, and any one that does NOT exempt the node counts
  * (codex P1). Returning on the first match let `ComfyUI-fal-API-Flux` bind to the broader
  * `comfyui-fal-api` entry and inherit ITS `FAL/Utils` exemption, so a paid Flux node in
  * that category answered "free" while the stricter entry written for that very pack was
  * never reached. Resolving toward PAID is also the correct direction for a money guard:
  * disagreement between two entries is not evidence of free.
+ *
+ * #2543 — a pack that hosts more than one vendor (Nicole Social bills Google Gemini AND
+ * WaveSpeed from the same category) contributes every distinct provider, so guidance can
+ * name both balances rather than the first entry's alone.
  */
-function externalServicePackFor(def: ComfyUINodeDef): ExternalServicePack | null {
+function matchingPaidPacks(def: ComfyUINodeDef): ExternalServicePack[] {
   const category = (def.category ?? "").toLowerCase();
   const pythonModule = (def.python_module ?? "").toLowerCase();
-  let exemptedBy: ExternalServicePack | null = null;
+  const paid: ExternalServicePack[] = [];
   for (const pack of EXTERNAL_SERVICE_PACKS) {
     if (!packMatches(pack, category, pythonModule)) continue;
     const exempt = pack.localCategoryPrefixes?.some(
       (p) => category === p || category.startsWith(`${p}/`),
     );
-    if (!exempt) return pack;
-    exemptedBy = pack;
+    if (!exempt) paid.push(pack);
   }
-  // Matched only packs that call this one of their own local helpers.
-  void exemptedBy;
-  return null;
+  return paid;
+}
+
+function externalServicePackFor(def: ComfyUINodeDef): ExternalServicePack | null {
+  return matchingPaidPacks(def)[0] ?? null;
+}
+
+type ExternalApiFields = {
+  external_api_node?: unknown;
+  EXTERNAL_API_NODE?: unknown;
+  externalApiNode?: unknown;
+  external_api_provider?: unknown;
+  EXTERNAL_API_PROVIDER?: unknown;
+  externalApiProvider?: unknown;
+};
+
+function markerValue(value: unknown): { marked: boolean; provider: string | null } {
+  if (value === true) return { marked: true, provider: null };
+  if (typeof value === "string") {
+    const s = value.trim();
+    if (!s) return { marked: false, provider: null };
+    if (s.toLowerCase() === "true") return { marked: true, provider: null };
+    if (s.toLowerCase() === "false") return { marked: false, provider: null };
+    return { marked: true, provider: s };
+  }
+  return { marked: false, provider: null };
+}
+
+function namedProvider(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  const s = value.trim();
+  return s.length > 0 ? s : null;
+}
+
+/**
+ * #2543 — explicit opt-in on the node def. Env-only packs cannot put a credential
+ * widget on the workflow just to satisfy classification; they set EXTERNAL_API_NODE
+ * (optionally with a provider) instead. Absence is not evidence of free — the
+ * enumerated registry and credential-input catch still apply.
+ */
+function externalApiMark(def: ComfyUINodeDef): { marked: boolean; provider: string | null } {
+  const rec = def as ComfyUINodeDef & ExternalApiFields;
+  let marked = false;
+  let provider: string | null = null;
+  for (const value of [rec.external_api_node, rec.EXTERNAL_API_NODE, rec.externalApiNode]) {
+    const parsed = markerValue(value);
+    if (!parsed.marked) continue;
+    marked = true;
+    if (parsed.provider) provider = parsed.provider;
+  }
+  if (!marked) return { marked: false, provider: null };
+  for (const value of [rec.external_api_provider, rec.EXTERNAL_API_PROVIDER, rec.externalApiProvider]) {
+    const named = namedProvider(value);
+    if (named) provider = named;
+  }
+  return { marked, provider };
 }
 
 /**
@@ -249,16 +333,28 @@ function externalServicePackFor(def: ComfyUINodeDef): ExternalServicePack | null
  */
 export function isExternalServiceNode(def: ComfyUINodeDef): boolean {
   if (isApiNode(def)) return false;
+  if (externalApiMark(def).marked) return true;
   if (externalServicePackFor(def)) return true;
   // The general catch: a node that asks for a service credential cannot be CONFIRMED free,
   // whichever pack it came from.
   return declaresCredentialInput(def);
 }
 
-/** The provider that bills for `def`, when a known pack identifies one. */
+/** Distinct providers that bill for `def`, when a marker or known pack names them. */
+function externalServiceProviders(def: ComfyUINodeDef): string[] {
+  if (isApiNode(def)) return [];
+  const mark = externalApiMark(def);
+  if (mark.provider) return [mark.provider];
+  const named: string[] = [];
+  for (const pack of matchingPaidPacks(def)) {
+    if (!named.includes(pack.provider)) named.push(pack.provider);
+  }
+  return named;
+}
+
+/** The provider that bills for `def`, when a known pack or marker identifies one. */
 export function externalServiceProvider(def: ComfyUINodeDef): string | null {
-  if (isApiNode(def)) return null;
-  return externalServicePackFor(def)?.provider ?? null;
+  return externalServiceProviders(def)[0] ?? null;
 }
 
 export interface ApiNodeSummary {
@@ -492,8 +588,9 @@ export async function checkWorkflowRuntime(
     // money just the same, so it must reach the same verdict.
     else if (isExternalServiceNode(def)) {
       externalApiNodes.push(ct);
-      const provider = externalServiceProvider(def);
-      if (provider && !externalProviders.includes(provider)) externalProviders.push(provider);
+      for (const provider of externalServiceProviders(def)) {
+        if (!externalProviders.includes(provider)) externalProviders.push(provider);
+      }
     }
   }
   const paidNodes = [...apiNodes, ...externalApiNodes];
