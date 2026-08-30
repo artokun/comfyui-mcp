@@ -6656,6 +6656,9 @@ type QueriedNodeScope = {
   node: "ordinary" | "container";
   nodeType: string;
   nodeIdentity?: string;
+  /** Owner of the currently viewed subgraph, when the target row is nested. */
+  scopeOwnerNodeId?: string;
+  workflowUuid?: string;
   /** The object-keyed graph identity of the exact view that supplied the row. */
   graphIdentity?: string;
 };
@@ -6695,6 +6698,16 @@ function parseVerifiedQueriedNodeScope(
   ) {
     return null;
   }
+  const workflowUuid = viewingRecord.workflow_uuid;
+  if (workflowUuid !== undefined && (typeof workflowUuid !== "string" || workflowUuid.length === 0)) {
+    return null;
+  }
+  const rawScopeOwner = viewingRecord.owner_node_id;
+  const scopeOwnerNodeId =
+    rawScopeOwner === undefined || rawScopeOwner === null
+      ? undefined
+      : canonicalQueriedNodeId(rawScopeOwner);
+  if (rawScopeOwner !== undefined && rawScopeOwner !== null && !scopeOwnerNodeId) return null;
 
   let row: unknown;
   if (Object.prototype.hasOwnProperty.call(payload, "nodes")) {
@@ -6726,6 +6739,8 @@ function parseVerifiedQueriedNodeScope(
     node: isSubgraph ? "container" : "ordinary",
     nodeType: identity.type,
     ...(identity.nodeIdentity !== undefined ? { nodeIdentity: identity.nodeIdentity } : {}),
+    ...(scopeOwnerNodeId ? { scopeOwnerNodeId } : {}),
+    ...(workflowUuid !== undefined ? { workflowUuid } : {}),
     ...(graphIdentity !== undefined ? { graphIdentity } : {}),
   };
 }
@@ -7155,6 +7170,9 @@ type PromotedWritePlan = {
   outerNodeId: number | string;
   /** Host/subgraph-input widget to write on the addressed SubgraphNode. */
   hostWidget: string;
+  /** The current graph that contains the addressed host instance. This is
+   * distinct from `scope`, which names the child graph reached by entering it. */
+  outerScope?: PromotedExpectedScope;
   outerNodeType?: string;
   outerNodeIdentity?: string;
   inner: {
@@ -7182,10 +7200,36 @@ type OrdinaryWritePlan = {
 };
 
 type PromotedExpectedScope = PromotedScopeWitness & {
+  /** Root is used for a host-instance write; inner writes remain subgraph-scoped. */
+  scope?: "root" | "subgraph";
   terminal?: PromotedTerminalWitness;
   promotedWidget?: string;
   parentRail?: PromotedParentRailWitness;
 };
+
+function outerPromotedExpectedScope(
+  targetScope: QueriedNodeScope | null,
+  outerNodeId: unknown,
+): PromotedExpectedScope | null {
+  if (!targetScope?.graphIdentity) return null;
+  const outerId = canonicalQueriedNodeId(outerNodeId);
+  if (!outerId) return null;
+  if (targetScope.activeView === "root") {
+    return {
+      scope: "root",
+      ownerNodeId: outerId,
+      graphIdentity: targetScope.graphIdentity,
+      ...(targetScope.workflowUuid !== undefined ? { workflowUuid: targetScope.workflowUuid } : {}),
+    };
+  }
+  if (!targetScope.scopeOwnerNodeId) return null;
+  return {
+    scope: "subgraph",
+    ownerNodeId: targetScope.scopeOwnerNodeId,
+    graphIdentity: targetScope.graphIdentity,
+    ...(targetScope.workflowUuid !== undefined ? { workflowUuid: targetScope.workflowUuid } : {}),
+  };
+}
 
 type PromotedWritePreflight = PromotedWritePlan | OrdinaryWritePlan | ToolResult | null;
 
@@ -7658,6 +7702,45 @@ function currentPromotedScopeError(
   }
   if (observed.uuid !== expected.workflowUuid) {
     return "the receiving panel workflow changed";
+  }
+  return null;
+}
+
+/** Check the graph that contains the addressed host instance. The promoted
+ * child witness above cannot do this job: before entry its graph identity is
+ * deliberately different from the current root/parent graph. Host-first
+ * writes therefore carry their own root-or-parent scope envelope. */
+function currentPromotedExpectedScopeError(
+  ctx: PanelToolCtx,
+  expected: PromotedExpectedScope,
+): string | null {
+  const readScope = ctx.bridge.promotedScopeFor;
+  if (typeof readScope !== "function") {
+    return "the receiving panel current-view scope became unavailable";
+  }
+  let observed: TabPromotedScopeRead;
+  try {
+    observed = readScope.call(ctx.bridge, ctx.tabId);
+  } catch {
+    return "the receiving panel current-view scope became unreadable";
+  }
+  if (observed.known !== true) {
+    return "the receiving panel current-view scope became unverifiable";
+  }
+  const expectedScope = expected.scope ?? "subgraph";
+  if (expectedScope === "root") {
+    if (observed.scope !== "root" || observed.graphIdentity !== expected.graphIdentity) {
+      return "the receiving panel current root graph changed or became unverifiable";
+    }
+  } else if (
+    observed.scope !== "subgraph" ||
+    observed.ownerNodeId !== expected.ownerNodeId ||
+    observed.graphIdentity !== expected.graphIdentity
+  ) {
+    return "the receiving panel current graph/subgraph identity changed or became unverifiable";
+  }
+  if (expected.workflowUuid !== undefined && observed.workflowUuid !== expected.workflowUuid) {
+    return "the receiving panel workflow scope changed or became unverifiable";
   }
   return null;
 }
@@ -8404,10 +8487,12 @@ async function preparePromotedWidgetWrite(
     );
   }
 
+  const outerScope = outerPromotedExpectedScope(targetScope, nodeId);
   return {
     kind: "promoted-write",
     outerNodeId: nodeId as number | string,
     hostWidget: inner.parentRail?.widget ?? widget,
+    ...(outerScope ? { outerScope } : {}),
     ...(outerNodeType ? { outerNodeType } : {}),
     ...(outerNodeIdentity ? { outerNodeIdentity } : {}),
     inner,
@@ -20200,7 +20285,7 @@ export function buildPanelToolDefs(): PanelToolDef[] {
               ...(targetExpectedScope
                 ? {
                     expected_scope: {
-                      scope: "subgraph",
+                      scope: targetExpectedScope.scope ?? "subgraph",
                       owner_node_id: targetExpectedScope.ownerNodeId,
                       graph_identity: targetExpectedScope.graphIdentity,
                       ...(targetExpectedScope.promotedWidget && targetExpectedScope.parentRail
@@ -20588,6 +20673,13 @@ export function buildPanelToolDefs(): PanelToolDef[] {
             // that host rail first so a link-driven inner widget is not treated
             // as the durable store. Known-bad inner widgets were refused above
             // when the terminal witness named them.
+            const hostScope = promotedPlan.outerScope;
+            if (!hostScope) {
+              return promotedWriteRefusal(
+                args.widget as string,
+                "the current host graph identity was unavailable for the enclosing-node write",
+              );
+            }
             const hostWidget = promotedPlan.hostWidget;
             const hostWritten = await write(
               promotedPlan.outerNodeId,
@@ -20600,8 +20692,14 @@ export function buildPanelToolDefs(): PanelToolDef[] {
                     `Refusing promoted host graph_set_widget: ${error}. No graph_set_widget was dispatched.`,
                   );
                 }
+                const scopeError = currentPromotedExpectedScopeError(ctx, hostScope);
+                if (scopeError) {
+                  throw new Error(
+                    `Refusing promoted host graph_set_widget: ${scopeError}. No graph_set_widget was dispatched.`,
+                  );
+                }
               },
-              undefined,
+              hostScope,
               promotedPlan.outerNodeIdentity,
             );
             if (!hostWritten.isError) {
@@ -20633,8 +20731,14 @@ export function buildPanelToolDefs(): PanelToolDef[] {
                       `Refusing promoted host graph_set_widget: ${error}. No graph_set_widget was dispatched.`,
                     );
                   }
+                  const scopeError = currentPromotedExpectedScopeError(ctx, hostScope);
+                  if (scopeError) {
+                    throw new Error(
+                      `Refusing promoted host graph_set_widget: ${scopeError}. No graph_set_widget was dispatched.`,
+                    );
+                  }
                 },
-                undefined,
+                hostScope,
                 promotedPlan.outerNodeIdentity,
               );
               if (!remappedHost.isError) {

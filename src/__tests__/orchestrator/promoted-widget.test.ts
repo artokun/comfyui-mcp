@@ -359,11 +359,19 @@ function bridge(opts: {
           }
           const expected = expectedScope as Record<string, unknown>;
           const actualOwner = inSubgraph ? String(currentOwnerNodeId) : null;
+          const expectedScopeKind = expected.scope ?? "subgraph";
+          const scopeMatches =
+            expectedScopeKind === "root"
+              ? !inSubgraph &&
+                String(expected.owner_node_id) === String(opts.ownerNodeId ?? 78) &&
+                expected.graph_identity === currentGraphIdentity
+              : expectedScopeKind === "subgraph" &&
+                String(expected.owner_node_id) === actualOwner &&
+                expected.graph_identity === currentGraphIdentity;
           if (
-            expected.scope !== "subgraph" ||
-            String(expected.owner_node_id) !== actualOwner ||
+            !scopeMatches ||
             (expected.workflow_uuid !== undefined && expected.workflow_uuid !== workflowUuid) ||
-            expected.graph_identity !== currentGraphIdentity
+            (expectedScopeKind !== "root" && expected.scope !== "subgraph")
           ) {
             throw new Error("graph_set_widget promoted receiver changed before dispatch: Nothing was applied.");
           }
@@ -1131,6 +1139,30 @@ describe("panel_set_widget promoted subgraph input routing (#2488)", () => {
     ]);
     expect(calls.map((call) => call.cmd)).not.toContain("graph_enter_subgraph");
     expect(text).toMatch(/enclosing subgraph node 78 widget "length"/);
+  });
+
+  it("refuses the host write when the root graph changes after the MCP fence", async () => {
+    const { text, isError, calls, mutations } = await setWidget(
+      { node_id: 78, widget: "frame_counts", value: 49 },
+      {
+        firstWrite: "ok",
+        promotedTerminalWitnesses: true,
+        promotedDetail: hostDetail,
+        subgraph: FRAME_COUNTS_PROMOTED_SUBGRAPH,
+        receiverNavigationAfterMcpFence: true,
+        receiverGraphIdentityCollisionAfterMcpFence: true,
+      },
+    );
+
+    expect(isError).toBe(true);
+    expect(mutations).toBe(0);
+    expect(calls.filter((call) => call.cmd === "graph_set_widget")).toHaveLength(1);
+    expect(calls.find((call) => call.cmd === "graph_set_widget")).toEqual(
+      expect.objectContaining({
+        expected_scope: expect.objectContaining({ scope: "root", graph_identity: "graph:workflow-a-root" }),
+      }),
+    );
+    expect(text).toMatch(/promoted receiver changed|Nothing was applied/);
   });
 
   it("does not report a link-driven inner fallback as a durable write", async () => {
