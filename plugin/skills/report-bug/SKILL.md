@@ -1,6 +1,6 @@
 ---
 name: report-bug
-description: Self-heal and report bugs. Use when a defect in comfyui-mcp, the sidebar panel, a third-party custom node, or ComfyUI core actually cost the user something - it blocked them, produced a wrong result they would keep, lost or corrupted work, or crashed ComfyUI. For OUR repos (comfyui-mcp, comfyui-mcp-panel, comfyui-mcp-issue-worker) diagnose and fix locally FIRST so the user is unblocked, then file with the diff so reports arrive as near-PRs, not tickets; attempt the fix ONCE, and if upstream-only say so with the precise change. Our intake Worker takes our repos; third-party goes to the node's own GitHub. Do NOT file a transient you recovered from at no cost, a missing capability (stabilisation freeze - parked on arrival), or behaviour that was merely surprising; say those in chat. A crash, lost work, or a wrong result the user might keep is STILL filed even if you recovered, and on a single occurrence. One report per root cause. An explicit "report this" bypasses this bar - route it and file.
+description: Self-heal and report bugs. Use when a defect in comfyui-mcp, the sidebar panel, a third-party custom node, or ComfyUI core actually cost the user something - it blocked them, produced a wrong result they would keep, lost or corrupted work, or crashed ComfyUI. For OUR repos (comfyui-mcp, comfyui-mcp-panel, comfyui-mcp-issue-worker) diagnose and fix locally FIRST so the user is unblocked, then file with the diff so reports arrive as near-PRs, not tickets; attempt the fix ONCE, and if upstream-only say so with the precise change. Our intake Worker takes our repos; third-party goes to the node's own GitHub. Do NOT file a transient you recovered from at no cost, a missing capability (stabilisation freeze - parked on arrival), or behaviour that was merely surprising; say those in chat. A crash or lost/corrupted work is STILL filed even if you recovered, on a single occurrence. One report per root cause. An explicit "report this" bypasses this bar - route it and file.
 ---
 
 # Self-heal & report bugs (make the ecosystem better)
@@ -342,7 +342,9 @@ what the temporary workaround is, if any.
   without asking.
 - Do not claim a fix you did not verify (Step 4).
 - Do not file to be thorough. A report is a claim on a maintainer's
-  attention; if you cannot say what it cost the user, it is not one.
+  attention; if you cannot say what it cost the user, it is not one. Applies to
+  what you file on your own initiative — when the user asks, that is their call
+  to make and no justification is owed.
 
 ## Sources
 
