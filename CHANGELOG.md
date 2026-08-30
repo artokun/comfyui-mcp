@@ -18,6 +18,7 @@ All notable changes to this project are documented here. This project adheres to
 - keep the causal line above a native fault and stop blaming a pass-through node (#2508)
 - direct-clone local git installs when Manager queue is unavailable (#2509)
 - make the Kimi Code backend usable (#2552)
+- only list history assets fetchable through /view (#2515)
 - reconcile release citations (#2519, #2520)
 
 
