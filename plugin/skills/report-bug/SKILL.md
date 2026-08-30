@@ -67,9 +67,10 @@ Step 2 still decides:
   Their call, made with the facts.
 
 - A transient you recovered from at no cost to the user — a retry that worked.
-  This NEVER covers a crash, lost or corrupted work, or a wrong result the user
-  might keep: recovering afterwards does not undo any of those, and they are
-  filed under "File when both hold" above even when you carried on cleanly.
+  Recovering does NOT excuse a crash, lost or corrupted work, or a wrong result
+  the user might keep. Judge those on the bar above exactly as if you had not
+  recovered; recovering afterwards undoes none of them. (A crash or lost work
+  also needs only the one occurrence — see the exception in question 1.)
 - A missing capability or a feature you wish existed. We are in a stabilisation
   freeze, so these are parked on arrival — filing one adds a ticket nobody will
   action.
