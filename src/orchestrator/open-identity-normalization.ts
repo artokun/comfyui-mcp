@@ -427,14 +427,44 @@ export function openLiveMatchesDestContent(live: unknown, dest: unknown): boolea
  * fail that matcher when live only holds positional/envelope widgets. Fail closed
  * on a missing node, a rewired link, or a dest widget value live does not hold.
  */
-function frontendWidgetPrimitive(value: unknown): unknown {
-  if (!isPlainObject(value) || !Object.prototype.hasOwnProperty.call(value, "value")) return value;
-  for (const key of Object.keys(value)) {
-    if (key !== "name" && key !== "value" && key !== "type" && key !== "label") return value;
+type FrontendWidgetAtom = string | number | boolean | null;
+type FrontendWidgetValue =
+  | FrontendWidgetAtom
+  | FrontendWidgetAtom[]
+  | Record<string, unknown>
+  | undefined;
+
+function asFrontendWidgetValue(value: unknown): FrontendWidgetValue {
+  if (value === undefined || value === null) return value;
+  if (typeof value === "string" || typeof value === "number" || typeof value === "boolean") {
+    return value;
   }
-  if (value.name != null && typeof value.name !== "string") return value;
-  if (value.type != null && typeof value.type !== "string") return value;
-  return value.value;
+  if (Array.isArray(value)) {
+    return value.every(
+      (entry) =>
+        entry === null ||
+        typeof entry === "string" ||
+        typeof entry === "number" ||
+        typeof entry === "boolean",
+    )
+      ? value
+      : undefined;
+  }
+  return isPlainObject(value) ? value : undefined;
+}
+
+function frontendWidgetPrimitive(value: unknown): FrontendWidgetValue {
+  if (!isPlainObject(value) || !Object.prototype.hasOwnProperty.call(value, "value")) {
+    return asFrontendWidgetValue(value);
+  }
+  for (const key of Object.keys(value)) {
+    if (key !== "name" && key !== "value" && key !== "type" && key !== "label") {
+      return asFrontendWidgetValue(value);
+    }
+  }
+  if (value.name != null && typeof value.name !== "string") return asFrontendWidgetValue(value);
+  if (value.type != null && typeof value.type !== "string") return asFrontendWidgetValue(value);
+  return asFrontendWidgetValue(value.value);
 }
 
 function frontendWidgetValuesEquivalent(a: unknown, b: unknown): boolean {
