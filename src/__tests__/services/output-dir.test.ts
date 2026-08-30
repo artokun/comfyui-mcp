@@ -198,6 +198,9 @@ import {
   parseInputDirFromArgv,
   localInputDirFallback,
   resolveInputDir,
+  parseTempDirFromArgv,
+  localTempDirFallback,
+  resolveTempDir,
   parseBaseDirFromArgv,
   parseModelsDirFromArgv,
   parseExtraModelPathsConfigsFromArgv,
@@ -362,6 +365,96 @@ describe("localInputDirFallback", () => {
   it("throws when COMFYUI_PATH is unset", () => {
     (config as { comfyuiPath?: string }).comfyuiPath = undefined;
     expect(() => localInputDirFallback()).toThrow(/COMFYUI_PATH/);
+  });
+});
+
+describe("parseTempDirFromArgv", () => {
+  it("returns undefined when no relevant flags are present", () => {
+    expect(parseTempDirFromArgv(["python", "main.py", "--listen"])).toBeUndefined();
+    expect(parseTempDirFromArgv([])).toBeUndefined();
+    expect(parseTempDirFromArgv(undefined)).toBeUndefined();
+  });
+
+  it("parses --temp-directory <value>", () => {
+    const abs = resolve("/shared/ComfyUI-Shared/temp");
+    expect(parseTempDirFromArgv(["main.py", "--temp-directory", abs])).toBe(abs);
+  });
+
+  it("parses --temp-directory=<value>", () => {
+    const abs = resolve("/shared/tmp");
+    expect(parseTempDirFromArgv(["main.py", `--temp-directory=${abs}`])).toBe(abs);
+  });
+
+  it("resolves a relative --temp-directory against the server cwd", () => {
+    const serverCwd = resolve("/srv/live-comfyui");
+    expect(
+      parseTempDirFromArgv(["main.py", "--temp-directory", "custom-temp"], serverCwd),
+    ).toBe(join(serverCwd, "custom-temp"));
+  });
+
+  it("derives <base>/temp from --base-directory", () => {
+    const base = resolve("/srv/comfy-base");
+    expect(parseTempDirFromArgv(["main.py", "--base-directory", base])).toBe(
+      join(base, "temp"),
+    );
+  });
+
+  it("lets --temp-directory win over --base-directory", () => {
+    const base = resolve("/srv/base");
+    const tmp = resolve("/srv/explicit-temp");
+    const got = parseTempDirFromArgv([
+      "main.py",
+      "--base-directory",
+      base,
+      "--temp-directory",
+      tmp,
+    ]);
+    expect(got).toBe(tmp);
+  });
+});
+
+describe("localTempDirFallback", () => {
+  it("returns <COMFYUI_PATH>/temp", () => {
+    expect(localTempDirFallback()).toBe(resolve("/comfy", "temp"));
+  });
+
+  it("throws when COMFYUI_PATH is unset", () => {
+    (config as { comfyuiPath?: string }).comfyuiPath = undefined;
+    expect(() => localTempDirFallback()).toThrow(/COMFYUI_PATH/);
+  });
+});
+
+describe("resolveTempDir", () => {
+  it("uses the redirected dir reported by /system_stats argv", async () => {
+    const redirected = resolve("/shared/ComfyUI-Shared/temp");
+    getSystemStats.mockResolvedValue({
+      system: { argv: ["python", "main.py", "--temp-directory", redirected] },
+    });
+    const got = await resolveTempDir();
+    expect(got).toBe(redirected);
+    expect(got).not.toBe(resolve("/comfy", "temp"));
+    expect(isAbsolute(got)).toBe(true);
+  });
+
+  it("resolves a relative redirected dir against the live server cwd", async () => {
+    const serverCwd = resolve("/srv/live-comfyui");
+    getSystemStats.mockResolvedValue({
+      system: {
+        argv: ["python", "main.py", "--temp-directory", "custom-temp"],
+        cwd: serverCwd,
+      },
+    });
+    expect(await resolveTempDir()).toBe(join(serverCwd, "custom-temp"));
+  });
+
+  it("falls back to <COMFYUI_PATH>/temp when argv has no override", async () => {
+    getSystemStats.mockResolvedValue({ system: { argv: ["python", "main.py"] } });
+    expect(await resolveTempDir()).toBe(resolve("/comfy", "temp"));
+  });
+
+  it("falls back to <COMFYUI_PATH>/temp when /system_stats is unreachable", async () => {
+    getSystemStats.mockRejectedValue(new Error("ECONNREFUSED"));
+    expect(await resolveTempDir()).toBe(resolve("/comfy", "temp"));
   });
 });
 

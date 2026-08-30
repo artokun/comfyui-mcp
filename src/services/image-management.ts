@@ -10,7 +10,7 @@ import {
 import type { ObjectInfo } from "../comfyui/types.js";
 import { ValidationError, ModelError, ComfyUIError } from "../utils/errors.js";
 import { logger } from "../utils/logger.js";
-import { resolveOutputDir, resolveInputDir } from "./output-dir.js";
+import { resolveOutputDir, resolveInputDir, resolveTempDir } from "./output-dir.js";
 import { tryLoadSharp } from "./sharp-loader.js";
 
 /**
@@ -211,6 +211,9 @@ export interface OutputImage {
   subfolder: string;
   /** Media kind derived from the file extension. */
   kind: "image" | "video";
+  /** ComfyUI directory the file lives in. Omitted/output for output/; "temp"
+   *  for VHS_VideoCombine with `save_output` unchecked (#2370). */
+  type?: "output" | "temp";
 }
 
 // Still-image extensions.
@@ -227,6 +230,52 @@ function mediaKind(ext: string): "image" | "video" {
 }
 
 /**
+ * Recursive media listing of one ComfyUI directory (output/ or temp/).
+ * `allowedExts` is MEDIA_EXTS for output/ and VIDEO_EXTS for temp/ so
+ * PreviewImage stills in temp/ stay omitted while VHS .mp4s are returned.
+ */
+async function collectMediaFromDir(
+  root: string,
+  pattern: string | undefined,
+  type: "output" | "temp",
+  allowedExts: Set<string>,
+): Promise<{ images: OutputImage[]; matched: number }> {
+  const dirents = await readdir(root, { recursive: true, withFileTypes: true });
+  const images: OutputImage[] = [];
+  let matched = 0;
+
+  for (const dirent of dirents) {
+    if (!dirent.isFile()) continue;
+    const ext = extname(dirent.name).toLowerCase();
+    if (!allowedExts.has(ext)) continue;
+
+    const parent = dirent.parentPath ?? root;
+    const subfolder = relative(root, parent).split(sep).join("/");
+    const relPath = subfolder ? `${subfolder}/${dirent.name}` : dirent.name;
+    if (pattern && !relPath.toLowerCase().includes(pattern)) continue;
+
+    const filePath = join(parent, dirent.name);
+    matched += 1;
+    try {
+      const info = await stat(filePath);
+      images.push({
+        filename: dirent.name,
+        path: filePath,
+        size: info.size,
+        modified: info.mtime.toISOString(),
+        subfolder,
+        kind: mediaKind(ext),
+        type,
+      });
+    } catch {
+      continue;
+    }
+  }
+
+  return { images, matched };
+}
+
+/**
  * List image AND video/animation files in the ComfyUI output directory.
  *
  * Covers VHS_VideoCombine / LTX / WAN video outputs (.mp4, .webm, …) in addition
@@ -240,6 +289,10 @@ export interface OutputListingSource {
    *  which has no directory to name — it is a listing from the server's
    *  in-memory history, not from disk. */
   directory?: string;
+  /** ComfyUI temp/ that was scanned for video files (VHS save_output
+   *  unchecked). Absent when temp could not be resolved or read, and on the
+   *  /history path. */
+  tempDirectory?: string;
   /** How the answer was produced, so a caller never has to guess which. */
   basis: "local-scan" | "server-history";
 }
@@ -313,9 +366,23 @@ export async function listOutputMedia(options?: {
   // contains a path (SaveVideo / VHS / "video/clip" → output/video/clip_00001.mp4).
   // A flat readdir of the top level silently misses those — so a finished video can
   // look "not found" even though the dir resolved correctly. Walk the whole tree.
-  let dirents;
+  //
+  // #2370 — also scan temp/ for VIDEO files. VHS_VideoCombine with `save_output`
+  // unchecked writes the completed .mp4 (including the muxed `-audio.mp4` a run
+  // completion names) to folder_paths.get_temp_directory() and tags it
+  // type:"temp". Scanning output/ only listed that render as nothing. Preview
+  // stills in temp/ stay omitted so PreviewImage does not flood the listing.
+  const images: OutputImage[] = [];
+  // How many entries MATCHED the query, versus how many we could actually stat.
+  // A per-file stat failure is skipped silently, which is fine when it is one
+  // file among many — but if it swallows every match, the caller gets `[]` over
+  // a directory that demonstrably held what they asked for (codex gate).
+  let matched = 0;
+
   try {
-    dirents = await readdir(outputDir, { recursive: true, withFileTypes: true });
+    const outputScan = await collectMediaFromDir(outputDir, pattern, "output", MEDIA_EXTS);
+    images.push(...outputScan.images);
+    matched += outputScan.matched;
   } catch (err) {
     // We know WHERE the outputs are and could not read them. That is not an
     // empty directory, and returning `[]` told the caller their file does not
@@ -328,43 +395,32 @@ export async function listOutputMedia(options?: {
     );
   }
 
-  const images: OutputImage[] = [];
-  // How many entries MATCHED the query, versus how many we could actually stat.
-  // A per-file stat failure is skipped silently, which is fine when it is one
-  // file among many — but if it swallows every match, the caller gets `[]` over
-  // a directory that demonstrably held what they asked for (codex gate).
-  let matched = 0;
-
-  for (const dirent of dirents) {
-    if (!dirent.isFile()) continue;
-    const ext = extname(dirent.name).toLowerCase();
-    if (!MEDIA_EXTS.has(ext)) continue;
-
-    // Dirent.parentPath (Node ≥20.12) is the absolute dir holding the entry.
-    const parent = dirent.parentPath ?? outputDir;
-    const subfolder = relative(outputDir, parent).split(sep).join("/"); // "" at top level
-    const relPath = subfolder ? `${subfolder}/${dirent.name}` : dirent.name;
-    // Match the pattern against the subfolder-relative path so "video/clip" works.
-    if (pattern && !relPath.toLowerCase().includes(pattern)) continue;
-
-    const filePath = join(parent, dirent.name);
-    matched += 1;
+  let tempDirectory: string | undefined;
+  try {
+    const tempDir = await resolveTempDir();
     try {
-      const info = await stat(filePath);
-      images.push({
-        filename: dirent.name,
-        path: filePath,
-        size: info.size,
-        modified: info.mtime.toISOString(),
-        subfolder,
-        kind: mediaKind(ext),
-      });
-    } catch {
-      // One file that vanished between readdir and stat, or that we cannot read,
-      // is not worth failing the whole listing over — skip it. But see the check
-      // below: skipping EVERY match is a different statement entirely.
-      continue;
+      const tempScan = await collectMediaFromDir(tempDir, pattern, "temp", VIDEO_EXTS);
+      images.push(...tempScan.images);
+      matched += tempScan.matched;
+      tempDirectory = tempDir;
+    } catch (err) {
+      const code =
+        typeof err === "object" && err !== null && "code" in err && typeof err.code === "string"
+          ? err.code
+          : undefined;
+      if (code === "ENOENT") {
+        // temp/ is created on first preview. Absence is an empty scan, not a miss.
+        tempDirectory = tempDir;
+      } else {
+        logger.debug("Could not scan ComfyUI temp directory; listing output/ only", {
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
     }
+  } catch (err) {
+    logger.debug("Could not resolve ComfyUI temp directory; listing output/ only", {
+      error: err instanceof Error ? err.message : String(err),
+    });
   }
 
   if (matched > 0 && images.length === 0) {
@@ -385,7 +441,11 @@ export async function listOutputMedia(options?: {
 
   return {
     images: images.slice(0, limit),
-    source: { directory: outputDir, basis: "local-scan" },
+    source: {
+      directory: outputDir,
+      ...(tempDirectory ? { tempDirectory } : {}),
+      basis: "local-scan",
+    },
   };
 }
 
@@ -404,9 +464,10 @@ export async function listOutputImages(options?: {
 /**
  * Remote-mode source for listOutputImages: derive output media from ComfyUI's
  * /history (HTTP) when there is no local filesystem to scan. Walks every history
- * entry's node outputs (images + videos/gifs), keeps only those that landed in
- * the "output" directory, dedupes by subfolder/filename, and returns them
- * newest-first (history is roughly insertion-ordered, so we iterate in reverse).
+ * entry's node outputs (images + videos/gifs), keeps output-directory assets
+ * plus temp/ videos (VHS save_output unchecked, #2370), skips temp still
+ * previews, dedupes by type/subfolder/filename, and returns them newest-first
+ * (history is roughly insertion-ordered, so we iterate in reverse).
  * Size/modified are unavailable over HTTP and come back as 0 / "".
  */
 async function listOutputImagesFromHistory(
@@ -457,18 +518,22 @@ async function listOutputImagesFromHistory(
           if (typeof media.filename !== "string" || media.filename.length === 0) {
             continue;
           }
-          // Only list assets in the output directory (skip temp previews).
-          const type = typeof media.type === "string" ? media.type : "output";
-          if (type !== "output") continue;
+          // output/ stills+video, plus temp/ videos (VHS save_output unchecked).
+          // Temp stills are PreviewImage previews and stay omitted.
+          const rawType = typeof media.type === "string" ? media.type : "output";
+          const type: "output" | "temp" | undefined =
+            rawType === "temp" ? "temp" : rawType === "output" ? "output" : undefined;
+          if (!type) continue;
           const ext = extname(media.filename).toLowerCase();
           if (!MEDIA_EXTS.has(ext)) continue;
+          if (type === "temp" && !VIDEO_EXTS.has(ext)) continue;
           const subfolder =
             typeof media.subfolder === "string" ? media.subfolder : "";
           const relPath = subfolder
             ? `${subfolder}/${media.filename}`
             : media.filename;
           if (pattern && !relPath.toLowerCase().includes(pattern)) continue;
-          const dedupeKey = relPath.toLowerCase();
+          const dedupeKey = `${type}:${relPath}`.toLowerCase();
           if (seen.has(dedupeKey)) continue;
           seen.add(dedupeKey);
           images.push({
@@ -479,6 +544,7 @@ async function listOutputImagesFromHistory(
             modified: "",
             subfolder,
             kind: mediaKind(ext),
+            type,
           });
         }
       }

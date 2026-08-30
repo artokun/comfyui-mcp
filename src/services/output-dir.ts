@@ -1261,6 +1261,51 @@ export function localInputDirFallback(): string {
   return resolve(base, "input");
 }
 
+// ---------------------------------------------------------------------------
+// Resolve ComfyUI's REAL temp directory — the same argv chain as input/.
+// VHS_VideoCombine writes completed .mp4 files here whenever `save_output` is
+// unchecked (`folder_paths.get_temp_directory()`), and get_image list_outputs
+// must scan that tree or a finished render lists as nothing (#2370).
+// --temp-directory wins; otherwise --base-directory implies <base>/temp.
+// ---------------------------------------------------------------------------
+
+/**
+ * Parse the configured temp directory out of ComfyUI's launch argv.
+ * --temp-directory wins; otherwise --base-directory implies <base>/temp.
+ * Returns undefined when neither flag is present.
+ */
+export function parseTempDirFromArgv(
+  argv: string[] | undefined,
+  serverCwd?: string,
+): string | undefined {
+  if (!argv || argv.length === 0) return undefined;
+
+  let tempDir: string | undefined;
+  let baseDir: string | undefined;
+  for (let i = 0; i < argv.length; i++) {
+    tempDir = flagValue(argv, i, "--temp-directory") ?? tempDir;
+    baseDir = flagValue(argv, i, "--base-directory") ?? baseDir;
+  }
+
+  if (tempDir) return resolveServerLaunchPath(tempDir, serverCwd);
+  const resolvedBase = baseDir ? resolveServerLaunchPath(baseDir, serverCwd) : undefined;
+  if (resolvedBase) return join(resolvedBase, "temp");
+  return undefined;
+}
+
+/** <COMFYUI_PATH>/temp fallback. Throws if COMFYUI_PATH is unset. */
+export function localTempDirFallback(): string {
+  const base = resolveEffectiveComfyUIBase();
+  if (!base) {
+    throw new ValidationError(
+      "No local ComfyUI install path could be established: COMFYUI_PATH is not set and no " +
+        "default workspace is saved. Set COMFYUI_PATH, or save one with the workspace tool " +
+        "(action 'set_default').",
+    );
+  }
+  return resolve(base, "temp");
+}
+
 /**
  * Resolve the directory ComfyUI actually reads inputs from. Asks the running
  * ComfyUI (/system_stats argv) first; falls back to <COMFYUI_PATH>/input.
@@ -1286,7 +1331,7 @@ export function localInputDirFallback(): string {
  * only a middle rung: an explicit --output-directory still wins above, and the
  * configured install still catches everything below.
  */
-async function liveIoDirFallback(kind: "input" | "output"): Promise<string | undefined> {
+async function liveIoDirFallback(kind: "input" | "output" | "temp"): Promise<string | undefined> {
   try {
     const base = await resolveLiveComfyUIBase();
     return base ? join(base, kind) : undefined;
@@ -1356,4 +1401,35 @@ export async function resolveOutputDir(): Promise<string> {
     return live;
   }
   return localOutputDirFallback();
+}
+
+/**
+ * Resolve the directory ComfyUI actually writes temp/preview files to. Asks the
+ * running ComfyUI (/system_stats argv) first; falls back to <COMFYUI_PATH>/temp.
+ */
+export async function resolveTempDir(): Promise<string> {
+  try {
+    const stats = await getSystemStats();
+    const serverCwd = (stats.system as { cwd?: string } | undefined)?.cwd;
+    const fromArgv = parseTempDirFromArgv(stats.system?.argv, serverCwd);
+    if (fromArgv) {
+      logger.debug("Resolved ComfyUI temp directory from launch argv", {
+        tempDir: fromArgv,
+      });
+      return fromArgv;
+    }
+  } catch (err) {
+    logger.debug(
+      "Could not resolve temp dir from /system_stats; using COMFYUI_PATH/temp",
+      { error: err instanceof Error ? err.message : String(err) },
+    );
+  }
+  const live = await liveIoDirFallback("temp");
+  if (live) {
+    logger.debug("Resolved ComfyUI temp directory from the LIVE server's install root", {
+      dir: live,
+    });
+    return live;
+  }
+  return localTempDirFallback();
 }

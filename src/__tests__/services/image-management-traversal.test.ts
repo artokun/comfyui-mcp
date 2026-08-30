@@ -19,6 +19,7 @@ const realpathMock = vi.fn();
 const statMock = vi.fn();
 const resolveInputDirMock = vi.fn();
 const resolveOutputDirMock = vi.fn();
+const resolveTempDirMock = vi.fn();
 vi.mock("node:fs/promises", () => ({
   readFile: (...a: unknown[]) => readFileMock(...a),
   open: (...a: unknown[]) => openMock(...a),
@@ -31,6 +32,7 @@ vi.mock("node:fs/promises", () => ({
 vi.mock("../../services/output-dir.js", () => ({
   resolveInputDir: (...a: unknown[]) => resolveInputDirMock(...a),
   resolveOutputDir: (...a: unknown[]) => resolveOutputDirMock(...a),
+  resolveTempDir: (...a: unknown[]) => resolveTempDirMock(...a),
 }));
 
 const fetchImageMock = vi.fn();
@@ -68,6 +70,7 @@ beforeEach(() => {
   });
   resolveInputDirMock.mockReset().mockResolvedValue(resolve("/comfy", "input"));
   resolveOutputDirMock.mockReset().mockResolvedValue(resolve("/comfy", "output"));
+  resolveTempDirMock.mockReset().mockResolvedValue(resolve("/comfy", "temp"));
 });
 
 beforeEach(() => {
