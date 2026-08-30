@@ -843,6 +843,10 @@ function looksLikeDesktop2Root(dir: string): boolean {
   );
 }
 
+function looksLikeDesktop2Argv(argv: string[]): boolean {
+  return argv.some((tok) => Boolean(tok && looksLikePath(tok) && looksLikeDesktop2Root(tok)));
+}
+
 function desktop2InstallFromArgv(argv: string[]): boolean {
   for (const tok of argv) {
     if (!tok || !looksLikePath(tok)) continue;
@@ -903,19 +907,24 @@ function detectDesktopLaunch(
   argv: string[],
 ): { isDesktopApp: boolean; desktopExePath?: string } {
   const fromArgv = isDesktopApp(argv);
-  const fromParent = desktopExeFromAncestor(pid);
   const fromMarkers = desktop2InstallFromArgv(argv);
+  const desktop2Argv = looksLikeDesktop2Argv(argv);
+  // Walking ancestors calls resolveProcessIdentity. Doing that on every gather
+  // consumes identity-sequence steps, so a later creation-time change is never
+  // seen and a recycled PID is killed (#776). Only walk when THIS argv already
+  // names a Desktop-2 layout.
+  const fromParent =
+    fromMarkers || desktop2Argv ? desktopExeFromAncestor(pid) : undefined;
   const isDesktop = fromArgv || Boolean(fromParent) || fromMarkers;
   if (!isDesktop) return { isDesktopApp: false };
 
   if (fromParent && fileExists(fromParent)) {
     return { isDesktopApp: true, desktopExePath: fromParent };
   }
-  if (fromMarkers || fromParent) {
-    const located = IS_WIN
-      ? (desktop2WindowsExeCandidates().find((p) => fileExists(p)) ??
-        findDesktopExeFromCommonPaths())
-      : findDesktopExeFromCommonPaths();
+  // fileExists, not `if exist` / `test -d`: POSIX findDesktopExeFromCommonPaths
+  // treats a stubbed execSync success as "the .app is there".
+  if (fromMarkers || fromParent || desktop2Argv) {
+    const located = desktop2WindowsExeCandidates().find((p) => fileExists(p));
     if (located) return { isDesktopApp: true, desktopExePath: located };
     if (fromParent) return { isDesktopApp: true, desktopExePath: fromParent };
   }
