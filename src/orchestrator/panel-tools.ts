@@ -4362,6 +4362,241 @@ async function settlePowerLoraWidgetAfterAckTimeout(
   });
 }
 
+// ---- panel_set_widget settle-after-ack-timeout (#2489) ---------------------
+// A value read from the requested node is evidence only when the read also
+// names the graph view that was fenced before the write. A same-tab navigation
+// can otherwise reuse both the node id and the value and produce a false
+// applied verdict.
+const SET_WIDGET_RECONCILE_MS = 8_000;
+
+type SetWidgetReadbackScope = {
+  activeView: "root" | "subgraph";
+  graphIdentity: string;
+  workflowUuid?: string;
+};
+
+function setWidgetAppliedNote(widget: string): string {
+  return (
+    `CHECKED FOR YOU: the tab did not ACKNOWLEDGE the widget write within the window, but a ` +
+    `graph read taken immediately afterwards, on that same tab and graph view, reports "${widget}" ` +
+    `holding the value this call delivered. No recovery step is needed and a retry would be wasted ` +
+    `work. A missing acknowledgement is not evidence the write failed; here it is evidence the tab ` +
+    `was too busy to answer in time. Stated precisely: what is established is THE LIVE WIDGET VALUE, ` +
+    `not that this command is what put it there — a concurrent canvas edit while the tab was ` +
+    `unresponsive would read identically. Both leave you where you asked to be, so the distinction ` +
+    `changes nothing you would do next.`
+  );
+}
+
+function setWidgetNotAppliedNote(widget: string): string {
+  return (
+    `CHECKED FOR YOU: a graph read taken immediately after the missing acknowledgement, on the ` +
+    `fenced graph view, does NOT show "${widget}" holding the value this call delivered. The write ` +
+    `has not applied (or was overwritten). Re-issuing the same write is safe — setting that widget ` +
+    `to this value again cannot duplicate a different change.`
+  );
+}
+
+function setWidgetUnknownNote(): string {
+  return (
+    `The live widget could not be read on the fenced graph view after the missing acknowledgement, ` +
+    `so this result cannot say whether the write applied. mutation_id is the delivery receipt for ` +
+    `this attempt; requested is the node, widget, and value that were sent. Re-issuing that exact ` +
+    `write cannot duplicate a different change. Do not guess.`
+  );
+}
+
+function widgetValuesMatch(requested: unknown, observed: unknown): boolean {
+  if (Object.is(requested, observed)) return true;
+  if (typeof requested === "number" && typeof observed === "number") {
+    return Number.isFinite(requested) && Number.isFinite(observed) && requested === observed;
+  }
+  if (typeof requested === "string" && typeof observed === "string") return requested === observed;
+  if (typeof requested === "boolean" && typeof observed === "boolean") return requested === observed;
+  return false;
+}
+
+/** A clipped string read-back cannot prove a miss: the live value may still be
+ * the full requested string behind the panel's per-widget cap. */
+function widgetValuePossiblyClipped(requested: unknown, observed: unknown): boolean {
+  if (typeof requested !== "string" || typeof observed !== "string") return false;
+  if (observed.length === 0 || observed.length >= requested.length) return false;
+  return requested.startsWith(observed);
+}
+
+function widgetRowFromGraphQuery(payload: Record<string, unknown> | null): Record<string, unknown> | null {
+  if (!payload) return null;
+  if (
+    Object.prototype.hasOwnProperty.call(payload, "truncated") &&
+    payload.truncated !== false
+  ) {
+    return null;
+  }
+
+  let row: unknown;
+  if (Object.prototype.hasOwnProperty.call(payload, "nodes")) {
+    if (!Array.isArray(payload.nodes) || payload.nodes.length !== 1) return null;
+    row = payload.nodes[0];
+  } else if (typeof payload.text === "string") {
+    let headerSeen = false;
+    for (const line of payload.text.split(/\r?\n/)) {
+      const trimmed = line.trim();
+      if (!trimmed) continue;
+      if (!headerSeen && /^\d+ match\(es\) of \d+ in scope/.test(trimmed)) {
+        headerSeen = true;
+        continue;
+      }
+      if (!trimmed.startsWith("{")) {
+        if (row !== undefined) continue;
+        return null;
+      }
+      if (row !== undefined) return null;
+      try {
+        row = JSON.parse(trimmed) as unknown;
+      } catch {
+        return null;
+      }
+      headerSeen = true;
+    }
+  }
+
+  if (!row || typeof row !== "object" || Array.isArray(row)) return null;
+  return row as Record<string, unknown>;
+}
+
+function setWidgetReadbackScopeMatches(
+  payload: Record<string, unknown> | null,
+  expected: SetWidgetReadbackScope | undefined,
+): boolean {
+  if (!expected) return true;
+  const viewing = payload?.viewing;
+  if (!viewing || typeof viewing !== "object" || Array.isArray(viewing)) return false;
+  const current = viewing as Record<string, unknown>;
+  if (current.scope !== expected.activeView) return false;
+  if (current.graph_identity !== expected.graphIdentity) return false;
+  return expected.workflowUuid === undefined || current.workflow_uuid === expected.workflowUuid;
+}
+
+function observedWidgetFromQuery(
+  res: ToolResult,
+  nodeId: unknown,
+  widget: string,
+  expectedScope?: SetWidgetReadbackScope,
+): { status: "value"; value: unknown } | { status: "unknown" } {
+  if (res.isError) return { status: "unknown" };
+  const payload = parseToolResultJson(res);
+  if (!setWidgetReadbackScopeMatches(payload, expectedScope)) return { status: "unknown" };
+  const row = widgetRowFromGraphQuery(payload);
+  if (!row) return { status: "unknown" };
+  const identity = parseQueriedNodeIdentityRow(row);
+  const requestedId = canonicalQueriedNodeId(nodeId);
+  if (!identity || !requestedId || identity.id !== requestedId) return { status: "unknown" };
+  const widgets = row.widgets;
+  if (!widgets || typeof widgets !== "object" || Array.isArray(widgets)) return { status: "unknown" };
+  if (!Object.prototype.hasOwnProperty.call(widgets, widget)) return { status: "unknown" };
+  return { status: "value", value: (widgets as Record<string, unknown>)[widget] };
+}
+
+function setWidgetTimeoutUnknown(
+  timedOut: ToolResult,
+  nodeId: unknown,
+  widget: string,
+  value: unknown,
+  mutationId: string | undefined,
+): ToolResult {
+  return appendReplyNote(
+    timedOut,
+    JSON.stringify(
+      {
+        applied: "unknown",
+        acknowledged: false,
+        mutation_id: mutationId ?? null,
+        requested: { node_id: nodeId, widget, value },
+        note: setWidgetUnknownNote(),
+      },
+      null,
+      2,
+    ),
+  );
+}
+
+function setWidgetReadbackProbe(
+  nodeId: unknown,
+  widget: string,
+  value: unknown,
+): Record<string, unknown> {
+  const probe: Record<string, unknown> = {
+    cmd: "graph_query",
+    ids: [nodeId],
+    fields: "detail",
+    limit: 1,
+  };
+  if (typeof value === "string" && value.length > DETAIL_WIDGET_MAX_CHARS_DEFAULT) {
+    probe.widget_max_chars = Math.min(
+      Math.max(value.length, DETAIL_WIDGET_MAX_CHARS_DEFAULT),
+      DETAIL_WIDGET_MAX_CHARS_CEILING,
+    );
+  }
+  return probe;
+}
+
+async function settleSetWidgetAfterAckTimeout(
+  ctx: PanelToolCtx,
+  timedOut: ToolResult,
+  nodeId: unknown,
+  widget: string,
+  value: unknown,
+  mutationId: string | undefined,
+  dispatchTab: string,
+  expectedScope?: SetWidgetReadbackScope,
+): Promise<ToolResult> {
+  // Probe the tab the write was DISPATCHED to. A silent rebind of an unpinned
+  // session would otherwise let a different tab's widget certify this write.
+  const probeOnSessionTab = ctx.tabId === dispatchTab;
+  const probe = await ctx.call(setWidgetReadbackProbe(nodeId, widget, value), SET_WIDGET_RECONCILE_MS);
+  if (probeOnSessionTab && ctx.tabId !== dispatchTab) {
+    return setWidgetTimeoutUnknown(timedOut, nodeId, widget, value, mutationId);
+  }
+  const observed = observedWidgetFromQuery(probe, nodeId, widget, expectedScope);
+  if (observed.status === "unknown") {
+    return setWidgetTimeoutUnknown(timedOut, nodeId, widget, value, mutationId);
+  }
+  if (widgetValuesMatch(value, observed.value)) {
+    return ok({
+      set: { node_id: nodeId, widget, value: observed.value },
+      applied: true,
+      acknowledged: false,
+      mutation_id: mutationId ?? null,
+      confirmed_by: "graph read after ack timeout",
+      note: setWidgetAppliedNote(widget),
+    });
+  }
+  if (widgetValuePossiblyClipped(value, observed.value)) {
+    return setWidgetTimeoutUnknown(timedOut, nodeId, widget, value, mutationId);
+  }
+  return {
+    isError: true,
+    content: [
+      {
+        type: "text",
+        text: JSON.stringify(
+          {
+            applied: false,
+            acknowledged: false,
+            mutation_id: mutationId ?? null,
+            requested: { node_id: nodeId, widget, value },
+            observed: observed.value,
+            confirmed_by: "graph read after ack timeout",
+            note: setWidgetNotAppliedNote(widget),
+          },
+          null,
+          2,
+        ),
+      },
+    ],
+  };
+}
+
 // ---- panel_free_vram: verifiable when the canvas tab is frozen (#1249) -----
 // `free_vram` is a purely SERVER-SIDE operation — the panel's handler is a plain
 // `POST /free` against the ComfyUI the tab fronts — yet the tool treated the
@@ -20809,7 +21044,39 @@ export function buildPanelToolDefs(): PanelToolDef[] {
               dispatchTab,
             );
           }
-          return classified;
+          // #2489 — ONLY a no-reply is settled by a read. An acked executor
+          // error is a definite outcome; re-deciding it from a later widget
+          // read would overwrite a better-informed verdict. Capture the tab
+          // AFTER dispatch: that is the tab the write was bound to. Host-rail
+          // writes (#2488) fence the current root/parent view, not the child
+          // graph the inner widget lives in.
+          const readbackScope = targetExpectedScope
+            ? {
+                activeView: targetExpectedScope.scope ?? "subgraph",
+                graphIdentity: targetExpectedScope.graphIdentity,
+                ...(targetExpectedScope.workflowUuid !== undefined
+                  ? { workflowUuid: targetExpectedScope.workflowUuid }
+                  : {}),
+              }
+            : ordinaryPlan
+              ? {
+                  activeView: ordinaryPlan.activeView,
+                  graphIdentity: ordinaryPlan.graphIdentity,
+                }
+              : undefined;
+          const settled = isReplyTimeoutResult(classified)
+            ? await settleSetWidgetAfterAckTimeout(
+                ctx,
+                classified,
+                nodeId,
+                widget,
+                value,
+                mutationId,
+                dispatchTab,
+                readbackScope,
+              )
+            : classified;
+          return stripVerifiedLastObservedSchemaNote(summarizeSetWidgetEcho(settled, echoFull));
         };
         let writePromotedInner: (plan: PromotedWritePlan) => Promise<ToolResult>;
         const guardedWrite = async (
