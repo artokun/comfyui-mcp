@@ -2292,9 +2292,11 @@ describe("panel-tools: panel_graph_outline (compact text map)", () => {
   // #809: the outline gained ONE optional argument — `max_chars`, deliberately the same
   // name and clamp as panel_query_graph's, so there is one budget concept to learn. It
   // stays argument-free for the "just show me the canvas" call.
-  it("is registered and takes only the optional max_chars budget", () => {
+  // #2541 — `detail` is an accepted alias for that default full-resolution
+  // request, not a second lever.
+  it("is registered and takes optional max_chars plus the documented detail alias", () => {
     expect(buildPanelToolDefs().map((d) => d.name)).toContain("panel_graph_outline");
-    expect(Object.keys(defByName("panel_graph_outline").schema)).toEqual(["max_chars"]);
+    expect(Object.keys(defByName("panel_graph_outline").schema)).toEqual(["max_chars", "detail"]);
   });
 
   it("forwards graph_outline", async () => {

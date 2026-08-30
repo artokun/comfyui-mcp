@@ -6,6 +6,12 @@ All notable changes to this project are documented here. This project adheres to
 
 ## Unreleased
 
+### MCP
+
+#### Fixed
+- panel_graph_outline accepts the documented `detail`:"full" argument instead of rejecting it as an unrecognized key (#2541)
+
+
 ## [0.52.159] - 2026-08-30
 
 ### MCP

@@ -19049,8 +19049,21 @@ export function buildPanelToolDefs(): PanelToolDef[] {
           .describe(
             `Output character bound for the outline (default ${OUTLINE_MAX_CHARS_DEFAULT}, max ${OUTLINE_MAX_CHARS_CEILING}) — the SAME budget concept as panel_query_graph's max_chars. ` +
               `COVERAGE IS NEVER TRADED AWAY: over budget the outline sheds RESOLUTION, not nodes — first per-node widget values, then titles, and at the floor a per-group summary — so any outline it DOES return describes the whole graph, with real node/group counts. ` +
-              `If even the group-level floor will not fit, it returns NO outline and says so (detail_level:"refused") rather than a partial one that would read as complete. ` +
-              `detail_level names the rung used and degraded_reason says why. Panel builds older than this budget ignore it and return the full outline; the result carries a max_chars field when the budget was actually applied.`,
+              `If even the group-level floor will not fit, it returns NO outline and says so — the RESULT field detail_level is "refused" rather than a partial outline that would read as complete. ` +
+              `The result's detail_level names the rung used; degraded_reason says why. Those are outputs. Panel builds older than this budget ignore max_chars and return the full outline; the result carries a max_chars field when the budget was actually applied.`,
+          ),
+        // #2541 — the result names its default rung `detail_level:"full"`, and
+        // the max_chars prose used to print that as if it were an argument. A
+        // Codex session then called `{ detail: "full" }` and died at the
+        // strict schema (`Unrecognized key 'detail' — accepted keys: 'max_chars'`)
+        // before the handler ran. `full` is already the default; accepting it
+        // lands the call. It is not forwarded: the panel's graph_outline only
+        // takes max_chars, and resolution is still chosen by that bound.
+        detail: z
+          .enum(["full"])
+          .optional()
+          .describe(
+            "Optional request for the default full-resolution outline. The outline already starts at full and sheds rungs only to fit max_chars; passing `full` does not change that. Raise max_chars for more detail. Omit this for the no-argument call.",
           ),
       },
       async (args: A, ctx) =>
