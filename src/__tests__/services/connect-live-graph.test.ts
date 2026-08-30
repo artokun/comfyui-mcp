@@ -248,7 +248,12 @@ describe("panel_connect ships the live-graph lookup (#2502)", () => {
       ctx,
     );
     expect(res.isError).toBeUndefined();
-    expect(calls.map((c) => c.cmd)).toEqual(["graph_connect", "graph_query", "graph_connect"]);
+    expect(calls.map((c) => c.cmd)).toEqual([
+      "graph_connect",
+      "graph_query",
+      "graph_connect",
+      "graph_query",
+    ]);
     expect(allText(res)).toMatch(/#2502/);
   });
 });
