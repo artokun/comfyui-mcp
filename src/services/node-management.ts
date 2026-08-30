@@ -3703,6 +3703,8 @@ export interface InstallOptions {
    * It is observational only and does not change the install decision.
    */
   onLocalFallback?: () => void;
+  /** Internal apply_manifest hook called after a selected local fallback settles. */
+  onLocalFallbackSettled?: (state: "applied" | "failed") => void;
 }
 
 function notifyLocalFallbackSelected(opts: InstallOptions): void {
@@ -3712,6 +3714,21 @@ function notifyLocalFallbackSelected(opts: InstallOptions): void {
     // This is an observational hook used by apply_manifest; a reporting
     // callback must never prevent the selected local fallback from running.
     logger.debug("Ignoring local fallback phase-hook failure", {
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
+}
+
+function notifyLocalFallbackSettled(
+  opts: InstallOptions,
+  state: "applied" | "failed",
+): void {
+  try {
+    opts.onLocalFallbackSettled?.(state);
+  } catch (err) {
+    // This is an observational hook used by apply_manifest; a reporting
+    // callback must never change the install result.
+    logger.debug("Ignoring local fallback settle-hook failure", {
       error: err instanceof Error ? err.message : String(err),
     });
   }
@@ -4065,7 +4082,8 @@ async function installCustomNodeImpl(
           wrongInstallRefusal(localWriteMismatch, 'install_custom_node (action:"install", git clone)', managerBase),
         );
       }
-      if (!isRemoteMode()) notifyLocalFallbackSelected(opts);
+      const localFallback = !isRemoteMode();
+      if (localFallback) notifyLocalFallbackSelected(opts);
       const managerUnavailable =
         refusedBy === undefined &&
         isManagerQueueDetectionFailure(err) &&
@@ -4106,10 +4124,17 @@ async function installCustomNodeImpl(
       // Manager task that resolves no pack reaches cloneCustomNodeFallback only
       // to receive its authoritative remote-target refusal; do not make that
       // refusal wait behind an unrelated local writer.
-      const cloned = isRemoteMode()
-        ? await clone()
-        : await withLocalInstallMutationLock(targetGeneration, managerBase, clone);
-      assertInstallTargetStable(targetGeneration, managerBase);
+      let cloned: NodeOpResult;
+      try {
+        cloned = localFallback
+          ? await withLocalInstallMutationLock(targetGeneration, managerBase, clone)
+          : await clone();
+        assertInstallTargetStable(targetGeneration, managerBase);
+      } catch (err) {
+        if (localFallback) notifyLocalFallbackSettled(opts, "failed");
+        throw err;
+      }
+      if (localFallback) notifyLocalFallbackSettled(opts, "applied");
       return withCliNote(cloned);
     }
     assertInstallTargetStable(targetGeneration, managerBase);
@@ -4133,7 +4158,8 @@ async function installCustomNodeImpl(
         wrongInstallRefusal(localWriteMismatch, 'install_custom_node (action:"install", git clone)', managerBase),
       );
     }
-    if (!isRemoteMode()) notifyLocalFallbackSelected(opts);
+    const localFallback = !isRemoteMode();
+    if (localFallback) notifyLocalFallbackSelected(opts);
     const clone = () => cloneCustomNodeFallback(gitId, repoName, gitRef, status, cliWorkspace, {
       refFromVersion,
       allowSharedWorkspaceFallback: cliWorkspace !== undefined,
@@ -4141,10 +4167,17 @@ async function installCustomNodeImpl(
     // An accepted remote Manager task that resolves no pack still reaches this
     // helper only for its authoritative remote-target refusal; it is not a
     // local write and must not wait on the local writer lock.
-    const cloned = isRemoteMode()
-      ? await clone()
-      : await withLocalInstallMutationLock(targetGeneration, managerBase, clone);
-    assertInstallTargetStable(targetGeneration, managerBase);
+    let cloned: NodeOpResult;
+    try {
+      cloned = localFallback
+        ? await withLocalInstallMutationLock(targetGeneration, managerBase, clone)
+        : await clone();
+      assertInstallTargetStable(targetGeneration, managerBase);
+    } catch (err) {
+      if (localFallback) notifyLocalFallbackSettled(opts, "failed");
+      throw err;
+    }
+    if (localFallback) notifyLocalFallbackSettled(opts, "applied");
     return withCliNote(cloned);
   }
 

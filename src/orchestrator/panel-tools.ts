@@ -66,6 +66,7 @@ import {
   formatQueueStatusPartialNote,
   getManifestPartialLeftover,
 } from "../services/manifest-partial.js";
+import { readPublishedManifestOutcomes } from "../services/manifest-outcome-channel.js";
 import { searchPanelNodes } from "../services/manager-node-search.js";
 import { listPanelNodes } from "../services/manager-node-list.js";
 import { isPanelAnsweredError } from "../services/panel-answered.js";
@@ -4853,18 +4854,25 @@ async function settleDroppedEnqueue(
  * name the outstanding entries on the object.
  */
 function annotateQueueStatusWithManifestPartial(res: ToolResult): ToolResult {
-  const leftover = getManifestPartialLeftover();
-  if (
-    !leftover ||
-    (leftover.not_started.length === 0 &&
-      leftover.still_installing.length === 0 &&
-      (leftover.outcome_unknown?.length ?? 0) === 0)
-  ) {
+  const local = getManifestPartialLeftover();
+  const published = readPublishedManifestOutcomes(getComfyUIBaseUrl());
+  const partials = [local, ...published].filter(
+    (partial): partial is NonNullable<typeof partial> => partial !== null,
+  );
+  const uniquePartials = partials.filter((partial, index, all) => {
+    const key = JSON.stringify(partial);
+    return all.findIndex((candidate) => JSON.stringify(candidate) === key) === index;
+  });
+  if (uniquePartials.length === 0) {
     return res;
   }
   if (res.isError) return res;
   const parsed = parseToolResultJson(res);
-  if (!parsed) return appendNote(res, formatQueueStatusPartialNote(leftover));
+  const leftover = uniquePartials[0];
+  const note = uniquePartials.length === 1
+    ? formatQueueStatusPartialNote(leftover)
+    : uniquePartials.map(formatQueueStatusPartialNote).join("\n\n");
+  if (!parsed) return appendNote(res, note);
   return {
     ...res,
     content: [
@@ -4874,6 +4882,7 @@ function annotateQueueStatusWithManifestPartial(res: ToolResult): ToolResult {
           {
             ...parsed,
             apply_manifest_partial: leftover,
+            ...(uniquePartials.length > 1 ? { apply_manifest_partials: uniquePartials } : {}),
             queue_complete_for_apply_manifest: false,
           },
           null,

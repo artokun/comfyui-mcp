@@ -181,6 +181,7 @@ import {
 import { ProcessControlError, ValidationError } from "../../utils/errors.js";
 import { withPanelMutationLock } from "../../services/panel-pin-guard.js";
 import { applyManifest } from "../../services/manifest.js";
+import { getManifestPartialLeftover } from "../../services/manifest-partial.js";
 
 const mockedExec = vi.mocked(execFileSync);
 const mockedExists = vi.mocked(existsSync);
@@ -258,6 +259,8 @@ function stubFetch(opts: {
   queueOpEmpty?: boolean;
   /** Return JSON null for a custom-node install enqueue. */
   queueOpNull?: boolean;
+  /** Return JSON null from queue/status after the enqueue has been accepted. */
+  queueStatusNull?: boolean;
   /** Delay a custom-node install enqueue response to exercise apply_manifest's late race. */
   queueOpDelayMs?: number;
   /** Body for `https://api.comfy.org/nodes/:id` (registry-zip empty-pack fallback). */
@@ -297,6 +300,11 @@ function stubFetch(opts: {
         return jsonResponse(opts.installedBody ?? {});
       }
       if (path === "/v2/manager/queue/status" || path === "/manager/queue/status") {
+        if (opts.queueStatusNull) {
+          // This is intentionally a status response, not an enqueue response:
+          // the accepted task has already crossed the Manager boundary.
+          return jsonResponse(null);
+        }
         if (opts.managerQueueStatus === "absent") {
           return new Response("missing", { status: 404 });
         }
@@ -1100,10 +1108,48 @@ describe("node-management service", () => {
         expect(
           mockedExec.mock.calls.find((c) => c[0] === "git" && (c[1] as string[])[0] === "clone"),
         ).toBeDefined();
+        // cloneStarted is raised from inside the mocked synchronous git call;
+        // allow the surrounding async fallback promise to run its settle hook.
+        await new Promise<void>((resolve) => setTimeout(resolve, 10));
+        const reconciled = getManifestPartialLeftover();
+        expect(reconciled?.not_started).toEqual(["next-pack"]);
+        expect(reconciled?.outcome_unknown).toBeUndefined();
+        expect(reconciled?.local_fallback).toBeUndefined();
       } finally {
         if (previousBudget === undefined) delete process.env.COMFYUI_MCP_MANIFEST_NODE_BUDGET_MS;
         else process.env.COMFYUI_MCP_MANIFEST_NODE_BUDGET_MS = previousBudget;
       }
+    });
+
+    it("fails closed when an accepted warm-cache enqueue is followed by JSON null queue status (#1129)", async () => {
+      const fetchOptions = { queueStatusNull: false };
+      const { calls } = stubFetch(fetchOptions);
+
+      // Establish the same warm dialect cache used by the production path,
+      // then make only the later queue/status poll return JSON null. The
+      // enqueue remains acknowledged, so no local fallback may be selected.
+      await installModelViaManager({
+        name: "warmup.safetensors",
+        url: "https://example.com/warmup.safetensors",
+        filename: "warmup.safetensors",
+        type: "checkpoints",
+      });
+      fetchOptions.queueStatusNull = true;
+
+      await expect(
+        installCustomNode({
+          id: "https://github.com/teskor-hub/comfyui-teskors-utils",
+          source: "git",
+        }),
+      ).rejects.toMatchObject({
+        details: { kind: "manager-queue-empty-status" },
+      });
+      expect(calls.some((c) => c.url.endsWith("/v2/manager/queue/task"))).toBe(true);
+      expect(calls.some((c) => c.url.endsWith("/v2/manager/queue/start"))).toBe(true);
+      expect(calls.some((c) => c.url.endsWith("/v2/manager/queue/status"))).toBe(true);
+      expect(
+        mockedExec.mock.calls.find((c) => c[0] === "git" && (c[1] as string[])[0] === "clone"),
+      ).toBeUndefined();
     });
 
     it("does not authorize a late local clone when Manager enqueue eventually returns null (#1129)", async () => {

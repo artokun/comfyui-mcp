@@ -5,6 +5,9 @@
 // This file drives the SHIPPED applyManifest + panel_node_queue_status path
 // (I/O is mocked; the result assembly and queue-status annotation are real).
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 const installCustomNodeMock = vi.hoisted(() => vi.fn());
 const listInstalledNodesMock = vi.hoisted(() => vi.fn());
@@ -33,6 +36,11 @@ import {
   getManifestPartialLeftover,
   recordManifestPartial,
 } from "../../services/manifest-partial.js";
+import {
+  configureManifestOutcomeReader,
+  publishManifestOutcome,
+  resetManifestOutcomeReader,
+} from "../../services/manifest-outcome-channel.js";
 import { WorkflowTargetStore } from "../../services/workflow-target-store.js";
 import {
   buildPanelToolDefs,
@@ -215,5 +223,42 @@ describe("apply_manifest leftover + panel_node_queue_status (#1699)", () => {
     });
     expect(text).toMatch(/UNKNOWN/i);
     expect(text).toMatch(/no local direct-install fallback is authorized/i);
+  });
+
+  it("annotates a signed child partial through the production channel", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "cmcp-manifest-panel-"));
+    const id = "https://github.com/example/child-only-pack";
+    const partial = buildManifestPartial({
+      source: "this inline manifest",
+      notStarted: [],
+      stillInstalling: [id],
+      outcomeUnknown: [id],
+    });
+    if (!partial) throw new Error("expected partial fixture");
+    try {
+      // This is the child-side write; the panel tool reads through a separately
+      // configured orchestrator-side verifier, with no process-local record.
+      expect(
+        publishManifestOutcome(partial, {
+          dir,
+          secret: "orchestrator-issued-child-secret",
+          scope: "orchestrator::codex",
+          target: "http://127.0.0.1:8188",
+        }),
+      ).toBe(true);
+      configureManifestOutcomeReader(dir, () => ["orchestrator-issued-child-secret"]);
+
+      clearManifestPartialLeftover();
+      const { parsed, text } = await queueStatus();
+      expect(parsed?.queue_complete_for_apply_manifest).toBe(false);
+      expect(parsed?.apply_manifest_partial).toMatchObject({
+        still_installing: [id],
+        outcome_unknown: [id],
+      });
+      expect(text).toMatch(/UNKNOWN/i);
+    } finally {
+      resetManifestOutcomeReader();
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });

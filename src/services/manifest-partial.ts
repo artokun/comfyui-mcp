@@ -6,11 +6,14 @@
  * "pending" / "not started" and are NEVER enqueued; an accepted-but-ambiguous
  * operation can also remain unresolved. panel_node_queue_status then reports a
  * drained queue (total_count: 0, is_processing: false) which agents read as
- * "all installs finished". This module is the process-local record of both
- * unsubmitted and unresolved names so apply_manifest (which names the PARTIAL
- * INSTALL) and panel_node_queue_status (which refuses to look complete while
- * they remain) share one source of truth.
+ * "all installs finished". This module is the fast process-local record of
+ * both unsubmitted and unresolved names. Panel-spawned children also publish
+ * the same record through manifest-outcome-channel.ts so apply_manifest and
+ * panel_node_queue_status share one source of truth across their process
+ * boundary.
  */
+
+import { publishManifestOutcome } from "./manifest-outcome-channel.js";
 
 export interface ManifestPartialInstall {
   kind: "custom_nodes_not_started";
@@ -27,26 +30,49 @@ export interface ManifestPartialInstall {
    * this result.
    */
   outcome_unknown?: string[];
+  /** Entries whose local direct-install fallback was selected after a timeout. */
+  local_fallback?: string[];
+  /** Entries whose late local direct-install fallback finished unsuccessfully. */
+  local_fallback_failed?: string[];
   message: string;
 }
 
 let leftover: ManifestPartialInstall | null = null;
+let lastRecordTarget: string | undefined;
 
-export function recordManifestPartial(partial: ManifestPartialInstall | null): void {
+export function recordManifestPartial(
+  partial: ManifestPartialInstall | null,
+  options: { target?: string } = {},
+): void {
+  if (options.target !== undefined) lastRecordTarget = options.target;
   leftover =
     partial &&
     (partial.not_started.length > 0 ||
       partial.still_installing.length > 0 ||
-      (partial.outcome_unknown?.length ?? 0) > 0)
+      (partial.outcome_unknown?.length ?? 0) > 0 ||
+      (partial.local_fallback?.length ?? 0) > 0 ||
+      (partial.local_fallback_failed?.length ?? 0) > 0)
       ? {
           ...partial,
           not_started: [...partial.not_started],
           still_installing: [...partial.still_installing],
-          ...(partial.outcome_unknown
+          ...(partial.outcome_unknown?.length
             ? { outcome_unknown: [...partial.outcome_unknown] }
+            : {}),
+          ...(partial.local_fallback?.length
+            ? { local_fallback: [...partial.local_fallback] }
+            : {}),
+          ...(partial.local_fallback_failed?.length
+            ? { local_fallback_failed: [...partial.local_fallback_failed] }
             : {}),
         }
       : null;
+  if (leftover) {
+    if (!leftover.outcome_unknown?.length) delete leftover.outcome_unknown;
+    if (!leftover.local_fallback?.length) delete leftover.local_fallback;
+    if (!leftover.local_fallback_failed?.length) delete leftover.local_fallback_failed;
+  }
+  publishManifestOutcome(leftover, { target: options.target ?? lastRecordTarget });
 }
 
 export function getManifestPartialLeftover(): ManifestPartialInstall | null {
@@ -56,6 +82,67 @@ export function getManifestPartialLeftover(): ManifestPartialInstall | null {
 /** Test seam — production callers replace leftovers via recordManifestPartial. */
 export function clearManifestPartialLeftover(): void {
   leftover = null;
+  publishManifestOutcome(null, { target: lastRecordTarget });
+}
+
+/**
+ * Reconcile a timed-out git install when its late fallback actually changes
+ * phase. The callback can run after apply_manifest has returned, so updating
+ * only the result object would leave queue status permanently stale.
+ */
+export function reconcileManifestPartialLocalFallback(
+  id: string,
+  state: "selected" | "applied" | "failed",
+): void {
+  if (!leftover) return;
+  const has = (items: string[] | undefined): boolean => items?.includes(id) === true;
+  if (
+    state === "selected" &&
+    !has(leftover.still_installing) &&
+    !has(leftover.outcome_unknown)
+  ) {
+    return;
+  }
+  const remove = (items: string[] | undefined): string[] =>
+    (items ?? []).filter((item) => item !== id);
+  const add = (items: string[] | undefined): string[] =>
+    has(items) ? [...(items ?? [])] : [...(items ?? []), id];
+
+  if (state === "selected") {
+    leftover = {
+      ...leftover,
+      outcome_unknown: remove(leftover.outcome_unknown),
+      local_fallback: add(leftover.local_fallback),
+      local_fallback_failed: remove(leftover.local_fallback_failed),
+      message:
+        `${leftover.message} Reconciliation: the earlier UNKNOWN outcome has now selected ` +
+        `a local direct-install fallback for "${id}". It is in progress; do not ` +
+        `use Manager queue status or re-issue the node while it runs.`,
+    };
+  } else if (state === "applied") {
+    leftover = {
+      ...leftover,
+      still_installing: remove(leftover.still_installing),
+      outcome_unknown: remove(leftover.outcome_unknown),
+      local_fallback: remove(leftover.local_fallback),
+      local_fallback_failed: remove(leftover.local_fallback_failed),
+      message:
+        `${leftover.message} Reconciliation: the local fallback for "${id}" completed; ` +
+        `the entry is no longer unresolved.`,
+    };
+  } else {
+    leftover = {
+      ...leftover,
+      still_installing: remove(leftover.still_installing),
+      outcome_unknown: remove(leftover.outcome_unknown),
+      local_fallback: remove(leftover.local_fallback),
+      local_fallback_failed: add(leftover.local_fallback_failed),
+      message:
+        `${leftover.message} Reconciliation: the local direct-install fallback for "${id}" ` +
+        `finished unsuccessfully. Inspect the filesystem/error before retrying.`,
+    };
+  }
+  recordManifestPartial(leftover);
 }
 
 export function describeManifestSource(opts: {
@@ -167,6 +254,14 @@ export function formatQueueStatusPartialNote(partial: ManifestPartialInstall): s
           `no local direct-install fallback is authorized and queue idle is not proof ` +
           `of completion. Verify the custom_nodes directory before reissuing.`
         : " Do not treat queue idle as proof that this apply_manifest completed.")
+      : "";
+  const local = partial.local_fallback?.length
+    ? ` Local direct-install fallback is in progress for ${partial.local_fallback.join(", ")}. ` +
+      `This work is NOT on the Manager queue; wait for it to settle and do not re-issue it.`
     : "";
-  return `WARNING — PARTIAL INSTALL, QUEUE DRAIN IS NOT COMPLETION. ${unsubmitted}${unresolved}`;
+  const failed = partial.local_fallback_failed?.length
+    ? ` Local direct-install fallback failed for ${partial.local_fallback_failed.join(", ")}. ` +
+      `Queue status cannot determine that result; inspect the install error before retrying.`
+    : "";
+  return `WARNING — PARTIAL INSTALL, QUEUE DRAIN IS NOT COMPLETION. ${unsubmitted}${unresolved}${local}${failed}`;
 }

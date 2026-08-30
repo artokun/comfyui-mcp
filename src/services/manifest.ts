@@ -58,6 +58,7 @@ import {
   formatLocalFallbackMessage,
   formatNotStartedMessage,
   formatStillInstallingMessage,
+  reconcileManifestPartialLocalFallback,
   recordManifestPartial,
   type ManifestPartialInstall,
 } from "./manifest-partial.js";
@@ -1220,6 +1221,10 @@ async function applyManifestSections(
       targetGeneration,
       onLocalFallback: () => {
         localFallbackSelected = true;
+        reconcileManifestPartialLocalFallback(normalizedId, "selected");
+      },
+      onLocalFallbackSettled: (state) => {
+        reconcileManifestPartialLocalFallback(normalizedId, state);
       },
     })
       .then((res) => ({ kind: "settled" as const, res }))
@@ -1664,7 +1669,7 @@ async function applyManifestSections(
     stillInstalling,
     outcomeUnknown,
   });
-  recordManifestPartial(partial);
+  recordManifestPartial(partial, { target: getComfyUIBaseUrl() });
 
   return {
     // `success` means the manifest is APPLIED AND VERIFIED — nothing failed AND

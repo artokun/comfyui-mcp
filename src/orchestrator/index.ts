@@ -290,6 +290,7 @@ import { AskAnswers, preview as previewQuestion } from "./ask-answer-journal.js"
 import { initRunpodWatcher, getRunpodWatcher, type RunpodStatusFrame, type RunpodAlertFrame } from "../services/runpod-watch.js";
 import { getPod } from "../services/runpod-client.js";
 import { listTargetChangeRequests, consumeTargetChange, ackTargetChange, setProgressDir, CONTROL_PREFIX, newestAttemptEpochs, isSupersededAttempt, downloadAttemptKey, markSupersededByLive, migrateInFlightJobs } from "../services/download-progress.js";
+import { configureManifestOutcomeReader } from "../services/manifest-outcome-channel.js";
 import { hasActiveTrainingJob, reconcileStaleTrainingJobs } from "../services/training-jobs.js";
 import {
   buildQueueStatusFrame,
@@ -1820,6 +1821,17 @@ export async function runPanelOrchestrator(): Promise<void> {
   // #2149 — a child may write to the shared progress directory, so its tab
   // identity must never come from request JSON. Capabilities are minted here,
   // injected into the child environment, and resolved only by this process.
+  const manifestOutcomeSecrets = new Set<string>();
+  const manifestOutcomeSecretByAgent = new Map<string, string>();
+  const manifestOutcomeSecretFor = (agentKey: string): string => {
+    const existing = manifestOutcomeSecretByAgent.get(agentKey);
+    if (existing) return existing;
+    const secret = randomBytes(32).toString("hex");
+    manifestOutcomeSecretByAgent.set(agentKey, secret);
+    manifestOutcomeSecrets.add(secret);
+    return secret;
+  };
+  configureManifestOutcomeReader(progressDir, () => manifestOutcomeSecrets);
   const panelImageRelaySecrets = new Map<string, string>();
   const panelImageRelaySecretFor = (agentKey: string): string => {
     const existing = [...panelImageRelaySecrets.entries()].find(([, key]) => key === agentKey)?.[0];
@@ -2348,6 +2360,7 @@ export async function runPanelOrchestrator(): Promise<void> {
         // downloads resolved to nobody and the owning conversation stalled).
         // `tabId` here IS the agent key (the scope address the lane binds).
         COMFYUI_MCP_TAB: tabId,
+        COMFYUI_MCP_MANIFEST_OUTCOME_SECRET: manifestOutcomeSecretFor(tabId),
         COMFYUI_MCP_RELAY_SECRET: panelImageRelaySecretFor(tabId),
         ...(panelImageRelayEndpoint ? { COMFYUI_MCP_RELAY_URL: panelImageRelayEndpoint } : {}),
         ...(panelTemplateRelayEndpoint
@@ -2693,6 +2706,9 @@ export async function runPanelOrchestrator(): Promise<void> {
         // child stamps its own COMFYUI_MCP_TAB into each progress row, and the
         // settle path resolves an agent-key-shaped stamp directly.
         ...(agentKey ? { COMFYUI_MCP_TAB: agentKey } : {}),
+        ...(agentKey
+          ? { COMFYUI_MCP_MANIFEST_OUTCOME_SECRET: manifestOutcomeSecretFor(agentKey) }
+          : {}),
         ...(agentKey ? { COMFYUI_MCP_RELAY_SECRET: panelImageRelaySecretFor(agentKey) } : {}),
         ...(agentKey && panelImageRelayEndpoint ? { COMFYUI_MCP_RELAY_URL: panelImageRelayEndpoint } : {}),
         ...(agentKey && panelTemplateRelayEndpoint
