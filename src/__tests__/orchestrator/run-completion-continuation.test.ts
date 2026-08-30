@@ -849,7 +849,7 @@ describe("run completion across automatic goal continuation (#468)", () => {
   });
 
   it("#2283: a matched PreviewImage completion names type:temp so get_image can fetch it without history", async () => {
-    // Headless get_image / list_assets / history can be ECONNREFUSED while the
+    // Headless get_image (action:"list_assets") / history can be ECONNREFUSED while the
     // panel still queued the run. Filename-only completion text defaults
     // get_image to type:"output" and misses PreviewImage's temp/ file.
     const backend = new ContinuationBackend();

@@ -1,5 +1,5 @@
 // #2283 — a connected sidebar panel can queue and complete renders while
-// headless get_image list_assets and get_system_stats logs fail with
+// headless get_image (action:"list_assets") and get_system_stats logs fail with
 // ECONNREFUSED against COMFYUI_URL. History fallback already landed for
 // prompt-scoped get_history (#2532/#2644); these production handlers must use
 // the same authenticated panel read (and /view image relay) instead of guessing
@@ -174,8 +174,8 @@ function assertNeverGuessed8188() {
   expect(fetchTargets.join("\n")).not.toMatch(/:8188\b/);
 }
 
-describe("get_image list_assets and get_system_stats logs use panel fallback (#2283)", () => {
-  it("list_assets registers a panel_run output when headless /history is ECONNREFUSED", async () => {
+describe('get_image (action:"list_assets") and get_system_stats logs use panel fallback (#2283)', () => {
+  it('get_image (action:"list_assets") registers a panel_run output when headless /history is ECONNREFUSED', async () => {
     const successTs = Date.now() - 4000;
     panelRead.mockImplementation(async (operation: string) => {
       if (operation !== "history") return undefined;
