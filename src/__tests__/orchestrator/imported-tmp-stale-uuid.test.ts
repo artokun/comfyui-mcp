@@ -129,7 +129,7 @@ function tmpLoadBridge(opts?: { destUuid?: string }) {
     workflowUuidFor: () => ({ known: true, uuid: destUuid }),
     refreshWorkflowUuid: () => true,
     tabGraphMutationCapability: () => ({ known: true, canMutate: true }),
-  } as unknown as PanelToolCtx["bridge"];
+  } as PanelToolCtx["bridge"];
   return { bridge, sent };
 }
 
@@ -245,7 +245,7 @@ function tmpOpenBridge(opts: {
       return true;
     },
     tabGraphMutationCapability: () => ({ known: true, canMutate: true }),
-  } as unknown as PanelToolCtx["bridge"];
+  } as PanelToolCtx["bridge"];
   return { bridge, sent, stampOf: () => fence };
 }
 
