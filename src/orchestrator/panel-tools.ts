@@ -11900,10 +11900,25 @@ async function refreshOpenWorkflowUuid(
     parsedOpen.routedTo === ctx.tabId &&
     (typeof ctx.bridge.canReach !== "function" || ctx.bridge.canReach(ctx.tabId));
   const opened = parsedOpen?.opened;
-  const openedPath =
-    opened && typeof opened === "object" && typeof (opened as { path?: unknown }).path === "string"
-      ? (opened as { path: string }).path
+  const openedRecord =
+    opened && typeof opened === "object" && !Array.isArray(opened)
+      ? (opened as Record<string, unknown>)
       : undefined;
+  const openedPath = typeof openedRecord?.path === "string" ? openedRecord.path : undefined;
+  // #2477 — some successful workflow_open replies nest routing_key under
+  // `opened` rather than at the top level. A tmp: request is never a filename
+  // alias, so prove that identity first; otherwise the #1639 unresolved-
+  // filename path rejects a canvas the panel already bound.
+  const requestedUnsaved = canonicalUnsavedWorkflowIdentity(requestedPath);
+  if (requestedUnsaved) {
+    const openedRoutingKey =
+      (typeof parsedOpen?.routing_key === "string" ? parsedOpen.routing_key : undefined) ??
+      (typeof openedRecord?.routing_key === "string" ? openedRecord.routing_key : undefined);
+    if (requestedUnsaved === openedRoutingKey) {
+      refreshWorkflowUuid(ctx, parsedOpen) || refreshWorkflowUuid(ctx, openedRecord);
+    }
+    return null;
+  }
   // The caller's original token is the fence target. A panel can resolve an
   // alias/basename to a path, but that reply must never retroactively turn the
   // alias into a UUID-refresh authorization. Require the reply to corroborate
@@ -12017,22 +12032,6 @@ async function refreshOpenWorkflowUuid(
       };
     }
 
-    // #812 — the SAVED corroboration above can never succeed for an unsaved
-    // target (there is no path), so try the parallel UNSAVED identity: the
-    // caller's literal token against the panel's own proven routing_key for
-    // the tab it just opened. Exact equality only — see
-    // canonicalUnsavedWorkflowIdentity for why that carries no alias risk.
-    //
-    // Trust level matches the EXISTING "could not ask" fallback below exactly:
-    // adopt the reply's own workflow_uuid directly, which the panel published
-    // only after its own final synchronous check that this target was still
-    // the active workflow (#716). No extra workflow_list round trip — that
-    // read is itself refused by the exact wedge this exists to repair
-    // (#1071), which is the same trap `panel_new_workflow`'s recovery hit.
-    const requestedUnsaved = canonicalUnsavedWorkflowIdentity(requestedPath);
-    if (requestedUnsaved && requestedUnsaved === parsedOpen?.routing_key) {
-      refreshWorkflowUuid(ctx, parsedOpen);
-    }
     return null;
   }
 
