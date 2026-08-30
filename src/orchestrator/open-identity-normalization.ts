@@ -33,6 +33,48 @@ export function extraWorkflowPath(graph: unknown): string | null {
   return typeof meta?.workflow_path === "string" && meta.workflow_path ? meta.workflow_path : null;
 }
 
+export function extraWorkflowUuid(graph: unknown): string | null {
+  if (!isPlainObject(graph)) return null;
+  const extra = isPlainObject(graph.extra) ? graph.extra : null;
+  const meta = extra && isPlainObject(extra.comfyui_mcp) ? extra.comfyui_mcp : null;
+  return typeof meta?.workflow_uuid === "string" && meta.workflow_uuid ? meta.workflow_uuid : null;
+}
+
+/**
+ * Exact unsaved routing handle (`tmp:<id>`). OPEN must accept any non-empty
+ * tmp: token list_workflows publishes — not only RFC-uuid suffixes — or an
+ * already-active imported tab cannot rebind (#2503).
+ */
+export function unsavedTmpWorkflowKey(value: unknown): string | null {
+  if (typeof value !== "string" || !value) return null;
+  return /^tmp:\S+$/.test(value) ? value : null;
+}
+
+/**
+ * #2503 — importing/loading onto a new tmp tab must not keep the source graph's
+ * extra.comfyui_mcp.workflow_uuid. Replace it with the tab's assigned uuid.
+ * Leaves workflow_path untouched (#2505).
+ *
+ * Returns a cloned graph when a rewrite is needed; null when dest/graph are
+ * unusable or the stamp already names dest.
+ */
+export function bindImportedTmpWorkflowUuid(
+  graph: unknown,
+  destUuid: string,
+): Record<string, unknown> | null {
+  if (!isPlainObject(graph)) return null;
+  if (typeof destUuid !== "string" || !destUuid) return null;
+  const stamped = extraWorkflowUuid(graph);
+  if (!stamped || stamped === destUuid) return null;
+  const next: Record<string, unknown> = structuredClone(graph);
+  const extra = isPlainObject(next.extra) ? { ...next.extra } : {};
+  const meta = isPlainObject(extra.comfyui_mcp) ? { ...extra.comfyui_mcp } : {};
+  meta.workflow_uuid = destUuid;
+  extra.comfyui_mcp = meta;
+  next.extra = extra;
+  return next;
+}
+
 export function extraStampDisagrees(graph: unknown, destPath: string): boolean {
   const stamped = normalizeWorkflowPath(extraWorkflowPath(graph));
   const dest = normalizeWorkflowPath(destPath);

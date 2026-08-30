@@ -177,12 +177,14 @@ import {
   isFastGroupsFilterProperty,
 } from "./rgthree-fast-groups-property.js";
 import {
+  bindImportedTmpWorkflowUuid,
   isPlainObject,
   isStampMismatchSaveRefusal,
   openLiveMatchesDestAfterReconnect,
   openLiveMatchesDestContent,
   patchOpenIdentity,
   shouldRebindOpenIdentity,
+  unsavedTmpWorkflowKey,
   workflowFromSerializeReply,
 } from "./open-identity-normalization.js";
 import {
@@ -9683,6 +9685,38 @@ type OpenIdentityRebind =
   | { status: "skipped" };
 
 /**
+ * #2503 — restamp extra.comfyui_mcp.workflow_uuid onto an already-active tmp
+ * tab. workflow_open of the exact tmp: key is the documented rebind; it must
+ * not require a saved filename, and it must replace a source-file uuid the
+ * imported graph still carries.
+ */
+async function tryRebindImportedTmpIdentity(
+  ctx: PanelToolCtx,
+  requestedPath: string,
+): Promise<{ status: "rebound" } | { status: "skipped" }> {
+  if (!unsavedTmpWorkflowKey(requestedPath)) return { status: "skipped" };
+  const fence = currentWorkflowFence(ctx);
+  const destUuid = fence.known && typeof fence.uuid === "string" && fence.uuid ? fence.uuid : undefined;
+  if (!destUuid) return { status: "skipped" };
+
+  let live: Record<string, unknown> | null = null;
+  try {
+    const serialized = await ctx.call({ cmd: "graph_serialize" }, 8000);
+    live = workflowFromSerializeReply(parseToolResultJson(serialized));
+  } catch {
+    return { status: "skipped" };
+  }
+  if (!live) return { status: "skipped" };
+
+  const bound = bindImportedTmpWorkflowUuid(live, destUuid);
+  if (!bound) return { status: "skipped" };
+  const loaded = await ctx.call({ cmd: "graph_load", graph: bound }, 30000);
+  if (loaded.isError) return { status: "skipped" };
+  refreshWorkflowUuid(ctx, { workflow_uuid: destUuid });
+  return { status: "rebound" };
+}
+
+/**
  * #1710 — restamp extra.comfyui_mcp onto the dest the tab is already bound to,
  * and copy dest-file promoted widgets onto any live empty slots.
  *
@@ -12112,16 +12146,20 @@ async function refreshOpenWorkflowUuid(
       ? (opened as Record<string, unknown>)
       : undefined;
   const openedPath = typeof openedRecord?.path === "string" ? openedRecord.path : undefined;
-  // #2477 — some successful workflow_open replies nest routing_key under
-  // `opened` rather than at the top level. A tmp: request is never a filename
-  // alias, so prove that identity first; otherwise the #1639 unresolved-
-  // filename path rejects a canvas the panel already bound.
-  const requestedUnsaved = canonicalUnsavedWorkflowIdentity(requestedPath);
-  if (requestedUnsaved) {
+  // #2477 / #2503 — a tmp: request is never a filename alias. Accept any
+  // non-empty tmp: token list_workflows publishes (not only RFC-uuid suffixes),
+  // or an already-active imported tab is rejected as an unresolved filename.
+  // Fence adoption stays RFC-strict on the key (#812): a malformed tmp: suffix
+  // must not stamp the session even if the reply echoes it.
+  const requestedTmp = unsavedTmpWorkflowKey(requestedPath);
+  if (requestedTmp) {
     const openedRoutingKey =
-      (typeof parsedOpen?.routing_key === "string" ? parsedOpen.routing_key : undefined) ??
-      (typeof openedRecord?.routing_key === "string" ? openedRecord.routing_key : undefined);
-    if (requestedUnsaved === openedRoutingKey) {
+      unsavedTmpWorkflowKey(parsedOpen?.routing_key) ??
+      unsavedTmpWorkflowKey(openedRecord?.routing_key);
+    const requestedUnsaved = canonicalUnsavedWorkflowIdentity(requestedPath);
+    // Absent routing_key is the already-active tmp tab: the panel applied the
+    // open but did not echo the handle. A DIFFERENT tmp: key is another tab.
+    if (requestedUnsaved && (!openedRoutingKey || requestedUnsaved === openedRoutingKey)) {
       refreshWorkflowUuid(ctx, parsedOpen) || refreshWorkflowUuid(ctx, openedRecord);
     }
     return null;
@@ -12579,6 +12617,7 @@ async function openWorkflowWithVerify(path: string, ctx: PanelToolCtx): Promise<
             `if you still need it — another tab became active during or after the open.`,
         );
       }
+      await tryRebindImportedTmpIdentity(ctx, path);
     }
     return res;
   }
@@ -12812,14 +12851,15 @@ function computeIsActive(rec: OpenWorkflowRecord, activeObj: unknown): boolean |
  * Per-tab unsaved handle (`tmp:<id>`). Unsaved tabs have no path/filename; this
  * is the only unique identity they publish. Accepts any non-empty `tmp:` token
  * (not only RFC-uuid suffixes) so a panel that mints a shorter handle still
- * corroborates — `canonicalUnsavedWorkflowIdentity` stays strict for OPEN,
- * which is a caller-supplied selector.
+ * corroborates. OPEN uses the same matcher to skip filename resolution (#2503);
+ * fence adoption stays RFC-strict via `canonicalUnsavedWorkflowIdentity` (#812).
  */
 function recordTmpHandle(value: unknown): string | null {
   if (!value || typeof value !== "object") return null;
   const rec = value as { key?: unknown; routing_key?: unknown };
   for (const v of [rec.routing_key, rec.key]) {
-    if (typeof v === "string" && /^tmp:\S+$/.test(v)) return v;
+    const key = unsavedTmpWorkflowKey(v);
+    if (key) return key;
   }
   return null;
 }
@@ -18845,6 +18885,17 @@ export function buildPanelToolDefs(): PanelToolDef[] {
           // Generous timeout — loading a large graph onto the live canvas can take a moment.
           const tabAtDispatch = ctx.tabId;
           const fenceBefore = currentWorkflowFence(ctx);
+          // #2503 — a UI import onto this tab must not keep the source file's
+          // extra.comfyui_mcp.workflow_uuid. Dest is the tab uuid already
+          // assigned (fence). workflow_path is left alone (#2505).
+          const destUuid =
+            fenceBefore.known && typeof fenceBefore.uuid === "string" && fenceBefore.uuid
+              ? fenceBefore.uuid
+              : undefined;
+          if (destUuid) {
+            const bound = bindImportedTmpWorkflowUuid(data, destUuid);
+            if (bound) data = bound;
+          }
           let graphBefore: unknown;
           if (uiWorkflowNodeCount(data) !== undefined) {
             try {
