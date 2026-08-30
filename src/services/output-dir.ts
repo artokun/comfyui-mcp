@@ -4,6 +4,7 @@ import { config, isRemoteMode } from "../config.js";
 import { getSystemStats, comfyApiFetch } from "../comfyui/client.js";
 import {
   resolveEffectiveComfyUIBase,
+  resolveLiveComfyUIBase,
   resolveLiveServerRoot,
   hasComfyUIEntrypoint,
 } from "./workspace-env.js";
@@ -1325,16 +1326,28 @@ export function localTempDirFallback(): string {
  * connected ComfyUI's output/input dirs", so the contract was right and the
  * resolution was not.
  *
- * This is the same live-first move #463/#369 made for models: `resolveLiveServerRoot`
- * uses argv `main.py` + cwd when that is absolute, and otherwise the OS-observed
- * process for the relative `ComfyUI/main.py` shape Desktop and the Windows
- * portable bundle both report (no --output-directory, no cwd). That last shape
- * is #2539: `get_image list_outputs` scanned an unrelated COMFYUI_PATH while
- * `/view` served the live server's files. An explicit --output-directory still
- * wins above, and the configured install still catches everything below.
+ * Two live rungs, in this order:
+ *
+ *  1. `resolveLiveComfyUIBase` (#2194 / #1052) — argv `main.py` + cwd when that
+ *     is absolute. `get_image` action:get type:input uses this when no
+ *     `--input-directory` is present, so a second install in COMFYUI_PATH is
+ *     not preferred over the connected server.
+ *  2. `resolveLiveServerRoot` (#2539 / #369) — OS-observed process when argv is
+ *     the relative `ComfyUI/main.py` shape Desktop and the Windows portable
+ *     bundle both report (no --output-directory, no cwd). That last shape is
+ *     why `get_image list_outputs` scanned an unrelated COMFYUI_PATH while
+ *     `/view` served the live server's files.
+ *
+ * An explicit --output-directory still wins above, and the configured install
+ * still catches everything below.
  */
 async function liveIoDirFallback(kind: "input" | "output" | "temp"): Promise<string | undefined> {
   try {
+    // #2194 — get_image action:get type:input when no --input-directory is set.
+    const fromArgv = await resolveLiveComfyUIBase();
+    if (fromArgv) return join(fromArgv, kind);
+
+    // #2539 — relative ComfyUI/main.py with no cwd cannot be derived from argv.
     const stats = await getSystemStats();
     const live = resolveLiveServerRoot(
       stats.system?.argv,
