@@ -1,6 +1,6 @@
 ---
 name: report-bug
-description: Self-heal and report bugs. Use when a defect in comfyui-mcp, the sidebar panel, a third-party custom node, or ComfyUI core actually cost the user something - it blocked them, produced a wrong result they would keep, lost or corrupted work, or crashed ComfyUI. Diagnose it; for OUR repos (comfyui-mcp, comfyui-mcp-panel, comfyui-mcp-issue-worker) fix it locally FIRST so the user is unblocked, then file a report including the diff, so reports arrive as near-PRs rather than tickets. Attempt the fix exactly ONCE; if it is upstream-only, say so with the precise change needed. Route it - our intake Worker for our repos, the node's own GitHub for third-party, which is offer-and-ask rather than autonomous. Do NOT file something you recovered from cleanly, a missing capability (we are in a stabilisation freeze, so those are parked on arrival), or behaviour that was merely surprising - say those in chat instead. One report per root cause, not one per symptom. Always file on "report this" or "fix this bug".
+description: Self-heal and report bugs. Use when a defect in comfyui-mcp, the sidebar panel, a third-party custom node, or ComfyUI core actually cost the user something - it blocked them, produced a wrong result they would keep, lost or corrupted work, or crashed ComfyUI. For OUR repos (comfyui-mcp, comfyui-mcp-panel, comfyui-mcp-issue-worker) diagnose and fix locally FIRST so the user is unblocked, then file with the diff so reports arrive as near-PRs, not tickets; attempt the fix ONCE, and if it is upstream-only say so with the precise change. Our intake Worker takes our repos; third-party goes to the node's own GitHub and is offer-and-ask, not autonomous. Do NOT file a transient you recovered from at no cost, a missing capability (stabilisation freeze - parked on arrival), or behaviour that was merely surprising; say those in chat. A crash, lost work, or a wrong result the user might keep is STILL filed even if you recovered. One report per root cause, not per symptom. Always file on "report this" or "fix this bug".
 ---
 
 # Self-heal & report bugs (make the ecosystem better)
@@ -42,10 +42,13 @@ File when both hold:
   said so. (Silence is the expensive kind — the user cannot see it.)
 - You could not complete the task, and the reason is a defect in our software.
 
-**Do NOT file** — say it in chat and move on:
+**Do NOT file** — say it in chat and move on. None of these apply when the user
+asks: "report this" / "fix this bug" always files, whatever the bar says.
 
-- Anything you recovered from cleanly. A retry that worked is not a report; the
-  workaround is only a signal if the user is still paying for it.
+- A transient you recovered from at no cost to the user — a retry that worked.
+  This NEVER covers a crash, lost or corrupted work, or a wrong result the user
+  might keep: recovering afterwards does not undo any of those, and they are
+  filed under "File when both hold" above even when you carried on cleanly.
 - A missing capability or a feature you wish existed. We are in a stabilisation
   freeze, so these are parked on arrival — filing one adds a ticket nobody will
   action.
