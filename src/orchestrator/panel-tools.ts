@@ -6359,6 +6359,135 @@ function stripVerifiedLastObservedSchemaNote(res: ToolResult): ToolResult {
   return rewriteToolResultJson(res, next);
 }
 
+// ---- #2545: MiniMaxH3Director duration onValueChange write_warning ----------
+// The panel assigns duration, verifies the value, then invokes the widget
+// callback. ComfyUI's settingStore onValueChange throws
+// `Cannot read properties of undefined (reading 'options')` when editor/options
+// is missing. That throw is a post-write disclosure, not a failed assignment.
+// Relaying it as isError (or leaving write_warning as the salient failure)
+// makes a landed 5→6 write look like a retryable error.
+
+function isDirectorDurationCallbackWarning(widget: string, text: string): boolean {
+  if (widget.toLowerCase() !== "duration") return false;
+  if (!/reading ['"]options['"]/.test(text)) return false;
+  return /onValueChange|settingStore|widget_callback/i.test(text);
+}
+
+function scalarWidgetValuesMatch(requested: unknown, observed: unknown): boolean {
+  if (Object.is(requested, observed)) return true;
+  if (
+    (typeof requested === "number" || typeof requested === "string") &&
+    (typeof observed === "number" || typeof observed === "string")
+  ) {
+    return String(requested) === String(observed);
+  }
+  return false;
+}
+
+function recordFromUnknown(value: unknown): Record<string, unknown> | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  return value as Record<string, unknown>;
+}
+
+function parseJsonObjectFromToolText(res: ToolResult): Record<string, unknown> | null {
+  const parsed = parseToolResultJson(res);
+  if (parsed) return parsed;
+  const text = res?.content?.find((c) => c.type === "text")?.text;
+  if (typeof text !== "string") return null;
+  const trimmed = text.replace(/^Error:\s*/i, "").trim();
+  const start = trimmed.indexOf("{");
+  if (start < 0) return null;
+  try {
+    return recordFromUnknown(JSON.parse(trimmed.slice(start)));
+  // unknown-ok: the reply is not JSON; keep the original widget-write result.
+  } catch {
+    return null;
+  }
+}
+
+function stripWriteWarningFields(record: Record<string, unknown>): Record<string, unknown> {
+  const next = { ...record };
+  delete next.write_warning;
+  delete next.write_warning_frame;
+  delete next.write_warning_source;
+  return next;
+}
+
+function landedDurationWriteResult(
+  payload: Record<string, unknown> | null,
+  set: Record<string, unknown>,
+): ToolResult {
+  const next: Record<string, unknown> = payload
+    ? stripWriteWarningFields({ ...payload, set: stripWriteWarningFields(set) })
+    : { set: stripWriteWarningFields(set) };
+  return ok(next);
+}
+
+async function readNamedWidgetValue(
+  ctx: PanelToolCtx,
+  nodeId: unknown,
+  widget: string,
+): Promise<unknown> {
+  const probe = await ctx.call(
+    {
+      cmd: "graph_query",
+      ids: [nodeId],
+      fields: "detail",
+      limit: 1,
+      max_chars: DYNAMIC_COMBO_PROBE_MAX_CHARS,
+    },
+    8000,
+  );
+  if (probe.isError) return undefined;
+  const detail = parseVerifiedQueriedNodeDetail(normalizeGraphQueryResult(probe));
+  const requestedId = canonicalQueriedNodeId(nodeId);
+  if (!detail || !requestedId || detail.id !== requestedId || !detail.widgets) {
+    return undefined;
+  }
+  if (!Object.prototype.hasOwnProperty.call(detail.widgets, widget)) return undefined;
+  return detail.widgets[widget];
+}
+
+/**
+ * #2545 — a verified Director duration write whose setting-store callback
+ * threw is still a landed write. Swallow that write_warning when `set.value`
+ * matches the request; if the panel reported it as an error without a set
+ * envelope, one graph_query may prove the value. Anything else stays failed.
+ */
+async function classifyLandedDirectorDurationWriteWarning(
+  ctx: PanelToolCtx,
+  res: ToolResult,
+  nodeId: unknown,
+  widget: string,
+  requested: unknown,
+): Promise<ToolResult> {
+  const text = textOfToolResult(res);
+  const payload = parseJsonObjectFromToolText(res);
+  const set = recordFromUnknown(payload?.set);
+  const warningText = [
+    typeof set?.write_warning === "string" ? set.write_warning : "",
+    typeof set?.write_warning_frame === "string" ? set.write_warning_frame : "",
+    typeof set?.write_warning_source === "string" ? set.write_warning_source : "",
+    text,
+  ].join("\n");
+  if (!isDirectorDurationCallbackWarning(widget, warningText)) return res;
+  if (set && scalarWidgetValuesMatch(requested, set.value)) {
+    return landedDurationWriteResult(payload, set);
+  }
+  if (!res.isError) return res;
+  const observed = await readNamedWidgetValue(ctx, nodeId, widget);
+  if (observed === undefined || !scalarWidgetValuesMatch(requested, observed)) {
+    return res;
+  }
+  return ok({
+    set: {
+      node_id: nodeId,
+      widget,
+      value: observed,
+    },
+  });
+}
+
 async function exitSubgraphLevels(
   ctx: PanelToolCtx,
   count: number,
@@ -18100,7 +18229,7 @@ async function pollLateAskReply(
   askId: string,
   timing: AskTiming,
   hardDeadline?: number,
-): Promise<unknown | undefined> {
+) {
   const probe: BridgeProbe = bridge;
   const take = probe.takeLateAskReply;
   if (typeof take !== "function") return undefined;
@@ -20410,16 +20539,23 @@ export function buildPanelToolDefs(): PanelToolDef[] {
           const echoed = stripVerifiedLastObservedSchemaNote(
             summarizeSetWidgetEcho(written, echoFull),
           );
+          const classified = await classifyLandedDirectorDurationWriteWarning(
+            ctx,
+            echoed,
+            nodeId,
+            widget,
+            value,
+          );
           // #2495 — ONLY a tagged no-reply on a named Power Lora row is settled
           // by a read. An acked executor error is a definite outcome.
           if (
-            isReplyTimeoutResult(echoed) &&
+            isReplyTimeoutResult(classified) &&
             isPowerLoraDynamicRowWidget(widget) &&
             args.defer_until_idle !== true
           ) {
             return settlePowerLoraWidgetAfterAckTimeout(
               ctx,
-              echoed,
+              classified,
               nodeId,
               widget,
               value,
@@ -20427,7 +20563,7 @@ export function buildPanelToolDefs(): PanelToolDef[] {
               dispatchTab,
             );
           }
-          return echoed;
+          return classified;
         };
         let writePromotedInner: (plan: PromotedWritePlan) => Promise<ToolResult>;
         const guardedWrite = async (
