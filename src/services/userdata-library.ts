@@ -85,12 +85,26 @@ export async function userdataFetch(
   const urls = userdataRetryUrls(client.apiURL(route), route, opts?.panelOrigin);
 
   let lastErr: unknown;
-  for (const url of urls) {
+  const alias = loopbackAliasUrl(urls[0] ?? "");
+  for (let i = 0; i < urls.length; i++) {
+    const url = urls[i];
+    if (!url) continue;
+    // Alternates are one-shot with a short ceiling. The headless URL already
+    // spent the restart-race retries; re-waiting 200/600/1500ms per alias
+    // (and letting localhost sit on the 120s comfyuiFetch ceiling) is what
+    // hung GRAPH_CMD_EFFECT's tool-surface probe on Windows after #1850 —
+    // 127.0.0.1 refuses immediately, then ::1/localhost black-holes.
+    const fallback = i > 0;
+    const ceilingMs = url === alias ? LOOPBACK_ALIAS_TIMEOUT_MS : FALLBACK_TIMEOUT_MS;
     for (let attempt = 0; ; attempt++) {
       try {
-        return await client.fetch(url, { headers });
+        return await client.fetch(url, {
+          headers,
+          ...(fallback ? { signal: AbortSignal.timeout(ceilingMs) } : {}),
+        });
       } catch (err) {
         lastErr = err;
+        if (fallback) break;
         if (!isTransientUnreachable(err)) throw err;
         if (attempt >= retryDelaysMs.length) break;
         await sleepImpl(retryDelaysMs[attempt]!);
@@ -162,6 +176,12 @@ function loopbackAliasUrl(url: string): string | undefined {
 }
 
 const DEFAULT_RETRY_DELAYS_MS: readonly number[] = [200, 600, 1500];
+/** Published/tab origin GET. A live listener answers in milliseconds. */
+const FALLBACK_TIMEOUT_MS = 2_000;
+/** Dual-stack localhost can black-hole for the full comfyuiFetch ceiling.
+ *  Keep this tight: several panel tools reach userdataFetch, and 2s each
+ *  stacked past the 30s GRAPH_CMD_EFFECT probe. */
+const LOOPBACK_ALIAS_TIMEOUT_MS = 400;
 let retryDelaysMs: readonly number[] = DEFAULT_RETRY_DELAYS_MS;
 let sleepImpl = (ms: number): Promise<void> =>
   new Promise((resolve) => setTimeout(resolve, ms));

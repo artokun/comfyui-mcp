@@ -1,4 +1,4 @@
-import { describe, it, expect, afterEach } from "vitest";
+import { describe, it, expect, afterEach, beforeEach } from "vitest";
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -18,6 +18,20 @@ import {
 } from "../../services/ui-bridge.js";
 import { compareSemver } from "../../services/self-update.js";
 import { buildPanelToolDefs } from "../../orchestrator/panel-tools.js";
+import { __userdataLibraryTestHooks } from "../../services/userdata-library.js";
+
+// Driving the real tool surface with `path: "workflows/x.json"` reaches
+// userdataFetch. Default restart-race delays plus a localhost alias would
+// stack toward this file's 30s budget (the CI failure on #2573). This probe
+// classifies commands; it is not the #1845 retry test.
+beforeEach(() => {
+  __userdataLibraryTestHooks.setRetryDelays([]);
+  __userdataLibraryTestHooks.setSleep(async () => {});
+});
+afterEach(() => {
+  __userdataLibraryTestHooks.setRetryDelays(null);
+  __userdataLibraryTestHooks.setSleep(null);
+});
 
 /**
  * #778 — a READ blocked by a WRITE gate, and the reason it could happen at all.
