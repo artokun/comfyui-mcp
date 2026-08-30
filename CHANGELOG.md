@@ -6,20 +6,24 @@ All notable changes to this project are documented here. This project adheres to
 
 ## Unreleased
 
+## [0.52.151] - 2026-08-30
+
 ### MCP
 
 #### Fixed
-- first save of a pinned tmp: workflow re-points panel_set_todo and panel_canvas onto the dest tab even while the tmp: address still reaches (#2419)
-- a root SubgraphNode promoted COMBO write uses the unique rail-backed inner mapping when the terminal witness is incomplete after loading an official template (#2393)
-- get_image action:"list_outputs" lists completed VHS mp4 outputs written to ComfyUI's temp/ (save_output unchecked), tagged type:"temp" (#2370)
-- panel_expose_subgraph_input retries Anything Everywhere? wildcard sockets against the live LiteGraph slot array after Convert to Subgraph (#2493)
-- panel_search_nodes and panel_list_nodes serve host Manager HTTP when the panel's browser Manager request does not complete (Failed to fetch) (#2492)
-- stage nested video as_filename values at the input root so VHS_LoadVideo can select them (#2083)
-- list_templates uses the live panel when the configured origin is unreachable (#2196)
-- panel_free_vram reports VRAM after CUDA release settles (#2050)
-- panel_open_workflow treats nested opened.routing_key as unsaved-open proof instead of failing a proven tmp: open as an unconfirmed filename (#2477)
-- omit the #2437 unexpose reindex warning when the removed slot is last or the panel already reindexed (#2491)
-- panel_get_errors reports unavailable saved LoadImage values instead of reasonless stale flags (#2587)
+- panel_get_errors reports unavailable saved LoadImage values instead of reasonless stale flags (#2587, #2592)
+- re-point Save-As routing after pinned tmp: first save (#2419, #2570)
+- map official-template promoted COMBOs via the unique rail-backed inner widget (#2393, #2569)
+- get_image list_outputs lists completed VHS mp4 outputs in ComfyUI temp/ (#2370, #2568)
+- panel_expose_subgraph_input retries Anything Everywhere? wildcard sockets against the live LiteGraph slot array after Convert to Subgraph (#2493, #2590)
+- panel_search_nodes and panel_list_nodes serve host Manager HTTP when the panel's browser Manager request does not complete (#2492, #2589)
+- omit the unexpose reindex warning when removing the final slot (#2491, #2588)
+- map staged videos onto VHS combo and Path widgets (#2083, #2563)
+- list_templates via live panel when origin is unreachable (#2196, #2562)
+- panel_free_vram reports VRAM after CUDA release settles (#2050, #2561)
+- reconcile manifest outcomes across processes (#1129, #2556)
+- treat nested opened.routing_key as unsaved-open proof (#2477, #2560)
+- preserve bridge receiver for #1129 scope settlement (#2585)
 
 ## [0.52.150] - 2026-08-30
 
