@@ -247,17 +247,37 @@ describe("resolveInstallInterpreter (#651)", () => {
     }
   });
 
+  /** Version + torch probes that agree with the running server (trusted). */
+  function mockTrustedInterpreterProbes(opts?: { version?: string; torch?: string }): void {
+    const version = opts?.version ?? "3.12.12";
+    const torch = opts?.torch ?? "2.13.0";
+    setExecFileResponder((_cmd, args) => {
+      if (args.includes("--version") || args.some((a) => a.includes("sys.version"))) {
+        return { stdout: `Python ${version}\n` };
+      }
+      if (args.includes("pip")) return { stdout: `Name: torch\nVersion: ${torch}\n` };
+      return new Error("nope");
+    });
+  }
+
   it("uses the OS-OBSERVED interpreter when the port owner corroborates the server argv (#401)", async () => {
     const root = await tmpDir();
     try {
       await writeFile(join(root, "main.py"), "", "utf-8");
       await makeVenvPython(root);
-      mockGetSystemStats.mockResolvedValue({ system: { argv: [join(root, "main.py")] } });
+      mockGetSystemStats.mockResolvedValue({
+        system: {
+          argv: [join(root, "main.py")],
+          python_version: "3.12.12",
+          pytorch_version: "2.13.0+cu130",
+        },
+      });
       h.mockLiveInterpreter.mockReturnValue({
         python: "D:/ComfyUI/.venv/Scripts/python.exe",
         source: "process-table",
         pid: 777,
       });
+      mockTrustedInterpreterProbes();
 
       await expect(resolveInstallInterpreter(root)).resolves.toMatchObject({
         python: "D:/ComfyUI/.venv/Scripts/python.exe",
@@ -449,6 +469,114 @@ describe("resolveInstallInterpreter (#651)", () => {
       });
     } finally {
       delete process.env.COMFYUI_PYTHON;
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("refuses an observed Stability Matrix BASE interpreter that has no torch while ComfyUI reports pytorch (#2530)", async () => {
+    // The reporter's shape: process-table argv[0] is the uv-managed base CPython
+    // (no torch, PEP 668), while the running ComfyUI imported torch 2.13.0+cu130.
+    // install_comfyui(environment) already sets python_probe_trusted:false; pip
+    // must not target that same interpreter.
+    const root = await tmpDir();
+    try {
+      await writeFile(join(root, "main.py"), "", "utf-8");
+      await makeVenvPython(root);
+      const basePy =
+        "A:/StabilityMatrix-win-x64/Data/Assets/Python/cpython-3.12.12-windows-x86_64-none/python.exe";
+      mockGetSystemStats.mockResolvedValue({
+        system: {
+          argv: [join(root, "main.py")],
+          python_version: "3.12.12",
+          pytorch_version: "2.13.0+cu130",
+        },
+      });
+      h.mockLiveInterpreter.mockReturnValue({
+        python: basePy,
+        source: "process-table",
+        pid: 4242,
+      });
+      setExecFileResponder((_cmd, args) => {
+        if (args.includes("--version") || args.some((a) => a.includes("sys.version"))) {
+          return { stdout: "Python 3.12.12\n" };
+        }
+        if (args.includes("pip")) {
+          return Object.assign(new Error("Command failed: exit 1"), {
+            stdout: "",
+            stderr:
+              "WARNING: Package(s) not found: torch, torchvision, torchaudio, xformers, numpy, transformers, diffusers, comfyui-frontend-package\n",
+          });
+        }
+        return new Error("nope");
+      });
+
+      const result = await resolveInstallInterpreter(root);
+
+      expect(result.source).toBe("undetermined");
+      expect(result.python).toBeUndefined();
+      expect(result.reason).toMatch(/none of torch/i);
+      expect(result.reason).toMatch(/2\.13\.0\+cu130/);
+      expect(result.reason).toMatch(/action:"fix"/);
+      expect(result.reason).not.toMatch(/-m pip install/);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("refuses an observed interpreter whose torch disagrees with the running ComfyUI (#2530)", async () => {
+    const root = await tmpDir();
+    try {
+      await writeFile(join(root, "main.py"), "", "utf-8");
+      await makeVenvPython(root);
+      mockGetSystemStats.mockResolvedValue({
+        system: {
+          argv: [join(root, "main.py")],
+          python_version: "3.12.12",
+          pytorch_version: "2.13.0+cu130",
+        },
+      });
+      h.mockLiveInterpreter.mockReturnValue({
+        python: "D:/wrong-venv/Scripts/python.exe",
+        source: "process-table",
+        pid: 99,
+      });
+      mockTrustedInterpreterProbes({ version: "3.12.12", torch: "2.4.0" });
+
+      const result = await resolveInstallInterpreter(root);
+      expect(result.source).toBe("undetermined");
+      expect(result.python).toBeUndefined();
+      expect(result.reason).toMatch(/does not match the running ComfyUI pytorch/i);
+      expect(result.reason).not.toMatch(/-m pip install/);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("still hands out an observed interpreter when its torch matches the running ComfyUI (#2530)", async () => {
+    const root = await tmpDir();
+    try {
+      await writeFile(join(root, "main.py"), "", "utf-8");
+      await makeVenvPython(root);
+      const venvPy = "D:/ComfyUI/.venv/Scripts/python.exe";
+      mockGetSystemStats.mockResolvedValue({
+        system: {
+          argv: [join(root, "main.py")],
+          python_version: "3.12.12",
+          pytorch_version: "2.13.0+cu130",
+        },
+      });
+      h.mockLiveInterpreter.mockReturnValue({
+        python: venvPy,
+        source: "process-table",
+        pid: 777,
+      });
+      mockTrustedInterpreterProbes({ version: "3.12.12", torch: "2.13.0" });
+
+      await expect(resolveInstallInterpreter(root)).resolves.toMatchObject({
+        python: venvPy,
+        source: "observed",
+      });
+    } finally {
       await rm(root, { recursive: true, force: true });
     }
   });

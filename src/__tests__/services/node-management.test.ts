@@ -1608,6 +1608,9 @@ describe("node-management service", () => {
       expect(res.mechanism).toBe("git-clone");
       // The deps install was REFUSED and the reason is surfaced in the message…
       expect(res.message).toContain("Python dependencies were NOT installed");
+      expect(res.message).toMatch(/PARTIAL install/i);
+      expect(res.message).toMatch(/action:"fix"/);
+      expect(res.message).not.toMatch(/-m pip install/);
       // …and no pip subprocess ran against any interpreter.
       const pipCall = mockedExec.mock.calls.find(
         (c) =>
@@ -1616,6 +1619,61 @@ describe("node-management service", () => {
           (c[1] as string[]).includes(requirements),
       );
       expect(pipCall).toBeUndefined();
+    });
+
+    it("does not recommend the same pip command after a PEP 668 refusal (#2530)", async () => {
+      // Even a pinned COMFYUI_PYTHON can be an externally-managed base interpreter.
+      // Clone still succeeds; the warning must NOT tell the user to re-run the
+      // command PEP 668 just rejected.
+      config.comfyuiPath = undefined;
+      const adopted = "/adopted/ComfyUI";
+      const IS_WIN = process.platform === "win32";
+      const basePy = join(
+        adopted,
+        ".venv",
+        IS_WIN ? "Scripts" : "bin",
+        IS_WIN ? "python.exe" : "python",
+      );
+      process.env.COMFYUI_PYTHON = basePy;
+      const nodeDir = resolve(adopted, "custom_nodes", "comfyui-teskors-utils");
+      const requirements = join(nodeDir, "requirements.txt");
+      stubFetch({ installedBody: {} });
+      let cloned = false;
+      mockedExists.mockImplementation((p: unknown) => {
+        const s = String(p);
+        if (s === basePy) return true;
+        if (s === requirements) return true;
+        if (s.includes("install.py") || s.includes("cm-cli.py")) return false;
+        if (s.includes(".venv")) return false;
+        if (s.includes("comfyui-teskors-utils")) return cloned;
+        return false;
+      });
+      mockedExec.mockImplementation(((bin: string, args: string[]) => {
+        if (bin === "git" && args[0] === "clone") {
+          cloned = true;
+          return "";
+        }
+        if (Array.isArray(args) && args.includes("-r")) {
+          throw Object.assign(new Error("Command failed: pip"), {
+            stderr:
+              "error: externally-managed-environment\n" +
+              "This Python installation is managed by uv and should not be modified.\n",
+            stdout: "",
+          });
+        }
+        return "";
+      }) as never);
+
+      const res = await installCustomNode({
+        id: "https://github.com/teskor-hub/comfyui-teskors-utils",
+        comfyuiPath: adopted,
+      });
+
+      expect(res.mechanism).toBe("git-clone");
+      expect(res.message).toMatch(/PEP 668|EXTERNALLY MANAGED/);
+      expect(res.message).toMatch(/action:"fix"/);
+      expect(res.message).toMatch(/Do not re-run pip against that interpreter/);
+      expect(res.message).not.toContain(`${basePy} -m pip install`);
     });
 
     it("full-clones (no --depth) and checks out an explicit ref on fallback", async () => {
