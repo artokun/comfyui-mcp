@@ -9,6 +9,7 @@ All notable changes to this project are documented here. This project adheres to
 ### MCP
 
 #### Fixed
+- concurrent panel_set_widget calls each settle after frontend acknowledgement instead of hanging the combined tool call (#2559)
 - panel_set_widget does not refuse an ordinary-root write when the panel connection identity is missing after a successful scope probe (#2551)
 - persist subgraph viewing scope across panel tool calls so interior mutations do not silently fall back to root (#2553)
 - use the authenticated connected panel for headless `/object_info` reads when the configured ComfyUI route is unreachable (#2283)

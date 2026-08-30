@@ -1877,6 +1877,32 @@ function usesGraphCommandLane(cmd: string): boolean {
 }
 
 /**
+ * Whether the per-tab graph lane must wait for this command's ACK before
+ * dispatching the next graph frame.
+ *
+ * Reads still wait (#2069): concurrent graph frames share the panel's main
+ * thread and /object_info coalescer, and graph_get_errors is the one that
+ * then misses its reply. Targeted mutations apply on the canvas immediately
+ * and only then await schema work; holding the lane until that ACK is what
+ * stranded concurrent panel_set_widget (#2559) — the frontend applied every
+ * write, then waited for a sibling mutation the lane would not dispatch, so
+ * none of the MCP promises settled.
+ */
+function graphLaneWaitsForReply(cmd: string): boolean {
+  return GRAPH_CMD_EFFECT[cmd] !== "targeted";
+}
+
+/** True when a panel reply body is a graph_set_widget success (`set: {…}`). */
+function isSetWidgetReplyResult(result: unknown): boolean {
+  return (
+    !!result &&
+    typeof result === "object" &&
+    !Array.isArray(result) &&
+    Object.prototype.hasOwnProperty.call(result, "set")
+  );
+}
+
+/**
  * A mutation the panel acknowledged AFTER its reply timeout (#694, #1175).
  *
  * `result` is the panel's own reply body, present only when it was retained (see
@@ -2226,11 +2252,14 @@ export class UiBridge {
   private static readonly MAX_MISSED_FRAMES = 100;
   private pending = new Map<string, Pending>();
   /**
-   * #2069 — per-tab chain of `graph_*` dispatches. The panel's WS listener is
-   * async-per-message, so concurrent graph frames share the main thread and the
-   * /object_info coalescer; graph_get_errors is the one that then misses its
-   * reply window while query/outline/screenshot succeed. Timeout clocks start
-   * at dispatch (after the predecessor settles), not at enqueue.
+   * #2069 / #2559 — per-tab chain of `graph_*` dispatches. The panel's WS
+   * listener is async-per-message, so concurrent READ frames share the main
+   * thread and the /object_info coalescer; graph_get_errors is the one that
+   * then misses its reply window. Targeted mutations release the lane once
+   * the frame is on the wire: they apply immediately, and waiting for their
+   * ACK before the next dispatch deadlocks when the frontend coalesces
+   * several widget writes (#2559). Timeout clocks start at dispatch, not at
+   * enqueue.
    */
   private graphLane = new Map<string, Promise<unknown>>();
   /** ask_user card sends (rid → {ask_id, ts}): lets a reply that validates AFTER
@@ -3405,61 +3434,21 @@ export class UiBridge {
               }
             }
           }
+          // #2559 — a concurrent widget write can land its ACK under a rid the
+          // bridge is no longer waiting on (rewritten, coalesced, or already
+          // recorded as late) while a sibling graph_set_widget on THIS socket
+          // is still blocked. Deliver the result to that waiter instead of
+          // stranding the MCP tool call.
+          const fifo = this.findFifoPendingForSetWidgetReply(sock, msg);
+          if (fifo) {
+            this.askRidToId.delete(rid);
+            this.settlePendingReply(fifo.rid, fifo.pending, msg, sock);
+            return;
+          }
           this.recordLateMutation(rid, msg);
           return;
         }
-        clearTimeout(p.timer);
-        this.pending.delete(rid);
-        this.askRidToId.delete(rid);
-        if (msg.ok) {
-          // #422 — the panel DEMONSTRABLY served this command. Record it on the LIVE
-          // connection (following a same-socket tmp:→wf: migration whose reply landed
-          // after the id change), so a later re-hello advertising an undercutting
-          // version can never re-gate it as "too old". Scoped to THIS reply's socket so
-          // an unrelated tab reusing the id can never be granted the veto.
-          const served = this.liveConnForTab(p.ctx.tabId, sock);
-          served?.provenSupportedCmds.add(p.cmd);
-          this.notePromotedScope(p.ctx.tabId, msg.result);
-          this.noteSiblingSuccess(p.ctx, rid);
-          p.resolve(msg.result);
-        } else {
-          // #1529 — carry the panel's STRUCTURED refusal onto the error.
-          //
-          // `msg.error` is arbitrary text, and the retry path needs one fact it
-          // cannot get from text: did the executor run? The panel states that in a
-          // field (panel 0.14.35), and dropping it here is why the first attempt at
-          // the retry had to match wording — which was reverted as a P0, because a
-          // genuine mid-write failure can contain the same sentence and the cost of
-          // being wrong is a re-applied mutation.
-          //
-          // Validated before it is attached, so only a complete pre-executor claim
-          // travels; anything else leaves the error exactly as it was.
-          // #1560 — and record the fact that this reply EXISTS, structurally.
-          // `ctx.call` flattens every failure into `isError`, so a command the panel
-          // SERVED and refused arrives indistinguishable from one the tab never
-          // answered — and a caller that reports "the channel is not answering" then
-          // says it about a panel that is demonstrably talking. This branch is the
-          // one place that knows the difference: a reply was received.
-          const err = attachPanelAnswered(new Error(String(msg.error ?? "panel reported an error")));
-          // OWN property on the WIRE message too (review, P0). A polluted
-          // Object.prototype.refusal would otherwise give every ordinary panel
-          // error — including a genuine mid-write one carrying no refusal of its
-          // own — the authority to have a mutation re-issued.
-          const refusal = hasOwnField(msg, "refusal")
-            ? readPanelRefusal((msg as { refusal?: unknown }).refusal)
-            : null;
-          const workflowListReadiness =
-            p.cmd === "workflow_list" && hasOwnField(msg, "workflow_list_readiness")
-              ? readWorkflowListReadiness(
-                  (msg as { workflow_list_readiness?: unknown }).workflow_list_readiness,
-                )
-              : null;
-          let rejected = refusal ? attachPanelRefusal(err, refusal) : err;
-          if (workflowListReadiness) {
-            rejected = attachWorkflowListReadiness(rejected, workflowListReadiness);
-          }
-          p.reject(rejected);
-        }
+        this.settlePendingReply(rid, p, msg, sock);
         return;
       }
 
@@ -5038,14 +5027,107 @@ export class UiBridge {
     result: unknown,
     sock: BridgeSocket,
   ): void {
+    this.settlePendingReply(rid, pending, { ok: true, result }, sock);
+  }
+
+  /**
+   * #2559 — oldest in-flight graph_set_widget on this socket, used when a
+   * mutation ACK misses its rid (coalesced / rewritten) while the waiter is
+   * still blocked. Never steals a non-widget pending.
+   */
+  private findFifoPendingForSetWidgetReply(
+    sock: BridgeSocket,
+    msg: Record<string, unknown>,
+  ): { rid: string; pending: Pending } | undefined {
+    if (msg.ok === true && !isSetWidgetReplyResult(msg.result)) return undefined;
+    const set =
+      msg.ok === true && isSetWidgetReplyResult(msg.result)
+        ? (msg.result as { set: Record<string, unknown> }).set
+        : undefined;
+    let oldest: { rid: string; pending: Pending } | undefined;
+    let widgetPending = 0;
+    for (const [rid, pending] of this.pending) {
+      if (pending.sock !== sock) continue;
+      if (pending.cmd !== "graph_set_widget") {
+        if (msg.ok !== true) return undefined;
+        continue;
+      }
+      widgetPending += 1;
+      const cmd = pending.ctx.command;
+      if (
+        set &&
+        cmd.node_id != null &&
+        set.node_id != null &&
+        String(cmd.node_id) !== String(set.node_id)
+      ) {
+        continue;
+      }
+      oldest ??= { rid, pending };
+    }
+    if (msg.ok !== true && widgetPending !== 1) return undefined;
+    return oldest;
+  }
+
+  /** Resolve or reject one in-flight command from a panel `{ rid, ok, … }` reply. */
+  private settlePendingReply(
+    rid: string,
+    pending: Pending,
+    msg: Record<string, unknown>,
+    sock: BridgeSocket,
+  ): void {
     clearTimeout(pending.timer);
     this.pending.delete(rid);
     this.askRidToId.delete(rid);
-    const served = this.liveConnForTab(pending.ctx.tabId, sock);
-    served?.provenSupportedCmds.add(pending.cmd);
-    this.notePromotedScope(pending.ctx.tabId, result);
-    this.noteSiblingSuccess(pending.ctx, rid);
-    pending.resolve(result);
+    if (msg.ok) {
+      // #422 — the panel DEMONSTRABLY served this command. Record it on the LIVE
+      // connection (following a same-socket tmp:→wf: migration whose reply landed
+      // after the id change), so a later re-hello advertising an undercutting
+      // version can never re-gate it as "too old". Scoped to THIS reply's socket so
+      // an unrelated tab reusing the id can never be granted the veto.
+      const served = this.liveConnForTab(pending.ctx.tabId, sock);
+      served?.provenSupportedCmds.add(pending.cmd);
+      this.notePromotedScope(pending.ctx.tabId, msg.result);
+      this.noteSiblingSuccess(pending.ctx, rid);
+      pending.resolve(msg.result);
+      return;
+    }
+    // #1529 — carry the panel's STRUCTURED refusal onto the error.
+    //
+    // `msg.error` is arbitrary text, and the retry path needs one fact it
+    // cannot get from text: did the executor run? The panel states that in a
+    // field (panel 0.14.35), and dropping it here is why the first attempt at
+    // the retry had to match wording — which was reverted as a P0, because a
+    // genuine mid-write failure can contain the same sentence and the cost of
+    // being wrong is a re-applied mutation.
+    //
+    // Validated before it is attached, so only a complete pre-executor claim
+    // travels; anything else leaves the error exactly as it was.
+    // #1560 — and record the fact that this reply EXISTS, structurally.
+    // `ctx.call` flattens every failure into `isError`, so a command the panel
+    // SERVED and refused arrives indistinguishable from one the tab never
+    // answered — and a caller that reports "the channel is not answering" then
+    // says it about a panel that is demonstrably talking. This branch is the
+    // one place that knows the difference: a reply was received.
+    const p = pending;
+    const err = attachPanelAnswered(new Error(String(msg.error ?? "panel reported an error")));
+    // OWN property on the WIRE message too (review, P0). A polluted
+    // Object.prototype.refusal would otherwise give every ordinary panel
+    // error — including a genuine mid-write one carrying no refusal of its
+    // own — the authority to have a mutation re-issued.
+    const refusal = hasOwnField(msg, "refusal")
+      ? readPanelRefusal((msg as { refusal?: unknown }).refusal)
+      : null;
+    const workflowListReadiness =
+      p.cmd === "workflow_list" && hasOwnField(msg, "workflow_list_readiness")
+        ? readWorkflowListReadiness(
+            (msg as { workflow_list_readiness?: unknown }).workflow_list_readiness,
+          )
+        : null;
+    let rejected = refusal ? attachPanelRefusal(err, refusal) : err;
+    if (workflowListReadiness) {
+      rejected = attachWorkflowListReadiness(rejected, workflowListReadiness);
+    }
+    p.reject(rejected);
   }
 
   /** The incarnation currently holding `tabId` — the identity every structure
@@ -6031,7 +6113,7 @@ export class UiBridge {
         markDispatched(new Error(`Panel tab ${conn.tabId.slice(0, 8)} is not open`), false),
       );
     }
-    const launch = (): Promise<unknown> => {
+    const launch = (releaseLane: () => void): Promise<unknown> => {
       // Re-resolve after a graph-lane wait: the tab may have migrated while a
       // predecessor occupied the lane. Gates above already ran against `conn`.
       let live: Conn;
@@ -6159,26 +6241,53 @@ export class UiBridge {
           workflowUuid:
             this.resolveTabWorkflowUuid?.(commandStampAddress(cmd, opts.tabId, live.tabId)) ??
             undefined,
-          onDispatchedRid: opts.onDispatchedRid,
+          onDispatchedRid: (rid) => {
+            releaseLane();
+            opts.onDispatchedRid?.(rid);
+          },
         };
         this.dispatch(live, ctx);
       });
     };
     if (usesGraphCommandLane(cmd.cmd)) {
-      return this.enqueueGraphLane(conn.tabId, launch);
+      return this.enqueueGraphLane(conn.tabId, launch, graphLaneWaitsForReply(cmd.cmd));
     }
-    return launch();
+    return launch(() => {});
   }
 
   /** Serialize `graph_*` dispatches per tab so concurrent reads cannot occupy
-   *  the panel at once (#2069). Failures still release the lane. */
-  private enqueueGraphLane<T>(tabId: string, run: () => Promise<T>): Promise<T> {
+   *  the panel at once (#2069). Targeted mutations release once the frame is
+   *  written so a sibling widget write can dispatch while the first awaits its
+   *  schema ACK (#2559). Failures still release the lane. */
+  private enqueueGraphLane<T>(
+    tabId: string,
+    run: (releaseLane: () => void) => Promise<T>,
+    waitForReply: boolean,
+  ): Promise<T> {
     const prev = this.graphLane.get(tabId) ?? Promise.resolve();
-    const next = prev.then(run, run);
-    const tail: Promise<unknown> = next.then(
-      () => undefined,
-      () => undefined,
+    let releaseLane = () => {};
+    const gate = waitForReply
+      ? null
+      : new Promise<void>((resolve) => {
+          releaseLane = resolve;
+        });
+    const next = prev.then(
+      () => run(releaseLane),
+      () => run(releaseLane),
     );
+    const tail: Promise<unknown> =
+      waitForReply || !gate
+        ? next.then(
+            () => undefined,
+            () => undefined,
+          )
+        : Promise.race([
+            gate,
+            next.then(
+              () => undefined,
+              () => undefined,
+            ),
+          ]);
     this.graphLane.set(tabId, tail);
     void tail.then(() => {
       if (this.graphLane.get(tabId) === tail) this.graphLane.delete(tabId);
@@ -6412,6 +6521,12 @@ export class UiBridge {
       // key on it). Previously `{ rid, ...cmd }` let a caller cmd.rid clobber the
       // minted rid, silently breaking reply correlation for that command.
       const frame: Record<string, unknown> = { ...cmd, rid };
+      // #2559 — the panel bounds duplicate-rid waits from THIS number. Use the
+      // caller-requested timeout, not the remaining clamp: retry_of fingerprints
+      // exclude only rid/retry_of, so a shrinking remainder would make a retry
+      // look like a different command. Always overwrite after the spread (same
+      // rule as rid).
+      frame.timeout_ms = ctx.timeoutMs;
       if (ctx.workflowUuid) frame.workflow_uuid = ctx.workflowUuid;
       else delete frame.workflow_uuid;
       conn.sock.send(JSON.stringify(frame));
