@@ -161,6 +161,7 @@ import {
   addressedNodeMatchesPersistRemedy,
   parseAmbiguousPromotedWidgetRefusal,
   parseContradictoryPromotedWidgetRefusal,
+  parseLinkDrivenPromotedWriteWarning,
   parseSubgraphScopeRefusal,
   parseUnpromotedControlPersistRemedy,
   promotedScopeWitnessFromEnvelope,
@@ -6655,6 +6656,9 @@ type QueriedNodeScope = {
   node: "ordinary" | "container";
   nodeType: string;
   nodeIdentity?: string;
+  /** Owner of the currently viewed subgraph, when the target row is nested. */
+  scopeOwnerNodeId?: string;
+  workflowUuid?: string;
   /** The object-keyed graph identity of the exact view that supplied the row. */
   graphIdentity?: string;
 };
@@ -6694,6 +6698,16 @@ function parseVerifiedQueriedNodeScope(
   ) {
     return null;
   }
+  const workflowUuid = viewingRecord.workflow_uuid;
+  if (workflowUuid !== undefined && (typeof workflowUuid !== "string" || workflowUuid.length === 0)) {
+    return null;
+  }
+  const rawScopeOwner = viewingRecord.owner_node_id;
+  const scopeOwnerNodeId =
+    rawScopeOwner === undefined || rawScopeOwner === null
+      ? undefined
+      : canonicalQueriedNodeId(rawScopeOwner);
+  if (rawScopeOwner !== undefined && rawScopeOwner !== null && !scopeOwnerNodeId) return null;
 
   let row: unknown;
   if (Object.prototype.hasOwnProperty.call(payload, "nodes")) {
@@ -6725,6 +6739,8 @@ function parseVerifiedQueriedNodeScope(
     node: isSubgraph ? "container" : "ordinary",
     nodeType: identity.type,
     ...(identity.nodeIdentity !== undefined ? { nodeIdentity: identity.nodeIdentity } : {}),
+    ...(scopeOwnerNodeId ? { scopeOwnerNodeId } : {}),
+    ...(workflowUuid !== undefined ? { workflowUuid } : {}),
     ...(graphIdentity !== undefined ? { graphIdentity } : {}),
   };
 }
@@ -7152,6 +7168,13 @@ type PromotedWriteBinding = {
 type PromotedWritePlan = {
   kind: "promoted-write";
   outerNodeId: number | string;
+  /** Host/subgraph-input widget to write on the addressed SubgraphNode. */
+  hostWidget: string;
+  /** The current graph that contains the addressed host instance. This is
+   * distinct from `scope`, which names the child graph reached by entering it. */
+  outerScope?: PromotedExpectedScope;
+  outerNodeType?: string;
+  outerNodeIdentity?: string;
   inner: {
     innerNodeId: number | string;
     widget: string;
@@ -7177,10 +7200,36 @@ type OrdinaryWritePlan = {
 };
 
 type PromotedExpectedScope = PromotedScopeWitness & {
+  /** Root is used for a host-instance write; inner writes remain subgraph-scoped. */
+  scope?: "root" | "subgraph";
   terminal?: PromotedTerminalWitness;
   promotedWidget?: string;
   parentRail?: PromotedParentRailWitness;
 };
+
+function outerPromotedExpectedScope(
+  targetScope: QueriedNodeScope | null,
+  outerNodeId: unknown,
+): PromotedExpectedScope | null {
+  if (!targetScope?.graphIdentity) return null;
+  const outerId = canonicalQueriedNodeId(outerNodeId);
+  if (!outerId) return null;
+  if (targetScope.activeView === "root") {
+    return {
+      scope: "root",
+      ownerNodeId: outerId,
+      graphIdentity: targetScope.graphIdentity,
+      ...(targetScope.workflowUuid !== undefined ? { workflowUuid: targetScope.workflowUuid } : {}),
+    };
+  }
+  if (!targetScope.scopeOwnerNodeId) return null;
+  return {
+    scope: "subgraph",
+    ownerNodeId: targetScope.scopeOwnerNodeId,
+    graphIdentity: targetScope.graphIdentity,
+    ...(targetScope.workflowUuid !== undefined ? { workflowUuid: targetScope.workflowUuid } : {}),
+  };
+}
 
 type PromotedWritePreflight = PromotedWritePlan | OrdinaryWritePlan | ToolResult | null;
 
@@ -7350,20 +7399,40 @@ function promotedMatchCount(payload: Record<string, unknown>, widget: string): n
  * array is also the distinction between a promoted alias and an ordinary
  * widget on the same subgraph container; do not infer that distinction from
  * the inner node's concrete widget names because aliases may be renamed. */
+function rawPromotedTerminalMatchesWidget(
+  entry: Record<string, unknown>,
+  widget: string,
+): boolean {
+  const wanted = widget.toLowerCase();
+  if (typeof entry.widget === "string" && entry.widget.toLowerCase() === wanted) return true;
+  if (typeof entry.immediate_widget === "string" && entry.immediate_widget.toLowerCase() === wanted) {
+    return true;
+  }
+  return typeof entry.terminal_widget === "string" && entry.terminal_widget.toLowerCase() === wanted;
+}
+
+function rawPromotedTerminalOwnEntries(
+  entries: Array<Record<string, unknown>>,
+  widget: string,
+): Array<Record<string, unknown>> {
+  const wanted = widget.toLowerCase();
+  const byHostAlias = entries.filter(
+    (entry) => typeof entry.widget === "string" && entry.widget.toLowerCase() === wanted,
+  );
+  if (byHostAlias.length > 0) return byHostAlias;
+  return entries.filter((entry) => rawPromotedTerminalMatchesWidget(entry, widget));
+}
+
 function promotedTerminalAliasCount(
   payload: Record<string, unknown>,
   widget: string,
 ): number | null {
   const entries = payload.promoted_terminals;
   if (!Array.isArray(entries)) return null;
-  return entries.filter(
-    (entry) =>
-      !!entry &&
-      typeof entry === "object" &&
-      !Array.isArray(entry) &&
-      typeof (entry as Record<string, unknown>).widget === "string" &&
-      ((entry as Record<string, unknown>).widget as string).toLowerCase() === widget.toLowerCase(),
-  ).length;
+  const records = entries.filter(
+    (entry) => !!entry && typeof entry === "object" && !Array.isArray(entry),
+  ) as Array<Record<string, unknown>>;
+  return rawPromotedTerminalOwnEntries(records, widget).length;
 }
 
 /** A capability-skewed receiver's witness array is not authoritative. Any
@@ -7404,7 +7473,6 @@ function promotedTerminalEvidenceError(
   if (!Object.prototype.hasOwnProperty.call(payload, "promoted_terminals")) return null;
   const entries = payload.promoted_terminals;
   if (!Array.isArray(entries)) return "the current receiver's promoted-terminal witness was unavailable";
-  const wanted = widget.toLowerCase();
   // Structural pass first: a malformed array cannot be narrowed, because the
   // requested alias may be exactly the entry that failed to parse.
   for (const entry of entries) {
@@ -7418,9 +7486,7 @@ function promotedTerminalEvidenceError(
   }
   // ONE entry for the requested alias is the only case this narrows: that entry
   // is complete evidence about this write, and it decides it.
-  const own = (entries as Array<Record<string, unknown>>).filter(
-    (entry) => (entry.widget as string).toLowerCase() === wanted,
-  );
+  const own = rawPromotedTerminalOwnEntries(entries as Array<Record<string, unknown>>, widget);
   if (own.length === 1) {
     return own[0].error ? "the promoted-terminal witness was incomplete or unresolved" : null;
   }
@@ -7640,6 +7706,45 @@ function currentPromotedScopeError(
   return null;
 }
 
+/** Check the graph that contains the addressed host instance. The promoted
+ * child witness above cannot do this job: before entry its graph identity is
+ * deliberately different from the current root/parent graph. Host-first
+ * writes therefore carry their own root-or-parent scope envelope. */
+function currentPromotedExpectedScopeError(
+  ctx: PanelToolCtx,
+  expected: PromotedExpectedScope,
+): string | null {
+  const readScope = ctx.bridge.promotedScopeFor;
+  if (typeof readScope !== "function") {
+    return "the receiving panel current-view scope became unavailable";
+  }
+  let observed: TabPromotedScopeRead;
+  try {
+    observed = readScope.call(ctx.bridge, ctx.tabId);
+  } catch {
+    return "the receiving panel current-view scope became unreadable";
+  }
+  if (observed.known !== true) {
+    return "the receiving panel current-view scope became unverifiable";
+  }
+  const expectedScope = expected.scope ?? "subgraph";
+  if (expectedScope === "root") {
+    if (observed.scope !== "root" || observed.graphIdentity !== expected.graphIdentity) {
+      return "the receiving panel current root graph changed or became unverifiable";
+    }
+  } else if (
+    observed.scope !== "subgraph" ||
+    observed.ownerNodeId !== expected.ownerNodeId ||
+    observed.graphIdentity !== expected.graphIdentity
+  ) {
+    return "the receiving panel current graph/subgraph identity changed or became unverifiable";
+  }
+  if (expected.workflowUuid !== undefined && observed.workflowUuid !== expected.workflowUuid) {
+    return "the receiving panel workflow scope changed or became unverifiable";
+  }
+  return null;
+}
+
 type PromotedScopeFence = {
   error: string | null;
   /** The exact structured result of the live graph_query. Once present, the
@@ -7682,6 +7787,43 @@ function promotedWriteRefusal(widget: string, reason: string): ToolResult {
       `No graph_set_widget was dispatched; retry only after the panel binding and ` +
       `subgraph mapping are stable.`,
   );
+}
+
+/** True when a successful inner write is the panel's link-driven no-op. The
+ * stored value was verified, but the enclosing subgraph input still holds the
+ * render value — reporting that as a durable write is the #2488 lie. */
+function linkDrivenPromotedInnerWarning(res: ToolResult): boolean {
+  if (res.isError) return false;
+  if (parseLinkDrivenPromotedWriteWarning(textOfToolResult(res))) return true;
+  const payload = parseToolResultJson(res);
+  return typeof payload?.warning === "string" &&
+    parseLinkDrivenPromotedWriteWarning(payload.warning) != null;
+}
+
+function promotedHostAppliedNote(plan: PromotedWritePlan): string {
+  return (
+    `\n\n(Applied on the enclosing subgraph node ${plan.outerNodeId} widget ` +
+    `"${plan.hostWidget}". The promoted inner mapping node ${plan.inner.innerNodeId} ` +
+    `"${plan.inner.widget}" is synchronized from that host rail.)`
+  );
+}
+
+const PROMOTED_PRIMITIVE_INNER_TYPES = new Set([
+  "PrimitiveInt",
+  "PrimitiveFloat",
+  "PrimitiveBoolean",
+  "PrimitiveNumber",
+  "PrimitiveString",
+]);
+
+/** #2488 — a promoted subgraph INPUT whose inner widget is a different name
+ * (frame_counts → length) or a linked primitive must be written on the host.
+ * Same-name proxyWidgets promotions keep the inner write so #2314's known-bad
+ * live probe still runs before any container mutation. */
+function shouldWritePromotedHostFirst(plan: PromotedWritePlan): boolean {
+  if (!plan.inner.parentRail) return false;
+  if (plan.hostWidget.toLowerCase() !== plan.inner.widget.toLowerCase()) return true;
+  return PROMOTED_PRIMITIVE_INNER_TYPES.has(plan.innerNodeType);
 }
 
 /**
@@ -7757,10 +7899,12 @@ function promotedPanelBuildRefusal(
 
 /**
  * #2314 — inspect a promoted target before the first write. A valid mapping is
- * not permission to write the wrapper: the plan carries the receiver identity,
- * inner node id, and inner type to an inner write whose final dispatch fence
- * checks the receiver again. A later promotion relink therefore cannot redirect
- * an apparently safe container write onto a known-bad inner.
+ * not permission to write an uninspected wrapper: the plan carries the receiver
+ * identity, inner node id, and inner type so known-bad inner widgets (Anima,
+ * DaSiWa, dynamic-combo) are refused before any mutation. #2488 then writes the
+ * inspected host rail first; the inner write is only the #1655 fallback when
+ * the host listing-vs-lookup contradicts. A later promotion relink therefore
+ * cannot redirect an apparently safe container write onto a known-bad inner.
  *
  * Only the panel's definitive "is not a subgraph" result supplies a safe
  * non-promoted classification. An unavailable, malformed, or otherwise
@@ -7990,6 +8134,9 @@ async function preparePromotedWidgetWrite(
     if (drift) return ordinaryBindingRefusal(widget, drift);
     return ordinaryWritePlanFromScope(widget, targetScope, tabBefore, identityBefore);
   }
+  const outerNodeType = targetScope?.node === "container" ? targetScope.nodeType : undefined;
+  const outerNodeIdentity =
+    targetScope?.node === "container" ? targetScope.nodeIdentity : undefined;
 
   let sub = await ctx.call(
     { cmd: "graph_get_subgraph", node_id: nodeId },
@@ -8340,9 +8487,14 @@ async function preparePromotedWidgetWrite(
     );
   }
 
+  const outerScope = outerPromotedExpectedScope(targetScope, nodeId);
   return {
     kind: "promoted-write",
     outerNodeId: nodeId as number | string,
+    hostWidget: inner.parentRail?.widget ?? widget,
+    ...(outerScope ? { outerScope } : {}),
+    ...(outerNodeType ? { outerNodeType } : {}),
+    ...(outerNodeIdentity ? { outerNodeIdentity } : {}),
     inner,
     innerNodeType,
     ...(inner.terminal ? { terminal: inner.terminal } : {}),
@@ -20133,7 +20285,7 @@ export function buildPanelToolDefs(): PanelToolDef[] {
               ...(targetExpectedScope
                 ? {
                     expected_scope: {
-                      scope: "subgraph",
+                      scope: targetExpectedScope.scope ?? "subgraph",
                       owner_node_id: targetExpectedScope.ownerNodeId,
                       graph_identity: targetExpectedScope.graphIdentity,
                       ...(targetExpectedScope.promotedWidget && targetExpectedScope.parentRail
@@ -20434,6 +20586,20 @@ export function buildPanelToolDefs(): PanelToolDef[] {
                   `"${plan.inner.widget}" and it FAILED: ${textOfToolResult(written)})`,
               );
             }
+            if (linkDrivenPromotedInnerWarning(written)) {
+              return appendToolResultText(
+                fail(
+                  `panel_set_widget wrote widget "${plan.inner.widget}" on inner node ` +
+                    `${plan.inner.innerNodeId}, but that widget is link-driven and will NOT change ` +
+                    `the render. Set the widget on the enclosing subgraph node ` +
+                    `${plan.outerNodeId} ("${plan.hostWidget}") instead. ` +
+                    `No durable host write was applied.`,
+                ),
+                exited.isError
+                  ? ` panel_exit_subgraph then FAILED — call panel_exit_subgraph. (${textOfToolResult(exited)})`
+                  : "",
+              );
+            }
             // #2514 — the caller addressed the enclosing subgraph. The panel's
             // #1087 warning is for a DIRECT inner write to a widget that is
             // link-driven from that parent rail, and it tells the caller to
@@ -20480,7 +20646,8 @@ export function buildPanelToolDefs(): PanelToolDef[] {
             return appendToolResultText(
               written,
               `\n\n(Applied via the validated promoted inner widget: node ${plan.inner.innerNodeId} ` +
-                `"${plan.inner.widget}". The container was not written.)` +
+                `"${plan.inner.widget}". The host rail "${plan.hostWidget}" on node ` +
+                `${plan.outerNodeId} was not writable.)` +
                 (exited.isError
                   ? ` panel_exit_subgraph then FAILED — call panel_exit_subgraph. (${textOfToolResult(exited)})`
                   : ""),
@@ -20501,6 +20668,98 @@ export function buildPanelToolDefs(): PanelToolDef[] {
         };
 
         if (promotedPlan) {
+          if (shouldWritePromotedHostFirst(promotedPlan)) {
+            // #2488 — the caller already addressed the host SubgraphNode. Write
+            // that host rail first so a link-driven inner widget is not treated
+            // as the durable store. Known-bad inner widgets were refused above
+            // when the terminal witness named them.
+            const hostScope = promotedPlan.outerScope;
+            if (!hostScope) {
+              return promotedWriteRefusal(
+                args.widget as string,
+                "the current host graph identity was unavailable for the enclosing-node write",
+              );
+            }
+            const hostWidget = promotedPlan.hostWidget;
+            const hostWritten = await write(
+              promotedPlan.outerNodeId,
+              hostWidget,
+              promotedPlan.outerNodeType,
+              () => {
+                const error = currentPromotedBindingError(ctx, promotedPlan.binding);
+                if (error) {
+                  throw new Error(
+                    `Refusing promoted host graph_set_widget: ${error}. No graph_set_widget was dispatched.`,
+                  );
+                }
+                const scopeError = currentPromotedExpectedScopeError(ctx, hostScope);
+                if (scopeError) {
+                  throw new Error(
+                    `Refusing promoted host graph_set_widget: ${scopeError}. No graph_set_widget was dispatched.`,
+                  );
+                }
+              },
+              hostScope,
+              promotedPlan.outerNodeIdentity,
+            );
+            if (!hostWritten.isError) {
+              markPanelSchemaReady(panelSchemaKey(ctx));
+              const persisted = await persistUnpromotedControlAfterGenerate(
+                hostWritten,
+                ctx,
+                promotedPlan.outerNodeId,
+              );
+              return appendToolResultText(persisted, promotedHostAppliedNote(promotedPlan));
+            }
+            const hostRefusal = parseContradictoryPromotedWidgetRefusal(
+              textOfToolResult(hostWritten),
+              hostWidget,
+            );
+            if (!hostRefusal || String(hostRefusal.nodeId) !== String(promotedPlan.outerNodeId)) {
+              return hostWritten;
+            }
+            if (hostRefusal.widget !== hostWidget) {
+              const remapPlan = { ...promotedPlan, hostWidget: hostRefusal.widget };
+              const remappedHost = await write(
+                promotedPlan.outerNodeId,
+                hostRefusal.widget,
+                promotedPlan.outerNodeType,
+                () => {
+                  const error = currentPromotedBindingError(ctx, promotedPlan.binding);
+                  if (error) {
+                    throw new Error(
+                      `Refusing promoted host graph_set_widget: ${error}. No graph_set_widget was dispatched.`,
+                    );
+                  }
+                  const scopeError = currentPromotedExpectedScopeError(ctx, hostScope);
+                  if (scopeError) {
+                    throw new Error(
+                      `Refusing promoted host graph_set_widget: ${scopeError}. No graph_set_widget was dispatched.`,
+                    );
+                  }
+                },
+                hostScope,
+                promotedPlan.outerNodeIdentity,
+              );
+              if (!remappedHost.isError) {
+                markPanelSchemaReady(panelSchemaKey(ctx));
+                const persisted = await persistUnpromotedControlAfterGenerate(
+                  remappedHost,
+                  ctx,
+                  promotedPlan.outerNodeId,
+                );
+                return appendToolResultText(persisted, promotedHostAppliedNote(remapPlan));
+              }
+              if (
+                !parseContradictoryPromotedWidgetRefusal(
+                  textOfToolResult(remappedHost),
+                  hostRefusal.widget,
+                )
+              ) {
+                return remappedHost;
+              }
+            }
+          }
           const promotedWritten = await writePromotedInner(promotedPlan);
           if (!promotedWritten.isError && parseToolResultJson(promotedWritten)?.refresh_pending !== true) {
             markPanelSchemaReady(panelSchemaKey(ctx));

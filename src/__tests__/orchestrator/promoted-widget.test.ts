@@ -27,6 +27,7 @@ import {
   matchListedName,
   parseAmbiguousPromotedWidgetRefusal,
   parseContradictoryPromotedWidgetRefusal,
+  parseLinkDrivenPromotedWriteWarning,
   parseSubgraphScopeRefusal,
   resolveInnerPromotedTarget,
   validatePromotedSubgraphEnvelope,
@@ -150,6 +151,8 @@ function bridge(opts: {
   parentRailRelinkAfterMcpFence?: boolean;
   /** Whether the fake receiver enforces the final parent-rail witness. */
   promotedParentRailFence?: boolean;
+  /** #2488: inner graph_set_widget succeeds with the panel's link-driven warning. */
+  innerWriteLinkDriven?: boolean;
   /** Receiver navigation to another graph with the SAME owner/workflow and
    * colliding inner ids. Only graph_identity may distinguish this target. */
   receiverGraphIdentityCollisionAfterMcpFence?: boolean;
@@ -356,11 +359,19 @@ function bridge(opts: {
           }
           const expected = expectedScope as Record<string, unknown>;
           const actualOwner = inSubgraph ? String(currentOwnerNodeId) : null;
+          const expectedScopeKind = expected.scope ?? "subgraph";
+          const scopeMatches =
+            expectedScopeKind === "root"
+              ? !inSubgraph &&
+                String(expected.owner_node_id) === String(opts.ownerNodeId ?? 78) &&
+                expected.graph_identity === currentGraphIdentity
+              : expectedScopeKind === "subgraph" &&
+                String(expected.owner_node_id) === actualOwner &&
+                expected.graph_identity === currentGraphIdentity;
           if (
-            expected.scope !== "subgraph" ||
-            String(expected.owner_node_id) !== actualOwner ||
+            !scopeMatches ||
             (expected.workflow_uuid !== undefined && expected.workflow_uuid !== workflowUuid) ||
-            expected.graph_identity !== currentGraphIdentity
+            (expectedScopeKind !== "root" && expected.scope !== "subgraph")
           ) {
             throw new Error("graph_set_widget promoted receiver changed before dispatch: Nothing was applied.");
           }
@@ -419,18 +430,32 @@ function bridge(opts: {
         ) {
           throw new Error(DYNAMIC_CHILD_CONTRADICTORY);
         }
+        const outerId = String(opts.ownerNodeId ?? 78);
         const which =
           writes === 1
             ? (opts.firstWrite ?? "contradict")
             : opts.scopeLost
               ? (opts.innerWrite ?? "ok")
-            : Number(cmd.node_id) === 76 || cmd.node_id === "76"
+            : String(cmd.node_id) !== outerId
               ? (opts.innerWrite ?? "ok")
               : (opts.remappedWrite ?? "contradict");
         if (which === "contradict") throw new Error(CONTRADICTORY);
         if (which === "fail") throw new Error("inner write rejected");
         mutations += 1;
-        return { set: { node_id: cmd.node_id, widget: cmd.widget, value: cmd.value } };
+        const applied = { set: { node_id: cmd.node_id, widget: cmd.widget, value: cmd.value } };
+        if (
+          opts.innerWriteLinkDriven &&
+          String(cmd.node_id) !== String(opts.ownerNodeId ?? 78)
+        ) {
+          return {
+            ...applied,
+            warning:
+              `The write SUCCEEDED and was verified, but it will NOT change the render: ` +
+              `widget "${String(cmd.widget)}" on inner node is link-driven. ` +
+              `Set the widget on the ENCLOSING subgraph node instead.`,
+          };
+        }
+        return applied;
       }
       if (cmd.cmd === "graph_get_subgraph") {
         subgraphReads += 1;
@@ -1026,6 +1051,146 @@ const UNet_COMBO_TEMPLATE_DETAIL = {
     '{"id":472,"type":"SubgraphNode","is_subgraph":true}',
 };
 
+/** #2488 — inner PrimitiveInt.length exposed as host frame_counts. The inner
+ * widget is link-driven; the durable store is the enclosing SubgraphNode. */
+const FRAME_COUNTS_PROMOTED_SUBGRAPH = {
+  subgraph_of: { node_id: 78, title: "Clip pack" },
+  node_count: 1,
+  nodes: [
+    {
+      id: 12,
+      type: "PrimitiveInt",
+      widgets: { length: 81 },
+      inputs: [{ name: "length", type: "INT" }],
+    },
+  ],
+  promoted_terminals: [
+    {
+      widget: "frame_counts",
+      parent_rail: { authoritative: true, widget: "frame_counts" },
+      immediate_node_id: 12,
+      immediate_widget: "length",
+      terminal_node_id: 12,
+      terminal_node_type: "PrimitiveInt",
+      terminal_widget: "length",
+      terminal_inputs: [{ name: "length", type: "INT" }],
+      chain_depth: 0,
+    },
+  ],
+};
+
+describe("panel_set_widget promoted subgraph input routing (#2488)", () => {
+  const hostDetail = {
+    text:
+      '1 match(es) of 1 in scope (viewing: 1 nodes)\n' +
+      '{"id":78,"type":"SubgraphNode","is_subgraph":true}',
+  };
+
+  it.each(["frame_counts", "length"] as const)(
+    "writes the host rail first when the caller addresses the SubgraphNode as %s",
+    async (widget) => {
+      const { text, isError, calls, mutations } = await setWidget(
+        { node_id: 78, widget, value: 49 },
+        {
+          firstWrite: "ok",
+          promotedTerminalWitnesses: true,
+          promotedDetail: hostDetail,
+          subgraph: FRAME_COUNTS_PROMOTED_SUBGRAPH,
+        },
+      );
+
+      expect(isError).toBe(false);
+      expect(mutations).toBe(1);
+      expect(calls.filter((call) => call.cmd === "graph_enter_subgraph")).toHaveLength(0);
+      expect(calls.filter((call) => call.cmd === "graph_set_widget")).toEqual([
+        expect.objectContaining({ node_id: 78, widget: "frame_counts", value: 49 }),
+      ]);
+      expect(text).toMatch(/enclosing subgraph node 78 widget "frame_counts"/);
+      expect(text).toMatch(/inner mapping node 12 "length"/);
+      expect(text).not.toMatch(/validated promoted inner widget/);
+    },
+  );
+
+  it("writes the host rail when the inner PrimitiveInt keeps the same widget name", async () => {
+    const sameName = {
+      ...FRAME_COUNTS_PROMOTED_SUBGRAPH,
+      promoted_terminals: [
+        {
+          ...FRAME_COUNTS_PROMOTED_SUBGRAPH.promoted_terminals[0],
+          widget: "length",
+          parent_rail: { authoritative: true, widget: "length" },
+        },
+      ],
+    };
+    const { text, isError, calls, mutations } = await setWidget(
+      { node_id: 78, widget: "length", value: 49 },
+      {
+        firstWrite: "ok",
+        promotedTerminalWitnesses: true,
+        promotedDetail: hostDetail,
+        subgraph: sameName,
+      },
+    );
+
+    expect(isError).toBe(false);
+    expect(mutations).toBe(1);
+    expect(calls.filter((call) => call.cmd === "graph_set_widget")).toEqual([
+      expect.objectContaining({ node_id: 78, widget: "length", value: 49 }),
+    ]);
+    expect(calls.map((call) => call.cmd)).not.toContain("graph_enter_subgraph");
+    expect(text).toMatch(/enclosing subgraph node 78 widget "length"/);
+  });
+
+  it("refuses the host write when the root graph changes after the MCP fence", async () => {
+    const { text, isError, calls, mutations } = await setWidget(
+      { node_id: 78, widget: "frame_counts", value: 49 },
+      {
+        firstWrite: "ok",
+        promotedTerminalWitnesses: true,
+        promotedDetail: hostDetail,
+        subgraph: FRAME_COUNTS_PROMOTED_SUBGRAPH,
+        receiverNavigationAfterMcpFence: true,
+        receiverGraphIdentityCollisionAfterMcpFence: true,
+      },
+    );
+
+    expect(isError).toBe(true);
+    expect(mutations).toBe(0);
+    expect(calls.filter((call) => call.cmd === "graph_set_widget")).toHaveLength(1);
+    expect(calls.find((call) => call.cmd === "graph_set_widget")).toEqual(
+      expect.objectContaining({
+        expected_scope: expect.objectContaining({ scope: "root", graph_identity: "graph:workflow-a-root" }),
+      }),
+    );
+    expect(text).toMatch(/promoted receiver changed|Nothing was applied/);
+  });
+
+  it("does not report a link-driven inner fallback as a durable write", async () => {
+    const { text, isError, calls, mutations } = await setWidget(
+      { node_id: 78, widget: "frame_counts", value: 49 },
+      {
+        firstWriteError:
+          `Cannot set widget on subgraph node 78: "frame_counts" is not a promoted widget ` +
+          `on this subgraph (promoted: frame_counts).`,
+        promotedTerminalWitnesses: true,
+        promotedDetail: hostDetail,
+        subgraph: FRAME_COUNTS_PROMOTED_SUBGRAPH,
+        innerWriteLinkDriven: true,
+      },
+    );
+
+    expect(isError).toBe(true);
+    expect(mutations).toBe(1);
+    expect(calls.filter((call) => call.cmd === "graph_set_widget")).toEqual([
+      expect.objectContaining({ node_id: 78, widget: "frame_counts", value: 49 }),
+      expect.objectContaining({ node_id: 12, widget: "length", value: 49 }),
+    ]);
+    expect(text).toMatch(/link-driven/);
+    expect(text).toMatch(/enclosing subgraph node 78/);
+    expect(text).not.toMatch(/Applied via the validated promoted inner widget/);
+  });
+});
+
 describe("panel_set_widget coordinated promoted-widget fixes (#2393, #2394)", () => {
   it("refreshes one incomplete post-template terminal witness before the guarded inner write (#2393)", async () => {
     const { isError, calls, mutations } = await setWidget(
@@ -1049,10 +1214,11 @@ describe("panel_set_widget coordinated promoted-widget fixes (#2393, #2394)", ()
 
     expect(isError).toBe(false);
     expect(mutations).toBe(1);
-    expect(calls.filter((call) => call.cmd === "graph_get_subgraph")).toHaveLength(3);
+    expect(calls.filter((call) => call.cmd === "graph_get_subgraph")).toHaveLength(2);
     expect(calls.filter((call) => call.cmd === "graph_set_widget")).toEqual([
-      expect.objectContaining({ node_id: 168, widget: "value", value: true }),
+      expect.objectContaining({ node_id: 170, widget: "enable_turbo_mode", value: true }),
     ]);
+    expect(calls.map((call) => call.cmd)).not.toContain("graph_enter_subgraph");
   });
 
   it("allows a missing root-level Power Lora Loader lora_N row without entering promoted mapping (#2394)", async () => {
@@ -2805,6 +2971,14 @@ describe("parseContradictoryPromotedWidgetRefusal", () => {
     expect(parseSubgraphScopeRefusal(SCOPE_REFUSAL, 189)).toBeNull();
     expect(parseSubgraphScopeRefusal("No node with id 188 in the current graph", 188)).toBeNull();
   });
+
+  it("parses the panel's link-driven inner-write warning (#2488)", () => {
+    const text =
+      `The write SUCCEEDED and was verified, but it will NOT change the render: ` +
+      `widget "length" on inner node is link-driven. Set the widget on the ENCLOSING subgraph node instead.`;
+    expect(parseLinkDrivenPromotedWriteWarning(text)).toEqual({ widget: "length" });
+    expect(parseLinkDrivenPromotedWriteWarning("inner write rejected")).toBeNull();
+  });
 });
 
 describe("resolveInnerPromotedTarget", () => {
@@ -2871,6 +3045,24 @@ describe("resolveInnerPromotedTarget", () => {
         chainDepth: 1,
       },
     });
+  });
+
+  it("maps either the displayed host alias or the inner widget name to the same promotion (#2488)", () => {
+    const viaLabel = resolveInnerPromotedTarget(FRAME_COUNTS_PROMOTED_SUBGRAPH, "frame_counts", 78);
+    const viaInner = resolveInnerPromotedTarget(FRAME_COUNTS_PROMOTED_SUBGRAPH, "length", 78);
+    expect(viaLabel).toEqual({
+      innerNodeId: 12,
+      widget: "length",
+      parentRail: { authoritative: true, widget: "frame_counts" },
+      terminal: {
+        nodeId: 12,
+        nodeType: "PrimitiveInt",
+        widget: "length",
+        inputs: [{ name: "length", type: "INT" }],
+        chainDepth: 0,
+      },
+    });
+    expect(viaInner).toEqual(viaLabel);
   });
 
   it("resolves renamed outer and immediate aliases from the terminal witness", () => {
