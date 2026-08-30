@@ -626,10 +626,22 @@ export function toolNameOf(item: Record<string, unknown> | undefined): string | 
 // has to classify the in-flight app-server item before deciding whether the
 // transport may issue its one retry. Keep this allowlist intentionally narrower
 // than the panel tool catalog: scope navigation and every mutation must never
-// be replayed from an opaque outer transport error.
-const PANEL_OUTER_TRANSPORT_RETRY_SAFE_TOOLS = new Set([
+// be replayed from an opaque outer transport error. Membership is the graph
+// inspect reads from QUEUE_BUSY_READ_TOOLS — including panel_find_nodes, which
+// is the #2395 recurrence after a completed panel_run.
+export const PANEL_OUTER_TRANSPORT_RETRY_SAFE_TOOLS = new Set([
   "panel_graph_outline",
   "panel_query_graph",
+  "panel_find_nodes",
+  "panel_get_errors",
+]);
+
+// Completing these can leave the Codex HTTP MCP client in a racy state.
+// Arm a one-shot window for the immediate next allowlisted read. The tools
+// themselves stay off the retry allowlist so a failed enter or run is fenced.
+export const PANEL_OUTER_TRANSPORT_RETRY_ARM_TOOLS = new Set([
+  "panel_enter_subgraph",
+  "panel_run",
 ]);
 
 type PanelMcpToolItem = {
@@ -1725,7 +1737,7 @@ export class CodexBackend implements AgentBackend {
     let mcpTransportFencePending = false;
     let turnFenced = false;
     type PanelMcpRequest = PanelMcpToolItem & {
-      afterEnterItemId: string | null;
+      afterArmItemId: string | null;
       completed: boolean;
     };
     type PanelReadRetry = {
@@ -1739,15 +1751,15 @@ export class CodexBackend implements AgentBackend {
     const panelReadRetries = new Map<string, PanelReadRetry>();
     const inFlightMcpItemIds = new Set<string>();
     let unkeyedMcpItems = 0;
-    let panelEnterCandidate: { itemId: string; laterPanelRequestStarted: boolean } | null = null;
-    let immediatePanelReadAfterEnter: string | null = null;
+    let panelArmCandidate: { itemId: string; laterPanelRequestStarted: boolean } | null = null;
+    let immediatePanelReadAfterArm: string | null = null;
 
     // Retry contract: only the next panel request after a successful
-    // panel_enter_subgraph completion can be an eligible graph read. The
-    // one-shot sequence is consumed at request start; a mutation or unrelated
-    // panel request therefore invalidates it before a later read can qualify.
-    // Correlation must resolve the transport error to that request; ambiguity
-    // is fail-closed. Mutations and unrelated reads use normal fencing.
+    // panel_enter_subgraph or panel_run completion can be an eligible graph
+    // read. The one-shot sequence is consumed at request start; a mutation or
+    // unrelated panel request therefore invalidates it before a later read can
+    // qualify. Correlation must resolve the transport error to that request;
+    // ambiguity is fail-closed. Mutations and unrelated reads use normal fencing.
 
     // LIVENESS (watchdog re-arm): re-arm PanelAgent's idle watchdog ONLY for
     // notifications that represent work or an outcome for THIS active turn. A
@@ -1826,7 +1838,7 @@ export class CodexBackend implements AgentBackend {
 
     const trackPanelMcpItem = (
       item: PanelMcpToolItem,
-      afterEnterItemId: string | null,
+      afterArmItemId: string | null,
     ): PanelMcpRequest => {
       const existing = panelMcpRequests.get(item.itemId);
       if (existing) {
@@ -1838,7 +1850,7 @@ export class CodexBackend implements AgentBackend {
       }
       const request: PanelMcpRequest = {
         ...item,
-        afterEnterItemId,
+        afterArmItemId,
         completed: false,
       };
       panelMcpRequests.set(item.itemId, request);
@@ -2144,20 +2156,20 @@ export class CodexBackend implements AgentBackend {
           const panelTool = panelMcpToolItemOf(item);
           if (panelTool) {
             const isNewPanelRequest = !panelMcpRequests.has(panelTool.itemId);
-            let afterEnterItemId: string | null = null;
+            let afterArmItemId: string | null = null;
             if (isNewPanelRequest) {
-              if (panelTool.name === "panel_enter_subgraph") {
-                immediatePanelReadAfterEnter = null;
-                panelEnterCandidate = { itemId: panelTool.itemId, laterPanelRequestStarted: false };
+              if (PANEL_OUTER_TRANSPORT_RETRY_ARM_TOOLS.has(panelTool.name)) {
+                immediatePanelReadAfterArm = null;
+                panelArmCandidate = { itemId: panelTool.itemId, laterPanelRequestStarted: false };
               } else {
-                if (panelEnterCandidate) panelEnterCandidate.laterPanelRequestStarted = true;
-                if (immediatePanelReadAfterEnter && PANEL_OUTER_TRANSPORT_RETRY_SAFE_TOOLS.has(panelTool.name)) {
-                  afterEnterItemId = immediatePanelReadAfterEnter;
+                if (panelArmCandidate) panelArmCandidate.laterPanelRequestStarted = true;
+                if (immediatePanelReadAfterArm && PANEL_OUTER_TRANSPORT_RETRY_SAFE_TOOLS.has(panelTool.name)) {
+                  afterArmItemId = immediatePanelReadAfterArm;
                 }
-                immediatePanelReadAfterEnter = null;
+                immediatePanelReadAfterArm = null;
               }
             }
-            const request = trackPanelMcpItem(panelTool, afterEnterItemId);
+            const request = trackPanelMcpItem(panelTool, afterArmItemId);
             for (const [originItemId, retry] of panelReadRetries) {
               if (
                 request.name === retry.tool &&
@@ -2194,14 +2206,15 @@ export class CodexBackend implements AgentBackend {
               item?.status !== "error" &&
               item?.status !== "declined" &&
               item?.error == null;
-            if (request.name === "panel_enter_subgraph") {
-              immediatePanelReadAfterEnter =
-                completedSuccessfully &&
-                panelEnterCandidate?.itemId === request.itemId &&
-                !panelEnterCandidate.laterPanelRequestStarted
+            if (
+              PANEL_OUTER_TRANSPORT_RETRY_ARM_TOOLS.has(request.name) &&
+              panelArmCandidate?.itemId === request.itemId
+            ) {
+              immediatePanelReadAfterArm =
+                completedSuccessfully && !panelArmCandidate.laterPanelRequestStarted
                   ? request.itemId
                   : null;
-              panelEnterCandidate = null;
+              panelArmCandidate = null;
             }
 
             const retryMatch = panelReadRetryForRequest(request);
@@ -2270,7 +2283,7 @@ export class CodexBackend implements AgentBackend {
               !retryAttempted &&
               params.willRetry === true &&
               request != null &&
-              request.afterEnterItemId != null &&
+              request.afterArmItemId != null &&
               PANEL_OUTER_TRANSPORT_RETRY_SAFE_TOOLS.has(request.name) &&
               appServerConnectionIsActive()
             ) {
