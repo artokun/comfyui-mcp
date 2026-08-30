@@ -91,7 +91,9 @@ function isInsideRoot(root: string, candidate: string): boolean {
  * use the userdata library. A path that IS under the workspace but missing
  * throws not-found rather than falling through to a userdata 500.
  */
-async function tryReadWorkspaceWorkflow(filename: string): Promise<unknown | undefined> {
+async function tryReadWorkspaceWorkflow(
+  filename: string,
+): Promise<Record<string, unknown> | undefined> {
   if (!isAbsolute(filename)) return undefined;
   const workspace = await resolveEffectiveComfyUIBaseLive();
   if (!workspace) return undefined;
@@ -115,7 +117,11 @@ async function tryReadWorkspaceWorkflow(filename: string): Promise<unknown | und
   if (!isInsideRoot(realRoot, realFile)) {
     throw new ValidationError(`Workflow not found: ${filename} (404)`);
   }
-  return JSON.parse(await readFile(realFile, "utf8"));
+  const parsed: unknown = JSON.parse(await readFile(realFile, "utf8"));
+  if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new ValidationError(`Could NOT read path: ${filename} is not a workflow object.`);
+  }
+  return parsed;
 }
 
 /** Keep every saved-workflow UI conversion on the same schema-backed path. */
