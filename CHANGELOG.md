@@ -19,7 +19,6 @@ All notable changes to this project are documented here. This project adheres to
 - retry graph reads after enter or panel_run (#2395, #2567)
 - harden #619 command probe lookup (#2564)
 - do not refuse promoted writes when the connection fingerprint is missing (#2475)
-- keep apply_manifest's scoped outcome handoff truthful through queue-status polling (#1129)
 
 ## [0.52.149] - 2026-08-30
 
