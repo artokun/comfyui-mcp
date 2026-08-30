@@ -9,6 +9,7 @@ All notable changes to this project are documented here. This project adheres to
 ### MCP
 
 #### Fixed
+- install_comfyui(action:"update") prunes a stale origin/dev ref-lock once and switches a detached version-tag checkout onto local master/main when update is explicitly requested (#2524)
 - krea2-identity-edit ships the LoRA widget as a POSIX path so Linux ComfyUI can match the installed file (#2525)
 - panel_strip_workflow applies live capturedWidgetValues to promoted subgraph widgets instead of stale definition defaults (#2522)
 - panel_strip_workflow honors a verified pin when capturing the live canvas instead of refusing a stale last-advertised workflow instance (#2487)
