@@ -118,6 +118,38 @@ describe("#888 a HEALTHY pin is still never displaced", () => {
     expect((out as { reason: string }).reason).toMatch(/still reaches a live tab/);
     expect(repinTo).not.toHaveBeenCalled();
   });
+
+  it("still refuses when the named dest is the ACTIVE canvas but the caller did not prove a switch", () => {
+    // #2531's alignLiveCanvas is extra consent from a verified open/pin. Without
+    // it, an active named dest is still not license to steal a live turn.
+    const { handler, repinTo } = harness({ pin: TAB_A, tabs: [TAB_A, TAB_B], active: TAB_B });
+
+    const out = handler(KEY, PATH_B);
+    expect(typeof out).toBe("object");
+    expect((out as { reason: string }).reason).toMatch(/still reaches a live tab/);
+    expect(repinTo).not.toHaveBeenCalled();
+  });
+});
+
+describe("#2531 alignLiveCanvas rewrites lastOrigin onto THIS canvas", () => {
+  it("returns the live tab instead of declining a healthy pin", () => {
+    const { handler, repinTo } = harness({ pin: TAB_A, tabs: [TAB_A, TAB_B] });
+
+    expect(handler(KEY, PATH_A, { alignLiveCanvas: true })).toBe(TAB_A);
+    expect(repinTo).toHaveBeenCalledWith(KEY, TAB_A);
+  });
+
+  it("does not steal onto another tab even when that tab is active and uniquely named", () => {
+    const { handler, repinTo } = harness({
+      pin: TAB_A,
+      tabs: [TAB_A, TAB_B],
+      active: TAB_B,
+    });
+
+    expect(handler(KEY, PATH_B, { alignLiveCanvas: true })).toBe(TAB_A);
+    expect(repinTo).toHaveBeenCalledWith(KEY, TAB_A);
+    expect(repinTo).not.toHaveBeenCalledWith(KEY, TAB_B);
+  });
 });
 
 describe("#2419 a tmp: predecessor pin is rewritten onto the named save dest", () => {

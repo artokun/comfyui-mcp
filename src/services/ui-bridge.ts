@@ -34,7 +34,7 @@ import {
 import { primePanelBase, verifiedPanelDiskVersion } from "./panel-workspace.js";
 import { compareSemver, detectInstallMode } from "./self-update.js";
 import { SHARED_SESSION_SCOPE, isScopeAddress } from "./session-scope.js";
-import type { ScopeRepinOutcome } from "../orchestrator/turn-origins.js";
+import type { ScopeRepinOutcome, ScopeRepinRequest } from "../orchestrator/turn-origins.js";
 import {
   QUEUE_BUSY_READ_TOOLS,
   panelToolForGraphCmd,
@@ -2180,7 +2180,13 @@ export class UiBridge {
    *  in-flight turn onto the tab that is active now (the documented
    *  panel_set_workflow_target({mode:"current"}) consent). Returns the tab it
    *  repinned to, or undefined when nothing is resolvable. */
-  private scopeRepinHandler: ((scopeId: string, preferredWorkflowPath?: string) => ScopeRepinOutcome) | null = null;
+  private scopeRepinHandler:
+    | ((
+        scopeId: string,
+        preferredWorkflowPath?: string,
+        request?: ScopeRepinRequest,
+      ) => ScopeRepinOutcome)
+    | null = null;
   /**
    * panel#1292 — an in-flight `mode:"current"` bind that is recovering a null
    * turn pin. Same-batch siblings (`panel_graph_outline`, `panel_set_todo`)
@@ -4270,7 +4276,13 @@ export class UiBridge {
   }
 
   /** #884 — inject the explicit-repin recovery handler (see the field doc). */
-  setScopeRepinHandler(fn: (scopeId: string, preferredWorkflowPath?: string) => ScopeRepinOutcome): void {
+  setScopeRepinHandler(
+    fn: (
+      scopeId: string,
+      preferredWorkflowPath?: string,
+      request?: ScopeRepinRequest,
+    ) => ScopeRepinOutcome,
+  ): void {
     this.scopeRepinHandler = fn;
   }
 
@@ -4290,14 +4302,23 @@ export class UiBridge {
    * of "the active one".
    *
    * Same handler, so the P0 gate is shared by construction: a pin that still
-   * reaches a live tab of this conversation is never displaced, however explicit
-   * the request. What a NAME adds is recovery in the state where "current" is
-   * legitimately refused — several eligible tabs and no active one among them —
-   * which is precisely the state that refusal already tells the agent to escape
-   * by naming a workflow. Until now nothing made the pin follow the name.
+   * reaches a live tab of this conversation is never displaced onto a
+   * background tab, however explicit the request. What a NAME adds is recovery
+   * in the state where "current" is legitimately refused — several eligible
+   * tabs and no active one among them — which is precisely the state that
+   * refusal already tells the agent to escape by naming a workflow.
+   *
+   * #2531 — `alignLiveCanvas` is extra consent from a successful
+   * panel_open_workflow / verified-active pin: rewrite lastOrigin onto THIS
+   * canvas's live id rather than reporting pin success while the next
+   * origin-less turn still inherits the pre-switch workflow.
    */
-  repinScopeToWorkflow(scopeId: string, workflowPath: string): ScopeRepinOutcome {
-    return this.scopeRepinHandler?.(scopeId, workflowPath);
+  repinScopeToWorkflow(
+    scopeId: string,
+    workflowPath: string,
+    request?: ScopeRepinRequest,
+  ): ScopeRepinOutcome {
+    return this.scopeRepinHandler?.(scopeId, workflowPath, request);
   }
 
   /**

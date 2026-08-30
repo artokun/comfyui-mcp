@@ -13281,6 +13281,26 @@ function noReachableTabFail(cmd: string, ctx?: PanelToolCtx): ToolResult {
   );
 }
 
+/**
+ * #2531 — after a successful open or a verified-active pin, align the
+ * conversation's turn-routing key onto THIS canvas. A live pin is still never
+ * stolen onto a different tab (#884); `alignLiveCanvas` only rewrites lastOrigin
+ * onto the canonical live id so the next origin-less turn (a run completion)
+ * inherits the switched workflow instead of the pre-open one, and so the tool
+ * does not report pin success while retaining a different healthy routing key.
+ *
+ * Best-effort: the open/pin already succeeded. A failed align must not retract it.
+ */
+function alignTurnRoutingAfterSwitch(ctx: PanelToolCtx, workflowPath: string): ScopeRepinOutcome | undefined {
+  if (!isScopeAddress(ctx.tabId)) return undefined;
+  if (typeof ctx.bridge.repinScopeToWorkflow !== "function") return undefined;
+  try {
+    return ctx.bridge.repinScopeToWorkflow(ctx.tabId, workflowPath, { alignLiveCanvas: true });
+  } catch {
+    return undefined; // never worse than the pre-#2531 silence
+  }
+}
+
 async function openWorkflowWithVerify(path: string, ctx: PanelToolCtx): Promise<ToolResult> {
   // #971 — consume the explicit-current proof BEFORE the first await. This
   // makes it one-shot even when this open fails, and prevents a concurrent or
@@ -13387,6 +13407,7 @@ async function openWorkflowWithVerify(path: string, ctx: PanelToolCtx): Promise<
       }
       await tryRebindImportedTmpIdentity(ctx, path);
     }
+    alignTurnRoutingAfterSwitch(ctx, path);
     return res;
   }
 
@@ -13401,6 +13422,7 @@ async function openWorkflowWithVerify(path: string, ctx: PanelToolCtx): Promise<
   const verify = await waitForOpenReceipt(ctx, path, dispatchedRid, timing);
   if (verify.receipt === "applied") {
     if (verify.workflowUuid) refreshWorkflowUuid(ctx, { workflow_uuid: verify.workflowUuid });
+    alignTurnRoutingAfterSwitch(ctx, path);
     return ok({
       opened: { path },
       recovered: true,
@@ -23563,8 +23585,16 @@ export function buildPanelToolDefs(): PanelToolDef[] {
           // source-text "wiring" assertion passed, because grepping for a call
           // cannot tell reachable code from dead code. The handler now does the
           // matching against the routes the bridge actually holds.
+          //
+          // #2531 — a pin the panel just verified as the live canvas is an
+          // explicit switch: align lastOrigin onto this canvas rather than
+          // reporting success while turn routing still names the previous
+          // workflow. An UNVERIFIED (lenient) pin keeps the #884 gate: a
+          // healthy pin is left alone.
           try {
-            scopeRepin = ctx.bridge.repinScopeToWorkflow?.(ctx.tabId, pinPath);
+            scopeRepin = pinVerifiedActive
+              ? alignTurnRoutingAfterSwitch(ctx, pinPath)
+              : ctx.bridge.repinScopeToWorkflow?.(ctx.tabId, pinPath);
           } catch {
             scopeRepin = undefined; // never worse than the pre-#888 silence
           }
@@ -23980,7 +24010,7 @@ CHECKED FOR YOU: the graph read this message prescribes was just run, and it ` +
         // A refusal carries its own reason out for the same reason.
         const scopeRepinNote =
           typeof scopeRepin === "string"
-            ? ` This session's turn routing was AMBIGUOUS (a reconnect delivered messages from several workflows at once) and is now pinned to this workflow, so graph tools will resolve deterministically.`
+            ? ` This session's turn routing now follows this workflow, so graph tools will resolve deterministically.`
             : scopeRepin && typeof scopeRepin === "object" && scopeRepin.reason
               ? ` NOTE — the workflow target was set, but this session's turn routing was NOT re-pinned: ${scopeRepin.reason}.`
               : "";

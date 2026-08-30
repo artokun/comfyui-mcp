@@ -676,6 +676,25 @@ export class TurnOriginTracker {
     this.turnTargetTabByKey.set(key, tab);
     this.lastTurnUuidByKey.set(key, uuid);
   }
+
+  /**
+   * #2531 — an explicit `panel_open_workflow` / verified pin is a
+   * message-equivalent origin: the agent moved this conversation onto that
+   * canvas. Rewrite the in-flight pin, the issue-time stamp, AND the last
+   * established origin so the NEXT origin-less turn (a run completion) inherits
+   * this canvas instead of the pre-switch workflow.
+   *
+   * Distinct from {@link repinTo}, which must not re-establish a rewind-cleared
+   * inheritance source. Callers are the open/verified-pin alignment in
+   * {@link makeScopeRepinHandler} and the #2419 same-canvas rewrite (the dest
+   * IS this canvas under a new id).
+   */
+  alignTo(key: string, tab: string): void {
+    const uuid = this.deps.uuidOfTab(tab);
+    this.turnTargetTabByKey.set(key, tab);
+    this.lastTurnUuidByKey.set(key, uuid);
+    this.lastOriginByKey.set(key, { tab, uuid });
+  }
 }
 
 /** The scope target resolver the UiBridge consults while resolving a
@@ -783,6 +802,19 @@ export function tabRouteCarriesPath(tabId: string, path: string): boolean {
   });
 }
 
+/** Extra consent for {@link makeScopeRepinHandler} when the caller has already
+ *  proven the named workflow is the live canvas (a successful
+ *  `panel_open_workflow`, or a verified-active pin). */
+export type ScopeRepinRequest = {
+  /**
+   * #2531 — rewrite lastOrigin onto this pin's live canonical id. Never
+   * steals onto a different tab: a healthy pin stays on the socket that just
+   * opened/pinned the canvas. Without this, the tool reports pin success while
+   * the next origin-less turn inherits the pre-switch workflow.
+   */
+  alignLiveCanvas?: boolean;
+};
+
 export function makeScopeRepinHandler(opts: {
   bridge: ScopeRepinBridge;
   tracker: TurnOriginTracker;
@@ -797,10 +829,14 @@ export function makeScopeRepinHandler(opts: {
    * pin we just wrote is immediately invalidated by {@link TurnOriginTracker.resolvedPinOf}.
    */
   claimTab?: (tabId: string, backend: string) => void;
-}): (scopeId: string, preferredWorkflowPath?: string) => ScopeRepinOutcome {
-  return (scopeId, preferredWorkflowPath) => {
+}): (scopeId: string, preferredWorkflowPath?: string, request?: ScopeRepinRequest) => ScopeRepinOutcome {
+  return (scopeId, preferredWorkflowPath, request) => {
     const key = opts.scopeAgentKeyOf(scopeId);
     const backend = opts.backendOfKey(key);
+    const movePin = (tab: string): void => {
+      if (typeof opts.tracker.alignTo === "function") opts.tracker.alignTo(key, tab);
+      else opts.tracker.repinTo(key, tab);
+    };
     const eligible = opts.bridge
       .tabs()
       .map((t) => t.tab_id)
@@ -828,11 +864,25 @@ export function makeScopeRepinHandler(opts: {
       const live = opts.bridge.liveTabIdFor?.(existing) ?? existing;
       const predecessor = existing.startsWith("tmp:");
       if (named && existing !== named && (live === named || predecessor)) {
-        opts.tracker.repinTo(key, named);
+        movePin(named);
         opts.info(
           `[panel-orchestrator] ${key} re-pinned onto ${named.slice(0, 8)} as the save dest successor of ${existing.slice(0, 8)} (#2419)`,
         );
         return named;
+      }
+      // #2531 — a successful open / verified pin already proved THIS canvas is
+      // the named workflow. Do not steal onto another tab whose id happens to
+      // carry that path (a second window showing the same file). Rewrite
+      // lastOrigin onto the canonical live id so the next origin-less turn
+      // inherits this canvas instead of the pre-switch workflow, and so the
+      // tool does not report pin success while retaining a different routing
+      // key.
+      if (request?.alignLiveCanvas && preferredWorkflowPath) {
+        movePin(live);
+        opts.info(
+          `[panel-orchestrator] ${key} aligned turn routing onto ${live.slice(0, 8)} after an explicit open/pin (#2531)`,
+        );
+        return live;
       }
       return {
         repinned: false,
