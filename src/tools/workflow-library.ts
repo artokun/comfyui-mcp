@@ -121,7 +121,7 @@ async function tryReadWorkspaceWorkflow(
   if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
     throw new ValidationError(`Could NOT read path: ${filename} is not a workflow object.`);
   }
-  return parsed;
+  return parsed as Record<string, unknown>;
 }
 
 /** Keep every saved-workflow UI conversion on the same schema-backed path. */
