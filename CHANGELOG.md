@@ -9,6 +9,7 @@ All notable changes to this project are documented here. This project adheres to
 ### MCP
 
 #### Fixed
+- panel_search_nodes and panel_list_nodes serve host Manager HTTP when the panel's browser Manager request does not complete (Failed to fetch) (#2492)
 - stage nested video as_filename values at the input root so VHS_LoadVideo can select them (#2083)
 - list_templates uses the live panel when the configured origin is unreachable (#2196)
 - panel_free_vram reports VRAM after CUDA release settles (#2050)

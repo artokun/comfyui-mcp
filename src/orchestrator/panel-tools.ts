@@ -23256,12 +23256,15 @@ CHECKED FOR YOU: the graph read this message prescribes was just run, and it ` +
     ),
     def(
       "panel_search_nodes",
-      "Search installable custom-node packs via the user's BUILT-IN ComfyUI Manager (the same source the Manager UI uses). Returns matching packs {id, title, description}. Use the `id` with panel_install_node. Prefer this over the headless search_custom_nodes tool — it works against the user's actual (Desktop) Manager. If Manager's cache mappings endpoint returns HTTP 5xx, this retries remote/local and still searches; a remaining 5xx is a Manager outage, not proof the pack is missing.",
+      "Search installable custom-node packs via the user's BUILT-IN ComfyUI Manager (the same source the Manager UI uses). Returns matching packs {id, title, description}. Use the `id` with panel_install_node. Prefer this over the headless search_custom_nodes tool — it works against the user's actual (Desktop) Manager. If Manager's cache mappings endpoint returns HTTP 5xx, this retries remote/local and still searches; a remaining 5xx is a Manager outage, not proof the pack is missing. If the panel tab is live but the browser Manager request does not complete (Failed to fetch), the search is served from host Manager HTTP instead of dying as a transport error — that is a panel-origin failure, not a Manager outage.",
       { query: z.string().describe("Search text, e.g. 'kjnodes', 'controlnet', 'ipadapter'."), limit: z.number().int().min(1).max(40).optional().describe("Max results to return, 1-40 (default 15). Requests above 40 are refused; the panel also clamps to 40 and discloses limit_cap.") },
       async (args: A, ctx) => {
         // #1669 — the panel asks getmappings?mode=cache and used to fail the
         // whole search on HTTP 500. Degrade: retry remote/local, or name the
         // 500 as a Manager outage (not a missing pack).
+        // #2492 — a live tab whose browser Manager fetch never completed
+        // (Failed to fetch) is the same host-HTTP search, not a transport
+        // death and not a Manager outage.
         const query = String(args.query ?? "");
         const limit = typeof args.limit === "number" ? args.limit : undefined;
         const out = await searchPanelNodes({
@@ -23279,13 +23282,15 @@ CHECKED FOR YOU: the graph read this message prescribes was just run, and it ` +
     ),
     def(
       "panel_list_nodes",
-      "List the custom-node PACKS currently installed in the user's ComfyUI (via the built-in Manager). Takes no arguments — it returns the whole installed set. Read-only. This lists packs, NOT node classes: to find out whether a specific node type is available (e.g. LTXVContextWindowsGuideAware), use comfy_cli action:\"search_nodes\", which fuzzy-searches real node classes and falls back to the connected server's live /object_info. panel_search_nodes is a third thing again — it searches INSTALLABLE packs in the registry, not what is already here. If the panel tab is gone, the listing is served from the ComfyUI host's Manager HTTP instead of failing as a dispatch error.",
+      "List the custom-node PACKS currently installed in the user's ComfyUI (via the built-in Manager). Takes no arguments — it returns the whole installed set. Read-only. This lists packs, NOT node classes: to find out whether a specific node type is available (e.g. LTXVContextWindowsGuideAware), use comfy_cli action:\"search_nodes\", which fuzzy-searches real node classes and falls back to the connected server's live /object_info. panel_search_nodes is a third thing again — it searches INSTALLABLE packs in the registry, not what is already here. If the panel tab is gone, the listing is served from the ComfyUI host's Manager HTTP instead of failing as a dispatch error. If the tab is live but the browser Manager request does not complete (Failed to fetch), the same host HTTP listing is used; that is a panel-origin transport failure, not a Manager outage.",
       {},
       async (_args, ctx) => {
         // #2459 — pack listing is a Manager / object_info server-state read.
         // Try the live tab first (Manager dialect + /object_info + #1496
         // filter). When dispatch never reaches the tab, serve the same
         // inventory from host Manager HTTP instead of dying as tab-loss.
+        // #2492 — a live tab whose browser Manager fetch never completed
+        // is the same host listing; do not call that a Manager outage.
         const out = await listPanelNodes({
           panelList: () => ctx.call({ cmd: "nodes_list" }, 20000),
         });

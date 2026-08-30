@@ -6,12 +6,14 @@ import { afterEach, describe, expect, it } from "vitest";
 import { markDispatched } from "../../services/ui-bridge.js";
 import {
   HOST_HTTP_LIST_NOTE,
+  HOST_HTTP_TRANSPORT_NOTE,
   dualCauseListFailure,
   installedNodesToPanelMap,
   isPanelTabDispatchFailure,
   listPanelNodes,
   setListInstalledNodesForTests,
 } from "../../services/manager-node-list.js";
+import { isManagerTransportFetchFailure } from "../../services/manager-node-search.js";
 import type { InstalledNode } from "../../services/node-management.js";
 
 afterEach(() => setListInstalledNodesForTests(undefined));
@@ -26,6 +28,14 @@ const REPORTER_WRAP =
 const DISPATCH_FAIL = {
   isError: true,
   content: [{ type: "text", text: `Error: ${REPORTER_WRAP}` }],
+};
+
+const REPORTER_LIST_FETCH =
+  "ComfyUI-Manager request to /v2/customnode/installed?mode=default did not complete: Failed to fetch.";
+
+const TRANSPORT_FAIL = {
+  isError: true,
+  content: [{ type: "text", text: `Error: ${REPORTER_LIST_FETCH}` }],
 };
 
 const PACKS: InstalledNode[] = [
@@ -203,6 +213,64 @@ describe("listPanelNodes (#2459)", () => {
   });
 });
 
+describe("listPanelNodes (#2492 transport Failed to fetch)", () => {
+  it("matches the reporter installed wrap as transport, not tab loss", () => {
+    expect(isManagerTransportFetchFailure(TRANSPORT_FAIL)).toBe(true);
+    expect(isManagerTransportFetchFailure(new Error(REPORTER_LIST_FETCH))).toBe(true);
+    expect(isPanelTabDispatchFailure(TRANSPORT_FAIL)).toBe(false);
+    expect(isPanelTabDispatchFailure(new Error(REPORTER_LIST_FETCH))).toBe(false);
+  });
+
+  it("live tab + panel Manager fetch fail + live Manager HTTP → inventory, transport note", async () => {
+    const hostCalls: number[] = [];
+    const out = await listPanelNodes({
+      panelList: async () => TRANSPORT_FAIL,
+      listInstalled: async () => {
+        hostCalls.push(1);
+        return PACKS;
+      },
+    });
+    expect(out.via).toBe("fallback");
+    if (out.via !== "fallback") throw new Error("expected fallback");
+    expect(hostCalls).toHaveLength(1);
+    expect(out.value.source).toBe("host_http");
+    expect(out.value.note).toBe(HOST_HTTP_TRANSPORT_NOTE);
+    expect(out.value.note).toMatch(/not a Manager outage/i);
+    expect(out.value.note).not.toMatch(/tab was not connected/i);
+    expect(out.value.note).not.toMatch(/Manager down/i);
+    expect(out.value.installed["ComfyUI-Impact-Pack"]?.cnr_id).toBe("comfyui-impact-pack");
+  });
+
+  it("falls back when the panel throws the reporter wrap", async () => {
+    const out = await listPanelNodes({
+      panelList: async () => {
+        throw new Error(REPORTER_LIST_FETCH);
+      },
+      listInstalled: async () => PACKS,
+    });
+    expect(out.via).toBe("fallback");
+    if (out.via !== "fallback") throw new Error("expected fallback");
+    expect(out.value.note).toBe(HOST_HTTP_TRANSPORT_NOTE);
+  });
+
+  it("transport + host HTTP failure → dual cause, not Manager down, not tab loss", async () => {
+    const out = await listPanelNodes({
+      panelList: async () => TRANSPORT_FAIL,
+      listInstalled: async () => {
+        throw new Error("Manager customnode/installed: HTTP 503");
+      },
+    });
+    expect(out.via).toBe("failed");
+    if (out.via !== "failed") throw new Error("expected failed");
+    expect(out.message).toMatch(/reached the panel tab/i);
+    expect(out.message).toMatch(/did not complete/i);
+    expect(out.message).toMatch(/HTTP 503/);
+    expect(out.message).toMatch(/not a Manager outage inferred from a transport-only fetch failure/i);
+    expect(out.message).not.toMatch(/could not be dispatched/i);
+    expect(out.message).not.toMatch(/Manager down/i);
+  });
+});
+
 describe("dualCauseListFailure copy", () => {
   it("names both tab loss and the host read, not a Manager outage from tab loss", () => {
     const msg = dualCauseListFailure(
@@ -212,5 +280,17 @@ describe("dualCauseListFailure copy", () => {
     expect(msg).toMatch(/no connected tab/);
     expect(msg).toMatch(/unreadable payload/);
     expect(msg).toMatch(/not a Manager outage inferred from tab loss/);
+  });
+
+  it("names both the transport wrap and the host read, not tab loss", () => {
+    const msg = dualCauseListFailure(
+      new Error(REPORTER_LIST_FETCH),
+      new Error("unreadable payload"),
+    );
+    expect(msg).toMatch(/reached the panel tab/);
+    expect(msg).toMatch(/Failed to fetch/);
+    expect(msg).toMatch(/unreadable payload/);
+    expect(msg).toMatch(/not a Manager outage inferred from a transport-only fetch failure/);
+    expect(msg).not.toMatch(/could not be dispatched/);
   });
 });
