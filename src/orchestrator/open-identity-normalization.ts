@@ -415,3 +415,105 @@ export function openLiveMatchesDestContent(live: unknown, dest: unknown): boolea
   }
   return true;
 }
+
+/**
+ * #2501 — dest vs live after reconnect, once identity and node id/type/link
+ * topology already agree. The panel's post-restart serialize fills
+ * inputs/outputs/properties and rewrites widgets_values / widgets_values_named
+ * (envelopes, extra default slots, named-vs-positional). Those frontend-derived
+ * bags are not a failed load.
+ *
+ * Additive to {@link openLiveMatchesDestContent}: named-first dest bags still
+ * fail that matcher when live only holds positional/envelope widgets. Fail closed
+ * on a missing node, a rewired link, or a dest widget value live does not hold.
+ */
+function frontendWidgetPrimitive(value: unknown): unknown {
+  if (!isPlainObject(value) || !Object.prototype.hasOwnProperty.call(value, "value")) return value;
+  for (const key of Object.keys(value)) {
+    if (key !== "name" && key !== "value" && key !== "type" && key !== "label") return value;
+  }
+  if (value.name != null && typeof value.name !== "string") return value;
+  if (value.type != null && typeof value.type !== "string") return value;
+  return value.value;
+}
+
+function frontendWidgetValuesEquivalent(a: unknown, b: unknown): boolean {
+  const left = frontendWidgetPrimitive(a);
+  const right = frontendWidgetPrimitive(b);
+  if (Object.is(left, right)) return true;
+  if (
+    (typeof left === "number" && typeof right === "string") ||
+    (typeof left === "string" && typeof right === "number")
+  ) {
+    const n = Number(left);
+    const m = Number(right);
+    if (Number.isFinite(n) && Number.isFinite(m) && n === m) return true;
+  }
+  return !valuesDiffer(left, right);
+}
+
+function destAuthoredWidgetSequence(node: Record<string, unknown>): unknown[] | null {
+  if (Array.isArray(node.widgets_values)) return node.widgets_values;
+  const named = namedWidgets(node);
+  return named ? Object.values(named) : null;
+}
+
+function liveSerializedWidgetSequence(node: Record<string, unknown>): unknown[] {
+  if (Array.isArray(node.widgets_values)) return node.widgets_values;
+  const named = namedWidgets(node);
+  return named ? Object.values(named) : [];
+}
+
+function frontendStableWidgetsDisagree(
+  destNode: Record<string, unknown>,
+  liveNode: Record<string, unknown>,
+): boolean {
+  const destNamed = namedWidgets(destNode);
+  const liveNamed = namedWidgets(liveNode);
+  if (destNamed && liveNamed && !Array.isArray(destNode.widgets_values)) {
+    for (const [key, destVal] of Object.entries(destNamed)) {
+      if (isEmptyWidgetValue(destVal)) continue;
+      const liveVal = liveNamed[key];
+      if (isEmptyWidgetValue(liveVal) || !frontendWidgetValuesEquivalent(liveVal, destVal)) {
+        return true;
+      }
+    }
+    return false;
+  }
+  const destWv = destAuthoredWidgetSequence(destNode);
+  if (!destWv) return false;
+  const liveWv = liveSerializedWidgetSequence(liveNode);
+  for (let i = 0; i < destWv.length; i++) {
+    if (isEmptyWidgetValue(destWv[i])) continue;
+    if (isEmptyWidgetValue(liveWv[i]) || !frontendWidgetValuesEquivalent(liveWv[i], destWv[i])) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function graphFrontendStableWidgetsDisagree(dest: unknown, live: unknown): boolean {
+  const destById = nodesById(dest);
+  const liveById = nodesById(live);
+  if (!destById || !liveById) return true;
+  for (const [id, destNode] of destById) {
+    const liveNode = liveById.get(id);
+    if (!liveNode || frontendStableWidgetsDisagree(destNode, liveNode)) return true;
+  }
+  return false;
+}
+
+export function openLiveMatchesDestAfterReconnect(live: unknown, dest: unknown): boolean {
+  if (!nodeIdentitiesMatchAllowingRehydration(dest, live)) return false;
+  if (!linkTopologiesMatch(dest, live)) return false;
+  if (graphFrontendStableWidgetsDisagree(dest, live)) return false;
+  const destSgs = subgraphsById(dest);
+  const liveSgs = subgraphsById(live);
+  if (!destSgs || !liveSgs) return false;
+  for (const [id, destSg] of destSgs) {
+    const liveSg = liveSgs.get(id);
+    if (!liveSg) return false;
+    if (!openLiveMatchesDestAfterReconnect(liveSg, destSg)) return false;
+  }
+  return true;
+}

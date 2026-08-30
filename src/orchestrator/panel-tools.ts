@@ -178,6 +178,7 @@ import {
 import {
   isPlainObject,
   isStampMismatchSaveRefusal,
+  openLiveMatchesDestAfterReconnect,
   openLiveMatchesDestContent,
   patchOpenIdentity,
   shouldRebindOpenIdentity,
@@ -9769,11 +9770,14 @@ function openedNormalizedContentResult(destPath: string): ToolResult {
 }
 
 /**
- * #1846 — the panel's identity-proven CONTENT_UNVERIFIED reply is not unknown
- * when dest's structural content is already on the canvas.
+ * #1846 / #2501 — the panel's identity-proven CONTENT_UNVERIFIED reply is not
+ * unknown when dest's structural content is already on the canvas.
  *
  * Fail closed: dest unreadable, a missing/extra node, a rewired link, or a dest
  * widget value the live graph does not hold leaves the panel error in place.
+ * After reconnect, frontend-derived per-node bags (inputs/outputs/properties/
+ * widgets_values representation) are accepted once identity, node id/type, and
+ * link topology match (#2501).
  */
 async function tryAcceptNormalizedOpenContent(
   ctx: PanelToolCtx,
@@ -9797,7 +9801,9 @@ async function tryAcceptNormalizedOpenContent(
   } catch {
     return { status: "skipped" };
   }
-  if (!openLiveMatchesDestContent(live, dest)) return { status: "skipped" };
+  if (!openLiveMatchesDestContent(live, dest) && !openLiveMatchesDestAfterReconnect(live, dest)) {
+    return { status: "skipped" };
+  }
 
   const destUuid = await activeWorkflowUuidForPath(ctx, destPath);
   if (destUuid) refreshWorkflowUuid(ctx, { workflow_uuid: destUuid });
