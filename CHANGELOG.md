@@ -6,14 +6,16 @@ All notable changes to this project are documented here. This project adheres to
 
 ## Unreleased
 
+## [0.52.161] - 2026-08-30
+
 ### MCP
 
 #### Fixed
-- panel_set_widget does not treat a MiniMaxH3Director duration write as failed when the value landed and only a setting-store onValueChange callback threw (#2545)
-- panel_connect retries a LiteGraph wildcard-to-wildcard (`*` → `*`) pairing when the panel reports "No input accepts type *" — PrimitiveNode "connect to widget input" can land on LogicIF.when_true / when_false so the primitive becomes typed from the destination (#2542)
-- panel_query_graph inspects the unsaved live canvas after custom-widget / builder content-only [root-shape-mismatch] instead of recommending a destructive re-open (#2544)
-- node_pack action:"patch" accepts the documented apply-patch (`*** Begin Patch` / `*** Update File`) format in addition to ---/+++ unified diffs (#2496)
-- list_packs action:"extract_deps" walks UI subgraph inner nodes and does not treat subgraph instance UUIDs as class types (#2648)
+- panel_set_widget does not treat a MiniMaxH3Director duration write as failed when the value landed and only a setting-store onValueChange callback threw (#2545, #2654)
+- panel_connect retries a LiteGraph wildcard-to-wildcard (`*` → `*`) pairing when the panel reports "No input accepts type *" — PrimitiveNode "connect to widget input" can land on LogicIF.when_true / when_false so the primitive becomes typed from the destination (#2542, #2653)
+- panel_query_graph inspects the unsaved live canvas after custom-widget / builder content-only [root-shape-mismatch] instead of recommending a destructive re-open (#2544, #2652)
+- node_pack action:"patch" accepts the documented apply-patch (`*** Begin Patch` / `*** Update File`) format in addition to ---/+++ unified diffs (#2496, #2650)
+- list_packs action:"extract_deps" walks UI subgraph inner nodes and does not treat subgraph instance UUIDs as class types (#2648, #2649)
 
 
 ## [0.52.160] - 2026-08-30
