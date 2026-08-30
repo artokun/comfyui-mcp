@@ -99,7 +99,7 @@ export function registerNodePackTools(server: McpServer): void {
       '- action:"read" — Read a slice of ONE file inside a pack (read-only), with bounded output so a huge file can\'t flood the context. Returns the requested line range with a truncation notice when clipped; long lines are chunked. Pair with action:"search" to locate the line, then action:"patch" or action:"write" to change it. Requires `path`.\n' +
       '- action:"search" — Regex-search custom-node source under custom_nodes/ (read-only). Uses ripgrep when it\'s on PATH, otherwise a bounded built-in scanner (skips dot-dirs, __pycache__/node_modules, binary and >1 MiB files). Returns file/line/text matches with per-line and result caps. Use this to find where a node class, import, or error string lives before reading or patching. Requires `query`.\n' +
       '- action:"write" — Create or overwrite ONE file inside a pack. Refuses to clobber an existing file unless overwrite is true, and creates parent directories by default. Use for whole-file edits or new files; for surgical edits prefer action:"patch". After writing, run action:"verify" and restart_comfyui to load the change. Requires `path` and `content`.\n' +
-      '- action:"patch" — Apply a unified diff to custom-node source under custom_nodes/. Every touched path is jail-checked BEFORE any git call, then the patch is validated with `git apply --check` and only applied if the check passes (two-phase; never uses --unsafe-paths). Paths are relative to custom_nodes/ and may carry a/ b/ prefixes; works on non-repo packs too. Ideal for surgical edits located via action:"search". Requires `patch`.\n' +
+      '- action:"patch" — Apply a unified diff (---/+++ headers) or an apply-patch / simplified diff (`*** Begin Patch` / `*** Update File`) to custom-node source under custom_nodes/. Every touched path is jail-checked BEFORE any git call, then the patch is validated with `git apply --check` and only applied if the check passes (two-phase; never uses --unsafe-paths). Paths are relative to custom_nodes/ and may carry a/ b/ prefixes; works on non-repo packs too. Ideal for surgical edits located via action:"search". Requires `patch`.\n' +
       '- action:"git" — Run a git operation inside one pack, selected by `git_action` (status/diff/log/commit/push). Reads (status/diff/log) are always allowed. Writes (commit/push) require the environment flag COMFYUI_MCP_ALLOW_GIT_WRITES=1 (default OFF) and otherwise return a structured DISABLED_BY_CONFIG refusal so you can self-correct. commit requires a `message` and stages either the given `paths` or all pack changes. This is the final step of the author loop after scaffold → write/patch → verify → restart_comfyui, before action:"publish". Requires `pack` and `git_action`.',
     {
       action: z
@@ -197,7 +197,7 @@ export function registerNodePackTools(server: McpServer): void {
         .string()
         .optional()
         .describe(
-          'action:"patch" — REQUIRED. A unified diff. File headers (---/+++) are read to determine touched paths, which must resolve inside custom_nodes/ (e.g. \'a/MyPack/nodes.py\').',
+          'action:"patch" — REQUIRED. A unified diff (---/+++ headers) or an apply-patch / simplified diff (`*** Begin Patch` / `*** Update File: path`). File headers are read to determine touched paths, which must resolve inside custom_nodes/ (e.g. \'a/MyPack/nodes.py\' or \'MyPack/nodes.py\').',
         ),
       query: z
         .string()
@@ -395,7 +395,7 @@ export function registerNodePackTools(server: McpServer): void {
           case "patch":
             return jsonResult(
               applyNodePatch(
-                required(args.patch, "patch", "patch", "the unified diff to apply under custom_nodes/"),
+                required(args.patch, "patch", "patch", "the unified or apply-patch diff to apply under custom_nodes/"),
                 undefined,
                 await resolveCustomNodesScanBaseLiveStrict(),
               ),

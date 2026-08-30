@@ -3,6 +3,7 @@ import {
   existsSync,
   mkdirSync,
   mkdtempSync,
+  readFileSync,
   rmSync,
   symlinkSync,
   writeFileSync,
@@ -539,6 +540,39 @@ describe("parsePatchPaths", () => {
     ].join("\n");
     expect(parsePatchPaths(patch)).toEqual(["Pack/nodes.py"]);
   });
+
+  it("extracts apply-patch *** Update File paths (#2496)", () => {
+    const patch = [
+      "*** Begin Patch",
+      "*** Update File: Pack/nodes.py",
+      "@@",
+      "-old",
+      "+new",
+      "*** End Patch",
+    ].join("\n");
+    expect(parsePatchPaths(patch)).toEqual(["Pack/nodes.py"]);
+  });
+
+  it("extracts Add File, Delete File, and Move to paths (#2496)", () => {
+    const patch = [
+      "*** Begin Patch",
+      "*** Add File: Pack/new.py",
+      "+hello",
+      "*** Delete File: Pack/gone.py",
+      "*** Update File: Pack/old.py",
+      "*** Move to: Pack/renamed.py",
+      "@@",
+      "-a",
+      "+b",
+      "*** End Patch",
+    ].join("\n");
+    expect(parsePatchPaths(patch)).toEqual([
+      "Pack/new.py",
+      "Pack/gone.py",
+      "Pack/old.py",
+      "Pack/renamed.py",
+    ]);
+  });
 });
 
 describe("applyNodePatch", () => {
@@ -598,6 +632,61 @@ describe("applyNodePatch", () => {
     ].join("\n");
     expect(() => applyNodePatch(patch, deps)).toThrow(NodeDevError);
     expect(gitCalls.length).toBe(0);
+  });
+
+  it("applies *** Begin Patch / *** Update File (real git) (#2496)", () => {
+    initRepoPack();
+    const patch = [
+      "*** Begin Patch",
+      "*** Update File: Pack/nodes.py",
+      "@@",
+      "-old",
+      "+new",
+      "*** End Patch",
+    ].join("\n");
+    const res = applyNodePatch(patch);
+    expect(res.success).toBe(true);
+    expect(res.stage).toBe("apply");
+    expect(res.touched).toEqual(["Pack/nodes.py"]);
+    expect(readFileSync(join(customNodes, "Pack", "nodes.py"), "utf8").replace(/\r\n/g, "\n")).toBe(
+      "new\n",
+    );
+  });
+
+  it("applies *** Add File (real git) (#2496)", () => {
+    initRepoPack();
+    const patch = [
+      "*** Begin Patch",
+      "*** Add File: Pack/extra.py",
+      "+hello",
+      "*** End Patch",
+    ].join("\n");
+    const res = applyNodePatch(patch);
+    expect(res.success).toBe(true);
+    expect(res.touched).toEqual(["Pack/extra.py"]);
+    expect(readFileSync(join(customNodes, "Pack", "extra.py"), "utf8").replace(/\r\n/g, "\n")).toBe(
+      "hello\n",
+    );
+  });
+
+  it("jail-checks apply-patch paths BEFORE any git call (#2496)", () => {
+    const { deps, gitCalls } = makeDeps();
+    const patch = [
+      "*** Begin Patch",
+      "*** Update File: ../escape.py",
+      "@@",
+      "-old",
+      "+new",
+      "*** End Patch",
+    ].join("\n");
+    expect(() => applyNodePatch(patch, deps)).toThrow(NodeDevError);
+    expect(gitCalls.length).toBe(0);
+  });
+
+  it("still names both header styles when none are present (#2496)", () => {
+    expect(() => applyNodePatch("not a patch")).toThrow(
+      /---\/\+\+\+ or \*\*\* Update\/Add\/Delete File/,
+    );
   });
 });
 
