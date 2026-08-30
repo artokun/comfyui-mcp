@@ -6,6 +6,12 @@ All notable changes to this project are documented here. This project adheres to
 
 ## Unreleased
 
+### MCP
+
+#### Fixed
+- persist subgraph viewing scope across panel tool calls so interior mutations do not silently fall back to root (#2553)
+
+
 ## [0.52.151] - 2026-08-30
 
 ### MCP

@@ -86,6 +86,11 @@ import {
 } from "../services/unexpose-host-link-shift.js";
 import { retryExposeSubgraphInput } from "../services/expose-ae-wildcard.js";
 import {
+  callAndRememberViewing,
+  callWithRememberedSubgraph,
+  noteConfirmedViewingFromToolResult,
+} from "../services/subgraph-viewing-scope.js";
+import {
   assertScreenshotPersistAllowed,
   decodePngBase64,
   persistScreenshotPng,
@@ -17953,7 +17958,9 @@ export function buildPanelToolDefs(): PanelToolDef[] {
       // announced. Nothing is shed while the whole reply fits.
       async (args: A, ctx) => {
         const widgetMaxChars = widgetMaxCharsRequest(args);
-        const panelReply = await ctx.call({
+        const panelReply = await callAndRememberViewing(
+          ctx.tabId,
+          {
             cmd: "graph_query",
             types: args.types,
             title: args.title,
@@ -17969,7 +17976,9 @@ export function buildPanelToolDefs(): PanelToolDef[] {
             ...(widgetMaxChars.value === undefined
               ? {}
               : { widget_max_chars: widgetMaxChars.value }),
-          });
+          },
+          (cmd, timeoutMs) => ctx.call(cmd, timeoutMs),
+        );
         return fitQueryGraphReply(
           panelReply,
           args.max_chars,
@@ -23246,14 +23255,25 @@ CHECKED FOR YOU: the graph read this message prescribes was just run, and it ` +
       "panel_enter_subgraph",
       "Navigate INTO a subgraph node so you can read and EDIT its inner nodes — after this, panel_query_graph / panel_graph_outline and all panel_* edit tools target the subgraph's inner graph (the user sees the canvas drill in). This is how you edit inside a subgraph (e.g. tweak a widget on an inner node). Call panel_exit_subgraph when done. Returns the new viewing scope.",
       { node_id: nodeId().describe("Subgraph node id (is_subgraph=true).") },
-      async (args: A, ctx) => ctx.call({ cmd: "graph_enter_subgraph", node_id: args.node_id }, 15000),
+      async (args: A, ctx) =>
+        callAndRememberViewing(
+          ctx.tabId,
+          { cmd: "graph_enter_subgraph", node_id: args.node_id },
+          (cmd, timeoutMs) => ctx.call(cmd, timeoutMs),
+          15000,
+        ),
     ),
     def(
       "panel_exit_subgraph",
       "Leave the current subgraph and return to the root graph (undo a panel_enter_subgraph). After this, panel_* tools target the root graph again.",
       {},
       async (_args, ctx) => {
-        const res = await ctx.call({ cmd: "graph_exit_subgraph" }, 15000);
+        const res = await callAndRememberViewing(
+          ctx.tabId,
+          { cmd: "graph_exit_subgraph" },
+          (cmd, timeoutMs) => ctx.call(cmd, timeoutMs),
+          15000,
+        );
         // #1468 — ONLY a no-reply is settled by a read. A genuine executor error
         // (the panel's own "could not confirm … no observation ever saw the canvas
         // there") is an ACKED reply the bridge received and relayed; it already
@@ -23261,7 +23281,9 @@ CHECKED FOR YOU: the graph read this message prescribes was just run, and it ` +
         // so re-deciding it from out here would overwrite a better-informed verdict
         // with a worse-informed one.
         if (!isReplyTimeoutResult(res)) return res;
-        return settleExitSubgraphAfterAckTimeout(ctx, res);
+        const settled = await settleExitSubgraphAfterAckTimeout(ctx, res);
+        if (!settled.isError) noteConfirmedViewingFromToolResult(ctx.tabId, settled);
+        return settled;
       },
     ),
     def(
@@ -23271,7 +23293,12 @@ CHECKED FOR YOU: the graph read this message prescribes was just run, and it ` +
         rail: z.enum(["input", "output"]).describe("Which boundary rail to move."),
         pos: xy().describe("New top-left [x, y] (two numbers)."),
       },
-      async (args: A, ctx) => ctx.call({ cmd: "graph_move_rail", rail: args.rail, pos: args.pos }),
+      async (args: A, ctx) =>
+        callWithRememberedSubgraph(
+          ctx.tabId,
+          { cmd: "graph_move_rail", rail: args.rail, pos: args.pos },
+          (cmd, timeoutMs) => ctx.call(cmd, timeoutMs),
+        ),
     ),
     def(
       "panel_promote_widget",
@@ -23282,7 +23309,17 @@ CHECKED FOR YOU: the graph read this message prescribes was just run, and it ` +
         demote: z.boolean().optional().describe("Set true to UN-promote (remove the widget from the parent node)."),
       },
       async (args: A, ctx) =>
-        ctx.call({ cmd: "graph_promote_widget", node_id: args.node_id, widget: args.widget, demote: args.demote }, 15000),
+        callWithRememberedSubgraph(
+          ctx.tabId,
+          {
+            cmd: "graph_promote_widget",
+            node_id: args.node_id,
+            widget: args.widget,
+            demote: args.demote,
+          },
+          (cmd, timeoutMs) => ctx.call(cmd, timeoutMs),
+          15000,
+        ),
     ),
     def(
       "panel_expose_subgraph_output",
@@ -23293,13 +23330,15 @@ CHECKED FOR YOU: the graph read this message prescribes was just run, and it ` +
         name: z.string().optional().describe("Optional name for the new subgraph output (boundary slot). Defaults from the source slot. IGNORED when the slot is already exposed — the reply carries reused:true and the existing name."),
       },
       async (args: A, ctx) =>
-        ctx.call(
+        callWithRememberedSubgraph(
+          ctx.tabId,
           {
             cmd: "graph_expose_subgraph_output",
             from_node_id: args.from_node_id,
             from_output: args.from_output,
             name: args.name,
           },
+          (cmd, timeoutMs) => ctx.call(cmd, timeoutMs),
           15000,
         ),
     ),
@@ -23314,7 +23353,15 @@ CHECKED FOR YOU: the graph read this message prescribes was just run, and it ` +
       async (args: A, ctx) =>
         retryExposeSubgraphInput(
           { to_node_id: args.to_node_id, to_input: args.to_input, name: args.name },
-          (cmd, timeoutMs) => ctx.call(cmd, timeoutMs),
+          (cmd, timeoutMs) =>
+            cmd.cmd === "graph_expose_subgraph_input"
+              ? callWithRememberedSubgraph(
+                  ctx.tabId,
+                  cmd,
+                  (inner, innerTimeout) => ctx.call(inner, innerTimeout),
+                  timeoutMs,
+                )
+              : ctx.call(cmd, timeoutMs),
         ),
     ),
     def(
@@ -23324,7 +23371,12 @@ CHECKED FOR YOU: the graph read this message prescribes was just run, and it ` +
         name: z.string().describe("Boundary output slot name (e.g. 'IMAGE') exactly as panel_query_graph lists it under rails.output.accepts_inputs — NOT a rail_node_id."),
       },
       async (args: A, ctx) => {
-        const res = await ctx.call({ cmd: "graph_unexpose_subgraph_output", name: args.name }, 15000);
+        const res = await callWithRememberedSubgraph(
+          ctx.tabId,
+          { cmd: "graph_unexpose_subgraph_output", name: args.name },
+          (cmd, timeoutMs) => ctx.call(cmd, timeoutMs),
+          15000,
+        );
         return withUnexposeHostLinkShiftNote(res, ctx);
       },
     ),
@@ -23335,7 +23387,12 @@ CHECKED FOR YOU: the graph read this message prescribes was just run, and it ` +
         name: z.string().describe("Boundary input slot name (e.g. 'model') exactly as panel_query_graph lists it under rails.input.provides_outputs — NOT a rail_node_id."),
       },
       async (args: A, ctx) => {
-        const res = await ctx.call({ cmd: "graph_unexpose_subgraph_input", name: args.name }, 15000);
+        const res = await callWithRememberedSubgraph(
+          ctx.tabId,
+          { cmd: "graph_unexpose_subgraph_input", name: args.name },
+          (cmd, timeoutMs) => ctx.call(cmd, timeoutMs),
+          15000,
+        );
         return withUnexposeHostLinkShiftNote(res, ctx);
       },
     ),
