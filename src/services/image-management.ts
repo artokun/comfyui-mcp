@@ -294,7 +294,7 @@ export interface OutputListingSource {
    *  /history path. */
   tempDirectory?: string;
   /** How the answer was produced, so a caller never has to guess which. */
-  basis: "local-scan" | "server-history";
+  basis: "local-scan" | "server-history" | "server-history-fallback";
 }
 
 /**
@@ -434,6 +434,35 @@ export async function listOutputMedia(options?: {
         `This is NOT a finding that there are no outputs.`,
       "OUTPUT_ENTRIES_UNREADABLE",
     );
+  }
+
+  // #2539 — a successful local scan of the WRONG directory looks identical to
+  // a genuine empty folder: resolveOutputDir fell back to an unrelated
+  // COMFYUI_PATH (relative `ComfyUI/main.py`, no --output-directory, no cwd)
+  // while the live /view endpoint served the files. Returning `{images:[],
+  // source: local-scan}` here is a silent miss, not an error. /history is the
+  // same source action:"get" uses; if it has matches, those are the answer.
+  // An unreadable history is not a finding that the empty scan was right —
+  // keep the empty local result rather than convert a readable empty folder
+  // into HISTORY_UNREADABLE.
+  if (images.length === 0) {
+    try {
+      const fromHistory = await listOutputImagesFromHistory(limit, pattern);
+      if (fromHistory.length > 0) {
+        return {
+          images: fromHistory,
+          source: {
+            directory: outputDir,
+            ...(tempDirectory ? { tempDirectory } : {}),
+            basis: "server-history-fallback",
+          },
+        };
+      }
+    } catch (err) {
+      logger.debug("Could not fall back to /history after an empty local output scan", {
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
   }
 
   // Sort newest first

@@ -5,7 +5,6 @@ import { getSystemStats, comfyApiFetch } from "../comfyui/client.js";
 import {
   resolveEffectiveComfyUIBase,
   resolveLiveComfyUIBase,
-  liveRootFromArgv,
   resolveLiveServerRoot,
   hasComfyUIEntrypoint,
 } from "./workspace-env.js";
@@ -1311,13 +1310,14 @@ export function localTempDirFallback(): string {
  * ComfyUI (/system_stats argv) first; falls back to <COMFYUI_PATH>/input.
  */
 /**
- * `<live install root>/<kind>` when the CONNECTED server's own argv identifies
- * it, else undefined (#1052).
+ * `<live install root>/<kind>` when the CONNECTED server identifies it, else
+ * undefined (#1052, #2539).
  *
  * The argv parse above only answers when ComfyUI was launched with an EXPLICIT
- * --input-directory / --output-directory. Without one, resolution fell straight
- * through to the configured/auto-detected install — and on a machine with more
- * than one ComfyUI that is a different tree from the one actually running.
+ * --input-directory / --output-directory. Without one, resolution used to fall
+ * straight through to the configured/auto-detected install — and on a machine
+ * with more than one ComfyUI that is a different tree from the one actually
+ * running.
  *
  * A reporter with ComfyUI Desktop installed alongside the git checkout they were
  * connected to had `train_prepare_dataset` refs resolve against Desktop and fail
@@ -1326,15 +1326,38 @@ export function localTempDirFallback(): string {
  * connected ComfyUI's output/input dirs", so the contract was right and the
  * resolution was not.
  *
- * `resolveLiveComfyUIBase` derives the root from the running server's argv
- * main.py + cwd, which is the same live-first move #463 made for models. It is
- * only a middle rung: an explicit --output-directory still wins above, and the
- * configured install still catches everything below.
+ * Two live rungs, in this order:
+ *
+ *  1. `resolveLiveComfyUIBase` (#2194 / #1052) — argv `main.py` + cwd when that
+ *     is absolute. `get_image` action:get type:input uses this when no
+ *     `--input-directory` is present, so a second install in COMFYUI_PATH is
+ *     not preferred over the connected server.
+ *  2. `resolveLiveServerRoot` (#2539 / #369) — OS-observed process when argv is
+ *     the relative `ComfyUI/main.py` shape Desktop and the Windows portable
+ *     bundle both report (no --output-directory, no cwd). That last shape is
+ *     why `get_image list_outputs` scanned an unrelated COMFYUI_PATH while
+ *     `/view` served the live server's files.
+ *
+ * An explicit --output-directory still wins above, and the configured install
+ * still catches everything below.
  */
 async function liveIoDirFallback(kind: "input" | "output" | "temp"): Promise<string | undefined> {
   try {
-    const base = await resolveLiveComfyUIBase();
-    return base ? join(base, kind) : undefined;
+    // #2194 — get_image action:get type:input when no --input-directory is set.
+    const fromArgv = await resolveLiveComfyUIBase();
+    if (fromArgv) return join(fromArgv, kind);
+
+    // #2539 — relative ComfyUI/main.py with no cwd cannot be derived from argv.
+    const stats = await getSystemStats();
+    const live = resolveLiveServerRoot(
+      stats.system?.argv,
+      (stats.system as { cwd?: string } | undefined)?.cwd,
+      { remote: isRemoteMode() },
+    );
+    // A Docker/forwarded server reports a container-side path that is not
+    // host-local. Same gate resolveModelsDir uses for this root.
+    if (!live.root || !existsSync(live.root)) return undefined;
+    return join(live.root, kind);
   } catch {
     return undefined; // never let a probe failure outrank the configured install
   }

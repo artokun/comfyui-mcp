@@ -1359,6 +1359,22 @@ describe("#1052: I/O dirs follow the CONNECTED server, not a second install", ()
     getSystemStats.mockResolvedValue({ system: { argv: ["python"] } });
     expect(await resolveOutputDir()).toBe(resolve(DESKTOP, "output"));
   });
+
+  // #2539 — ComfyUI Desktop / Windows portable report a RELATIVE
+  // `ComfyUI/main.py` with no cwd and no --output-directory. argv alone cannot
+  // resolve the live root, so list_outputs scanned the unrelated COMFYUI_PATH
+  // while /view served the live server's files. The OS-observed process is the
+  // same rung models already use for this argv shape.
+  it("#2539: relative ComfyUI/main.py without cwd uses the OS-observed live root, not COMFYUI_PATH", async () => {
+    const liveRoot = resolve("/portable2/ComfyUI");
+    observedLiveRoot = liveRoot;
+    getSystemStats.mockResolvedValue({
+      system: { argv: [join("ComfyUI", "main.py"), "--windows-standalone-build"] },
+    });
+    const got = await resolveOutputDir();
+    expect(got).toBe(join(liveRoot, "output"));
+    expect(got).not.toBe(resolve(DESKTOP, "output"));
+  });
 });
 
 describe("#1371 — a configured base the server demonstrably does not read is refused", () => {

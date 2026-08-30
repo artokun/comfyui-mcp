@@ -45,6 +45,14 @@ vi.mock("../../services/workspace-env.js", async () => {
   return {
     ...actual,
     resolveLiveComfyUIBase: (...args: unknown[]) => mocks.liveRoot(...args),
+    // #1263 — this file pins the #2194 argv live-root rung. The OS process table
+    // is not a fixture; observed-process for relative ComfyUI/main.py lives in
+    // output-dir.test.ts (#2539).
+    resolveLiveServerRoot: (argv?: string[], cwd?: string) => {
+      const fromArgv = actual.liveRootFromArgv(argv, cwd);
+      if (fromArgv) return { root: fromArgv, source: "argv" };
+      return { source: "unresolved" };
+    },
   };
 });
 

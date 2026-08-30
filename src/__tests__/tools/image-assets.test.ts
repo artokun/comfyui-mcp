@@ -31,7 +31,7 @@ const stageOutputAsInputMock = vi.fn();
 let listSourceMock: {
   directory?: string;
   tempDirectory?: string;
-  basis: "local-scan" | "server-history";
+  basis: "local-scan" | "server-history" | "server-history-fallback";
 } = {
   directory: "C:\\Comfy\\output",
   basis: "local-scan",
