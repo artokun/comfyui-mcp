@@ -9,6 +9,7 @@ All notable changes to this project are documented here. This project adheres to
 ### MCP
 
 #### Fixed
+- panel_query_graph inspects the unsaved live canvas after custom-widget / builder content-only [root-shape-mismatch] instead of recommending a destructive re-open (#2544)
 - node_pack action:"patch" accepts the documented apply-patch (`*** Begin Patch` / `*** Update File`) format in addition to ---/+++ unified diffs (#2496)
 - list_packs action:"extract_deps" walks UI subgraph inner nodes and does not treat subgraph instance UUIDs as class types (#2648)
 
