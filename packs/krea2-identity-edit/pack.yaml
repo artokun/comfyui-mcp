@@ -28,7 +28,7 @@ notes:
     Swapping them swaps which identity survives.
   - >-
     The LoRA must land in loras/Krea2/ — the workflow loads it as
-    "Krea2\krea2_identity_edit_v1_2.safetensors". A flat loras/ install leaves the loader
+    "Krea2/krea2_identity_edit_v1_2.safetensors". A flat loras/ install leaves the loader
     pointing at a file that is present but unfindable.
   - >-
     THE FIDELITY DIALS FOLLOW THE IMAGE SLOTS, NOT THE ROLES. Internally the LAST reference

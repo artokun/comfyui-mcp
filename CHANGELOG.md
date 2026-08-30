@@ -9,6 +9,7 @@ All notable changes to this project are documented here. This project adheres to
 ### MCP
 
 #### Fixed
+- krea2-identity-edit ships the LoRA widget as a POSIX path so Linux ComfyUI can match the installed file (#2525)
 - panel_strip_workflow applies live capturedWidgetValues to promoted subgraph widgets instead of stale definition defaults (#2522)
 
 
