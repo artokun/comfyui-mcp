@@ -51,6 +51,14 @@ vi.mock("node:fs/promises", () => ({
   utimes: vi.fn(),
 }));
 
+vi.mock("../../services/extra-paths.js", async (importOriginal) => {
+  const real = await importOriginal<typeof import("../../services/extra-paths.js")>();
+  return {
+    ...real,
+    getExtraModelRoots: async () => [],
+  };
+});
+
 const { config } = await import("../../config.js");
 const { listLocalModelsWithCoverage, describeUnparsableBody } = await import(
   "../../services/model-resolver.js"
@@ -934,10 +942,14 @@ describe("#1015: a filtered 404 names the RENAME, not a broken server", () => {
     expect(text).not.toMatch(/Check the ComfyUI URL/);
   });
 
-  it("points unet → diffusion_models", () => {
+  it("does not claim unet files are almost certainly under diffusion_models (#2480)", () => {
     const text = describeEmptyModelListing("unet", { ...base, absent: ["unet"] });
-    expect(text).toContain("diffusion_models");
-    expect(text).toMatch(/LEGACY name/);
+    expect(text).not.toMatch(/almost certainly/);
+    expect(text).not.toMatch(/LEGACY name/);
+    expect(text).not.toMatch(/Ask for "diffusion_models" instead/);
+    expect(text).toMatch(/404/);
+    expect(text).toMatch(/extra_model_paths/);
+    expect(text).toMatch(/UnetLoaderGGUF|unet_gguf|list_paths/);
   });
 
   it("a NON-legacy 404 category says what to do without inventing a rename", () => {
@@ -954,5 +966,40 @@ describe("#1015: a filtered 404 names the RENAME, not a broken server", () => {
       absent: ["checkpoints", "loras"],
     });
     expect(text).toMatch(/older\s+ComfyUI, or a proxy/);
+  });
+});
+
+describe("#2480: unet REST 404 is not a diffusion_models remedy", () => {
+  it("list_local_models(model_type:unet) does not say almost certainly diffusion_models", async () => {
+    getClient.mockReturnValue({ fetchApi });
+    fetchApi.mockResolvedValue(new Response("", { status: 404 }));
+    readdir.mockRejectedValue(new Error("ENOENT"));
+    const handler = registeredListLocalModelsTool();
+    const result = await handler({ action: "list", model_type: "unet" });
+    const text = result.content[0]?.text ?? "";
+    expect(text).not.toMatch(/almost certainly/);
+    expect(text).not.toMatch(/LEGACY name/);
+    expect(text).not.toMatch(/Ask for "diffusion_models" instead/);
+    expect(text).toMatch(/404|does not serve a "unet"/);
+  });
+
+  it("lists a GGUF from the configured unet directory after /models/unet 404s", async () => {
+    getClient.mockReturnValue({ fetchApi });
+    fetchApi.mockImplementation(async (path: string) =>
+      String(path).endsWith("/unet")
+        ? new Response("", { status: 404 })
+        : new Response("[]", { status: 200 }),
+    );
+    readdir.mockImplementation(async (dir: string) => {
+      const s = String(dir).replace(/\\/g, "/");
+      return s.endsWith("/unet") ? ["z_image_turbo-Q8_0.gguf"] : [];
+    });
+    stat.mockResolvedValue({ isFile: () => true, size: 1024, mtime: new Date(0) });
+    const handler = registeredListLocalModelsTool();
+    const result = await handler({ action: "list", model_type: "unet" });
+    const text = result.content[0]?.text ?? "";
+    expect(text).toContain("z_image_turbo-Q8_0.gguf");
+    expect(text).not.toMatch(/almost certainly/);
+    expect(text).toMatch(/## unet/);
   });
 });

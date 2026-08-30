@@ -760,6 +760,15 @@ async function collectLocalModels(
         // listing can still say which categories this server does not register.
         if (res.status === 404) {
           (coverage.absent ??= []).push(dir);
+          // #2480 — a filtered unet (or clip) 404 is not "look under the rename".
+          // ComfyUI-GGUF still serves those files via unet_gguf / clip_gguf, and
+          // extra_model_paths can still register the original folder. Probe the
+          // alias view on a FILTERED call; unfiltered listing already discovers it.
+          if (modelType) {
+            for (const view of ggufViewsAliasing(dir)) {
+              if (!dirsToScan.includes(view)) dirsToScan.push(view);
+            }
+          }
           continue;
         }
         if (!res.ok) {
@@ -868,37 +877,60 @@ async function collectLocalModels(
   }
   coverage.usedFilesystem = true;
   const modelsRoot = join(config.comfyuiPath, "models");
+  // extra_model_paths can register unet (and other categories) at a directory
+  // that is NOT `{comfyuiPath}/models/<dir>` — Desktop's extra_models_config
+  // is the usual case. REST 404 must still list that configured directory (#2480).
+  let extraRoots: Awaited<ReturnType<typeof getExtraModelRoots>> = [];
+  try {
+    extraRoots = await getExtraModelRoots();
+  } catch {
+    extraRoots = [];
+  }
+  if (refuseStaleModelListing(target, coverage)) return [];
   const dedup = makeModelDeduper();
   for (const dir of dirsToScan) {
-    const dirPath = join(modelsRoot, dir);
-    let entries: string[];
-    try {
-      entries = await readdir(dirPath, { recursive: true });
-    } catch {
-      if (refuseStaleModelListing(target, coverage)) return [];
-      continue;
+    const primary = join(modelsRoot, dir);
+    const extraForDir = extraRoots
+      .filter((er) => er.category.trim().toLowerCase() === dir.toLowerCase())
+      .map((er) => er.dir);
+    const scanRoots: string[] = [];
+    const seenRoots = new Set<string>();
+    for (const dirPath of [primary, ...extraForDir]) {
+      const key = resolve(dirPath);
+      if (seenRoots.has(key)) continue;
+      seenRoots.add(key);
+      scanRoots.push(dirPath);
     }
-    if (refuseStaleModelListing(target, coverage)) return [];
-    for (const entry of entries) {
-      // Same `.gguf`-only guard as the HTTP path for `*_gguf` categories (e.g. an
-      // explicit `listLocalModels("unet_gguf")`): never list non-gguf files here.
-      if (isGgufCategory(dir) && !entry.toLowerCase().endsWith(".gguf")) continue;
-      const filePath = join(dirPath, entry);
+    for (const dirPath of scanRoots) {
+      let entries: string[];
       try {
-        const info = await stat(filePath);
-        if (refuseStaleModelListing(target, coverage)) return [];
-        if (!info.isFile()) continue;
-        if (!dedup.add(dir, entry)) continue; // same file already surfaced elsewhere
-        results.push({
-          name: entry,
-          path: filePath,
-          size: info.size,
-          modified: info.mtime.toISOString(),
-          type: dir,
-        });
+        entries = await readdir(dirPath, { recursive: true });
       } catch {
         if (refuseStaleModelListing(target, coverage)) return [];
-        // Skip files we can't stat
+        continue;
+      }
+      if (refuseStaleModelListing(target, coverage)) return [];
+      for (const entry of entries) {
+        // Same `.gguf`-only guard as the HTTP path for `*_gguf` categories (e.g. an
+        // explicit `listLocalModels("unet_gguf")`): never list non-gguf files here.
+        if (isGgufCategory(dir) && !entry.toLowerCase().endsWith(".gguf")) continue;
+        const filePath = join(dirPath, entry);
+        try {
+          const info = await stat(filePath);
+          if (refuseStaleModelListing(target, coverage)) return [];
+          if (!info.isFile()) continue;
+          if (!dedup.add(dir, entry)) continue; // same file already surfaced elsewhere
+          results.push({
+            name: entry,
+            path: filePath,
+            size: info.size,
+            modified: info.mtime.toISOString(),
+            type: dir,
+          });
+        } catch {
+          if (refuseStaleModelListing(target, coverage)) return [];
+          // Skip files we can't stat
+        }
       }
     }
   }
@@ -1127,6 +1159,72 @@ export async function liveCategoryListing(
     const json = (await res.json()) as unknown;
     if (!Array.isArray(json)) return undefined;
     return json.filter((n): n is string => typeof n === "string");
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Combo option strings from a ComfyUI /object_info input spec (V1 `[[...], cfg]`
+ * or V3 `["COMBO", {options:[...]}]`). Undefined when this spec is not a
+ * single-select combo we can search.
+ */
+function comboOptionStrings(spec: unknown): string[] | undefined {
+  if (!Array.isArray(spec) || spec.length === 0) return undefined;
+  const cfgRaw = spec[1];
+  const cfg =
+    cfgRaw && typeof cfgRaw === "object" && !Array.isArray(cfgRaw)
+      ? (cfgRaw as Record<string, unknown>)
+      : null;
+  if (cfg?.multiselect) return undefined;
+  const type = spec[0];
+  if (Array.isArray(type)) return type.filter((v) => typeof v === "string");
+  if (typeof type !== "string" || !/COMBO/i.test(type) || /DYNAMIC/i.test(type)) {
+    return undefined;
+  }
+  if (!cfg) return undefined;
+  const opts = cfg.options;
+  if (!Array.isArray(opts)) return undefined;
+  const strings = opts.filter((v) => typeof v === "string");
+  return strings.length === opts.length ? strings : undefined;
+}
+
+function objectInfoHasFilename(info: unknown, filename: string): boolean {
+  if (!info || typeof info !== "object" || Array.isArray(info)) return false;
+  const defs = info as Record<string, unknown>;
+  const wanted = basename(filename.replace(/\\/g, "/"));
+  for (const def of Object.values(defs)) {
+    if (!def || typeof def !== "object" || Array.isArray(def)) continue;
+    const input = "input" in def ? def.input : undefined;
+    if (!input || typeof input !== "object" || Array.isArray(input)) continue;
+    const groups: unknown[] = [];
+    if ("required" in input) groups.push(input.required);
+    if ("optional" in input) groups.push(input.optional);
+    for (const group of groups) {
+      if (!group || typeof group !== "object" || Array.isArray(group)) continue;
+      const rec = group as Record<string, unknown>;
+      for (const spec of Object.values(rec)) {
+        const options = comboOptionStrings(spec);
+        if (!options) continue;
+        if (options.some((o) => basename(o.replace(/\\/g, "/")) === wanted)) return true;
+      }
+    }
+  }
+  return false;
+}
+
+/**
+ * Does any loader combo on /object_info list this filename? Used when
+ * `/models/<category>` 404s (#2480 — UnetLoaderGGUF still names GGUFs under
+ * unet even though core REST dropped that route). `undefined` = could not ask.
+ */
+async function objectInfoListsFilename(filename: string): Promise<boolean | undefined> {
+  if (!filename) return undefined;
+  try {
+    const res = await comfyApiFetch("/object_info");
+    if (!res.ok) return undefined;
+    const json: unknown = await res.json();
+    return objectInfoHasFilename(json, filename);
   } catch {
     return undefined;
   }
@@ -2013,12 +2111,14 @@ export async function verifyLandedModel(
     };
   }
 
+  const listingCats = await listingCategoriesFor(targetSubfolder, basename(targetPath));
   let sawListing = false;
   for (let i = 0; i < attempts; i++) {
-    const listing = await liveCategoryListing(category);
-    if (listing !== undefined) {
+    for (const cat of listingCats) {
+      const listing = await liveCategoryListing(cat);
+      if (listing === undefined) continue;
       sawListing = true;
-      if (listing.some((n) => normRel(n) === wanted)) {
+      if (!listing.some((n) => normRel(n) === wanted)) continue;
         // RE-CHECK membership AFTER the listing. The root check and the listing are
         // two separate observations; a ComfyUI restart onto a DIFFERENT install
         // between them would otherwise let the NEW server's own same-named model
@@ -2052,7 +2152,7 @@ export async function verifyLandedModel(
           verifiedPath,
           liveVisible: "unknown",
           note:
-            `The connected ComfyUI (${getComfyUIBaseUrl()}) lists "${wanted}" under "${category}", ` +
+            `The connected ComfyUI (${getComfyUIBaseUrl()}) lists "${wanted}" under "${cat}", ` +
             "but this destination was not named by the running server — it came from local " +
             "configuration, or was inferred from where the server's interpreter lives — so that " +
             "listing cannot be tied to the file just written to " +
@@ -2065,19 +2165,70 @@ export async function verifyLandedModel(
             ". " +
             unverifiableDestinationRemedy(),
         };
-      }
     }
     if (i < attempts - 1 && retryMs > 0) {
       await new Promise((r) => setTimeout(r, retryMs));
     }
   }
   if (!sawListing) {
+    // #2480 — /models/unet 404s on current ComfyUI even when extra_model_paths
+    // and UnetLoaderGGUF still use that folder. Ask /object_info before treating
+    // the REST miss as "could not confirm".
+    const comboListed = await objectInfoListsFilename(basename(targetPath));
+    if (comboListed === true) {
+      const still = await isUnderLiveModelRoots(resolve(targetPath), category);
+      if (still.inRoots === false) {
+        return {
+          verifiedPath,
+          verifiedAgainstRoot: still.liveRoot,
+          liveVisible: "not-visible",
+          note:
+            `The file IS on disk at ${landed}, but the connected ComfyUI ` +
+            `(${getComfyUIBaseUrl()}) changed while this was being checked and no longer ` +
+            "reads from that location — the entry it lists is its OWN file of the same name. " +
+            "Re-download now that the correct server is connected.",
+        };
+      }
+      if (!ambiguous) {
+        return {
+          verifiedPath,
+          verifiedAgainstRoot: still.liveRoot ?? membership.liveRoot,
+          liveVisible: "visible",
+          note:
+            `The connected ComfyUI (${getComfyUIBaseUrl()}) answered 404 for /models/${category}, ` +
+            `but /object_info lists "${wanted}" on a loader combo, so a custom loader can select it.`,
+        };
+      }
+      return {
+        verifiedPath,
+        liveVisible: "unknown",
+        note:
+          `The connected ComfyUI (${getComfyUIBaseUrl()}) lists "${wanted}" on a loader combo, ` +
+          "but this destination was not named by the running server — it came from local " +
+          "configuration, or was inferred from where the server's interpreter lives — so that " +
+          "listing cannot be tied to the file just written to " +
+          `${verifiedPath} — it may be the server's own copy elsewhere` +
+          (opts?.listedBefore === true
+            ? " (it already listed that name before this download)"
+            : opts?.listedBefore === undefined
+              ? " (whether it listed that name before this download could not be checked)"
+              : "") +
+          ". " +
+          unverifiableDestinationRemedy(),
+      };
+    }
     return {
       verifiedPath,
       liveVisible: "unknown",
       note:
-        `The connected ComfyUI (${getComfyUIBaseUrl()}) did not answer for the ` +
-        `"${category}" model folder, so it could not be confirmed that it reads from this location.`,
+        category.toLowerCase() === "unet"
+          ? `The file IS on disk at ${verifiedPath}. The connected ComfyUI answered 404 for ` +
+            `/models/unet, which does not prove the file is missing or that it lives under ` +
+            `diffusion_models. extra_model_paths and custom loaders (UnetLoaderGGUF) can still ` +
+            `use a configured unet directory. Check list_local_models (action:"list_paths") ` +
+            `for unet roots, or list with no model_type to see unet_gguf.`
+          : `The connected ComfyUI (${getComfyUIBaseUrl()}) did not answer for the ` +
+            `"${category}" model folder, so it could not be confirmed that it reads from this location.`,
     };
   }
   // A CORE category's listing enumerates only ComfyUI's own weight extensions

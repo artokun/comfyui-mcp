@@ -1571,7 +1571,10 @@ async function cancelAction(args: { id: string; tray_id?: string }): Promise<Cal
  */
 const LEGACY_CATEGORY_RENAMES: Record<string, string> = {
   clip: "text_encoders",
-  unet: "diffusion_models",
+  // unet → diffusion_models is a core rename too, but extra_model_paths and
+  // ComfyUI-GGUF UnetLoaderGGUF still use a configured unet directory (#2480).
+  // A 404 for /models/unet must NOT claim the files are almost certainly
+  // under diffusion_models.
 };
 
 export function describeEmptyModelListing(
@@ -1615,6 +1618,24 @@ export function describeEmptyModelListing(
     // Blaming "an older ComfyUI or a proxy" would send someone to check a URL
     // that is working perfectly.
     if (modelType) {
+      // #2480 — REST 404 for "unet" is a fact about the HTTP route, not about
+      // whether extra_model_paths or UnetLoaderGGUF still use a unet folder.
+      // Claiming the weights are almost certainly under diffusion_models is a
+      // definitive wrong-folder remedy.
+      if (modelType === "unet") {
+        return (
+          `The connected ComfyUI does not serve a "unet" model category over REST — it ` +
+          `answered 404 for /models/unet. That is a fact about the HTTP route, not about ` +
+          `whether a unet folder is configured.\n\n` +
+          `Core ComfyUI renamed its default unet folder to "diffusion_models", but ` +
+          `extra_model_paths can still register BOTH, and custom loaders such as ` +
+          `ComfyUI-GGUF UnetLoaderGGUF keep reading the configured unet directory even ` +
+          `when /models/unet 404s. Do not assume the file is under diffusion_models.\n\n` +
+          `Check list_local_models (action:"list_paths") for the unet paths this install ` +
+          `actually registers, or list with no model_type to surface unet_gguf when ` +
+          `ComfyUI-GGUF is installed.`
+        );
+      }
       const modern = LEGACY_CATEGORY_RENAMES[modelType];
       return (
         `The connected ComfyUI does not serve a "${modelType}" model category — it ` +
