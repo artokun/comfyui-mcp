@@ -197,6 +197,12 @@ import {
   workflowFromSerializeReply,
 } from "./open-identity-normalization.js";
 import {
+  contentOnlyRootShapeReadNote,
+  isContentOnlyRootShapeMismatch,
+  recoverContentOnlyGraphQuery,
+} from "./root-shape-mismatch.js";
+import type { GraphQueryOptions } from "../services/graph-query.js";
+import {
   clearSwitchHold,
   describeSwitchHold,
   recordSwitchHold,
@@ -19219,6 +19225,34 @@ export function buildPanelToolDefs(): PanelToolDef[] {
           },
           (cmd, timeoutMs) => ctx.call(cmd, timeoutMs),
         );
+        // #2544 — content-only [root-shape-mismatch] after custom-widget / builder
+        // edits (same node count, unsaved live canvas). Inspect the live graph
+        // read-only. Never open or rebind: that would discard the builder work.
+        if (panelReply.isError && isContentOnlyRootShapeMismatch(toolResultText(panelReply))) {
+          const recovered = await recoverContentOnlyGraphQuery((cmd, timeoutMs) => ctx.call(cmd, timeoutMs), {
+            types: args.types,
+            title: args.title,
+            where: args.where,
+            ids: args.ids,
+            upstream_of: args.upstream_of,
+            downstream_of: args.downstream_of,
+            depth: args.depth,
+            fields: args.fields,
+            group_by: args.group_by,
+            limit: args.limit,
+            max_chars: args.max_chars,
+          } as GraphQueryOptions);
+          if (recovered) {
+            const recoveredReply = ok(recovered);
+            rememberLiveRootViewing(ctx, recovered.viewing);
+            return fitQueryGraphReply(
+              recoveredReply,
+              args.max_chars,
+              widgetMaxChars.note ?? legacyWidgetMaxCharsNote(recoveredReply, widgetMaxChars.value),
+            );
+          }
+          return fail(contentOnlyRootShapeReadNote(toolResultText(panelReply)));
+        }
         rememberLiveRootViewing(ctx, parseToolResultJson(panelReply)?.viewing);
         return fitQueryGraphReply(
           panelReply,
