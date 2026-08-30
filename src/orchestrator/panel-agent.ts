@@ -272,10 +272,11 @@ export interface ImageRef {
 /** One queued user turn (a panel message, or an injected panel event).
  *
  *  `eventTokens` carry #468's run-completion journal tokens through the queue.
- *  A completion is only ACKED once the turn that carried it ended, so an item
- *  that is queued-but-unread when the agent dies (or whose turn is abandoned by
- *  the stall watchdog) is handed BACK to the journal and replayed instead of
- *  vanishing with the agent. */
+ *  A completion is ACKED when the carrying turn ends, or when a user interrupt
+ *  lands AFTER the backend has produced an event for that turn (#2486). An item
+ *  that is queued-but-unread when the agent dies (or whose turn is abandoned
+ *  before the model received it) is handed BACK to the journal and replayed
+ *  instead of vanishing with the agent. */
 export interface QueueItem {
   text: string;
   images?: ImageRef[];
@@ -673,6 +674,19 @@ export class PanelAgent {
       this.deps.onEventUndelivered?.(this.tabId, [...tokens], opts);
     } catch (err) {
       logger.warn(`[panel-agent ${this.short()}] releasing completion tokens: ${msgOf(err)}`);
+    }
+  }
+
+  /** Settle tokens the model has already been shown (#2486). Same callback the
+   *  carrying turn's `result` uses; interrupt() steals the tokens from that
+   *  path, so without this a mid-reply Stop re-injects a completion the agent
+   *  already read. */
+  private ackEventTokens(tokens: string[] | undefined): void {
+    if (!tokens?.length) return;
+    try {
+      this.deps.onEventDelivered?.(this.tabId, [...tokens], { carrier: this.carrierId });
+    } catch (err) {
+      logger.warn(`[panel-agent ${this.short()}] acking completion tokens: ${msgOf(err)}`);
     }
   }
 
@@ -1440,25 +1454,35 @@ export class PanelAgent {
     // the user wants BOTH the interrupted message and the new one answered. A plain
     // Stop / Ctrl+C / Esc (requeueInFlight=false) must NOT re-queue, or it would
     // silently re-run the turn the user just stopped (double tool actions).
-    // #468 — the interrupted turn's run-completion tokens travel with its text.
-    // Re-queued: they ride the re-queued item and are acked when THAT turn ends.
-    // Dropped (plain Stop): hand them back so the completion is replayed rather
-    // than dying with the turn the user cancelled.
+    //
+    // #468 / #2486 — the interrupted turn's run-completion tokens.
+    // The model HAS seen them (`turnProducedEvents`): settle, and do not put
+    // `completionOnly` items back on the queue. Replaying after a mid-reply
+    // interrupt is what made the same prompt fire 3+ "Acknowledge the result"
+    // turns. The model has NOT seen them (pre-submission abort): keep the old
+    // rule — requeue so they ride the next turn, or hand them back so a plain
+    // Stop does not swallow a completion nobody read.
     const interruptedTokens = this.turnEventTokens;
     this.turnEventTokens = [];
+    const alreadyRead = this.turnProducedEvents;
     if (interrupted && opts.requeueInFlight) {
       // Front of the queue: the interrupted work is addressed before whatever the
       // user sends next (which is appended after this interrupt is handled). The
       // ORIGINAL items go back (not one merged item) — the next splice re-joins
       // them into the same text, while an injected completion stays a separate
       // `completionOnly` item that a later detach can remove cleanly (#468).
-      this.queue.unshift(...interrupted.items);
+      const items = alreadyRead
+        ? interrupted.items.filter((item) => !item.completionOnly)
+        : interrupted.items;
+      this.queue.unshift(...items);
+      if (alreadyRead) this.ackEventTokens(interruptedTokens);
+    } else if (alreadyRead) {
+      this.ackEventTokens(interruptedTokens);
     } else {
-      // UNCARRIED on purpose. This is a plain Stop — a deliberate human act that
-      // does not repeat on its own, so it cannot form the automatic loop the
-      // bound exists to break; settling a completion on the user's third Stop
-      // would be a surprise, not a safeguard. (The stall watchdog and rewind DO
-      // auto-repeat, so those are carried.)
+      // UNCARRIED on purpose. This is a plain Stop before the model received
+      // the turn — a deliberate human act that does not repeat on its own, so
+      // it cannot form the automatic loop the bound exists to break. (The stall
+      // watchdog and rewind DO auto-repeat, so those are carried.)
       this.releaseEventTokens(interruptedTokens);
     }
     // Track the turn this interrupt is aborting (the one holding the gate). The
@@ -2357,8 +2381,9 @@ export class PanelAgent {
         this.inFlight = null;
         // #468 — the turn that CARRIED the run completion(s) has ended, so they
         // demonstrably reached the model's context. Ack them: the journal drops
-        // them and settles their run tickets. This is the ONLY ack point; every
-        // other exit from a turn hands the tokens back for replay.
+        // them and settles their run tickets. The other ack point is a user
+        // interrupt AFTER the backend has produced an event for this turn
+        // (#2486); every other exit from a turn hands the tokens back for replay.
         //
         // ACK GATE: only THIS turn's own result may ack. On a backend that
         // DECLARES turn markers, an UNMARKED result is a traceless straggler
