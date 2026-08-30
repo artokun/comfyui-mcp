@@ -1011,15 +1011,15 @@ export class PanelAgent {
       // sibling branches already refuse.
       const unnamedImgs = imgs.length - attachableImgs.length;
       // What the agent is NOT being shown, in coordinates it can actually call
-      // get_image with. `names` is filenames only and a `note` replaces it
-      // outright, so neither can carry a withheld PreviewImage that lives in
-      // `temp` or a subfolder — get_image would default to type "output" and
-      // miss it. Withholding pixels is only honest if the pointer works.
+      // get_image with. A custom `note` (video storyboard, etc.) replaces the
+      // default name list outright, so that list cannot carry a PreviewImage
+      // that lives in `temp` — get_image would default to type "output" and
+      // miss it (#2283). Withholding pixels is only honest if the pointer works.
       const withheldImgs = correlationIsUntrusted
         ? attachableImgs
         : attachableImgs.slice(attachedImgs.length);
       const withheldRefs = describeImageRefs(withheldImgs);
-      const names = imgs.map((i) => i.filename).filter(Boolean).join(", ") || "(unnamed)";
+      const names = describeImageRefs(attachableImgs) || "(unnamed)";
       // A custom `note` (e.g. the panel's video-storyboard summary) replaces the
       // default image-acknowledgement wording so the agent is told accurately
       // what it's looking at (a contact sheet of a video, not a still image).
@@ -1083,8 +1083,12 @@ export class PanelAgent {
                     ? sessionBound
                       ? `The first ${attachedImgs.length} image(s) are attached below; all ${imgs.length} outputs are already shown to the user in the panel. ${omittedImgs} further preview(s) were omitted because this conversation's cumulative automatic-preview budget (${MAX_SESSION_PREVIEW_ATTACHMENTS} images / ~${previewByteBudgetLabel()}) is nearly spent — fetch one with get_image action:"get" if you need it: ${withheldRefs}. `
                       : `The first ${attachedImgs.length} image(s) are attached below; all ${imgs.length} outputs are already shown to the user in the panel. ${omittedImgs} further preview(s) were omitted to keep this TURN's image context bounded — fetch one with get_image action:"get" if you need it: ${withheldRefs}. `
-                    : `The image(s) are attached below and already shown to the user in the panel. `
-            : `You cannot view images on this provider, but they are already shown to the user in the panel. `
+                    : note && names !== "(unnamed)"
+                      ? `The image(s) are attached below and already shown to the user in the panel. Fetch one with get_image action:"get" if you need to inspect or stage it: ${names}. `
+                      : `The image(s) are attached below and already shown to the user in the panel. `
+            : names !== "(unnamed)"
+              ? `You cannot view images on this provider, but they are already shown to the user in the panel. Fetch one with get_image action:"get": ${names}. `
+              : `You cannot view images on this provider, but they are already shown to the user in the panel. `
           : ``) +
         // Said on TOP of whichever branch fired, because every one of them is
         // arithmetically incomplete while an unnamed output is in the event: the
