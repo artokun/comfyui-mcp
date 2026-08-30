@@ -85,6 +85,7 @@ import {
   unexposeHostLinkShiftNote,
 } from "../services/unexpose-host-link-shift.js";
 import { retryConnectAgainstLiveGraph } from "../services/connect-live-graph.js";
+import { verifyPrimitiveForceInputAfterConnect } from "../services/primitive-force-input-connect.js";
 import { retryExposeSubgraphInput } from "../services/expose-ae-wildcard.js";
 import {
   applyLiveRootViewing,
@@ -20165,7 +20166,7 @@ export function buildPanelToolDefs(): PanelToolDef[] {
     ),
     def(
       "panel_connect",
-      "Connect an output slot of one node to an input slot of another in the user's open graph. Slots accept a name ('MODEL', 'samples') or numeric index. If both slot args are omitted the panel picks the first type-compatible pairing. On failure the error lists every slot with its type and [connected] flag — re-check with panel_query_graph ({ids:[node_id], fields:'detail'}). Undoable.",
+      "Connect an output slot of one node to an input slot of another in the user's open graph. Slots accept a name ('MODEL', 'samples') or numeric index. If both slot args are omitted the panel picks the first type-compatible pairing. On failure the error lists every slot with its type and [connected] flag — re-check with panel_query_graph ({ids:[node_id], fields:'detail'}). A frontend PrimitiveNode only serializes through a target widget; connecting one to a forceInput-only / non-widget STRING is refused (panel_run would omit the required input) — use a backend STRING producer such as PrimitiveStringMultiline instead. Undoable.",
       {
         from_node_id: nodeId().describe("Source node id."),
         from_output: slotRef
@@ -20190,17 +20191,18 @@ export function buildPanelToolDefs(): PanelToolDef[] {
         output: slotRef.optional().describe("Alias for from_output."),
         input: slotRef.optional().describe("Alias for to_input."),
       },
-      async (args: A, ctx) =>
-        retryConnectAgainstLiveGraph(
-          {
-            from_node_id: args.from_node_id,
-            from_output: args.from_output ?? args.from_slot_name ?? args.from_slot ?? args.output,
-            to_node_id: args.to_node_id,
-            to_input: args.to_input ?? args.to_slot_name ?? args.to_slot ?? args.input,
-            auto_match: args.auto_match,
-          },
-          (cmd, timeoutMs) => ctx.call(cmd, timeoutMs),
-        ),
+      async (args: A, ctx) => {
+        const connectArgs = {
+          from_node_id: args.from_node_id,
+          from_output: args.from_output ?? args.from_slot_name ?? args.from_slot ?? args.output,
+          to_node_id: args.to_node_id,
+          to_input: args.to_input ?? args.to_slot_name ?? args.to_slot ?? args.input,
+          auto_match: args.auto_match,
+        };
+        const call = (cmd: Record<string, unknown>, timeoutMs?: number) => ctx.call(cmd, timeoutMs);
+        const connected = await retryConnectAgainstLiveGraph(connectArgs, call);
+        return verifyPrimitiveForceInputAfterConnect(connectArgs, connected, call);
+      },
     ),
     def(
       "panel_disconnect",

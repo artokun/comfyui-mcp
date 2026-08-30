@@ -9,6 +9,7 @@ All notable changes to this project are documented here. This project adheres to
 ### MCP
 
 #### Fixed
+- panel_connect refuses a frontend PrimitiveNode wired to a forceInput-only STRING instead of reporting a LiteGraph link that panel_run omits from the prompt (#2536)
 - panel_run retries once after a "Dynamic widget doesn't exist on node" serializer throw so the first queue after graph edits is not a false failure (#2537)
 - get_history and panel_run completion journaling fall back to the connected panel's global /history when the headless `/history/<prompt_id>` is unreachable, and queue.status discloses a cached done when that history still cannot be read (#2532)
 - panel_graph_outline accepts the documented `detail`:"full" argument instead of rejecting it as an unrecognized key (#2541)
