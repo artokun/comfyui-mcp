@@ -1,6 +1,6 @@
 ---
 name: report-bug
-description: Self-heal and report bugs. Use when a defect in comfyui-mcp, the sidebar panel, a third-party custom node, or ComfyUI core actually cost the user something - it blocked them, produced a wrong result they would keep, lost or corrupted work, or crashed ComfyUI. For OUR repos (comfyui-mcp, comfyui-mcp-panel, comfyui-mcp-issue-worker) diagnose and fix locally FIRST so the user is unblocked, then file with the diff so reports arrive as near-PRs, not tickets; attempt the fix ONCE, and if it is upstream-only say so with the precise change. Our intake Worker takes our repos; third-party goes to the node's own GitHub and is offer-and-ask, not autonomous. Do NOT file a transient you recovered from at no cost, a missing capability (stabilisation freeze - parked on arrival), or behaviour that was merely surprising; say those in chat. A crash, lost work, or a wrong result the user might keep is STILL filed even if you recovered. One report per root cause, not per symptom. Always file on "report this" or "fix this bug".
+description: Self-heal and report bugs. Use when a defect in comfyui-mcp, the sidebar panel, a third-party custom node, or ComfyUI core actually cost the user something - it blocked them, produced a wrong result they would keep, lost or corrupted work, or crashed ComfyUI. For OUR repos (comfyui-mcp, comfyui-mcp-panel, comfyui-mcp-issue-worker) diagnose and fix locally FIRST so the user is unblocked, then file with the diff so reports arrive as near-PRs, not tickets; attempt the fix ONCE, and if upstream-only say so with the precise change. Our intake Worker takes our repos; third-party goes to the node's own GitHub. Do NOT file a transient you recovered from at no cost, a missing capability (stabilisation freeze - parked on arrival), or behaviour that was merely surprising; say those in chat. A crash, lost work, or a wrong result the user might keep is STILL filed even if you recovered, and on a single occurrence. One report per root cause. An explicit "report this" bypasses this bar - route it and file.
 ---
 
 # Self-heal & report bugs (make the ecosystem better)
@@ -24,6 +24,10 @@ missing model, bad params: use `troubleshooting`). First decide whose bug it is.
 
 ## When to file — a real defect that cost the user something
 
+This bar governs what YOU decide to file on your own initiative. An explicit
+request from the user is handled at the end of this section and is not subject
+to it.
+
 Two questions, both must be YES:
 
 1. **Is it ours, and does it still reproduce?** On the CURRENT version — check
@@ -46,9 +50,21 @@ File when both hold:
 - You could not complete the task, and the reason is a defect in our software.
 
 **Do NOT file** — say it in chat and move on. None of these apply when the user
-asks: "report this" / "fix this bug" always files, whatever the bar says. For a
-THIRD-PARTY defect their request IS the go-ahead Step 6 exists to obtain, so
-route it to that project's GitHub and file it — do not ask a second time.
+asks.
+
+**When the user asks explicitly** ("report this", "fix this bug"), the bar above
+does not apply — you never have to justify cost or reproducibility to them.
+Their request settles THAT it is reported; it does not change WHERE, which
+Step 2 still decides:
+
+- **Ours** — file it, no further questions.
+- **Third-party or ComfyUI core** — their request IS the go-ahead Step 6 exists
+  to obtain, so route it to that project's GitHub and file it without asking a
+  second time.
+- **Not a defect at all** (OOM, a missing model or node, bad params, a mistake) —
+  say plainly that it is not a bug in our software and fix it via
+  `troubleshooting`. If they still want it recorded after hearing that, file it.
+  Their call, made with the facts.
 
 - A transient you recovered from at no cost to the user — a retry that worked.
   This NEVER covers a crash, lost or corrupted work, or a wrong result the user
@@ -295,9 +311,10 @@ you.
 - **Ask before patching.** You may offer a local workaround (for example, patch
   the custom node so the user is not blocked), but apply it only once the user
   says yes. Same keep-the-patch logic once approved.
-- **Ask before filing.** Identify the node or project's GitHub repo (from its
-  metadata, `install_custom_node` (`action: "list"`), or its folder). Then, with
-  the user's go-ahead, use `report_issue` with that `owner/repo` (it returns a
+- **Ask before filing — unless they already asked.** Identify the node or
+  project's GitHub repo (from its metadata, `install_custom_node`
+  (`action: "list"`), or its folder). Then, with the user's go-ahead (which an
+  explicit "report this" already is), use `report_issue` with that `owner/repo` (it returns a
   prefilled link the user reviews and submits; it does not auto-file into
   third-party repos), OR `gh issue create -R owner/repo` if `gh` is authed and
   they agree.
