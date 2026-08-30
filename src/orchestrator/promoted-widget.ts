@@ -720,3 +720,58 @@ export function addressedNodeMatchesPersistRemedy(
     sameNodeId(addressedNodeId, remedy.enterPath[0])
   );
 }
+
+/**
+ * #2514 — the panel's #1087 warning for a DIRECT write to a widget that is
+ * link-driven from a promoted subgraph input. That warning tells the caller
+ * to set the widget on the ENCLOSING subgraph node. It is contradictory when
+ * MCP already remapped a parent-addressed write onto that inner widget.
+ */
+const INNER_LINK_DRIVEN_WARNING_RE =
+  /will NOT change the render[\s\S]*\blink-driven\b[\s\S]*ENCLOSING subgraph node/i;
+
+export function isInnerLinkDrivenWriteWarning(text: string): boolean {
+  return INNER_LINK_DRIVEN_WARNING_RE.test(text);
+}
+
+export type ParentAuthoritativePromotedWrite = {
+  nodeId: number | string;
+  widget: string;
+  synced: boolean;
+};
+
+/**
+ * Shape a remapped promoted-write receipt around the parent the caller
+ * addressed. The inner link-driven warning is dropped only on that path;
+ * an unrelated warning (control_after_generate, etc.) is left in place.
+ * `set` is rewritten to the parent-facing widget only when the parent
+ * rail was actually synced — otherwise the inner assignment stands.
+ */
+export function shapeParentAuthoritativePromotedWrite(
+  payload: Record<string, unknown>,
+  parent: ParentAuthoritativePromotedWrite,
+): Record<string, unknown> {
+  const next: Record<string, unknown> = { ...payload };
+  if (typeof next.warning === "string" && isInnerLinkDrivenWriteWarning(next.warning)) {
+    delete next.warning;
+  }
+  if (parent.synced) {
+    next.parent_widget_synced = true;
+    const set = next.set;
+    if (set && typeof set === "object" && !Array.isArray(set)) {
+      next.set = {
+        ...(set as Record<string, unknown>),
+        node_id: parent.nodeId,
+        widget: parent.widget,
+      };
+    }
+    const promotedFrom = next.promoted_from;
+    if (promotedFrom && typeof promotedFrom === "object" && !Array.isArray(promotedFrom)) {
+      next.promoted_from = {
+        ...(promotedFrom as Record<string, unknown>),
+        parent_widget_synced: true,
+      };
+    }
+  }
+  return next;
+}

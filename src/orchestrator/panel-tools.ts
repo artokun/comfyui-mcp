@@ -165,6 +165,8 @@ import {
   resolveLegacyInnerPromotedTarget,
   resolveInnerPromotedTarget,
   validatePromotedSubgraphEnvelope,
+  isInnerLinkDrivenWriteWarning,
+  shapeParentAuthoritativePromotedWrite,
   type PromotedParentRailWitness,
   type PromotedScopeWitness,
   type PromotedTerminalWitness,
@@ -19599,6 +19601,49 @@ export function buildPanelToolDefs(): PanelToolDef[] {
                 written,
                 `\n\n(Tried the promoted inner mapping node ${plan.inner.innerNodeId} ` +
                   `"${plan.inner.widget}" and it FAILED: ${textOfToolResult(written)})`,
+              );
+            }
+            // #2514 — the caller addressed the enclosing subgraph. The panel's
+            // #1087 warning is for a DIRECT inner write to a widget that is
+            // link-driven from that parent rail, and it tells the caller to
+            // set the enclosing node — which is what this call already did.
+            // Treat the parent promotion as authoritative: write that
+            // parent-facing widget now that we have left the inner scope,
+            // and never forward the inner warning on this path.
+            const innerPayload = parseToolResultJson(written);
+            const innerWarning =
+              typeof innerPayload?.warning === "string" ? innerPayload.warning : "";
+            if (innerPayload && isInnerLinkDrivenWriteWarning(innerWarning)) {
+              const parentWritten = await write(plan.outerNodeId, args.widget as string);
+              const exitNote = exited.isError
+                ? ` panel_exit_subgraph then FAILED — call panel_exit_subgraph. (${textOfToolResult(exited)})`
+                : "";
+              if (!parentWritten.isError) {
+                const parentPayload = parseToolResultJson(parentWritten) ?? innerPayload;
+                const shaped = shapeParentAuthoritativePromotedWrite(parentPayload, {
+                  nodeId: plan.outerNodeId,
+                  widget: args.widget as string,
+                  synced: true,
+                });
+                return appendToolResultText(
+                  rewriteToolResultJson(parentWritten, shaped),
+                  `\n\n(Applied the enclosing subgraph widget on node ${plan.outerNodeId} ` +
+                    `"${args.widget as string}" as the authoritative parent promotion.)` +
+                    exitNote,
+                );
+              }
+              const shaped = shapeParentAuthoritativePromotedWrite(innerPayload, {
+                nodeId: plan.outerNodeId,
+                widget: args.widget as string,
+                synced: false,
+              });
+              return appendToolResultText(
+                rewriteToolResultJson(written, shaped),
+                `\n\n(Applied via the validated promoted inner widget: node ${plan.inner.innerNodeId} ` +
+                  `"${plan.inner.widget}". The enclosing subgraph widget is the authoritative ` +
+                  `parent promotion; the inner link-driven warning was suppressed because that ` +
+                  `is the node this call addressed.)` +
+                  exitNote,
               );
             }
             return appendToolResultText(
