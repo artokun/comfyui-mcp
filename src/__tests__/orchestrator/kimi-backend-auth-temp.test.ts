@@ -90,6 +90,27 @@ describe("#2546 per-turn OAuth re-resolve", () => {
     expect(applied).toEqual(["tok-1", "tok-2"]);
   });
 
+  it("#2546 resolves at session start BEFORE the readiness dial", async () => {
+    // Not redundant with the per-turn pins: without this call prepare() runs the
+    // inherited GET {host}/models reachability check holding the constructor's
+    // "pending-oauth" placeholder, so Connect fails before any turn exists for
+    // wrapChannel to repair. Mutating this call site alone killed nothing until
+    // this test existed.
+    const failFetch = vi.fn(async () => {
+      throw new Error("offline in test");
+    });
+    vi.stubGlobal("fetch", failFetch);
+    try {
+      const b = new KimiBackend();
+      // super.prepare() is allowed to fail — the claim is only that auth was
+      // resolved first, which is the ordering prepare() exists to guarantee.
+      await b.prepare().catch(() => undefined);
+      expect(resolveKimiCodeOAuth).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
   it("a refresh failure does NOT drop the turn", async () => {
     // Best-effort, like CopilotBackend: the turn proceeds on the existing token
     // and a genuinely stale one surfaces as a normal 401 turn-error, never as an
