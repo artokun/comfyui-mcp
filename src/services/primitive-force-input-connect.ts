@@ -313,6 +313,9 @@ export async function verifyPrimitiveForceInputAfterConnect<T extends ToolResult
 
   const input = findTargetConnectInput(target, args.from_node_id, args.to_input);
   if (!input) return connected;
+  // #2536 is STRING-only. A LiteGraph wildcard (`*`) with no widget is a typed
+  // destination for PrimitiveNode (#2542), not a forceInput-only STRING omit.
+  if ((input.type ?? "").toUpperCase() !== "STRING") return connected;
   if (!isForceInputOnlyNonWidget(input, target.widgets, target.widgetsKnown)) {
     return connected;
   }

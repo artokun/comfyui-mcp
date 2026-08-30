@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   compatibilityRank,
+  isLiteGraphWildcardType,
   isTypeCompatible,
   RANK_EXACT,
   RANK_INCOMPATIBLE,
@@ -23,6 +24,14 @@ describe("slot-compat", () => {
     expect(compatibilityRank("MODEL", "*")).toBe(RANK_WILDCARD);
     expect(isTypeCompatible("*", "ANYTHING")).toBe(true);
     expect(RANK_WILDCARD).toBeLessThan(RANK_EXACT);
+  });
+
+  it("permits LiteGraph wildcard-to-wildcard (`*` → `*`)", () => {
+    expect(compatibilityRank("*", "*")).toBe(RANK_WILDCARD);
+    expect(isTypeCompatible("*", "*")).toBe(true);
+    expect(isLiteGraphWildcardType("*")).toBe(true);
+    expect(isLiteGraphWildcardType("IMAGE")).toBe(false);
+    expect(isLiteGraphWildcardType(["a"])).toBe(false);
   });
 
   it("orders exact > wildcard > incompatible", () => {
