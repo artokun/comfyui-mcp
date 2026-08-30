@@ -46,6 +46,17 @@ const textOf = (r: ToolResult): string =>
 
 let sent: string[] = [];
 
+/** A class-method receiver catches accidental unbound invocation of the real
+ * UiBridge resolver. The method deliberately reads instance state, like the
+ * production method's `this.resolveTarget()` call. */
+class ScopeKeyBridge {
+  constructor(private readonly scopeTargets: Record<string, string>) {}
+
+  resolveSharedTabId(scopeId?: string): string | undefined {
+    return scopeId === undefined ? undefined : this.scopeTargets[scopeId];
+  }
+}
+
 function bridge(opts: {
   install?: Record<string, unknown>;
   /** The `status` block nodes_queue_status wraps. */
@@ -55,10 +66,11 @@ function bridge(opts: {
   noIncarnation?: boolean;
   tabId?: string;
   resolveSharedTabId?: (scopeId?: string) => string | undefined;
+  scopeTargets?: Record<string, string>;
   incarnationArgs?: string[];
   dispatchedTabIds?: string[];
 }) {
-  return {
+  const fixture = {
     send: async (cmd: Record<string, unknown>, sendOpts?: { tabId?: string }) => {
       sent.push(String(cmd.cmd));
       if (sendOpts?.tabId) opts.dispatchedTabIds?.push(sendOpts.tabId);
@@ -76,7 +88,7 @@ function bridge(opts: {
     // The REAL UiBridge always reports this; a fixture without it models a
     // bridge that cannot identify which panel answered, which is a separate case
     // asserted below.
-    resolveSharedTabId: opts.resolveSharedTabId,
+    ...(opts.resolveSharedTabId === undefined ? {} : { resolveSharedTabId: opts.resolveSharedTabId }),
     tabIncarnation: (id: string) => {
       opts.incarnationArgs?.push(id);
       if (opts.tabId?.startsWith("orchestrator::") && id !== TAB) {
@@ -93,7 +105,10 @@ function bridge(opts: {
     workflowUuidFor: () => ({ known: false }),
     tabCanMutateGraph: () => true,
     tabGraphMutationCapability: () => ({ known: true, canMutate: true }),
-  } as unknown as PanelToolCtx["bridge"];
+  };
+  return (opts.scopeTargets === undefined
+    ? fixture
+    : Object.assign(new ScopeKeyBridge(opts.scopeTargets), fixture)) as unknown as PanelToolCtx["bridge"];
 }
 
 async function install(
@@ -338,19 +353,23 @@ describe("an install the Manager accepted and dropped says so (#1129)", () => {
     expect(textOf(res)).toMatch(/THE QUEUE DOES NOT HAVE THIS TASK/);
   });
 
-  it("resolves the Claude scope address before reading the panel incarnation", async () => {
-    const SCOPE = "orchestrator::claude";
+  it.each([
+    ["Claude", "orchestrator::claude"],
+    ["HTTP", "orchestrator::codex"],
+  ])("resolves the %s scope address before reading the panel incarnation", async (_lane, SCOPE) => {
     const incarnationArgs: string[] = [];
     const dispatchedTabIds: string[] = [];
     const out = await install({
       tabId: SCOPE,
-      resolveSharedTabId: (scopeId) => (scopeId === SCOPE ? TAB : undefined),
+      scopeTargets: { [SCOPE]: TAB },
       incarnationArgs,
       dispatchedTabIds,
     });
 
-    // A production-shaped Claude context carries the scope address into the
-    // tool server, while the bridge routes it to the real panel connection.
+    // Production-shaped Claude and HTTP contexts carry their backend-qualified
+    // scope address into the shared tool server, while UiBridge routes it to
+    // the real panel connection. ScopeKeyBridge's class method fails if the
+    // resolver is called without its receiver.
     expect(out.text).toMatch(/THE QUEUE DOES NOT HAVE THIS TASK/);
     expect(dispatchedTabIds).toEqual([SCOPE, SCOPE]);
     expect(incarnationArgs).toEqual([TAB, TAB]);

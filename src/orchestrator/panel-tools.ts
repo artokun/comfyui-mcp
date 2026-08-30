@@ -4503,7 +4503,13 @@ function panelIncarnation(ctx: PanelToolCtx, tabId: string): string | undefined 
     ? (() => {
         const resolveSharedTabId = (ctx.bridge as BridgeProbe).resolveSharedTabId;
         try {
-          return typeof resolveSharedTabId === "function" ? resolveSharedTabId(tabId) : undefined;
+          // Preserve UiBridge's receiver: resolveSharedTabId delegates through
+          // `this.resolveTarget()`. Scope-key contexts (Claude and HTTP lanes)
+          // must not lose that receiver merely because this probe extracts the
+          // optional method before invoking it.
+          return typeof resolveSharedTabId === "function"
+            ? resolveSharedTabId.call(ctx.bridge, tabId)
+            : undefined;
         } catch {
           return undefined;
         }
