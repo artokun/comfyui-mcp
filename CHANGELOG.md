@@ -6,6 +6,11 @@ All notable changes to this project are documented here. This project adheres to
 
 ## Unreleased
 
+### MCP
+
+#### Fixed
+- panel_run(to_node_id) treats a random-mode seed-control / KSampler seed-only graph-stamp diff as queue-time volatility rather than a real graph mismatch, and reconnects the local transport when that certified-not-queued retry's send drops (#2120)
+
 ## [0.52.165] - 2026-08-30
 
 ### MCP

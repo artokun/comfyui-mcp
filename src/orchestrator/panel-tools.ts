@@ -10603,17 +10603,69 @@ function isRetryableRunToNodeStampRace(res: ToolResult, rejection: ToolResult): 
 }
 
 /**
- * #2120 — an older panel can decorate a fixed seed while it builds the deferred
- * run prompt. That can make the same scoped run hit the certified stamp race more
- * than once. The panel still has to identify the changed entry as a seed; this is
- * deliberately narrower than allowing an arbitrary third dispatch.
+ * #2120 — a queue-time seed roll (KSampler control_after_generate, DaSiWa_SeedControl
+ * in random mode, RandomNoise noise_seed) can make the same scoped run hit the
+ * certified stamp race more than once. The panel has to name the changed entries,
+ * and every named entry has to be a seed-like input; a real graph mismatch still
+ * fails closed after the ordinary single re-issue.
  */
 const MAX_SCOPED_STAMP_RACE_RETRIES = 2;
 
+/** Serialized prompt inputs a queue-time seed roller is allowed to rewrite. */
+function isQueueTimeSeedInputName(name: string): boolean {
+  return /^(?:noise_)?seed$|^seed_value$/i.test(name.trim());
+}
+
+/**
+ * The panel's drift list (`The differing entry: 53 seed_value.`) or the older
+ * `differing entry node 53 seed: <n>` form. Null when the refusal does not name
+ * a parseable list — fail toward treating that as a real mismatch.
+ */
+function stampRaceDriftTokens(text: string): string[] | null {
+  const modern = text.match(/The differing entr(?:y|ies):\s*([^.]+)\./i);
+  if (modern?.[1]) {
+    const tokens = modern[1]
+      .split(";")
+      .map((t) => t.trim())
+      .filter(Boolean);
+    return tokens.length ? tokens : null;
+  }
+  const legacy = text.match(/differing entry(?: node)?\s+(\S+)\s+([A-Za-z_][A-Za-z0-9_]*)/i);
+  return legacy ? [`${legacy[1]} ${legacy[2]}`] : null;
+}
+
+function driftTokenInputName(token: string): string | null {
+  const m = token.trim().match(/^\S+\s+([A-Za-z_][A-Za-z0-9_]*)/);
+  return m ? m[1] : null;
+}
+
 function isSeedRunToNodeStampRace(res: ToolResult, rejection: ToolResult): boolean {
+  if (!isRetryableRunToNodeStampRace(res, rejection)) return false;
+  const tokens = stampRaceDriftTokens(toolResultText(rejection));
+  if (!tokens) return false;
+  return tokens.every((token) => {
+    const name = driftTokenInputName(token);
+    return name != null && isQueueTimeSeedInputName(name);
+  });
+}
+
+/**
+ * #2120 — a send that failed before the panel accepted the frame. `retry_of:"…"`
+ * means the bridge already handed the dispatch out, so the outcome is unknown
+ * and a further graph_run would risk a second queue.
+ */
+function isUndispatchedTransportSendFailure(resOrErr: unknown): boolean {
+  const text =
+    resOrErr && typeof resOrErr === "object" && Array.isArray((resOrErr as ToolResult).content)
+      ? toolResultText(resOrErr as ToolResult)
+      : resOrErr instanceof Error
+        ? resOrErr.message
+        : String(resOrErr ?? "");
+  if (/\bretry_of:"/i.test(text)) return false;
   return (
-    isRetryableRunToNodeStampRace(res, rejection) &&
-    /\bdiffering\b[\s\S]{0,160}\bseed\b/i.test(toolResultText(rejection))
+    isWorkerTransportSendError(text) ||
+    (/Transport send error/i.test(text) && /HTTP request failed/i.test(text)) ||
+    /error sending request for url/i.test(text)
   );
 }
 
@@ -10663,6 +10715,9 @@ export const __panelRunTestHooks = {
   formatRunRejection,
   isRetryableRunToNodeStampRace,
   isSeedRunToNodeStampRace,
+  isQueueTimeSeedInputName,
+  stampRaceDriftTokens,
+  isUndispatchedTransportSendFailure,
   isRetryableDynamicWidgetRace,
   describeDroppedOutputs,
   applyQueuedUnknownRetryGuidance,
@@ -22438,10 +22493,11 @@ export function buildPanelToolDefs(): PanelToolDef[] {
         // certifies as not-queued. Gated on OUR OWN args (this really was a scoped run)
         // and on the panel having ANSWERED, so an unknown outcome is never retried.
         // The ordinary race gets one re-issue. A repeated race gets ONE additional
-        // chance only when the panel names a differing seed entry — the fixed-seed
-        // decoration race reported in #2120. Every attempt still passes the panel's
-        // graph-stamp check independently; this is not a bypass or a blind mutation
-        // retry.
+        // chance only when EVERY named differing entry is a seed-like input — a
+        // queue-time KSampler / SeedControl / noise_seed roll, including DaSiWa
+        // random mode (`seed_value`). A steps/cfg/topology mismatch still fails
+        // closed. Every attempt still passes the panel's graph-stamp check
+        // independently; this is not a bypass or a blind mutation retry.
         let scopeRebuilt = false;
         let scopeRetryCount = 0;
         while (
@@ -22474,20 +22530,37 @@ export function buildPanelToolDefs(): PanelToolDef[] {
             // first certified refusal but before this re-issue belongs to neither
             // attempt; keep the ticket fence at the dispatch that actually minted its
             // prompt id rather than allowing that stale arm to be synthesized (#2021).
-            runDispatchedAt = Date.now();
-            res = await ctx.call(runCmd, 20000, observeRunRid);
-            retryResultReceived = true;
+            const sendScopedRetry = async (): Promise<void> => {
+              runDispatchedAt = Date.now();
+              res = await ctx.call(runCmd, 20000, observeRunRid);
+              retryResultReceived = true;
+              // #2120 — a send that never reached the panel cannot have queued. Rebind
+              // the local route and re-send THIS attempt once; a retry_of token means
+              // the frame already left and is unknown, so that path still stops.
+              if (res?.isError && isUndispatchedTransportSendFailure(res)) {
+                try {
+                  ctx.rebindToActiveTab?.();
+                } catch {
+                  /* rebind is best-effort; the re-send below is the recovery */
+                }
+                await sleep(retrySettleMs());
+                runDispatchedAt = Date.now();
+                res = await ctx.call(runCmd, 20000, observeRunRid);
+              }
+            };
+            await sendScopedRetry();
             // #1175 — the re-issue can miss its window exactly as the first
             // dispatch can, and this is the one whose outcome is genuinely open
             // (the first was CERTIFIED to have queued nothing). Reconcile it on
             // the same terms; observeRunRid has already rebound to this attempt.
             await reconcileRun();
             rejection = detectRunRejection(res);
-          } catch (err) {
+          } catch (thrown) {
             // A retry timeout/transport failure still has a concrete rid when the
             // bridge accepted the dispatch. Register the bounded exact handoff
             // before returning so a later Panel receipt can open its ticket.
             installLateReceiptHandoff();
+            let err = thrown;
             // A bridge/late-receipt failure after ctx.call already returned must not
             // erase the retry's own result (notably its retry_of token). Preserve it
             // verbatim and stop: no further dispatch is justified by a failed local
@@ -22501,6 +22574,37 @@ export function buildPanelToolDefs(): PanelToolDef[] {
                   `made. Do not infer an additional queue entry from the reconciliation ` +
                   `failure alone. (${err instanceof Error ? err.message : String(err)})`,
               );
+            }
+            // #2120 — a throw that is an undispatched send failure is the dropped
+            // orchestrator transport, not a queued unknown. Rebind and re-send THIS
+            // attempt once; a second throw stays the unknown-outcome report below.
+            if (isUndispatchedTransportSendFailure(err)) {
+              try {
+                ctx.rebindToActiveTab?.();
+              } catch {
+                /* rebind is best-effort; the re-send below is the recovery */
+              }
+              try {
+                await sleep(retrySettleMs());
+                runDispatchedAt = Date.now();
+                res = await ctx.call(runCmd, 20000, observeRunRid);
+                retryResultReceived = true;
+                await reconcileRun();
+                rejection = detectRunRejection(res);
+                continue;
+              } catch (err2) {
+                err = err2;
+                if (retryResultReceived) {
+                  return appendToolResultText(
+                    res,
+                    `\n\n(Dispatch history: the retry dispatch returned the result above, but local ` +
+                      `late-ack reconciliation failed before this handler could finish ` +
+                      `interpreting it. That result is preserved and no further dispatch was ` +
+                      `made. Do not infer an additional queue entry from the reconciliation ` +
+                      `failure alone. (${err instanceof Error ? err.message : String(err)})`,
+                  );
+                }
+              }
             }
             // ctx.call settles every panel/transport failure into a ToolResult and does
             // not throw today — but this await is the one point where a throw would
