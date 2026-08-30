@@ -15,7 +15,8 @@ autonomously. Fix, then file, then inform the user with a short summary. Do not
 pepper them with permission prompts. For THIRD-PARTY and ComfyUI-core defects
 it is offer-and-ask (Step 6). You propose the workaround and/or the report and
 act only once the user agrees, because patching someone else's node or posting
-to someone else's tracker is their call. Even for our repos, pause and ask for
+to someone else's tracker is their call — so when THEY are the one asking, that
+call is already made and you file without asking again. Even for our repos, pause and ask for
 a fix that touches the user's own workflow or data, for anything large or
 risky, and for anything you cannot make safe.
 
@@ -88,7 +89,8 @@ fix.
 Still NOT bug reports (route elsewhere): ordinary generation and workflow
 failures such as OOM, a missing model or node, bad params, or user mistakes go
 to `troubleshooting`. Third-party and custom-node bugs go to their GitHub
-(Step 6), where you still offer and ask first rather than auto-file.
+(Step 6), where you offer and ask first rather than auto-file — unless the user
+asked for the report, which is already the go-ahead.
 
 The intake Worker dedupes server-side, so you need not research duplicates — but
 that is not a licence to file freely. Over-reporting is now the expensive
@@ -137,7 +139,7 @@ the user runs the patched version in the meantime. Capture the diff
 (`git diff`, or diff the file you touched) so Step 5 can attach it.
 
 THIRD-PARTY and ComfyUI-core defects are the exception. There you still offer
-and ask first before patching or filing (Step 6).
+and ask first before patching or filing, unless the user asked for it (Step 6).
 
 ## Step 4 — Verify the fix
 
@@ -299,7 +301,7 @@ touched and nothing is done as the user. That is the default and needs no ask.
 - **Fallback** (no `gh`, no Worker URL): use the `report_issue` tool for a
   prefilled GitHub issue link the user can submit in one click.
 
-## Step 6 — Third-party / ComfyUI-core bugs (offer + ASK first — not autonomous)
+## Step 6 — Third-party / ComfyUI-core bugs (offer + ASK first, unless they asked)
 
 Our Worker only files into OUR repos, so these go to their GitHub. Unlike
 our-repo defects (Steps 3 to 5, which you handle autonomously), third-party
