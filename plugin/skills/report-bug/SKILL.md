@@ -1,6 +1,6 @@
 ---
 name: report-bug
-description: Self-heal and report bugs to make the ecosystem better. Use when you hit ANY defect in comfyui-mcp or the sidebar panel, or in a third-party custom node or ComfyUI core. Diagnose it, and for OUR repos (comfyui-mcp, comfyui-mcp-panel, comfyui-mcp-issue-worker) fix it locally FIRST so the user is unblocked, then file a report that includes the diff, so reports arrive as near-PRs rather than tickets. Attempt the fix exactly ONCE; if it is upstream-only, say so and include the precise change needed. Route it correctly. Our intake Worker takes our repos, the node's own GitHub takes third-party. For OUR repos act autonomously (fix-then-file, then inform the user, no per-step permission); for THIRD-PARTY or ComfyUI-core it is offer-and-ask. Bias HARD toward fix-then-file on our repos. Trigger on any error, crash, wrong or empty output, silent failure, confusing result, or limitation that forced an awkward workaround, EVEN IF you recovered. You do not need to be blocked. Also on "report this" and "fix this bug".
+description: Self-heal and report bugs. Use when a defect in comfyui-mcp, the sidebar panel, a third-party custom node, or ComfyUI core actually cost the user something - it blocked them, produced a wrong result they would keep, lost or corrupted work, or crashed ComfyUI. Diagnose it; for OUR repos (comfyui-mcp, comfyui-mcp-panel, comfyui-mcp-issue-worker) fix it locally FIRST so the user is unblocked, then file a report including the diff, so reports arrive as near-PRs rather than tickets. Attempt the fix exactly ONCE; if it is upstream-only, say so with the precise change needed. Route it - our intake Worker for our repos, the node's own GitHub for third-party, which is offer-and-ask rather than autonomous. Do NOT file something you recovered from cleanly, a missing capability (we are in a stabilisation freeze, so those are parked on arrival), or behaviour that was merely surprising - say those in chat instead. One report per root cause, not one per symptom. Always file on "report this" or "fix this bug".
 ---
 
 # Self-heal & report bugs (make the ecosystem better)
@@ -22,33 +22,53 @@ risky, and for anything you cannot make safe.
 This is for bugs in software, not ordinary workflow or generation errors (OOM,
 missing model, bad params: use `troubleshooting`). First decide whose bug it is.
 
-## When to file — bias HARD toward reporting (we're in beta)
+## When to file — a real defect that cost the user something
 
-While comfyui-mcp is in beta, the default is to file. You do NOT need to be
-blocked, and it does NOT need to be fatal. If you notice a defect in our
-software, report it, even after you have already recovered. File when any of
-these happen:
+Two questions, both must be YES:
 
-- A tool, panel, or orchestrator call errors, throws, or crashes ComfyUI.
-- A tool returns wrong, misleading, empty, or malformed output, or succeeds but
-  did the wrong thing.
-- A silent failure, where something that should have happened did not and no
-  error appeared.
-- You had to retry, work around, or take an awkward path because a tool or the
-  panel misbehaved or lacked an obvious capability. Report it even though you
-  recovered; the workaround is the signal.
-- Behavior that is confusing, inconsistent, or surprising in our own tools or
-  panel (a flag that did not take, a stale or duplicate state, a race, a
-  reconnect glitch).
+1. **Is it ours, and does it still reproduce?** On the CURRENT version — check
+   before filing, not after. A defect already fixed upstream of the user's
+   install is noise.
+2. **Did it cost the user something?** It blocked them, produced a wrong result
+   they would have kept, lost or corrupted their work, or crashed ComfyUI.
+
+File when both hold:
+
+- A tool, panel, or orchestrator call crashes ComfyUI, loses work, or corrupts a
+  workflow.
+- A tool returns wrong or misleading output the user would act on, or succeeds
+  while doing something different from what it reported.
+- A silent failure: something that should have happened did not, and nothing
+  said so. (Silence is the expensive kind — the user cannot see it.)
+- You could not complete the task, and the reason is a defect in our software.
+
+**Do NOT file** — say it in chat and move on:
+
+- Anything you recovered from cleanly. A retry that worked is not a report; the
+  workaround is only a signal if the user is still paying for it.
+- A missing capability or a feature you wish existed. We are in a stabilisation
+  freeze, so these are parked on arrival — filing one adds a ticket nobody will
+  action.
+- Behaviour that surprised you but was correct, or that you have not actually
+  diagnosed. An unverified hunch costs a maintainer the whole investigation.
+- A one-off you cannot reproduce. Note it; if it happens again, that second
+  occurrence is the report.
+
+**One report per root cause.** If several symptoms trace to one component in one
+session, file ONE report covering them, not one per symptom. Three separate
+reports for three faults in the same backend are three triage passes for one
+fix.
 
 Still NOT bug reports (route elsewhere): ordinary generation and workflow
 failures such as OOM, a missing model or node, bad params, or user mistakes go
 to `troubleshooting`. Third-party and custom-node bugs go to their GitHub
 (Step 6), where you still offer and ask first rather than auto-file.
 
-Do not over-think dedup or whether it is worth it. The intake Worker dedupes
-server-side, so a duplicate is a no-op. Under-reporting is the expensive
-failure mode. When in doubt during beta, file it and move on.
+The intake Worker dedupes server-side, so you need not research duplicates — but
+that is not a licence to file freely. Over-reporting is now the expensive
+failure mode: every low-value report costs a maintainer a read, a triage, and a
+close, and it buries the reports that matter. When genuinely in doubt, tell the
+user what you saw and let them decide.
 
 ## Step 1 — Diagnose (root cause, not symptom)
 
@@ -292,6 +312,8 @@ what the temporary workaround is, if any.
 - Patches stay minimal and reversible; never touch the user's workflow data
   without asking.
 - Do not claim a fix you did not verify (Step 4).
+- Do not file to be thorough. A report is a claim on a maintainer's
+  attention; if you cannot say what it cost the user, it is not one.
 
 ## Sources
 
