@@ -53,10 +53,15 @@ function bridge(opts: {
   queueErrors?: boolean;
   /** Model a bridge that cannot say which panel holds the route key. */
   noIncarnation?: boolean;
+  tabId?: string;
+  resolveSharedTabId?: (scopeId?: string) => string | undefined;
+  incarnationArgs?: string[];
+  dispatchedTabIds?: string[];
 }) {
   return {
-    send: async (cmd: Record<string, unknown>) => {
+    send: async (cmd: Record<string, unknown>, sendOpts?: { tabId?: string }) => {
       sent.push(String(cmd.cmd));
+      if (sendOpts?.tabId) opts.dispatchedTabIds?.push(sendOpts.tabId);
       if (cmd.cmd === "nodes_install") {
         // The reporter's exact reply.
         return opts.install ?? { queued: true, pending: true, dialect: "legacy" };
@@ -71,7 +76,14 @@ function bridge(opts: {
     // The REAL UiBridge always reports this; a fixture without it models a
     // bridge that cannot identify which panel answered, which is a separate case
     // asserted below.
-    tabIncarnation: () => (opts.noIncarnation ? undefined : "inc-A"),
+    resolveSharedTabId: opts.resolveSharedTabId,
+    tabIncarnation: (id: string) => {
+      opts.incarnationArgs?.push(id);
+      if (opts.tabId?.startsWith("orchestrator::") && id !== TAB) {
+        throw new Error(`scope address leaked to tabIncarnation: ${id}`);
+      }
+      return opts.noIncarnation ? undefined : "inc-A";
+    },
     push: () => 1,
     canReach: (id: string) => id === TAB,
     isHeadless: () => false,
@@ -87,7 +99,7 @@ function bridge(opts: {
 async function install(
   opts: Parameters<typeof bridge>[0],
 ): Promise<{ text: string; isError: boolean }> {
-  const ctx = makePanelToolCtx(bridge(opts), TAB, new WorkflowTargetStore());
+  const ctx = makePanelToolCtx(bridge(opts), opts.tabId ?? TAB, new WorkflowTargetStore());
   const def = buildPanelToolDefs().find((d) => d.name === "panel_install_node");
   if (!def) throw new Error("panel_install_node is not registered");
   const res: ToolResult = await def.handler({ repository: REPO } as never, ctx);
@@ -324,6 +336,24 @@ describe("an install the Manager accepted and dropped says so (#1129)", () => {
     const res: ToolResult = await def!.handler({ repository: REPO } as never, ctx);
 
     expect(textOf(res)).toMatch(/THE QUEUE DOES NOT HAVE THIS TASK/);
+  });
+
+  it("resolves the Claude scope address before reading the panel incarnation", async () => {
+    const SCOPE = "orchestrator::claude";
+    const incarnationArgs: string[] = [];
+    const dispatchedTabIds: string[] = [];
+    const out = await install({
+      tabId: SCOPE,
+      resolveSharedTabId: (scopeId) => (scopeId === SCOPE ? TAB : undefined),
+      incarnationArgs,
+      dispatchedTabIds,
+    });
+
+    // A production-shaped Claude context carries the scope address into the
+    // tool server, while the bridge routes it to the real panel connection.
+    expect(out.text).toMatch(/THE QUEUE DOES NOT HAVE THIS TASK/);
+    expect(dispatchedTabIds).toEqual([SCOPE, SCOPE]);
+    expect(incarnationArgs).toEqual([TAB, TAB]);
   });
 
   it("claims nothing when the bridge cannot identify the panel (codex final)", async () => {

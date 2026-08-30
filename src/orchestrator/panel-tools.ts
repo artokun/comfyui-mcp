@@ -4490,7 +4490,26 @@ function queueNeverSawATask(reply: Record<string, unknown> | null): boolean {
  */
 function panelIncarnation(ctx: PanelToolCtx, tabId: string): string | undefined {
   const b = ctx.bridge as { tabIncarnation?: (t: string) => string | undefined };
-  return typeof b?.tabIncarnation === "function" ? b.tabIncarnation(tabId) : undefined;
+  if (typeof b?.tabIncarnation !== "function") return undefined;
+
+  // Claude's in-process server is bound to the backend-qualified scope address
+  // (for example `orchestrator::claude`), not to a concrete bridge tab id. The
+  // bridge's scope resolver is the same canonical routing decision used by the
+  // subsequent queue read, so ask it for the real connection before reading its
+  // incarnation. Never pass an unresolved scope address to tabIncarnation: the
+  // UiBridge stores incarnations by real connection key, and a mock/legacy
+  // implementation must not make an unknown scope look identified.
+  const resolvedTab = isScopeAddress(tabId)
+    ? (() => {
+        const resolveSharedTabId = (ctx.bridge as BridgeProbe).resolveSharedTabId;
+        try {
+          return typeof resolveSharedTabId === "function" ? resolveSharedTabId(tabId) : undefined;
+        } catch {
+          return undefined;
+        }
+      })()
+    : tabId;
+  return resolvedTab === undefined ? undefined : b.tabIncarnation(resolvedTab);
 }
 
 type RegistryInstallSnapshot = {
