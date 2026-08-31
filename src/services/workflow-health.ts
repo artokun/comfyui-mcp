@@ -88,16 +88,46 @@ function startsBelowSigmaMax(denoise: number, steps: unknown): boolean {
   return Math.trunc(steps / denoise) > steps;
 }
 
+// Scalar widget feeds. A link on one of these carries a NUMBER or a string into a
+// dimension/seed slot; it cannot put picture content into the generated latent.
+const SCALAR_INPUT_TYPES = new Set(["INT", "FLOAT", "STRING", "BOOLEAN"]);
+
 /**
- * A node whose LATENT output is provably all zeros: an Empty* generator that
- * consumes nothing. The name test alone would also match a hypothetical
- * `EmptyLatentFromReference`-style node that derives its latent from an input —
- * requiring no inbound links is what makes "empty" a fact about this graph
- * rather than a guess from a class name.
+ * Is this node's LATENT output empty — all zeros?
+ *
+ * The class-name test alone is not enough: an `EmptyLatentFromReference`-style
+ * custom node derives its latent from an input and is not empty at all. But
+ * "consumes no links" is too strict in the other direction, and would drop the
+ * very common `PrimitiveInt → EmptyLatentImage.width` shape, whose output is
+ * still zeros.
+ *
+ * So the question asked is specifically whether any CONNECTED input can carry
+ * content, decided from the node's real `/object_info` slot types rather than
+ * from its name. A width/height/batch_size feed is a scalar and changes only the
+ * shape of the zeros; an IMAGE/LATENT/anything-else feed can carry a picture.
+ *
+ * A node or slot missing from object_info is an uninstalled custom node: what its
+ * link carries is unknowable, so it is NOT called empty. That direction is the
+ * safe one — it costs a warning we might have raised, never a false one.
  */
-function producesEmptyLatent(node: { class_type: string; inputs?: Record<string, unknown> } | undefined): boolean {
+function producesEmptyLatent(
+  node: { class_type: string; inputs?: Record<string, unknown> } | undefined,
+  objectInfo: ObjectInfo,
+): boolean {
   if (!node || !EMPTY_LATENT_RE.test(node.class_type)) return false;
-  return !Object.values(node.inputs ?? {}).some(isConnection);
+
+  const def = objectInfo[node.class_type];
+  const slots = { ...(def?.input?.required ?? {}), ...(def?.input?.optional ?? {}) };
+
+  for (const [name, value] of Object.entries(node.inputs ?? {})) {
+    if (!isConnection(value)) continue;
+    const declared = slots[name]?.[0];
+    if (declared === undefined) return false; // unknown slot — decline to claim empty
+    if (Array.isArray(declared)) continue; // a combo (dropdown) is a value, not content
+    if (SCALAR_INPUT_TYPES.has(declared)) continue; // INT/FLOAT/… — shape, not content
+    return false; // IMAGE / LATENT / … — this latent may be derived
+  }
+  return true;
 }
 
 // Hardcoded output classes, mirroring workflow-validator.ts step 4.
@@ -356,10 +386,13 @@ export function analyzeGraphHealth(
   }
 
   // --- 6. Partial denoise fed by an empty latent (warning) -----------------
-  // A denoise below 1.0 exists to PRESERVE part of the incoming latent. If that
-  // latent is generated empty there is nothing to preserve, so the sampler is handed
-  // no source content at all: the graph validates, executes without error, and cannot
-  // be an edit of any input image (#2678).
+  // A denoise low enough to truncate the schedule exists to PRESERVE part of the
+  // incoming latent. If that latent is generated empty there is nothing to preserve:
+  // the graph validates, executes without error, and cannot reproduce the source
+  // image (#2678). Note this is specifically about the LATENT channel — a Qwen/Flux
+  // edit encoder really does carry reference images on CONDITIONING, but conditioning
+  // steers the denoising trajectory and never seeds its starting state, which is
+  // built from `noise` and `latent_image` alone.
   //
   // From ComfyUI's own source, samplers.py KSAMPLER.sample:
   //   noise = model_sampling.noise_scaling(sigmas[0], noise, latent_image, max_denoise)
@@ -394,25 +427,30 @@ export function analyzeGraphHealth(
 
     const sourceId = latentInput[0];
     const sourceNode = workflow[sourceId];
-    if (!producesEmptyLatent(sourceNode)) continue;
+    if (!producesEmptyLatent(sourceNode, objectInfo)) continue;
     const sourceType = sourceNode.class_type;
 
     const steps = node.inputs?.steps;
-    const stepsNote = typeof steps === "number" ? `, steps=${steps}` : "";
+    const schedule =
+      typeof steps === "number" && denoise > 0
+        ? ` — ComfyUI builds int(${steps}/${denoise})=${Math.trunc(steps / denoise)} sigmas and keeps the last ${steps + 1}, so sampling starts BELOW sigma_max`
+        : "";
     findings.push({
       kind: "partial_denoise_empty_latent",
       severity: "warning",
       node_ids: [id, sourceId],
       node_type: node.class_type,
       detail:
-        `Node ${id} (${node.class_type}) runs denoise=${denoise}${stepsNote} on a latent taken ` +
-        `straight from node ${sourceId} (${sourceType}), which generates an EMPTY latent. A denoise ` +
-        `below 1.0 exists to preserve part of the incoming latent, but an empty latent has nothing ` +
-        `to preserve — the sampler receives no source content, so the result cannot be an edit of ` +
-        `any input image. It will run without error. On flow-matching models (Qwen, Flux, SD3, WAN) ` +
-        `the output collapses to a flat, near-uniform field. To edit an existing image, feed ` +
-        `latent_image from an encode of it (VAEEncode; VAEEncodeAudio for audio) instead. To ` +
-        `generate from scratch, set denoise to 1.0.`,
+        `Node ${id} (${node.class_type}) runs denoise=${denoise}` +
+        (typeof steps === "number" ? `, steps=${steps}` : "") +
+        ` on a latent taken straight from node ${sourceId} (${sourceType}), which generates an ` +
+        `EMPTY latent${schedule}. Starting below sigma_max is what PRESERVES part of the incoming ` +
+        `latent — and an empty latent has nothing to preserve. Reference images carried on ` +
+        `CONDITIONING (Qwen/Flux edit encoders) do not fill this in: latent_image is the only ` +
+        `channel that seeds the sampler's starting state, and it is zeros. The graph runs without ` +
+        `error; on flow-matching models (Qwen, Flux, SD3, WAN) the output collapses to a flat, ` +
+        `near-uniform field. To edit an existing image, feed latent_image from an encode of it ` +
+        `(VAEEncode; VAEEncodeAudio for audio). To generate from scratch, set denoise to 1.0.`,
     });
   }
 

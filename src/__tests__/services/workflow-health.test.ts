@@ -67,8 +67,19 @@ const OBJECT_INFO = {
     output_node: false,
   },
   TextEncodeQwenImageEditPlus: {
-    input: { required: { clip: ["CLIP"], prompt: ["STRING"] } },
+    input: {
+      required: { clip: ["CLIP"], prompt: ["STRING"] },
+      optional: { vae: ["VAE"], image1: ["IMAGE"] },
+    },
     output: ["CONDITIONING"],
+    output_node: false,
+  },
+  // A latent generator whose dimensions are driven by real nodes: still all zeros.
+  PrimitiveInt: { input: { required: { value: ["INT"] } }, output: ["INT"], output_node: false },
+  // An Empty*Latent*-NAMED node that actually derives its latent from an image.
+  EmptyLatentFromReference: {
+    input: { required: { reference: ["IMAGE"], batch_size: ["INT"] } },
+    output: ["LATENT"],
     output_node: false,
   },
   ImageUpscaleWithModel: {
@@ -254,16 +265,22 @@ describe("analyzeGraphHealth", () => {
     // flow-matching outcome, and it is attributed as such rather than asserted
     // for every sampler. EPS models still render an image -- just not an edit.
     expect(f[0].detail).toMatch(/flow-matching/);
+    // ...and it must not claim the sampler gets NO source content -- a Qwen edit
+    // encoder really does carry the reference on CONDITIONING. The precise claim is
+    // that conditioning does not seed the starting state.
+    expect(f[0].detail).toMatch(/CONDITIONING/);
+    expect(f[0].detail).toMatch(/starting state/);
   });
 
-  it("does NOT flag an Empty*Latent*-named node that CONSUMES a link -- its latent is derived", () => {
-    // Name-matching alone would call this empty. It takes an IMAGE, so its output is
-    // whatever that image encodes to, and warning about it would be a false positive.
-    const h = analyzeGraphHealth(
+  // "Is this latent empty?" is decided from real object_info slot TYPES, not from the
+  // presence of links. These two cases pull in opposite directions and both must hold.
+  const withLatentSource = (source: Record<string, unknown>) =>
+    analyzeGraphHealth(
       wf({
         "4": { class_type: "CheckpointLoaderSimple", inputs: { ckpt_name: "sd_xl_base.safetensors" } },
         "5": { class_type: "LoadImage", inputs: { image: "ref.png" } },
-        "8": { class_type: "EmptyLatentFromReference", inputs: { reference: ["5", 0], batch_size: 1 } },
+        "7": { class_type: "PrimitiveInt", inputs: { value: 1024 } },
+        ...source,
         "9": {
           class_type: "KSampler",
           inputs: {
@@ -275,8 +292,34 @@ describe("analyzeGraphHealth", () => {
         "11": { class_type: "SaveImage", inputs: { images: ["10", 0] } },
       }),
       OBJECT_INFO,
-    );
-    expect(h.findings.filter((x) => x.kind === "partial_denoise_empty_latent")).toHaveLength(0);
+    ).findings.filter((x) => x.kind === "partial_denoise_empty_latent").length;
+
+  it("does NOT flag an Empty*Latent*-named node fed an IMAGE -- that latent is derived", () => {
+    expect(
+      withLatentSource({
+        "8": { class_type: "EmptyLatentFromReference", inputs: { reference: ["5", 0], batch_size: 1 } },
+      }),
+    ).toBe(0);
+  });
+
+  it("STILL flags EmptyLatentImage whose width comes from a link -- a scalar feed is not content", () => {
+    // A blanket "consumes no links" rule would go quiet here and miss a real defect:
+    // driving width from PrimitiveInt changes the shape of the zeros, not their content.
+    expect(
+      withLatentSource({
+        "8": { class_type: "EmptyLatentImage", inputs: { width: ["7", 0], height: 1024, batch_size: 1 } },
+      }),
+    ).toBe(1);
+  });
+
+  it("declines to call an UNINSTALLED custom latent node empty when it consumes a link", () => {
+    // Absent from object_info, so what the link carries is unknowable. Staying quiet
+    // costs a warning we might have raised; guessing would cost a false one.
+    expect(
+      withLatentSource({
+        "8": { class_type: "EmptyLatentSomethingCustom", inputs: { mystery: ["5", 0] } },
+      }),
+    ).toBe(0);
   });
 
   it("does not crash when latent_image points at a node id that does not exist", () => {
@@ -301,8 +344,11 @@ describe("analyzeGraphHealth", () => {
       wf({
         "4": { class_type: "CheckpointLoaderSimple", inputs: { ckpt_name: "sd_xl_base.safetensors" } },
         "5": { class_type: "LoadImage", inputs: { image: "ref.png" } },
-        "6": { class_type: "TextEncodeQwenImageEditPlus", inputs: { clip: ["4", 1], prompt: "change the garment" } },
-        "7": { class_type: "TextEncodeQwenImageEditPlus", inputs: { clip: ["4", 1], prompt: "" } },
+        // image1 wired from LoadImage: the reference IS reaching the encoder, so the
+        // conditioning genuinely carries source content. The finding must still fire --
+        // conditioning steers denoising but never seeds the sampler's starting state.
+        "6": { class_type: "TextEncodeQwenImageEditPlus", inputs: { clip: ["4", 1], prompt: "change the garment", image1: ["5", 0] } },
+        "7": { class_type: "TextEncodeQwenImageEditPlus", inputs: { clip: ["4", 1], prompt: "", image1: ["5", 0] } },
         "8": { class_type: "EmptyLatentImage", inputs: { width: 1024, height: 1024, batch_size: 1 } },
         "9": {
           class_type: "KSampler",

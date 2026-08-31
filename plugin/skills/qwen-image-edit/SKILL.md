@@ -111,13 +111,15 @@ For non-edit models (txt2img, 2512):
 | Standard edit | 40 | 4.0 | euler | simple | 0.75 | none |
 | Quality edit | 50 | 4.0 | euler | simple | 0.5-0.8 | none |
 
-> **The sub-1.0 denoise rows REQUIRE a `VAEEncode` latent.** Any denoise below 1.0
-> keeps part of the incoming latent, so the latent has to be the source image. Wire
-> `latent_image` from a `VAEEncode` of the source (or from a node that emits a
-> source-derived latent, like `TextEncodeQwenImageEditPlusAdvance_lrzjason` output
-> [1]). Pairing these rows with an `EmptyLatentImage` runs clean and returns a flat,
-> near-uniform field — there is no source content in an empty latent to preserve.
-> Only the `denoise = 1.0` rows are safe over an empty latent.
+> **The sub-1.0 denoise rows REQUIRE a `VAEEncode` latent.** A denoise low enough to
+> shorten the sampling schedule — which 0.5-0.8 certainly is — keeps part of the
+> incoming latent, so that latent has to BE the source image. Wire `latent_image` from
+> a `VAEEncode` of the source (or from a node that emits a source-derived latent, like
+> `TextEncodeQwenImageEditPlusAdvance_lrzjason` output [1]). Pairing these rows with an
+> `EmptyLatentImage` runs clean and returns a flat, near-uniform field — an empty latent
+> has no source content to preserve. Feeding the reference through
+> `TextEncodeQwenImageEditPlus` does **not** rescue it: that image rides on CONDITIONING,
+> which steers denoising but never seeds the sampler's starting state.
 
 **Denoise for editing**: Lower denoise = closer to source — *provided the latent IS the source*. 0.5-0.8 range for standard editing on a `VAEEncode` latent. Lightning uses 1.0 (model handles fidelity internally).
 

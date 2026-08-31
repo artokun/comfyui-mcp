@@ -185,6 +185,31 @@ describe('create_workflow action:"validate" render -- a health WARNING is not "N
     expect(text).toContain("EmptyLatentImage");
   });
 
+  it("counts the warning from `issues`, not from `health.findings`", async () => {
+    // These two arrays are identical in the fixture above, so that case cannot tell the
+    // two code paths apart. Here `health.findings` is EMPTY while `issues` carries the
+    // warning: an implementation that counted health.findings would fall through to
+    // "No issues found" and bury it.
+    const text = await run({
+      valid: true,
+      summary: "Workflow is valid with 1 warning(s)",
+      issues: [
+        {
+          severity: "warning",
+          node_id: "9",
+          node_type: "KSampler",
+          kind: "partial_denoise_empty_latent",
+          health: true,
+          message: "Node 9 (KSampler) runs denoise=0.65 on an empty latent",
+        },
+      ],
+      health: { summary: "5 nodes, 5 types", findings: [] },
+    } as never);
+    expect(text).not.toContain("No issues found");
+    expect(text).toContain("Nothing here blocks execution");
+    expect(text).toMatch(/1 graph-health warning/);
+  });
+
   it("leaves the plain ready-to-execute wording alone for an INFO-level finding", async () => {
     const text = await run(withHealthWarning("info"));
     expect(text).toContain("No issues found. The workflow is ready to execute.");
