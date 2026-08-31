@@ -50,16 +50,55 @@ const MODEL_FILE_RE = /\.(safetensors|gguf|ckpt|pt|pth|bin|sft)$/i;
 
 // A latent produced from nothing — EmptyLatentImage, EmptySD3LatentImage,
 // EmptyHunyuanLatentVideo, EmptyLTXVLatentVideo, EmptyLatentAudio, and the
-// custom EmptyLatentImagePresets family. Every one of these emits ZEROS.
+// custom EmptyLatentImagePresets family. Name-matching alone is not enough to
+// call a node's output empty, so callers must ALSO require that the node consumes
+// no links — see `producesEmptyLatent`.
 const EMPTY_LATENT_RE = /^Empty[A-Za-z0-9_]*Latent/i;
 
-// ComfyUI's OWN full-denoise threshold. comfy/samplers.py KSampler.set_steps:
-//   if denoise is None or denoise > 0.9999: <full schedule>
-//   else: sigmas = calculate_sigmas(int(steps/denoise))[-(steps + 1):]
-// At or below this the sigma schedule is TRUNCATED, so sigmas[0] < sigma_max and
-// the latent_image term stops being multiplied by zero. Matching the threshold
-// exactly means this finding fires on precisely the branch that changes behaviour.
+// ComfyUI's OWN full-denoise gate, comfy/samplers.py KSampler.set_steps.
 const FULL_DENOISE_THRESHOLD = 0.9999;
+
+/**
+ * Does ComfyUI actually start this sampler below sigma_max?
+ *
+ * This is `KSampler.set_steps` (comfy/samplers.py) transcribed, NOT a proxy for it:
+ *
+ *   if denoise is None or denoise > 0.9999:  self.sigmas = calculate_sigmas(steps)
+ *   elif denoise <= 0.0:                     self.sigmas = FloatTensor([])
+ *   else:  sigmas = calculate_sigmas(int(steps / denoise)); self.sigmas = sigmas[-(steps + 1):]
+ *
+ * The last branch only DROPS leading entries when `int(steps / denoise) > steps`.
+ * When it doesn't, the slice keeps the whole schedule, `sigmas[0]` is still
+ * sigma_max, and an empty latent is exactly correct. That makes the threshold
+ * steps-dependent, and a bare `denoise <= 0.9999` test is WRONG: at steps=50,
+ * denoise=0.9999 gives int(50.005) = 50, i.e. the full schedule. Same for
+ * steps=4 at denoise=0.9 (int(4.44) = 4). Flagging those would be a false alarm
+ * on an ordinary txt2img graph.
+ *
+ * Returns true only for the two shapes that really are degenerate over zeros:
+ * a truncated schedule, and the empty schedule at denoise <= 0 (zero sampling
+ * steps, so the sampler hands back the latent it was given, untouched).
+ */
+function startsBelowSigmaMax(denoise: number, steps: unknown): boolean {
+  if (denoise <= 0) return true;
+  if (denoise > FULL_DENOISE_THRESHOLD) return false;
+  // `steps` decides the rest, so without a literal value there is no claim to make.
+  if (typeof steps !== "number" || !Number.isFinite(steps) || steps <= 0) return false;
+  // Python's int() truncates toward zero; both operands are positive here.
+  return Math.trunc(steps / denoise) > steps;
+}
+
+/**
+ * A node whose LATENT output is provably all zeros: an Empty* generator that
+ * consumes nothing. The name test alone would also match a hypothetical
+ * `EmptyLatentFromReference`-style node that derives its latent from an input —
+ * requiring no inbound links is what makes "empty" a fact about this graph
+ * rather than a guess from a class name.
+ */
+function producesEmptyLatent(node: { class_type: string; inputs?: Record<string, unknown> } | undefined): boolean {
+  if (!node || !EMPTY_LATENT_RE.test(node.class_type)) return false;
+  return !Object.values(node.inputs ?? {}).some(isConnection);
+}
 
 // Hardcoded output classes, mirroring workflow-validator.ts step 4.
 const OUTPUT_CLASSES = new Set([
@@ -317,56 +356,63 @@ export function analyzeGraphHealth(
   }
 
   // --- 6. Partial denoise fed by an empty latent (warning) -----------------
-  // A sampler with denoise < 1.0 is being asked to keep part of its input latent.
-  // If that input is an Empty*Latent* node the input is ZEROS, so there is nothing
-  // to keep and the run is degenerate — it validates, executes without error, and
-  // returns a flat/uniform field (#2678).
+  // A denoise below 1.0 exists to PRESERVE part of the incoming latent. If that
+  // latent is generated empty there is nothing to preserve, so the sampler is handed
+  // no source content at all: the graph validates, executes without error, and cannot
+  // be an edit of any input image (#2678).
   //
-  // Why it is a certainty rather than a guess, from ComfyUI's own source:
-  //   samplers.py KSAMPLER.sample ->
-  //     noise = model_sampling.noise_scaling(sigmas[0], noise, latent_image, max_denoise)
-  //   model_sampling.py CONST.noise_scaling (flow-matching: Qwen, Flux, SD3, WAN) ->
-  //     return sigma * noise + (1.0 - sigma) * latent_image
-  // With denoise <= 0.9999 the schedule is truncated so sigmas[0] < sigma_max, which
-  // is what gives the `(1.0 - sigma) * latent_image` term any weight at all. Hand it
-  // a zero latent and that term contributes nothing: the sampler is told the clean
-  // image underneath the noise IS the empty latent, and it integrates toward exactly
-  // that. (EPS models take the sibling branch with the same consequence.) At
-  // denoise = 1.0 sigmas[0] IS sigma_max, the term is multiplied by zero, and an
-  // empty latent is correct — which is why this is scoped to the truncated branch.
+  // From ComfyUI's own source, samplers.py KSAMPLER.sample:
+  //   noise = model_sampling.noise_scaling(sigmas[0], noise, latent_image, max_denoise)
+  // and model_sampling.py:
+  //   CONST.noise_scaling -> sigma * noise + (1.0 - sigma) * latent_image   (flow matching)
+  //   EPS.noise_scaling   -> noise * sigma + latent_image                   (SD1.x/SDXL)
+  // Either way `latent_image` is the ONLY channel carrying source content, and it is
+  // zeros. The severity of the visible result differs by family and the message says
+  // so rather than overclaiming: on flow matching (Qwen, Flux, SD3, WAN) the source
+  // term is `(1 - sigma) * 0`, so the model's target collapses to the empty latent and
+  // the output is a flat, near-uniform field — the reported symptom. On EPS the start
+  // state `sigma * noise` is still a legitimate noisy latent, so an image does appear;
+  // it simply has nothing to do with any source image.
   //
-  // Deliberately DIRECT-connection only. A hires-fix chain (KSampler -> LatentUpscale
-  // -> KSampler denoise 0.5) is healthy and must never be flagged, and tracing through
-  // arbitrary latent ops to decide whether real content survives would trade a
-  // zero-false-positive check for a guess.
+  // Scope is deliberately narrow in three ways, each of which is a false-positive
+  // guard rather than an oversight:
+  //   - DIRECT connection only. A hires-fix chain (KSampler -> LatentUpscale ->
+  //     KSampler denoise 0.5) carries real content and must stay silent; tracing
+  //     through arbitrary latent ops to decide whether content survives would trade a
+  //     zero-false-positive check for a guess.
+  //   - LITERAL widget values only. A `denoise`/`steps` converted to an input is a
+  //     connection whose runtime value cannot be known statically.
+  //   - The schedule test is ComfyUI's own arithmetic, not a rounded threshold.
   for (const id of nodeIds) {
     const node = workflow[id];
     const denoise = node.inputs?.denoise;
-    // A literal widget value only. A converted-to-input `denoise` is a connection
-    // tuple whose value we cannot know statically, and a non-finite value is not a
-    // claim about the schedule either way.
     if (typeof denoise !== "number" || !Number.isFinite(denoise)) continue;
-    if (denoise > FULL_DENOISE_THRESHOLD) continue;
+    if (!startsBelowSigmaMax(denoise, node.inputs?.steps)) continue;
 
     const latentInput = node.inputs?.latent_image;
     if (!isConnection(latentInput)) continue;
 
     const sourceId = latentInput[0];
-    const sourceType = workflow[sourceId]?.class_type;
-    if (!sourceType || !EMPTY_LATENT_RE.test(sourceType)) continue;
+    const sourceNode = workflow[sourceId];
+    if (!producesEmptyLatent(sourceNode)) continue;
+    const sourceType = sourceNode.class_type;
 
+    const steps = node.inputs?.steps;
+    const stepsNote = typeof steps === "number" ? `, steps=${steps}` : "";
     findings.push({
       kind: "partial_denoise_empty_latent",
       severity: "warning",
       node_ids: [id, sourceId],
       node_type: node.class_type,
       detail:
-        `Node ${id} (${node.class_type}) runs denoise=${denoise} on a latent taken straight from ` +
-        `node ${sourceId} (${sourceType}), which emits an EMPTY latent. denoise < 1.0 keeps part of ` +
-        `the input latent — but there is nothing to keep, so the sampler denoises toward the empty ` +
-        `latent and the result decodes to a flat, near-uniform field. It will run without error. ` +
-        `For image editing / img2img, feed latent_image from a VAEEncode of the source image ` +
-        `instead. For text-to-image from an empty latent, set denoise to 1.0.`,
+        `Node ${id} (${node.class_type}) runs denoise=${denoise}${stepsNote} on a latent taken ` +
+        `straight from node ${sourceId} (${sourceType}), which generates an EMPTY latent. A denoise ` +
+        `below 1.0 exists to preserve part of the incoming latent, but an empty latent has nothing ` +
+        `to preserve — the sampler receives no source content, so the result cannot be an edit of ` +
+        `any input image. It will run without error. On flow-matching models (Qwen, Flux, SD3, WAN) ` +
+        `the output collapses to a flat, near-uniform field. To edit an existing image, feed ` +
+        `latent_image from an encode of it (VAEEncode; VAEEncodeAudio for audio) instead. To ` +
+        `generate from scratch, set denoise to 1.0.`,
     });
   }
 

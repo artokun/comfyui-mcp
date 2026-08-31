@@ -178,7 +178,7 @@ describe('create_workflow action:"validate" render -- a health WARNING is not "N
     expect(text).not.toContain("No issues found");
     expect(text).not.toContain("ready to execute");
     // It must still be honest that ComfyUI will accept and run the graph...
-    expect(text).toContain("No blocking errors");
+    expect(text).toContain("Nothing here blocks execution");
     // ...and point at the section that explains why that is not the same as correct.
     expect(text).toMatch(/1 graph-health warning/);
     expect(text).toContain("### Graph health");

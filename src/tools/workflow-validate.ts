@@ -64,13 +64,18 @@ export async function validateWorkflowAction(args: {
     // that "validated and executed successfully" and rendered a flat field.
     // Info-level findings stay on the plain ready-to-execute wording; only a
     // warning changes the verdict line.
-    const healthWarnings =
-      result.health?.findings.filter((f) => f.severity === "warning").length ?? 0;
+    // Counted from `issues` -- the very array being partitioned -- so this can never
+    // disagree with the header. Reading `result.health.findings` instead would leave a
+    // caller whose issues carry health warnings but whose `health` section is absent
+    // being told "No issues found" over its own warning.
+    const healthWarnings = result.issues.filter(
+      (i) => i.health && i.severity === "warning",
+    ).length;
     // Verdict is DERIVED from the surfaced errors, never asserted independently.
     lines.push(
       result.valid
         ? healthWarnings > 0
-          ? `No blocking errors — this will execute. But ${healthWarnings} graph-health warning(s) below flag a graph that may not produce what you intend; read them before running.`
+          ? `Nothing here blocks execution, but ${healthWarnings} graph-health warning(s) below flag a graph that may not produce what you intend — read them before running.`
           : "No issues found. The workflow is ready to execute."
         : "No errors were surfaced, but the workflow is NOT valid — see the header and graph-health section below.",
     );
