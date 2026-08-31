@@ -183,6 +183,17 @@ describe("#2673: a loader input naming a file the server does not have", () => {
       expect(message).toContain("the same host");
     });
 
+    it("does NOT rule the split out while another tab is on a different ComfyUI", async () => {
+      // Gate finding. ONE matching tab settles "a panel can reach this address";
+      // it does not settle "the attachment came from a tab on THIS server". With
+      // tabs on both, "RULED OUT" would suppress the guidance the reader needs.
+      setConnectedPanelOrigins(() => ["http://127.0.0.1:8188", "http://127.0.0.1:8199"]);
+      const message = await enqueueAgainst(MISSING_ATTACHMENT);
+      expect(message).not.toContain("RULED OUT");
+      expect(message).toContain("http://127.0.0.1:8199");
+      expect(message).toContain("Rule that out before treating the file as simply missing");
+    });
+
     it("says NOTHING about drift when no panel is connected — an absent comparison is not a verdict", async () => {
       const message = await enqueueAgainst(MISSING_ATTACHMENT);
       expect(message).not.toContain("A connected panel is on");
@@ -307,11 +318,31 @@ describe("#2673: a loader input naming a file the server does not have", () => {
     expect(message).toContain("names a FILE on the server");
   });
 
-  // Every field the note interpolates comes out of the response body, so it goes
-  // through the same #1191 scrub as the lines above it.
-  it("routes its interpolated fields through the #1191 scrub", async () => {
-    const message = await enqueueAgainst(MISSING_ATTACHMENT);
-    expect(message).toContain("LoadImage.image (node 5)");
+  // Every field the note interpolates comes out of the response body — an
+  // attacker-influenceable channel — so it takes the same #1191 scrub as the
+  // lines above it. The earlier version of this test asserted only that benign
+  // values survived, which deleting `safeField` would also satisfy (gate
+  // finding). A credential-SHAPED node id is redacted by scrubSecretShapedText's
+  // opaque-run pass with nothing configured, so the assertion has teeth.
+  it("scrubs a credential-shaped field instead of echoing it", async () => {
+    const secretish = "AKIA7ZXQ8WVLMNPRT2H4JKD9GBC3FYS6";
+    const message = await enqueueAgainst(
+      rejection({
+        [secretish]: {
+          class_type: "LoadImage",
+          errors: [
+            {
+              type: "custom_validation_failed",
+              message: "Custom validation failed for node",
+              details: "image - Invalid image file: a.png",
+              extra_info: { input_name: "image" },
+            },
+          ],
+        },
+      }),
+    );
+    expect(message).toContain("names a FILE on the server");
+    expect(message).not.toContain(secretish);
   });
 
   // Gate finding on the first round of this PR. `fetch` FOLLOWS redirects, so a

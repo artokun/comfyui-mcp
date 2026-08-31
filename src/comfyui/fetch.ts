@@ -180,6 +180,16 @@ interface TargetDriftClassification {
   origins: string[];
   /** Parenthetical naming both spellings on a "same" verdict; "" otherwise. */
   alias: string;
+  /**
+   * Connected-panel origins that do NOT match the target. Non-empty alongside a
+   * "same" verdict when tabs are open on more than one ComfyUI (gate finding).
+   *
+   * `describeTargetDrift` does not need this — "a panel can reach this address"
+   * is established by ONE match. #2673's question is different and stronger
+   * ("could the file have come from a panel on another server?"), and one match
+   * does not settle it.
+   */
+  others: string[];
 }
 
 function classifyTargetDrift(target: string): TargetDriftClassification {
@@ -190,9 +200,10 @@ function classifyTargetDrift(target: string): TargetDriftClassification {
       return []; // a broken source must never replace the real network error
     }
   })();
-  if (origins.length === 0) return { verdict: "unknown", text: "", origins: [], alias: "" };
+  if (origins.length === 0)
+    return { verdict: "unknown", text: "", origins: [], alias: "", others: [] };
   const want = originOf(target);
-  if (!want) return { verdict: "unknown", text: "", origins: [], alias: "" };
+  if (!want) return { verdict: "unknown", text: "", origins: [], alias: "", others: [] };
   const distinct = [...new Set(origins)];
   // #1175 — `includes` compares spellings, not servers. A panel on
   // http://127.0.0.1:8188 against a target of http://localhost:8188 is ONE
@@ -211,6 +222,7 @@ function classifyTargetDrift(target: string): TargetDriftClassification {
     return {
       verdict: "same",
       origins: distinct,
+      others: distinct.filter((o) => !sameOrigin(o, want)),
       alias,
       text:
         ` A connected panel is on this same origin${alias}, so this is NOT a wrong-address problem: ` +
@@ -221,6 +233,7 @@ function classifyTargetDrift(target: string): TargetDriftClassification {
   return {
     verdict: "different",
     origins: distinct,
+    others: distinct,
     alias: "",
     text:
       ` A connected panel is on ${distinct.join(", ")} — a DIFFERENT address, which is why ` +
@@ -246,12 +259,22 @@ function classifyTargetDrift(target: string): TargetDriftClassification {
  * absent from the one they have.
  */
 export function describeMissingInputMediaDrift(target: string): string {
-  const { verdict, origins, alias } = classifyTargetDrift(target);
+  const { verdict, origins, alias, others } = classifyTargetDrift(target);
   if (verdict === "unknown") return "";
   if (verdict === "same") {
+    // ONE matching tab does not rule the split out when OTHER tabs are open
+    // elsewhere: the attachment could have come from any of them, and "RULED
+    // OUT" would then suppress the very guidance the reader needs (gate finding).
+    if (others.length > 0) {
+      return (
+        ` A connected panel is on this same ComfyUI${alias} — but others are on ` +
+        `${others.join(", ")}, so a file attached in one of THOSE tabs is on that server and ` +
+        `not on this one. Rule that out before treating the file as simply missing.`
+      );
+    }
     return (
-      ` A connected panel is on this same ComfyUI${alias}, so that split is RULED OUT — the file ` +
-      `is missing from the one server both are using.`
+      ` A connected panel is on this same ComfyUI${alias}, and no other panel is on a different ` +
+      `one, so that split is RULED OUT — the file is missing from the one server both are using.`
     );
   }
   return (

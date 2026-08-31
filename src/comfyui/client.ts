@@ -993,11 +993,17 @@ function describeMissingInputMedia(missing: MissingInputMedia[], target: string)
   const where = missing
     .map((m) => `${safeField(m.classType)}.${safeField(m.inputName)} (node ${safeField(m.nodeId)})`)
     .join(", ");
-  const origin = originOf(target) ?? target;
+  // #1191 — `originOf` drops userinfo/path/query, so a COMFYUI_URL carrying a
+  // token cannot leak. It returns undefined only for a target `new URL()` cannot
+  // parse, and interpolating THAT raw would reintroduce the leak by the back
+  // door (gate finding), so the fallback takes the same fail-closed scrub as
+  // every other interpolated field here.
+  const origin = originOf(target) ?? safeField(target);
   return (
-    `\n\nThat input names a FILE on the server, not a free value: ${where} is resolved inside the ` +
-    `input directory of the ComfyUI at ${origin} — so this is a question about WHICH server holds ` +
-    `the file, not about the value's spelling. A file ATTACHED in the panel's chat is uploaded by ` +
+    `\n\nThat input names a FILE on the server, not a free value: on stock ComfyUI ${where} is a ` +
+    `server-side FILE selector, resolved against the media directories of the ComfyUI at ` +
+    `${origin} — so this is a question about WHICH server holds the file, not about the value's ` +
+    `spelling. A file ATTACHED in the panel's chat is uploaded by ` +
     `the BROWSER to whichever ComfyUI that tab is on, a separate connection from this headless ` +
     `target (COMFYUI_URL), so a file can exist on one and not the other.` +
     `${describeMissingInputMediaDrift(target)}` +
