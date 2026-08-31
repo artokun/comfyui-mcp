@@ -349,6 +349,20 @@ export function buildDeferredUpdateScript(opts: DeferredUpdateOpts, logPath: str
 }
 
 /**
+ * The helper script the scheduler actually writes: #2671's npm resolution
+ * DEFAULTED in for this process when the caller supplied none.
+ *
+ * Exported as its own seam because the defaulting is the entire fix on this
+ * exit, and it is invisible to a test of buildDeferredUpdateScript alone — that
+ * one is handed a launcher and can only prove it renders one. Resolving at this
+ * single choke point also means both scheduler callers inherit it rather than
+ * each having to remember.
+ */
+export function deferredUpdateScriptFor(opts: DeferredUpdateOpts, logPath: string): string {
+  return buildDeferredUpdateScript({ ...opts, npm: opts.npm ?? currentNpmLauncher() }, logPath);
+}
+
+/**
  * Launch the detached helper. Resolves true only when the script was written
  * AND powershell actually spawned — a false here must surface as "not
  * scheduled", never as a claimed scheduled update. Never throws.
@@ -376,14 +390,7 @@ async function defaultScheduleDeferredUpdate(opts: DeferredUpdateOpts): Promise<
       }
     }
     const scriptPath = join(dir, `comfyui-mcp-self-update-${process.pid}-${Date.now()}.ps1`);
-    // #2671 — resolve npm HERE, the single choke point every scheduler caller
-    // passes through, rather than at each of them. `opts.npm` stays injectable
-    // for tests; production always gets this process's own resolution.
-    writeFileSync(
-      scriptPath,
-      buildDeferredUpdateScript({ ...opts, npm: opts.npm ?? currentNpmLauncher() }, logPath),
-      "utf-8",
-    );
+    writeFileSync(scriptPath, deferredUpdateScriptFor(opts, logPath), "utf-8");
     const spawned = await new Promise<boolean>((resolveP) => {
       const child = spawn(
         "powershell.exe",
@@ -522,7 +529,7 @@ export function resolveNpmLauncher(io: {
 }
 
 /** Resolve the npm launcher for THIS process. */
-function currentNpmLauncher(): NpmLauncher | undefined {
+export function currentNpmLauncher(): NpmLauncher | undefined {
   return resolveNpmLauncher({
     platform: process.platform,
     pathEnv: process.env.PATH ?? process.env.Path,

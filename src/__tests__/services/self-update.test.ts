@@ -9,6 +9,8 @@ import {
   checkAndSelfUpdate,
   compareSemver,
   detectInstallMode,
+  currentNpmLauncher,
+  deferredUpdateScriptFor,
   isNewer,
   resolveNpmLauncher,
   runSelfUpdate,
@@ -1173,5 +1175,43 @@ describe("#2671 — the DEFERRED helper must launch the same npm the caller reso
   it("with no resolved launcher the historical bare shim is kept", () => {
     const script = buildDeferredUpdateScript(OPTS, "C:\\tmp\\log.txt");
     expect(script).toContain("& npm.cmd i -g");
+  });
+});
+
+describe("#2671 — the scheduler's script carries THIS process's npm resolution", () => {
+  const OPTS = {
+    mode: "global" as const,
+    packageDir: "C:\\Users\\me\\AppData\\Roaming\\npm\\node_modules\\comfyui-mcp",
+    to: "0.52.165",
+  };
+  const LOG = "C:\\tmp\\log.txt";
+  const psq = (s: string) => `'${s.replace(/'/g, "''")}'`;
+
+  it("defaults npm in when the caller supplies none", () => {
+    // Guard against a vacuous assertion: if npm were unresolvable on the host
+    // running this suite, the check below would pass on an empty premise.
+    // Anything running vitest was itself installed with npm, so this holds.
+    const resolved = currentNpmLauncher();
+    expect(resolved).toBeDefined();
+
+    const script = deferredUpdateScriptFor(OPTS, LOG);
+    const expected = [resolved!.file, ...resolved!.prefixArgs].map(psq).join(" ");
+    expect(script).toContain(`& ${expected} i -g ${PACKAGE_NAME}@latest`);
+  });
+
+  it("an explicitly supplied launcher is not overwritten by the default", () => {
+    const script = deferredUpdateScriptFor(
+      {
+        ...OPTS,
+        npm: {
+          file: "X:\\node\\node.exe",
+          prefixArgs: ["X:\\node\\npm-cli.js"],
+          shell: false,
+          source: "node-adjacent",
+        },
+      },
+      LOG,
+    );
+    expect(script).toContain("& 'X:\\node\\node.exe' 'X:\\node\\npm-cli.js' i -g");
   });
 });
