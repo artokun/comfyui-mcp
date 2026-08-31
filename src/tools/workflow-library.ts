@@ -284,7 +284,7 @@ export function registerWorkflowLibraryTools(server: McpServer): void {
             "detail: mermaid diagram for one section (requires section parameter). " +
             "list: text listing of all sections with data flow summary. " +
             "flat: single mermaid flowchart of the entire workflow (best for small workflows). " +
-            "health: graph-health heuristics (disconnected nodes, duplicate model loads, orphaned branches, muted/bypassed, a sampler running denoise below 1.0 on an empty latent).",
+            "health: graph-health heuristics (disconnected nodes, duplicate model loads, orphaned branches, muted/bypassed, a sampler running denoise below 1.0 on an empty latent, an image-edit graph whose sampled canvas is not derived from the reference).",
         ),
       section: z
         .string()
