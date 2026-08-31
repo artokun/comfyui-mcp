@@ -153,11 +153,20 @@ latent (`comfy_extras/nodes_qwen.py`).
 The model then lays the reference tokens and the tokens it is generating on **one
 shared, centred coordinate grid** (`comfy/ldm/qwen_image/model.py`, `process_img`), so
 reference position (i, j) and output position (i, j) mean the same place only when the
-two grids are the same size. That is the whole reason the official templates run the
-one image through `FluxKontextImageScale` and then feed the sampler a `VAEEncode` of
-*that* scaled image: canvas geometry and reference geometry come out identical by
-construction. Every `PREFERRED_KONTEXT_RESOLUTIONS` entry is ~1.05 MP for the same
-reason.
+two grids are the same size. That is the whole reason the official templates run the one
+image through `FluxKontextImageScale` and then feed the sampler a `VAEEncode` of *that*
+scaled image — both branches then see the same pixels at the same ~1 MP scale and the
+same aspect. Every `PREFERRED_KONTEXT_RESOLUTIONS` entry is ~1.05 MP for the same reason.
+
+It is agreement to within the encoder's round-to-8, not exact equality, and the
+difference is worth knowing precisely. `FluxKontextImageScale` snaps to a preferred pair;
+the encoder then renormalises *that* to its own 1,048,576 px budget. For 12 of the 18
+preferred pairs the two land on the same latent grid. For the other 6 — 688x1504,
+800x1328, 832x1248 and their landscape mirrors — the reference lands one latent row or
+column off: at 800x1328 the sampler's grid is 100x166 and the reference's is 99x165.
+ComfyUI's own bundled 2511 template does exactly this, so a sub-patch offset is evidently
+fine in practice. **The failure this page is about is one of SCALE, not of rounding** — an
+empty latent at 1104x1472 sits 1.24x away linearly, not one row.
 
 So on an edit graph you do not choose a resolution — you inherit one:
 
@@ -280,7 +289,7 @@ and it fails silently. A `VAEEncode` removes the coincidence — it cannot be th
 size, because it is derived from the same pixels the encoder saw.
 
 Feed `latent_image` from a `VAEEncode` of the same image you gave the encoder, scaled
-once up front so both see identical geometry:
+once up front so both branches see the same pixels at the same scale:
 
 ```json
 {
