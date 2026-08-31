@@ -475,6 +475,32 @@ describe("analyzeGraphHealth", () => {
     expect(h.findings.filter((x) => x.kind === "partial_denoise_empty_latent")).toHaveLength(0);
   });
 
+  it("ignores a non-numeric denoise -- coercion would both false-fire and false-zero", () => {
+    // The connection-tuple case above is silent for an incidental reason: ["12", 0]
+    // stringifies with a comma, so the arithmetic NaNs regardless of the guard. These
+    // two shapes are what the guard actually buys, and both are false positives:
+    //   "0.65" -> Math.trunc(50 / "0.65") = 76 > 50, so it would FIRE, and
+    //   ""     -> "" <= 0 is true, so it would fire via the empty-schedule branch.
+    const withDenoise = (denoise: unknown) =>
+      analyzeGraphHealth(
+        wf({
+          "4": { class_type: "CheckpointLoaderSimple", inputs: { ckpt_name: "sd_xl_base.safetensors" } },
+          "8": { class_type: "EmptyLatentImage", inputs: { width: 1024, height: 1024, batch_size: 1 } },
+          "9": {
+            class_type: "KSampler",
+            inputs: { model: ["4", 0], positive: ["4", 1], negative: ["4", 1], latent_image: ["8", 0], steps: 50, denoise },
+          },
+          "10": { class_type: "VAEDecode", inputs: { samples: ["9", 0], vae: ["4", 2] } },
+          "11": { class_type: "SaveImage", inputs: { images: ["10", 0] } },
+        }),
+        OBJECT_INFO,
+      ).findings.filter((x) => x.kind === "partial_denoise_empty_latent").length;
+
+    expect(withDenoise("0.65")).toBe(0);
+    expect(withDenoise("")).toBe(0);
+    expect(withDenoise(Number.NaN)).toBe(0);
+  });
+
   it("flags an unknown custom sampler class by its slot shape, not a class allowlist", () => {
     const h = analyzeGraphHealth(
       wf({
