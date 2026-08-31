@@ -442,7 +442,8 @@ import {
   resolveEffectiveComfyUIBase,
 } from "../services/workspace-env.js";
 import { getNsfwConsent, setNsfwConsent } from "../services/panel-settings.js";
-import { QueueMonitor } from "../services/queue-monitor.js";
+import { QueueMonitor, RUNNING_UNCONFIRMED_MS } from "../services/queue-monitor.js";
+import type { QueueSnapshot } from "../services/queue-monitor.js";
 import { RunCompletions } from "./run-completion-journal.js";
 import {
   AskAnswers,
@@ -1571,6 +1572,56 @@ function queueBusySnapshotNote(): string {
 }
 
 /**
+ * #2684 — how long the believed running prompt has gone with NO evidence from
+ * the monitored ComfyUI, or null while that belief is still fresh.
+ *
+ * `QueueSnapshot.running` is last-known state, not a live reading. When the
+ * monitored target stops answering, `fetchJson` returns null, `applyQueue`
+ * returns before the empty-queue clear can run, and `runningPromptId` persists
+ * unbounded — so every message built from it goes on asserting a run the server
+ * never confirmed. That is what the reporter hit: a `queue` read showed
+ * `running: 0, pending: 0` while these notes still named a specific prompt as
+ * present-tense fact.
+ *
+ * `sinceMs` is null in the one case where we cannot even date the belief: the
+ * server has never answered here at all. That is MORE unverified, not less, so
+ * it must not read as fresh — hence a null age inside an unconfirmed result,
+ * never a null result.
+ */
+function unconfirmedRun(snap: QueueSnapshot): { sinceMs: number | null } | null {
+  if (!snap.running) return null;
+  if (snap.lastServerContactTs === null) return { sinceMs: null };
+  const sinceMs = Date.now() - snap.lastServerContactTs;
+  return sinceMs >= RUNNING_UNCONFIRMED_MS ? { sinceMs } : null;
+}
+
+/**
+ * #2684 — the queue-busy subject clause, in the tense the evidence supports.
+ *
+ * Returns "" when nothing is believed in flight, so a caller can only ever
+ * embed a claim the monitor actually holds. The fence decisions upstream are
+ * untouched: a stale belief still fences exactly as before (fail-closed is
+ * correct — an unverified run is not a verified idle). Only what we SAY about
+ * it changes, because the previous wording folded "could not determine" into
+ * "determined not" (#796's shape).
+ */
+function queueBusyRunClause(still: boolean): string {
+  const snap = QueueMonitor.snapshot();
+  if (!snap.running) return "";
+  const detail = queueBusySnapshotNote();
+  const un = unconfirmedRun(snap);
+  if (!un) return `a ComfyUI prompt is ${still ? "still " : ""}running${detail}`;
+  const age =
+    un.sinceMs === null
+      ? "the ComfyUI server has never answered this orchestrator"
+      : `the ComfyUI server has not answered this orchestrator for ~${Math.round(un.sinceMs / 1000)}s`;
+  return (
+    `a ComfyUI prompt was last seen running${detail}, but ${age}, so that run is ` +
+    `UNCONFIRMED — it may already have finished, failed, or been cancelled`
+  );
+}
+
+/**
  * panel#1489 — is this `graph_*` command one the queue-busy fence must let past?
  *
  * Answered from GRAPH_CMD_EFFECT, which is the ledger that classifies a graph
@@ -1675,8 +1726,8 @@ function graphCmdBlockedByRunningPrompt(cmd: Record<string, unknown>): string | 
       return (
         `${deferSubject} was NOT sent — nothing was applied. You asked to park this ` +
         `edit until the queue is idle (defer_until_idle:true), but the request does ` +
-        `not qualify: ${gap}. QUEUE BUSY: a ComfyUI prompt is running` +
-        `${queueBusySnapshotNote()}, so the edit was fenced as an ordinary mutation. ` +
+        `not qualify: ${gap}. QUEUE BUSY: ${queueBusyRunClause(false)}, ` +
+        `so the edit was fenced as an ordinary mutation. ` +
         `Fix the request above and retry — or drop defer_until_idle and retry after ` +
         `queue (action:"list") shows running: 0.`
       );
@@ -1693,8 +1744,8 @@ function graphCmdBlockedByRunningPrompt(cmd: Record<string, unknown>): string | 
   // fixed here, not a smaller version of it.
   const subject = panelToolForGraphCmd(name) ?? "This edit";
   return (
-    `${subject} was NOT sent — nothing was applied. QUEUE BUSY: a ComfyUI prompt is running` +
-    `${queueBusySnapshotNote()}. ${subject} MUTATES the workflow, and the panel tab often ` +
+    `${subject} was NOT sent — nothing was applied. QUEUE BUSY: ${queueBusyRunClause(false)}. ` +
+    `${subject} MUTATES the workflow, and the panel tab often ` +
     `cannot service a graph edit while a prompt is executing — delivering it would only ` +
     `surface a generic "tab may be backgrounded or frozen" timeout with an unknown ` +
     `outcome, leaving you unable to say whether the edit applied. Read-only graph calls ` +
@@ -1704,12 +1755,36 @@ function graphCmdBlockedByRunningPrompt(cmd: Record<string, unknown>): string | 
 }
 
 function queueBusyTimeoutNote(): string {
-  if (!QueueMonitor.snapshot().running) return "";
+  const snap = QueueMonitor.snapshot();
+  if (!snap.running) return "";
+  const un = unconfirmedRun(snap);
+  if (!un) {
+    return (
+      `\n\nQUEUE BUSY: a ComfyUI prompt is still running${queueBusySnapshotNote()}, which is the ` +
+      `most likely reason the tab did not answer in time — a render can occupy the panel's main ` +
+      `thread. Retry after queue (action:"list") shows running: 0; if it still does not answer ` +
+      `once the queue is idle, THEN treat the tab as backgrounded or frozen.`
+    );
+  }
+  // #2684 — the branch above offers the running prompt as the CAUSE of the ack
+  // timeout. Reusing it on an unverified belief is how this note misexplained a
+  // dead render: the reporter's `queue (action:"list")` read `running: 0` at the
+  // very moment this text named a specific prompt as "still running", so "retry
+  // once the queue is idle" was advice against a queue that was ALREADY idle.
+  //
+  // The same lapsed heartbeat that makes the run unconfirmed is itself the more
+  // likely story — an unreachable ComfyUI, or one this orchestrator is polling
+  // at a different target than the tab is bound to (#1593). So state the age of
+  // the belief and hand over the check that can actually settle it, instead of
+  // folding "could not determine" into "determined not".
   return (
-    `\n\nQUEUE BUSY: a ComfyUI prompt is still running${queueBusySnapshotNote()}, which is the ` +
-    `most likely reason the tab did not answer in time — a render can occupy the panel's main ` +
-    `thread. Retry after queue (action:"list") shows running: 0; if it still does not answer ` +
-    `once the queue is idle, THEN treat the tab as backgrounded or frozen.`
+    `\n\nQUEUE STATE UNCONFIRMED: ${queueBusyRunClause(false)}. Do NOT treat that run as the ` +
+    `reason the tab did not answer — it is last-known state this orchestrator has been unable ` +
+    `to re-verify, not a live reading. Settle it with queue (action:"list"), which reads the ` +
+    `server directly: if that reports running: 0 the run is already over and the tab's silence ` +
+    `has another cause; if it cannot reach the server either, ComfyUI is down or this ` +
+    `orchestrator is polling a different target than the tab is bound to — compare ` +
+    `get_system_stats (action:"health").`
   );
 }
 
