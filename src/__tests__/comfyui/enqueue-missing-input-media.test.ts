@@ -55,10 +55,24 @@ function res(status: number, body: unknown, statusText = "Bad Request"): Respons
   });
 }
 
+/** One node error exactly as ComfyUI 0.34.0 emits it (execution.py). */
+interface NodeErrorEntry {
+  type?: string;
+  message: string;
+  details: string;
+  extra_info: { input_name?: string; input_config?: unknown; received_value?: unknown };
+}
+
 /** The 400 envelope ComfyUI 0.34.0 answers a failed prompt validation with. */
-function rejection(
-  nodeErrors: Record<string, { class_type?: string; errors?: unknown[] }>,
-): unknown {
+interface RejectionBody {
+  error: { type: string; message: string; details: string; extra_info: Record<string, never> };
+  node_errors: Record<
+    string,
+    { class_type: string; errors: NodeErrorEntry[]; dependent_outputs?: string[] }
+  >;
+}
+
+function rejection(nodeErrors: RejectionBody["node_errors"]): RejectionBody {
   return {
     error: {
       type: "prompt_outputs_failed_validation",
@@ -85,7 +99,7 @@ const MISSING_ATTACHMENT = rejection({
   },
 });
 
-async function enqueueAgainst(body: unknown): Promise<string> {
+async function enqueueAgainst(body: RejectionBody): Promise<string> {
   comfyuiFetch.mockResolvedValueOnce(res(400, body));
   const err = await enqueuePrompt({ "5": { class_type: "LoadImage", inputs: {} } }).catch(
     (e: unknown) => e,

@@ -995,12 +995,13 @@ function describeMissingInputMedia(missing: MissingInputMedia[], target: string)
     .join(", ");
   const origin = originOf(target) ?? target;
   return (
-    `\n\nThat input names a FILE on the server, not a free value: ${where} is resolved inside ` +
-    `the input directory of the ComfyUI at ${origin}, and this rejection means the file is not ` +
-    `there.${describeMissingInputMediaDrift(target)} An image ATTACHED in the panel's chat is ` +
-    `uploaded by the BROWSER to whichever ComfyUI that tab is on — a separate connection from ` +
-    `this headless target (COMFYUI_URL) — so a file can exist on one and not the other. To put ` +
-    `it on THIS target: upload_image (action:"image") for a file on disk, or upload_image ` +
+    `\n\nThat input names a FILE on the server, not a free value: ${where} is resolved inside the ` +
+    `input directory of the ComfyUI at ${origin} — so this is a question about WHICH server holds ` +
+    `the file, not about the value's spelling. A file ATTACHED in the panel's chat is uploaded by ` +
+    `the BROWSER to whichever ComfyUI that tab is on, a separate connection from this headless ` +
+    `target (COMFYUI_URL), so a file can exist on one and not the other.` +
+    `${describeMissingInputMediaDrift(target)}` +
+    ` To put it on THIS target: upload_image (action:"image") for a file on disk, or upload_image ` +
     `(action:"stage") for an existing ComfyUI output; then re-enqueue with the filename it ` +
     `returns. Re-submitting this workflow unchanged will fail identically — enqueue_workflow ` +
     `sends loader values through verbatim and never rewrites them.`

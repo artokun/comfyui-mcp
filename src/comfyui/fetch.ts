@@ -250,15 +250,14 @@ export function describeMissingInputMediaDrift(target: string): string {
   if (verdict === "unknown") return "";
   if (verdict === "same") {
     return (
-      ` A connected panel is on this same ComfyUI${alias}, so a panel-vs-headless target split ` +
-      `is RULED OUT — the file is missing from the one server both are using.`
+      ` A connected panel is on this same ComfyUI${alias}, so that split is RULED OUT — the file ` +
+      `is missing from the one server both are using.`
     );
   }
   return (
-    ` A connected panel is on ${origins.join(", ")} — a DIFFERENT ComfyUI from this target. An ` +
-    `image attached in the panel's chat is uploaded by the BROWSER to that server, so it is ` +
-    `genuinely absent here; that is very likely the whole answer. Run the graph on the panel ` +
-    `instead (panel_run), or point COMFYUI_URL at that origin.`
+    ` A connected panel is on ${origins.join(", ")} — a DIFFERENT ComfyUI from this target, so ` +
+    `that is very likely where the file is, and very likely the whole answer: run the graph on ` +
+    `the panel instead (panel_run), or point COMFYUI_URL at that origin.`
   );
 }
 
