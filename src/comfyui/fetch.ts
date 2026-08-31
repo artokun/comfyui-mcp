@@ -113,7 +113,12 @@ export function isComfyTransportFailure(err: unknown): boolean {
  *  credential cannot leak through a diagnostic string. */
 export function originOf(target: string): string | undefined {
   try {
-    return new URL(target).origin;
+    const origin = new URL(target).origin;
+    // An OPAQUE origin (file:, data:, blob:) serialises to the literal string
+    // "null", which is truthy and would sail through every caller as if it were
+    // an address — printing "a connected panel is on null" (gate, round 4). It is
+    // not an address, so it is not an origin as far as this module is concerned.
+    return origin === "null" ? undefined : origin;
   } catch {
     return undefined;
   }
@@ -204,6 +209,18 @@ function classifyTargetDrift(target: string): TargetDriftClassification {
     return { verdict: "unknown", text: "", origins: [], alias: "", others: [] };
   const want = originOf(target);
   if (!want) return { verdict: "unknown", text: "", origins: [], alias: "", others: [] };
+  // WHY THESE ARE NOT PUT THROUGH #1191's SCRUB, asked three times by the gate.
+  //
+  // `scrubSecretShapedText`'s third pass redacts any unbroken run of >=24
+  // credential-alphabet characters. A cloudflared quick-tunnel hostname IS one —
+  // `http://abcdef0123456789abcdef0123456789.trycloudflare.com` has a 32-char
+  // label — and that is the most common remote-ComfyUI setup this project sees.
+  // Scrubbing would therefore redact exactly the origins a reader most needs
+  // named, on the one message whose entire job is to say WHICH server. A
+  // hostname is public routing information, not a credential; the credential
+  // risk in a URL lives in userinfo, path and query, and `originOf` drops all
+  // three. So the protection here is NORMALISATION, not redaction:
+  //
   // Only a well-formed `scheme://host[:port]` may ever reach a message (gate,
   // round 3). These values are server-observed handshake Origins, not client
   // prose — but "not attacker prose today" is a property of a call site three

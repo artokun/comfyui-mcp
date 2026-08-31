@@ -200,6 +200,28 @@ describe("#2673: a loader input naming a file the server does not have", () => {
       expect(message).toContain("Rule that out before treating the file as simply missing");
     });
 
+    it("drops an OPAQUE origin, which serialises to the truthy string \"null\"", async () => {
+      // Gate, round 4. `new URL("file:///tmp").origin` is the STRING "null" —
+      // truthy, so it would otherwise be reported as a panel on a different
+      // ComfyUI called "null". It is not an address.
+      setConnectedPanelOrigins(() => ["file:///tmp"]);
+      const message = await enqueueAgainst(MISSING_ATTACHMENT);
+      expect(message).not.toContain("null");
+      expect(message).not.toContain("A connected panel is on");
+      expect(message).toContain("names a FILE on the server");
+    });
+
+    it("keeps a cloudflared-style hostname VERBATIM — it is an address, not a credential", async () => {
+      // The reason origins are normalised rather than scrubbed: a quick-tunnel
+      // hostname is a 32-char hex label, which #1191's opaque-run pass would
+      // redact — deleting exactly the answer this message exists to give.
+      const tunnel = "https://abcdef0123456789abcdef0123456789.trycloudflare.com";
+      setConnectedPanelOrigins(() => [tunnel]);
+      const message = await enqueueAgainst(MISSING_ATTACHMENT);
+      expect(message).toContain(tunnel);
+      expect(message).toContain("a DIFFERENT ComfyUI from this target");
+    });
+
     it("drops an origin that is not a well-formed scheme://host[:port]", async () => {
       // Gate, round 3. Only a normalised origin may reach the message; anything
       // else is dropped rather than echoed. With nothing left, there is no
@@ -336,6 +358,30 @@ describe("#2673: a loader input naming a file the server does not have", () => {
       expect(message).toContain("names a FILE on the server");
       // The claim is SCOPED, so it is not false even here.
       expect(message).toContain("on stock ComfyUI");
+    });
+
+    it("a value_not_in_list whose received_value was never a filename", async () => {
+      // Gate, round 4. `value_not_in_list` reports what it received. A non-string
+      // means the widget never held a filename — a malformed prompt, an object,
+      // a link tuple — and reading that as "the server is missing this file"
+      // would misdiagnose a real rejection.
+      const message = await enqueueAgainst(
+        rejection({
+          "12": {
+            class_type: "VHS_LoadVideo",
+            errors: [
+              {
+                type: "value_not_in_list",
+                message: "Value not in list",
+                details: "video: {'path': 'clip.mp4'} not in (list of length 41)",
+                extra_info: { input_name: "video", received_value: { path: "clip.mp4" } },
+              },
+            ],
+          },
+        }),
+      );
+      expect(message).toContain("Value not in list");
+      expect(message).not.toContain("names a FILE on the server");
     });
 
     it("a node error with no machine `type` at all", async () => {

@@ -923,7 +923,7 @@ interface ComfyNodeErrorEntry {
   type?: string;
   message?: string;
   details?: string;
-  extra_info?: { input_name?: string };
+  extra_info?: { input_name?: string; received_value?: unknown };
 }
 
 /**
@@ -967,6 +967,14 @@ function collectMissingInputMedia(
       if (typeof e?.type !== "string" || !MISSING_VALUE_ERROR_TYPES.has(e.type)) continue;
       const inputName = e.extra_info?.input_name;
       if (typeof inputName !== "string") continue;
+      // A `value_not_in_list` reports `received_value`; when it is present and
+      // is NOT a string, the widget never held a filename at all (a malformed
+      // prompt, an object, a link tuple) and "the server does not have this
+      // file" would be a wrong reading of a real rejection (gate, round 4).
+      // ABSENCE must not disqualify: `custom_validation_failed` — the shape
+      // LoadImage always fails with — carries no `received_value` at all.
+      const received = e.extra_info?.received_value;
+      if (received !== undefined && typeof received !== "string") continue;
       if (!isKnownLoaderInput(classType, inputName)) continue;
       found.push({ nodeId, classType, inputName });
     }
