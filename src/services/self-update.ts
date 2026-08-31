@@ -30,7 +30,7 @@
 import { existsSync, lstatSync, readdirSync, readFileSync, realpathSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { execFile, spawn } from "node:child_process";
 import { tmpdir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { dirname, join, resolve, posix as pathPosix, win32 as pathWin32 } from "node:path";
 import { fileURLToPath } from "node:url";
 import { unreachableHostMessage } from "../utils/errors.js";
 import { logger } from "../utils/logger.js";
@@ -486,6 +486,15 @@ export function resolveNpmLauncher(io: {
 }): NpmLauncher | undefined {
   const isWin = io.platform === "win32";
   const shim = npmShimName(io.platform);
+  // Path arithmetic must follow the INJECTED platform, never the host's (codex
+  // gate r3). Host-native `dirname` on a Windows execPath evaluated from Linux
+  // returns "." — there is no "/" in it — so the node-adjacent candidate
+  // silently collapses to a bare relative path and the launcher is missed. In
+  // production io.platform IS process.platform, so this is the native flavour
+  // and nothing changes; it only makes the seam mean what it says. Choosing the
+  // FLAVOUR retires the class, where the r1 fix (dropping one `resolve()`)
+  // removed a single instance of it.
+  const P = isWin ? pathWin32 : pathPosix;
 
   const pathSep = isWin ? ";" : ":";
   for (const raw of (io.pathEnv ?? "").split(pathSep)) {
@@ -501,7 +510,7 @@ export function resolveNpmLauncher(io: {
     // walk is the shell's problem and already bounded by NPM_TIMEOUT_MS.
     if (isWin && /^[\\/]{2}/.test(entry)) continue;
     try {
-      if (io.exists(join(entry, shim))) {
+      if (io.exists(P.join(entry, shim))) {
         return { file: shim, prefixArgs: [], shell: isWin, source: "path" };
       }
     } catch {
@@ -509,19 +518,17 @@ export function resolveNpmLauncher(io: {
     }
   }
 
-  // `join` normalizes the ".." itself, and `io.execPath` is always absolute, so
-  // there is nothing left for a `resolve()` to do here. Calling one would be
-  // worse than redundant: it resolves against the HOST's cwd and separator
-  // rules, so a Windows layout evaluated on a POSIX runner (which is exactly
-  // what the injected `platform` exists for) would come back cwd-prefixed.
-  const nodeDir = dirname(io.execPath);
+  // `P.join` normalizes the ".." itself and `io.execPath` is always absolute, so
+  // there is nothing left for a `resolve()` to do — and calling one would be
+  // actively wrong, since it resolves against the HOST's cwd (codex gate r1).
+  const nodeDir = P.dirname(io.execPath);
   const cliCandidates = isWin
     ? // Windows: node.exe and node_modules/ sit in the same directory.
-      [join(nodeDir, "node_modules", "npm", "bin", "npm-cli.js")]
+      [P.join(nodeDir, "node_modules", "npm", "bin", "npm-cli.js")]
     : // POSIX: <prefix>/bin/node alongside <prefix>/lib/node_modules/npm.
       [
-        join(nodeDir, "..", "lib", "node_modules", "npm", "bin", "npm-cli.js"),
-        join(nodeDir, "node_modules", "npm", "bin", "npm-cli.js"),
+        P.join(nodeDir, "..", "lib", "node_modules", "npm", "bin", "npm-cli.js"),
+        P.join(nodeDir, "node_modules", "npm", "bin", "npm-cli.js"),
       ];
   for (const cli of cliCandidates) {
     try {

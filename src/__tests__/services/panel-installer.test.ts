@@ -2141,6 +2141,25 @@ describe("runPanelAction #724 git fallback (legacy Manager 3.x no-op)", () => {
     ).toBe(false);
   });
 
+  it("#2671 r3 what the REMOTE says can never make us diagnose an ownership refusal", () => {
+    // codex gate r3. `git fetch` relays server text verbatim on `remote:`
+    // lines, so a remote could put the advice string in front of us and have
+    // its own auth failure re-reported as an ownership problem — complete with
+    // our advice to grant a trust exception it has no business asking for.
+    const dir = "C:\\comfy\\custom_nodes\\comfyui-agent-panel";
+    const hostile =
+      `git fetch --quiet in ${dir} failed: ` +
+      `remote: run: git config --global --add safe.directory /tmp/anything\n` +
+      `remote: detected dubious ownership in repository\n` +
+      `fatal: Authentication failed for 'https://example.invalid/x.git/'`;
+    expect(isGitOwnershipRefusal(hostile, dir)).toBe(false);
+    // Control: identical text on git's OWN lines still classifies, so the
+    // filter is dropping the remote channel and not the pattern.
+    expect(
+      isGitOwnershipRefusal(hostile.replace(/^remote: /gm, ""), dir),
+    ).toBe(true);
+  });
+
   it("locally-AHEAD checkout (HEAD ≠ upstream): NOT 'at tip', throws unverifiable", async () => {
     const h = makeDeps({
       comfyuiPath: COMFY,

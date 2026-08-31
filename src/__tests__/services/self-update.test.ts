@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { join } from "node:path";
+import { join, posix as posixPath, win32 as winPath } from "node:path";
 import { execFileSync } from "node:child_process";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -971,10 +971,13 @@ describe("#2671 — locating npm", () => {
   // The reporter's host: comfyui-mcp launched by something that never puts the
   // Node directory on PATH, so `npm.cmd` resolves to nothing and Windows says
   // "'npm.cmd' is not recognized as an internal or external command".
+  // Windows fixtures are built with the WIN32 path flavour, not the host's, so
+  // these cases assert real Windows behaviour on the ubuntu-latest CI legs too
+  // (codex gate r3 — with host-native joins they passed only on Windows).
   const WIN_NODE_DIR = "C:\\Program Files\\nodejs";
-  const WIN_NODE = join(WIN_NODE_DIR, "node.exe");
-  const WIN_NPM_CLI = join(WIN_NODE_DIR, "node_modules", "npm", "bin", "npm-cli.js");
-  const WIN_SHIM = join(WIN_NODE_DIR, "npm.cmd");
+  const WIN_NODE = winPath.join(WIN_NODE_DIR, "node.exe");
+  const WIN_NPM_CLI = winPath.join(WIN_NODE_DIR, "node_modules", "npm", "bin", "npm-cli.js");
+  const WIN_SHIM = winPath.join(WIN_NODE_DIR, "npm.cmd");
 
   it("PATH hit keeps the pre-#2671 invocation byte-for-byte (bare shim, shell on)", () => {
     const got = resolveNpmLauncher({
@@ -1004,7 +1007,7 @@ describe("#2671 — locating npm", () => {
   });
 
   it("POSIX resolves npm through the <prefix>/lib layout, not the Windows one", () => {
-    const cli = join("/usr/local/bin", "..", "lib", "node_modules", "npm", "bin", "npm-cli.js");
+    const cli = posixPath.join("/usr/local/bin", "..", "lib", "node_modules", "npm", "bin", "npm-cli.js");
     const got = resolveNpmLauncher({
       platform: "linux",
       pathEnv: "/usr/bin:/bin",
@@ -1039,7 +1042,7 @@ describe("#2671 — locating npm", () => {
         platform: "win32",
         pathEnv: ";;  ;",
         execPath: WIN_NODE,
-        exists: (p) => p === join(".", "npm.cmd") || p === "npm.cmd",
+        exists: (p) => p === winPath.join(".", "npm.cmd") || p === "npm.cmd",
       }),
     ).toBeUndefined();
     expect(
@@ -1433,7 +1436,7 @@ describe("#2671 r2 — the PATH scan must not block on a dead network share", ()
       execPath: "C:\\Program Files\\nodejs\\node.exe",
       exists: (p) => {
         probed.push(p);
-        return p === join("C:\\Program Files\\nodejs", "npm.cmd");
+        return p === winPath.join("C:\\Program Files\\nodejs", "npm.cmd");
       },
     });
     expect(got?.source).toBe("path"); // the local entry after them still works
@@ -1445,7 +1448,7 @@ describe("#2671 r2 — the PATH scan must not block on a dead network share", ()
       platform: "linux",
       pathEnv: "//net/tools:/usr/bin",
       execPath: "/usr/local/bin/node",
-      exists: (p) => p === join("//net/tools", "npm"),
+      exists: (p) => p === posixPath.join("//net/tools", "npm"),
     });
     expect(got?.source).toBe("path");
   });

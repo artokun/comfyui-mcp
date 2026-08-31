@@ -562,7 +562,18 @@ function pathVariants(dir: string): string[] {
 }
 
 export function isGitOwnershipRefusal(message: string, dir?: string): boolean {
-  let haystack = message;
+  // Drop everything the REMOTE said (codex gate r3). `git fetch` relays server
+  // text verbatim on `remote:` lines, so a remote could put "--add
+  // safe.directory" in front of us and turn its own auth failure into a
+  // fabricated ownership diagnosis — one that tells the user to grant a trust
+  // exception it has no business asking for. Text an external party controls
+  // must never drive a local classification.
+  //
+  // Excised from the marker to end-of-line rather than by dropping whole
+  // lines: runGit prefixes the stderr with `git <args> in <dir> failed: `, so
+  // the FIRST relayed line does not begin at a line start. Git's own messages
+  // never contain "remote:" except when relaying, so nothing local is lost.
+  let haystack = message.replace(/\bremote:.*$/gim, "");
   if (dir) {
     for (const v of pathVariants(dir)) {
       // Windows paths are case-insensitive, and git may echo a different case
