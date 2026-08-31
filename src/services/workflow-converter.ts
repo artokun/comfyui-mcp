@@ -13,6 +13,7 @@ import type {
   SubgraphLink,
 } from "../comfyui/types.js";
 import { logger } from "../utils/logger.js";
+import { isKnownLoaderInput } from "../comfyui/loader-asset-inputs.js";
 import { isSelfProducingUeSender, isUeSender } from "./flatten-workflow.js";
 
 export interface ConversionResult {
@@ -247,34 +248,16 @@ const ASSET_WIDGET_NAMES = new Set([
 ]);
 
 /**
- * KNOWN server-side file/upload SELECTORS, keyed by (classType → input name):
- * real loader nodes whose combo lists media files present on the *connected*
- * server (uploads or on-disk inputs). For these — and ONLY these, plus the
- * model-loader widget names in ASSET_WIDGET_NAMES and object_info upload-flag
- * metadata (isUploadSelectorSpec) — a value absent from a STALE combo is
- * PRESERVED with a warning rather than silently rewritten to comboOpts[0]
- * (issue #504). This is deliberately an allowlist, NOT a global name/extension
- * heuristic: a combo merely *named* `image`/`audio`/`video`/`extension` on some
- * OTHER node, or a media-looking value (`.bmp`, `.mp4`, …) on a TRUE enum, is
- * NOT an asset selector and must take the enum fallback (substitute + warn) so
- * ComfyUI does not hard-reject a "Value not in list".
+ * KNOWN server-side file/upload SELECTORS, keyed by (classType → input name).
+ * For these — and ONLY these, plus the model-loader widget names in
+ * ASSET_WIDGET_NAMES and object_info upload-flag metadata (isUploadSelectorSpec)
+ * — a value absent from a STALE combo is PRESERVED with a warning rather than
+ * silently rewritten to comboOpts[0] (issue #504).
+ *
+ * The list itself moved to comfyui/loader-asset-inputs.ts when the enqueue error
+ * path became a second reader of it (#2673); see that module for why it is an
+ * allowlist rather than a name/extension heuristic.
  */
-const LOADER_ASSET_INPUTS: ReadonlyMap<string, ReadonlySet<string>> = new Map([
-  ["LoadImage", new Set(["image"])],
-  ["LoadImageMask", new Set(["image"])],
-  ["LoadImageOutput", new Set(["image"])],
-  ["VHS_LoadVideo", new Set(["video"])],
-  ["VHS_LoadVideoPath", new Set(["video"])],
-  ["VHS_LoadVideoFFmpeg", new Set(["video"])],
-  ["VHS_LoadVideoFFmpegPath", new Set(["video"])],
-  ["LoadAudio", new Set(["audio"])],
-  ["VHS_LoadAudio", new Set(["audio"])],
-  ["VHS_LoadAudioUpload", new Set(["audio"])],
-]);
-
-function isKnownLoaderInput(classType: string, name: string): boolean {
-  return LOADER_ASSET_INPUTS.get(classType)?.has(name) ?? false;
-}
 
 /**
  * Whether object_info marks this input as an in-browser file/media UPLOAD

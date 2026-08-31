@@ -107,10 +107,18 @@ export function isComfyTransportFailure(err: unknown): boolean {
   return false;
 }
 
-/** Origin (scheme://host:port) of a request target, or undefined if unparsable. */
-function originOf(target: string): string | undefined {
+/** Origin (scheme://host:port) of a request target, or undefined if unparsable.
+ *  Exported because a message that names the target should name the ORIGIN:
+ *  `URL.origin` drops userinfo, path and query, so a COMFYUI_URL carrying a
+ *  credential cannot leak through a diagnostic string. */
+export function originOf(target: string): string | undefined {
   try {
-    return new URL(target).origin;
+    const origin = new URL(target).origin;
+    // An OPAQUE origin (file:, data:, blob:) serialises to the literal string
+    // "null", which is truthy and would sail through every caller as if it were
+    // an address — printing "a connected panel is on null" (gate, round 4). It is
+    // not an address, so it is not an origin as far as this module is concerned.
+    return origin === "null" ? undefined : origin;
   } catch {
     return undefined;
   }
@@ -160,7 +168,36 @@ export type ComfyFetchDiagnosticContext =
   | "get_system_stats_health"
   | "install_comfyui_environment";
 
-function classifyTargetDrift(target: string): { verdict: TargetDriftVerdict; text: string } {
+/**
+ * The comparison's RAW facts alongside its sentence.
+ *
+ * `text` is worded for a request that never CONNECTED. #2673 needs the same
+ * verdict for one the server ANSWERED and refused, where that wording would be
+ * false ("the browser can reach it and this process cannot" — this process
+ * reached it and got a 400). So the origins and the alias parenthetical come
+ * back too, and the second caller writes its own sentence from them rather than
+ * re-deriving the comparison or editing the first caller's prose.
+ */
+interface TargetDriftClassification {
+  verdict: TargetDriftVerdict;
+  text: string;
+  /** Distinct connected-panel origins; empty when the verdict is "unknown". */
+  origins: string[];
+  /** Parenthetical naming both spellings on a "same" verdict; "" otherwise. */
+  alias: string;
+  /**
+   * Connected-panel origins that do NOT match the target. Non-empty alongside a
+   * "same" verdict when tabs are open on more than one ComfyUI (gate finding).
+   *
+   * `describeTargetDrift` does not need this — "a panel can reach this address"
+   * is established by ONE match. #2673's question is different and stronger
+   * ("could the file have come from a panel on another server?"), and one match
+   * does not settle it.
+   */
+  others: string[];
+}
+
+function classifyTargetDrift(target: string): TargetDriftClassification {
   const origins = (() => {
     try {
       return panelOrigins();
@@ -168,10 +205,35 @@ function classifyTargetDrift(target: string): { verdict: TargetDriftVerdict; tex
       return []; // a broken source must never replace the real network error
     }
   })();
-  if (origins.length === 0) return { verdict: "unknown", text: "" };
+  if (origins.length === 0)
+    return { verdict: "unknown", text: "", origins: [], alias: "", others: [] };
   const want = originOf(target);
-  if (!want) return { verdict: "unknown", text: "" };
-  const distinct = [...new Set(origins)];
+  if (!want) return { verdict: "unknown", text: "", origins: [], alias: "", others: [] };
+  // WHY THESE ARE NOT PUT THROUGH #1191's SCRUB, asked three times by the gate.
+  //
+  // `scrubSecretShapedText`'s third pass redacts any unbroken run of >=24
+  // credential-alphabet characters. A cloudflared quick-tunnel hostname IS one —
+  // `http://abcdef0123456789abcdef0123456789.trycloudflare.com` has a 32-char
+  // label — and that is the most common remote-ComfyUI setup this project sees.
+  // Scrubbing would therefore redact exactly the origins a reader most needs
+  // named, on the one message whose entire job is to say WHICH server. A
+  // hostname is public routing information, not a credential; the credential
+  // risk in a URL lives in userinfo, path and query, and `originOf` drops all
+  // three. So the protection here is NORMALISATION, not redaction:
+  //
+  // Only a well-formed `scheme://host[:port]` may ever reach a message (gate,
+  // round 3). These values are server-observed handshake Origins, not client
+  // prose — but "not attacker prose today" is a property of a call site three
+  // modules away, and this string lands in an agent's context. Normalising
+  // through `originOf` cannot mangle a legitimate origin (it is idempotent on
+  // one) and cannot echo anything that is not one. An unparsable entry is
+  // dropped rather than scrubbed: it could not have matched the target anyway,
+  // and a scrub-by-shape here would redact real long hostnames.
+  const distinct = [...new Set(origins)].flatMap((o) => {
+    const normalised = originOf(o);
+    return normalised ? [normalised] : [];
+  });
+  if (distinct.length === 0) return { verdict: "unknown", text: "", origins: [], alias: "", others: [] };
   // #1175 — `includes` compares spellings, not servers. A panel on
   // http://127.0.0.1:8188 against a target of http://localhost:8188 is ONE
   // ComfyUI, and reporting it as "a DIFFERENT address" sent a reporter to point
@@ -188,6 +250,9 @@ function classifyTargetDrift(target: string): { verdict: TargetDriftVerdict; tex
         : ` (spelled ${match} there and ${want} here — the same host, so this is not a mismatch)`;
     return {
       verdict: "same",
+      origins: distinct,
+      others: distinct.filter((o) => !sameOrigin(o, want)),
+      alias,
       text:
         ` A connected panel is on this same origin${alias}, so this is NOT a wrong-address problem: ` +
         `the browser can reach ${want} and this process cannot (a firewall, a container ` +
@@ -196,11 +261,57 @@ function classifyTargetDrift(target: string): { verdict: TargetDriftVerdict; tex
   }
   return {
     verdict: "different",
+    origins: distinct,
+    others: distinct,
+    alias: "",
     text:
       ` A connected panel is on ${distinct.join(", ")} — a DIFFERENT address, which is why ` +
       `the panel works while this call does not. Point COMFYUI_URL at that origin if it is the ` +
       `server you meant.`,
   };
+}
+
+/**
+ * The same comparison, for a loader input naming a media file the server does
+ * not have (#2673).
+ *
+ * A chat attachment is uploaded by the BROWSER, to whichever ComfyUI the panel
+ * tab is on; `enqueue_workflow` posts to COMFYUI_URL. When those are two servers
+ * the file lands on one and the render reads the other, and ComfyUI answers
+ * "Invalid image file: <name>" — a rejection that says nothing about the split
+ * and that re-submitting the same workflow can never clear. This is the drift
+ * #952 already detects, reached through a 400 instead of a socket error, and it
+ * is the case the detector was NOT wired into.
+ *
+ * The SAME-origin answer earns its place too: it rules the split out, so the
+ * reader stops hunting for a second server and treats the file as genuinely
+ * absent from the one they have.
+ */
+export function describeMissingInputMediaDrift(target: string): string {
+  const { verdict, origins, alias, others } = classifyTargetDrift(target);
+  if (verdict === "unknown") return "";
+  if (verdict === "same") {
+    // ONE matching tab does not rule the split out when OTHER tabs are open
+    // elsewhere: the attachment could have come from any of them, and "RULED
+    // OUT" would then suppress the very guidance the reader needs (gate finding).
+    if (others.length > 0) {
+      return (
+        ` A connected panel is on this same ComfyUI${alias} — but others are on ` +
+        `${others.join(", ")}, so a file attached in one of THOSE tabs is on that server and ` +
+        `not on this one. Rule that out before treating the file as simply missing.`
+      );
+    }
+    return (
+      ` A connected panel is on this same ComfyUI${alias}, and no OTHER tab is open on a ` +
+      `different one, so that split is RULED OUT for every panel visible right now — a tab that ` +
+      `has since closed or navigated away would not appear here.`
+    );
+  }
+  return (
+    ` A connected panel is on ${origins.join(", ")} — a DIFFERENT ComfyUI from this target, so ` +
+    `that is very likely where the file is, and very likely the whole answer: run the graph on ` +
+    `the panel instead (panel_run), or point COMFYUI_URL at that origin.`
+  );
 }
 
 /**
