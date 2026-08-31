@@ -80,6 +80,19 @@ const OBJECT_INFO = {
     output: ["*"],
     output_node: false,
   },
+  // One typed conditioning input and one untyped one — a fork that a CONDITIONING-only
+  // count would read as a chain.
+  AnyConditioningMux: {
+    input: { required: { conditioning: ["CONDITIONING"], alt: ["*"] } },
+    output: ["CONDITIONING"],
+    output_node: false,
+  },
+  // One conditioning input plus scalar widgets that can be converted to inputs.
+  ConditioningSetTimestepRange: {
+    input: { required: { conditioning: ["CONDITIONING"], start: ["INT"], end: ["INT"] } },
+    output: ["CONDITIONING"],
+    output_node: false,
+  },
   ConditioningZeroOut: {
     input: { required: { conditioning: ["CONDITIONING"] } },
     output: ["CONDITIONING"],
@@ -884,6 +897,40 @@ describe("analyzeGraphHealth — empty latent under an image-edit reference (#26
     expect(hits).toHaveLength(1);
     expect(hits[0].detail).toContain("where the grids differ");
     expect(hits[0].detail).toContain("Where they happen to coincide it is fine");
+  });
+
+  it("does not count a converted scalar widget as a second branch", () => {
+    // `start` converted from a widget to an input is a NUMBER feed, not a fork arm.
+    // Counting every connected input instead of the CONDITIONING-typed ones would make
+    // this node look like a two-branch fork and silently drop the finding.
+    const g = editGraph();
+    (g as unknown as Record<string, unknown>)["73"] = {
+      class_type: "ConditioningSetTimestepRange",
+      inputs: { conditioning: ["6", 0], start: ["74", 0], end: 1 },
+    };
+    (g as unknown as Record<string, unknown>)["74"] = {
+      class_type: "PrimitiveInt",
+      inputs: { value: 0 },
+    };
+    (g["9"] as unknown as { inputs: Record<string, unknown> }).inputs.positive = ["73", 0];
+    const h = analyzeGraphHealth(g, OBJECT_INFO);
+    expect(h.findings.filter((x) => x.kind === "edit_reference_empty_latent")).toHaveLength(1);
+  });
+
+  it("counts a connected wildcard slot as a fork arm, not as nothing", () => {
+    // One typed CONDITIONING input from the encoder plus one connected `*`. The wildcard
+    // may be what actually reaches the output, so the typed branch is not proof. Counting
+    // only CONDITIONING-typed inputs would read this as a chain of one and fire -- and
+    // then suppress rule 6, turning a false positive into a lost warning.
+    const g = editGraph({ denoise: 0.65, steps: 50 });
+    (g as unknown as Record<string, unknown>)["72"] = {
+      class_type: "AnyConditioningMux",
+      inputs: { conditioning: ["6", 0], alt: ["7", 0] },
+    };
+    (g["9"] as unknown as { inputs: Record<string, unknown> }).inputs.positive = ["72", 0];
+    const h = analyzeGraphHealth(g, OBJECT_INFO);
+    expect(h.findings.filter((x) => x.kind === "edit_reference_empty_latent")).toHaveLength(0);
+    expect(h.findings.filter((x) => x.kind === "partial_denoise_empty_latent")).toHaveLength(1);
   });
 
   it("replaces the partial-denoise finding rather than double-reporting the same sampler", () => {

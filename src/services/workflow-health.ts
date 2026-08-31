@@ -246,7 +246,9 @@ function emitsEditReferenceLatents(
  * part of the conditioning chain. Three shapes end the walk, all in the same direction:
  *
  *   - a node absent from object_info (an uninstalled class has no known slot types)
- *   - a wildcard `*` slot such as a Reroute's, which could be carrying anything
+ *   - any connected wildcard `*` slot, such as a Reroute's — it could be carrying
+ *     anything, including the conditioning that actually reaches the output, so it
+ *     counts as a fork arm even when a typed conditioning input sits beside it
  *   - a node with MORE THAN ONE connected CONDITIONING input. That is a fork, not a
  *     link in a chain, and which branch reaches the output is not knowable statically:
  *     a switch/mux passes one through and discards the rest, `ConditioningAverage`
@@ -284,14 +286,20 @@ function findEditReferenceEncoder(
     if (!def) continue;
     const slots = { ...(def.input?.required ?? {}), ...(def.input?.optional ?? {}) };
     const upstream: string[] = [];
+    let wildcardInput = false;
     for (const [slot, value] of Object.entries(node.inputs ?? {})) {
       if (!isConnection(value)) continue;
-      if (slots[slot]?.[0] !== "CONDITIONING") continue;
-      upstream.push(value[0]);
+      const declared = slots[slot]?.[0];
+      // A connected `*` is a fork arm of unknown type — it may well be carrying the
+      // conditioning that actually reaches the output. Counting only the TYPED inputs
+      // would let a node with one typed conditioning and one wildcard look like a chain.
+      if (declared === "*") wildcardInput = true;
+      else if (declared === "CONDITIONING") upstream.push(value[0]);
     }
-    // Exactly one inbound conditioning is a chain and can be followed. Two or more is a
-    // fork whose surviving branch is a run-time decision — stop rather than guess.
-    if (upstream.length === 1) queue.push(upstream[0]);
+    // Exactly one inbound conditioning and nothing untyped beside it is a chain and can
+    // be followed. Anything else is a fork whose surviving branch is a run-time
+    // decision — stop rather than guess.
+    if (!wildcardInput && upstream.length === 1) queue.push(upstream[0]);
   }
   return null;
 }
