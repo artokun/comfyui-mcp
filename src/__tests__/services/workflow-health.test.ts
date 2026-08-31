@@ -85,6 +85,12 @@ const OBJECT_INFO = {
     output: ["CONDITIONING"],
     output_node: false,
   },
+  // Two inbound CONDITIONING slots: a fork, not a link in a chain.
+  ConditioningCombine: {
+    input: { required: { conditioning_1: ["CONDITIONING"], conditioning_2: ["CONDITIONING"] } },
+    output: ["CONDITIONING"],
+    output_node: false,
+  },
   // The generic edit-reference node. Deliberately NOT in QWEN_EDIT_ENCODERS -- its
   // reference geometry is whatever latent it is handed, and ComfyUI's own
   // Qwen-Image-Layered templates pair it with an empty layered latent on purpose.
@@ -851,6 +857,33 @@ describe("analyzeGraphHealth — empty latent under an image-edit reference (#26
     expect(hits).toHaveLength(1);
     expect(hits[0].detail).toContain("builds an EMPTY sigma schedule");
     expect(hits[0].detail).not.toContain("truncates the sigma schedule");
+  });
+
+  it("stops at a node with two inbound conditionings, and leaves rule 6 its warning", () => {
+    // A fork: which branch survives to the output is a run-time decision, so an encoder
+    // on one of them is not proof the sampler receives its reference. Declining is the
+    // safe half; the load-bearing half is that rule 6 must NOT be suppressed here, or a
+    // false positive would have cost a real warning.
+    const g = editGraph({ denoise: 0.65, steps: 50 });
+    (g as unknown as Record<string, unknown>)["71"] = {
+      class_type: "ConditioningCombine",
+      inputs: { conditioning_1: ["6", 0], conditioning_2: ["7", 0] },
+    };
+    (g["9"] as unknown as { inputs: Record<string, unknown> }).inputs.positive = ["71", 0];
+    const h = analyzeGraphHealth(g, OBJECT_INFO);
+    expect(h.findings.filter((x) => x.kind === "edit_reference_empty_latent")).toHaveLength(0);
+    expect(h.findings.filter((x) => x.kind === "partial_denoise_empty_latent")).toHaveLength(1);
+  });
+
+  it("makes the re-synthesis consequence conditional on the grids actually differing", () => {
+    // The checker cannot see the source image, so it cannot know whether the literal
+    // canvas happened to match. Asserting the plastic/CGI outcome unconditionally would
+    // claim more than it establishes.
+    const h = analyzeGraphHealth(editGraph({ width: 1024, height: 1024 }), OBJECT_INFO);
+    const hits = h.findings.filter((x) => x.kind === "edit_reference_empty_latent");
+    expect(hits).toHaveLength(1);
+    expect(hits[0].detail).toContain("where the grids differ");
+    expect(hits[0].detail).toContain("Where they happen to coincide it is fine");
   });
 
   it("replaces the partial-denoise finding rather than double-reporting the same sampler", () => {

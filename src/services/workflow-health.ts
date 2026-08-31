@@ -243,12 +243,23 @@ function emitsEditReferenceLatents(
  *
  * Only CONDITIONING-typed slots are followed, decided from real `/object_info` types
  * rather than slot names — so a `ControlNetApply`'s `image` input is not mistaken for
- * part of the conditioning chain. Two shapes therefore end the walk: a node absent from
- * object_info (an uninstalled class has no known slot types), and a wildcard `*` slot
- * such as a Reroute's, which could be carrying anything. Both cost a warning that could
- * have been raised and neither can raise a false one, which is the same direction
- * `producesEmptyLatent` takes. It is a real trade, not an oversight, and
- * workflow-health.test.ts asserts both halves of it.
+ * part of the conditioning chain. Three shapes end the walk, all in the same direction:
+ *
+ *   - a node absent from object_info (an uninstalled class has no known slot types)
+ *   - a wildcard `*` slot such as a Reroute's, which could be carrying anything
+ *   - a node with MORE THAN ONE connected CONDITIONING input. That is a fork, not a
+ *     link in a chain, and which branch reaches the output is not knowable statically:
+ *     a switch/mux passes one through and discards the rest, `ConditioningAverage`
+ *     carries `reference_latents` from `conditioning_to` only, and
+ *     `ControlNetApplyAdvanced` takes a positive and a negative and emits both on
+ *     separate slots. Walking every branch would report a reference the sampler never
+ *     receives — and, worse, would suppress rule 6 while doing it, turning a false
+ *     positive into a LOST warning. (Raised in review; `ConditioningCombine` really
+ *     does merge both branches, so declining costs a warning there.)
+ *
+ * Each costs a warning that could have been raised and none can raise a false one,
+ * which is the same direction `producesEmptyLatent` takes. These are real trades, not
+ * oversights, and workflow-health.test.ts asserts each of them.
  */
 function findEditReferenceEncoder(
   workflow: WorkflowJSON,
@@ -272,11 +283,15 @@ function findEditReferenceEncoder(
     const def = objectInfo[node.class_type];
     if (!def) continue;
     const slots = { ...(def.input?.required ?? {}), ...(def.input?.optional ?? {}) };
+    const upstream: string[] = [];
     for (const [slot, value] of Object.entries(node.inputs ?? {})) {
       if (!isConnection(value)) continue;
       if (slots[slot]?.[0] !== "CONDITIONING") continue;
-      queue.push(value[0]);
+      upstream.push(value[0]);
     }
+    // Exactly one inbound conditioning is a chain and can be followed. Two or more is a
+    // fork whose surviving branch is a run-time decision — stop rather than guess.
+    if (upstream.length === 1) queue.push(upstream[0]);
   }
   return null;
 }
@@ -689,10 +704,12 @@ export function analyzeGraphHealth(
         `can only copy detail when the sampled latent has the reference's geometry. An ` +
         `Empty*Latent* node's size is a literal and the reference's is computed from the ` +
         `source when the graph runs, so the two line up only by coincidence.${geometry} ` +
-        `Unlike a partial denoise this does not depend on denoise: the graph runs clean at ` +
-        `denoise 1.0 and returns a plausible image, but re-synthesises the subject instead of ` +
-        `preserving it — materials read as plastic/CGI and printed detail comes back as generic ` +
-        `shapes (#2681).${truncation} Feed latent_image from a VAEEncode of the same image you ` +
+        `Unlike a partial denoise this does not depend on denoise: where the grids differ the ` +
+        `graph still runs clean at denoise 1.0 and returns a plausible image, but re-synthesises ` +
+        `the subject instead of preserving it — materials read as plastic/CGI and printed detail ` +
+        `comes back as generic shapes (#2681). Where they happen to coincide it is fine, which is ` +
+        `the trap: nothing here tells you which one you got.${truncation} Feed latent_image from ` +
+        `a VAEEncode of the same image you ` +
         `gave the encoder (ComfyUI's own Qwen edit templates use FluxKontextImageScale -> ` +
         `VAEEncode). If you deliberately want a canvas unrelated to the reference, this warning ` +
         `is expected.`,
