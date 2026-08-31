@@ -194,6 +194,25 @@ describe("#2673: a loader input naming a file the server does not have", () => {
       expect(message).toContain("Rule that out before treating the file as simply missing");
     });
 
+    it("drops an origin that is not a well-formed scheme://host[:port]", async () => {
+      // Gate, round 3. Only a normalised origin may reach the message; anything
+      // else is dropped rather than echoed. With nothing left, there is no
+      // comparison to report — which is the honest answer, not a verdict.
+      setConnectedPanelOrigins(() => ["not-an-origin token=abcdefghijklmnopqrstuvwxyz012345"]);
+      const message = await enqueueAgainst(MISSING_ATTACHMENT);
+      expect(message).not.toContain("not-an-origin");
+      expect(message).not.toContain("A connected panel is on");
+      expect(message).toContain("names a FILE on the server");
+    });
+
+    it("still compares the origins it CAN parse, alongside one it cannot", async () => {
+      setConnectedPanelOrigins(() => ["http://127.0.0.1:8199/", "garbage"]);
+      const message = await enqueueAgainst(MISSING_ATTACHMENT);
+      expect(message).toContain("http://127.0.0.1:8199");
+      expect(message).not.toContain("garbage");
+      expect(message).toContain("a DIFFERENT ComfyUI from this target");
+    });
+
     it("says NOTHING about drift when no panel is connected — an absent comparison is not a verdict", async () => {
       const message = await enqueueAgainst(MISSING_ATTACHMENT);
       expect(message).not.toContain("A connected panel is on");
@@ -279,6 +298,38 @@ describe("#2673: a loader input naming a file the server does not have", () => {
         }),
       );
       expect(message).not.toContain("names a FILE on the server");
+    });
+
+    // CHARACTERISATION, not an endorsement (gate, round 3). An allowlisted
+    // loader input CAN fail custom validation for a reason that is not "the file
+    // is missing" — a pack that shadows a core class_type, or a future core
+    // check on dimensions. The note DOES fire there, and it cannot be made not
+    // to: `custom_validation_failed` carries `extra_info: {input_name}` and
+    // nothing else (ComfyUI 0.34.0 execution.py:1101) — no received_value, no
+    // input_config, no upload flag — so there is no signal to tell the two
+    // apart. The wording is scoped to stock ComfyUI for exactly this reason.
+    // Pinned so that a future attempt to narrow it is a deliberate change and
+    // not a silent one.
+    it("KNOWN LIMIT: an allowlisted input failing for a non-file reason still gets the note", async () => {
+      const message = await enqueueAgainst(
+        rejection({
+          "5": {
+            class_type: "LoadImage",
+            errors: [
+              {
+                type: "custom_validation_failed",
+                message: "Custom validation failed for node",
+                details: "image - dimensions must be a multiple of 8",
+                extra_info: { input_name: "image" },
+              },
+            ],
+          },
+        }),
+      );
+      expect(message).toContain("dimensions must be a multiple of 8");
+      expect(message).toContain("names a FILE on the server");
+      // The claim is SCOPED, so it is not false even here.
+      expect(message).toContain("on stock ComfyUI");
     });
 
     it("a node error with no machine `type` at all", async () => {

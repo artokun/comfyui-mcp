@@ -204,7 +204,19 @@ function classifyTargetDrift(target: string): TargetDriftClassification {
     return { verdict: "unknown", text: "", origins: [], alias: "", others: [] };
   const want = originOf(target);
   if (!want) return { verdict: "unknown", text: "", origins: [], alias: "", others: [] };
-  const distinct = [...new Set(origins)];
+  // Only a well-formed `scheme://host[:port]` may ever reach a message (gate,
+  // round 3). These values are server-observed handshake Origins, not client
+  // prose — but "not attacker prose today" is a property of a call site three
+  // modules away, and this string lands in an agent's context. Normalising
+  // through `originOf` cannot mangle a legitimate origin (it is idempotent on
+  // one) and cannot echo anything that is not one. An unparsable entry is
+  // dropped rather than scrubbed: it could not have matched the target anyway,
+  // and a scrub-by-shape here would redact real long hostnames.
+  const distinct = [...new Set(origins)].flatMap((o) => {
+    const normalised = originOf(o);
+    return normalised ? [normalised] : [];
+  });
+  if (distinct.length === 0) return { verdict: "unknown", text: "", origins: [], alias: "", others: [] };
   // #1175 — `includes` compares spellings, not servers. A panel on
   // http://127.0.0.1:8188 against a target of http://localhost:8188 is ONE
   // ComfyUI, and reporting it as "a DIFFERENT address" sent a reporter to point
@@ -273,8 +285,9 @@ export function describeMissingInputMediaDrift(target: string): string {
       );
     }
     return (
-      ` A connected panel is on this same ComfyUI${alias}, and no other panel is on a different ` +
-      `one, so that split is RULED OUT — the file is missing from the one server both are using.`
+      ` A connected panel is on this same ComfyUI${alias}, and no OTHER tab is open on a ` +
+      `different one, so that split is RULED OUT for every panel visible right now — a tab that ` +
+      `has since closed or navigated away would not appear here.`
     );
   }
   return (
