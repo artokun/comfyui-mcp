@@ -1008,7 +1008,20 @@ function describeMissingInputMedia(missing: MissingInputMedia[], target: string)
   );
 }
 
-async function buildEnqueueError(res: Response, target: string): Promise<ComfyUIError> {
+async function buildEnqueueError(res: Response, requestedUrl: string): Promise<ComfyUIError> {
+  // WHICH server actually answered (#2673, gate finding).
+  //
+  // `comfyuiFetch` goes through `fetch`, which FOLLOWS redirects — so a 307/308
+  // in front of ComfyUI can move the POST to a different origin, and the input
+  // directory that was searched belongs to whoever answered, not to whoever was
+  // addressed. Naming the requested URL would then point the reader at the proxy
+  // and compare the panel's origin against the wrong server, producing confident
+  // and wrong guidance on exactly the message written to end that guessing.
+  //
+  // `res.url` is "" on a Response that was constructed rather than fetched, so
+  // the requested URL stays as the fallback: an unknown final URL must degrade to
+  // the address we know we asked, never to "".
+  const target = res.url || requestedUrl;
   // unknown-ok: "" only routes to the GENERIC status message, which reports the
   // HTTP status and claims nothing about node errors. An unread body and an empty
   // body get the same honest fallback rather than a fabricated validation result.

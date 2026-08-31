@@ -99,6 +99,13 @@ const MISSING_ATTACHMENT = rejection({
   },
 });
 
+/** A fetched Response reports the FINAL url after redirects; a constructed one
+ *  reports "". Both shapes reach `buildEnqueueError`, so both are exercised. */
+function withFinalUrl(r: Response, url: string): Response {
+  Object.defineProperty(r, "url", { value: url, configurable: true });
+  return r;
+}
+
 async function enqueueAgainst(body: RejectionBody): Promise<string> {
   comfyuiFetch.mockResolvedValueOnce(res(400, body));
   const err = await enqueuePrompt({ "5": { class_type: "LoadImage", inputs: {} } }).catch(
@@ -305,5 +312,46 @@ describe("#2673: a loader input naming a file the server does not have", () => {
   it("routes its interpolated fields through the #1191 scrub", async () => {
     const message = await enqueueAgainst(MISSING_ATTACHMENT);
     expect(message).toContain("LoadImage.image (node 5)");
+  });
+
+  // Gate finding on the first round of this PR. `fetch` FOLLOWS redirects, so a
+  // 307/308 in front of ComfyUI moves the POST to another origin — and the input
+  // directory that was searched belongs to whoever ANSWERED. Naming the address
+  // we posted to would point the reader at the proxy and compare the panel
+  // against the wrong server, on the one message written to stop that guessing.
+  describe("names the server that ANSWERED, not the one that was addressed", () => {
+    it("uses the response's final URL when a redirect moved the request", async () => {
+      comfyuiFetch.mockResolvedValueOnce(
+        withFinalUrl(res(400, MISSING_ATTACHMENT), "http://gpu-box.lan:8188/prompt"),
+      );
+      const err = await enqueuePrompt({ "5": { class_type: "LoadImage", inputs: {} } }).catch(
+        (e: unknown) => e,
+      );
+      const message = (err as Error).message;
+      expect(message).toContain("http://gpu-box.lan:8188");
+      expect(message).not.toContain("http://127.0.0.1:8188");
+    });
+
+    it("compares the PANEL against the responder, so a same-looking panel is not called a match", async () => {
+      // The panel is on the address we posted to — but a redirect sent the prompt
+      // somewhere else, so the split is REAL and must not read as ruled out.
+      setConnectedPanelOrigins(() => ["http://127.0.0.1:8188"]);
+      comfyuiFetch.mockResolvedValueOnce(
+        withFinalUrl(res(400, MISSING_ATTACHMENT), "http://gpu-box.lan:8188/prompt"),
+      );
+      const err = await enqueuePrompt({ "5": { class_type: "LoadImage", inputs: {} } }).catch(
+        (e: unknown) => e,
+      );
+      const message = (err as Error).message;
+      expect(message).toContain("a DIFFERENT ComfyUI from this target");
+      expect(message).not.toContain("RULED OUT");
+    });
+
+    it("falls back to the requested address when the response carries no url", async () => {
+      // A constructed Response has url === "". Degrading to "" would name no
+      // server at all — worse than naming the address we know we asked.
+      const message = await enqueueAgainst(MISSING_ATTACHMENT);
+      expect(message).toContain("http://127.0.0.1:8188");
+    });
   });
 });
