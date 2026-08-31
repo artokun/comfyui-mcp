@@ -212,9 +212,12 @@ function emitsEditReferenceLatents(node: WorkflowNode | undefined): boolean {
  *
  * Only CONDITIONING-typed slots are followed, decided from real `/object_info` types
  * rather than slot names — so a `ControlNetApply`'s `image` input is not mistaken for
- * part of the conditioning chain. A node absent from object_info ends the walk on that
- * branch: an uninstalled class has no known slot types, and guessing them would be the
- * only way to produce a false positive here.
+ * part of the conditioning chain. Two shapes therefore end the walk: a node absent from
+ * object_info (an uninstalled class has no known slot types), and a wildcard `*` slot
+ * such as a Reroute's, which could be carrying anything. Both cost a warning that could
+ * have been raised and neither can raise a false one, which is the same direction
+ * `producesEmptyLatent` takes. It is a real trade, not an oversight, and
+ * workflow-health.test.ts asserts both halves of it.
  */
 function findEditReferenceEncoder(
   workflow: WorkflowJSON,

@@ -125,7 +125,12 @@ For non-edit models (txt2img, 2512):
 
 ## Resolutions
 
-Qwen operates at ~1.6 megapixels natively:
+> **This table is for Qwen-Image TEXT-TO-IMAGE. Do not pick an edit graph's output
+> size from it.** An edit graph's geometry is decided by the SOURCE image, not by you
+> — see "Resolution on an edit graph" below. Choosing 1104x1472 here for an edit was
+> #2681.
+
+Qwen-Image operates at ~1.6 megapixels natively:
 
 | Aspect | Resolution | Use Case |
 |--------|-----------|----------|
@@ -137,6 +142,36 @@ Qwen operates at ~1.6 megapixels natively:
 | Video-ready | 832x480 | For WAN 2.2 FLF pipeline |
 
 **For video pipelines**: Use 832x480 to match WAN 2.2's default resolution.
+
+### Resolution on an edit graph
+
+`TextEncodeQwenImageEdit` and `TextEncodeQwenImageEditPlus` do not take a size. They
+scale every reference image to a hard-coded `int(1024 * 1024)` px — **~1.05 MP, at the
+source's own aspect ratio** — VAE-encode it, and hand it to the model as a reference
+latent (`comfy_extras/nodes_qwen.py`).
+
+The model then lays the reference tokens and the tokens it is generating on **one
+shared, centred coordinate grid** (`comfy/ldm/qwen_image/model.py`, `process_img`), so
+reference position (i, j) and output position (i, j) mean the same place only when the
+two grids are the same size. That is the whole reason the official templates run the
+one image through `FluxKontextImageScale` and then feed the sampler a `VAEEncode` of
+*that* scaled image: canvas geometry and reference geometry come out identical by
+construction. Every `PREFERRED_KONTEXT_RESOLUTIONS` entry is ~1.05 MP for the same
+reason.
+
+So on an edit graph you do not choose a resolution — you inherit one:
+
+- **Right:** `LoadImage` -> `FluxKontextImageScale` -> (`TextEncodeQwenImageEditPlus`
+  *and* `VAEEncode`) -> KSampler `latent_image`.
+- **Wrong:** an `EmptyLatentImage` at a size from the table above. Its dimensions are
+  literals; the reference's are computed from the source when the graph runs. At
+  1104x1472 (1.63 MP) against a 1.05 MP reference the grids are 1.24x apart linearly,
+  the model cannot copy detail across them, and it re-synthesises the subject instead —
+  materials come back looking plastic/CGI and printed detail comes back as a generic
+  shape (#2681). Nothing errors; the image just is not the edit you asked for.
+
+`create_workflow (action:"validate")` now flags this pairing as
+`edit_reference_empty_latent`.
 
 ## Prompt Patterns
 
@@ -226,13 +261,33 @@ If `qweneditutils` custom node is unavailable, use the built-in `TextEncodeQwenI
 
 Replace node 6 and add node 8. KSampler latent_image connects to `["8", 0]` instead of `["6", 1]`.
 
-**Set `denoise` to 1.0 on this path.** `TextEncodeQwenImageEditPlus` emits CONDITIONING only, so the `EmptyLatentImage` here is genuinely empty and carries no source pixels. A sub-1.0 denoise over it produces a flat texture instead of the edited image (#2678). If you want a sub-1.0 denoise, drop the `EmptyLatentImage` and feed `latent_image` from a `VAEEncode` of the source image instead:
+**Do not leave that `EmptyLatentImage` wired to the sampler.** It is shown above only
+because it is what the Plus encoder's own signature leaves you needing, and it is wrong
+at *every* denoise:
+
+- Below 1.0 it renders a flat, near-uniform field. The encoder emits CONDITIONING only,
+  so the latent is genuinely empty, and a truncated sigma schedule exists to preserve an
+  incoming latent that here has nothing in it (#2678).
+- At 1.0 it renders a plausible image that is not your source. The reference the encoder
+  attached is ~1.05 MP at the source's aspect ratio, the empty latent's size is a
+  literal, and the model aligns the two on one shared grid — so it re-synthesises rather
+  than copies (#2681). See "Resolution on an edit graph".
+
+Feed `latent_image` from a `VAEEncode` of the same image you gave the encoder, scaled
+once up front so both see identical geometry:
 
 ```json
 {
-  "8": { "class_type": "VAEEncode", "inputs": { "pixels": ["5", 0], "vae": ["4", 0] }}
+  "5b": { "class_type": "FluxKontextImageScale", "inputs": { "image": ["5", 0] }},
+  "6":  { "class_type": "TextEncodeQwenImageEditPlus", "inputs": {
+    "clip": ["3", 0], "prompt": "<edit instruction>", "vae": ["4", 0], "image1": ["5b", 0]
+  }},
+  "8":  { "class_type": "VAEEncode", "inputs": { "pixels": ["5b", 0], "vae": ["4", 0] }}
 }
 ```
+
+KSampler `latent_image` connects to `["8", 0]`. Any denoise is then meaningful: 1.0 for
+a full edit, sub-1.0 to stay closer to the source.
 
 ### Basic Variant (Official ComfyUI Example)
 
@@ -293,9 +348,9 @@ This produces a grid image showing all combinations, useful for finding the best
 ## Tips
 
 1. **Upload source images first** with `upload_image (action:"image")` before building the workflow
-2. **Match output resolution** to the next pipeline step (e.g., 832x480 for WAN FLF)
+2. **Match output resolution** to the next pipeline step (e.g., 832x480 for WAN FLF) — but only on a *generation* graph. On an edit graph the size is the source's; resize the RESULT afterwards instead of sampling at the size you want
 3. **Lightning LoRA + denoise 1.0** works well. The model handles structure preservation through conditioning
-4. For **img2img editing** (denoise < 1.0), use `VAEEncode` on the source image instead of `EmptyLatentImage` — a sub-1.0 denoise over an empty latent decodes to a flat, near-uniform field with no error (#2678). `create_workflow (action:"validate")` now flags this pairing
+4. **An edit graph's `latent_image` always comes from a `VAEEncode` of the source, never from an `EmptyLatentImage`** — at sub-1.0 denoise the empty latent decodes to a flat, near-uniform field (#2678), and at denoise 1.0 it decouples the sampled canvas from the reference and the subject gets re-synthesised (#2681). Neither errors. `create_workflow (action:"validate")` flags both pairings (`partial_denoise_empty_latent`, `edit_reference_empty_latent`)
 5. The **lrzjason Pro variant** is best for multi-image compositions where you need fine control over which images get VL-resized
 6. **Use `get_workflow (action:"analyze")`** to understand any saved Qwen edit workflow before modifying or executing it. It returns a structured summary, not raw JSON. Only use `get_workflow` when you need the actual JSON for `enqueue_workflow` or `create_workflow (action:"modify")`.
 

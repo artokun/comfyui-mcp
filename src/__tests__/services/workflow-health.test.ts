@@ -74,6 +74,12 @@ const OBJECT_INFO = {
     output: ["CONDITIONING"],
     output_node: false,
   },
+  // A reroute: its input slot is the wildcard type, not CONDITIONING.
+  Reroute: {
+    input: { required: { "": ["*"] } },
+    output: ["*"],
+    output_node: false,
+  },
   ConditioningZeroOut: {
     input: { required: { conditioning: ["CONDITIONING"] } },
     output: ["CONDITIONING"],
@@ -775,6 +781,22 @@ describe("analyzeGraphHealth — empty latent under an image-edit reference (#26
         denoise: 1.0,
       },
     };
+    const h = analyzeGraphHealth(g, OBJECT_INFO);
+    expect(h.findings.filter((x) => x.kind === "edit_reference_empty_latent")).toHaveLength(0);
+  });
+
+  it("ends the walk at a wildcard-typed reroute rather than guessing what it carries", () => {
+    // Only CONDITIONING-typed slots are followed. A `*` reroute could be carrying
+    // anything, so the walk stops and the finding is not raised -- the same direction
+    // producesEmptyLatent takes for an unknown class. This costs a warning we could
+    // have raised on a rerouted graph and can never cost a false one; the test exists
+    // so that trade is asserted rather than accidental.
+    const g = editGraph();
+    (g as unknown as Record<string, unknown>)["70"] = {
+      class_type: "Reroute",
+      inputs: { "": ["6", 0] },
+    };
+    (g["9"] as unknown as { inputs: Record<string, unknown> }).inputs.positive = ["70", 0];
     const h = analyzeGraphHealth(g, OBJECT_INFO);
     expect(h.findings.filter((x) => x.kind === "edit_reference_empty_latent")).toHaveLength(0);
   });
