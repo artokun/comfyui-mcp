@@ -66,6 +66,27 @@ const OBJECT_INFO = {
     output: ["LATENT"],
     output_node: false,
   },
+  TextEncodeQwenImageEdit: {
+    input: {
+      required: { clip: ["CLIP"], prompt: ["STRING"] },
+      optional: { vae: ["VAE"], image: ["IMAGE"] },
+    },
+    output: ["CONDITIONING"],
+    output_node: false,
+  },
+  ConditioningZeroOut: {
+    input: { required: { conditioning: ["CONDITIONING"] } },
+    output: ["CONDITIONING"],
+    output_node: false,
+  },
+  // The generic edit-reference node. Deliberately NOT in QWEN_EDIT_ENCODERS -- its
+  // reference geometry is whatever latent it is handed, and ComfyUI's own
+  // Qwen-Image-Layered templates pair it with an empty layered latent on purpose.
+  ReferenceLatent: {
+    input: { required: { conditioning: ["CONDITIONING"] }, optional: { latent: ["LATENT"] } },
+    output: ["CONDITIONING"],
+    output_node: false,
+  },
   TextEncodeQwenImageEditPlus: {
     input: {
       required: { clip: ["CLIP"], prompt: ["STRING"] },
@@ -574,5 +595,199 @@ describe("analyzeGraphHealth", () => {
     const f = h.findings.filter((x) => x.kind === "partial_denoise_empty_latent");
     expect(f).toHaveLength(1);
     expect(f[0].node_type).toBe("SomeCustomKSampler");
+  });
+});
+
+describe("analyzeGraphHealth — empty latent under an image-edit reference (#2681)", () => {
+  // The encoder's `vae` and `image1` are both wired: ComfyUI only appends
+  // reference_latents when BOTH are present, so this conditioning really does carry
+  // a reference and the sampled canvas really is expected to match its geometry.
+  const editGraph = (
+    over: {
+      width?: number;
+      height?: number;
+      denoise?: number;
+      steps?: number;
+      latentFrom?: string;
+      encoderInputs?: Record<string, unknown>;
+    } = {},
+  ) =>
+    wf({
+      "4": { class_type: "CheckpointLoaderSimple", inputs: { ckpt_name: "sd_xl_base.safetensors" } },
+      "5": { class_type: "LoadImage", inputs: { image: "8058752590630.JPG" } },
+      "6": {
+        class_type: "TextEncodeQwenImageEditPlus",
+        inputs: over.encoderInputs ?? {
+          clip: ["4", 1],
+          prompt: "remove the hanger, steamed symmetric e-commerce still life",
+          vae: ["4", 2],
+          image1: ["5", 0],
+        },
+      },
+      "7": { class_type: "ConditioningZeroOut", inputs: { conditioning: ["6", 0] } },
+      "8": {
+        class_type: "EmptyLatentImage",
+        inputs: { width: over.width ?? 1104, height: over.height ?? 1472, batch_size: 1 },
+      },
+      "80": { class_type: "VAEEncode", inputs: { pixels: ["5", 0], vae: ["4", 2] } },
+      "9": {
+        class_type: "KSampler",
+        inputs: {
+          model: ["4", 0],
+          positive: ["6", 0],
+          negative: ["7", 0],
+          latent_image: [over.latentFrom ?? "8", 0],
+          seed: 42,
+          steps: over.steps ?? 50,
+          cfg: 4,
+          sampler_name: "euler",
+          scheduler: "simple",
+          denoise: over.denoise ?? 1.0,
+        },
+      },
+      "10": { class_type: "VAEDecode", inputs: { samples: ["9", 0], vae: ["4", 2] } },
+      "11": { class_type: "SaveImage", inputs: { images: ["10", 0] } },
+    });
+
+  it("reproduces the #2681 graph: Plus encoder + EmptyLatentImage 1104x1472 at denoise 1.0", () => {
+    const h = analyzeGraphHealth(editGraph(), OBJECT_INFO);
+    const hits = h.findings.filter((x) => x.kind === "edit_reference_empty_latent");
+    expect(hits).toHaveLength(1);
+    expect(hits[0].node_ids).toEqual(["9", "8", "6"]);
+    // The arithmetic, not a vague adjective: 1104*1472 = 1625088 px against the
+    // encoder's hard-coded int(1024*1024) = 1048576 px reference budget.
+    expect(hits[0].detail).toContain("1104x1472 = 1625088 px is 1.55x the 1048576 px budget");
+    expect(hits[0].detail).toContain("1.24x linear");
+    // Rule 6 is silent here -- denoise is 1.0, so the schedule is never truncated.
+    expect(h.findings.filter((x) => x.kind === "partial_denoise_empty_latent")).toHaveLength(0);
+  });
+
+  it("stays silent when the encoder has no VAE — it emits no reference latents at all", () => {
+    // ComfyUI: `if vae is not None: ref_latents.append(vae.encode(...))`. Without a
+    // VAE the node is a plain VL-conditioned text encoder and an empty latent is
+    // ordinary txt2img. This is also the shape of the #2678 regression test above.
+    const h = analyzeGraphHealth(
+      editGraph({
+        encoderInputs: { clip: ["4", 1], prompt: "change the garment", image1: ["5", 0] },
+      }),
+      OBJECT_INFO,
+    );
+    expect(h.findings.filter((x) => x.kind === "edit_reference_empty_latent")).toHaveLength(0);
+  });
+
+  it("stays silent when no image is connected to the encoder", () => {
+    const h = analyzeGraphHealth(
+      editGraph({ encoderInputs: { clip: ["4", 1], prompt: "a cat", vae: ["4", 2] } }),
+      OBJECT_INFO,
+    );
+    expect(h.findings.filter((x) => x.kind === "edit_reference_empty_latent")).toHaveLength(0);
+  });
+
+  it("stays silent when latent_image comes from a VAEEncode — the official edit shape", () => {
+    const h = analyzeGraphHealth(editGraph({ latentFrom: "80" }), OBJECT_INFO);
+    expect(h.findings.filter((x) => x.kind === "edit_reference_empty_latent")).toHaveLength(0);
+  });
+
+  it("follows the CONDITIONING chain through a pass-through node", () => {
+    // positive <- ConditioningZeroOut <- the encoder. The walk must reach it.
+    const g = editGraph();
+    (g["9"] as unknown as { inputs: Record<string, unknown> }).inputs.positive = ["7", 0];
+    const h = analyzeGraphHealth(g, OBJECT_INFO);
+    expect(h.findings.filter((x) => x.kind === "edit_reference_empty_latent")).toHaveLength(1);
+  });
+
+  it("does NOT fire on a generic ReferenceLatent — the Qwen-Image-Layered shape", () => {
+    // Both bundled layered templates reach reference_latents through a
+    // `ReferenceLatent` fed by a `CLIPTextEncode`, over an empty layered latent, on
+    // purpose. Keying the rule on ReferenceLatent scores 2 false positives on the
+    // 533-template corpus; keying it on the Qwen edit encoders scores 0.
+    const h = analyzeGraphHealth(
+      wf({
+        "4": { class_type: "CheckpointLoaderSimple", inputs: { ckpt_name: "sd_xl_base.safetensors" } },
+        "5": { class_type: "LoadImage", inputs: { image: "ref.png" } },
+        "6": { class_type: "CLIPTextEncode", inputs: { clip: ["4", 1], text: "layers" } },
+        "60": { class_type: "VAEEncode", inputs: { pixels: ["5", 0], vae: ["4", 2] } },
+        "61": { class_type: "ReferenceLatent", inputs: { conditioning: ["6", 0], latent: ["60", 0] } },
+        "8": { class_type: "EmptyLatentImage", inputs: { width: 640, height: 640, batch_size: 1 } },
+        "9": {
+          class_type: "KSampler",
+          inputs: {
+            model: ["4", 0],
+            positive: ["61", 0],
+            negative: ["6", 0],
+            latent_image: ["8", 0],
+            steps: 20,
+            denoise: 1.0,
+          },
+        },
+        "10": { class_type: "VAEDecode", inputs: { samples: ["9", 0], vae: ["4", 2] } },
+        "11": { class_type: "SaveImage", inputs: { images: ["10", 0] } },
+      }),
+      OBJECT_INFO,
+    );
+    expect(h.findings.filter((x) => x.kind === "edit_reference_empty_latent")).toHaveLength(0);
+  });
+
+  it("says equal-area-is-not-equal-shape rather than claiming a mismatch it cannot prove", () => {
+    const h = analyzeGraphHealth(editGraph({ width: 1024, height: 1024 }), OBJECT_INFO);
+    const hits = h.findings.filter((x) => x.kind === "edit_reference_empty_latent");
+    expect(hits).toHaveLength(1);
+    expect(hits[0].detail).toContain("equal area is not equal shape");
+    expect(hits[0].detail).not.toContain("provably differ");
+  });
+
+  it("omits the geometry clause when the empty latent's dimensions are not literals", () => {
+    const g = editGraph();
+    (g["8"] as unknown as { inputs: Record<string, unknown> }).inputs.width = ["12", 0];
+    (g as unknown as Record<string, unknown>)["12"] = {
+      class_type: "PrimitiveInt",
+      inputs: { value: 1104 },
+    };
+    const h = analyzeGraphHealth(g, OBJECT_INFO);
+    const hits = h.findings.filter((x) => x.kind === "edit_reference_empty_latent");
+    expect(hits).toHaveLength(1);
+    expect(hits[0].detail).not.toContain("px budget");
+    expect(hits[0].detail).not.toContain("equal area");
+  });
+
+  it("scopes the encoder to the sampler's OWN conditioning chain", () => {
+    // Two samplers in one graph: node 9 is a correct edit (VAEEncode latent), node 19
+    // is a plain txt2img whose positive is a CLIPTextEncode. The edit encoder is
+    // present in the graph but is NOT upstream of 19, so 19 must stay silent -- a
+    // per-graph "is there an edit encoder anywhere?" test would flag it.
+    const g = editGraph({ latentFrom: "80" });
+    (g as unknown as Record<string, unknown>)["18"] = {
+      class_type: "CLIPTextEncode",
+      inputs: { clip: ["4", 1], text: "a landscape" },
+    };
+    (g as unknown as Record<string, unknown>)["180"] = {
+      class_type: "EmptyLatentImage",
+      inputs: { width: 1104, height: 1472, batch_size: 1 },
+    };
+    (g as unknown as Record<string, unknown>)["19"] = {
+      class_type: "KSampler",
+      inputs: {
+        model: ["4", 0],
+        positive: ["18", 0],
+        negative: ["18", 0],
+        latent_image: ["180", 0],
+        steps: 20,
+        denoise: 1.0,
+      },
+    };
+    const h = analyzeGraphHealth(g, OBJECT_INFO);
+    expect(h.findings.filter((x) => x.kind === "edit_reference_empty_latent")).toHaveLength(0);
+  });
+
+  it("replaces the partial-denoise finding rather than double-reporting the same sampler", () => {
+    // At denoise 0.65 BOTH conditions hold. Rule 6 would add "to generate from
+    // scratch, set denoise to 1.0" -- which for an edit graph is how you land on
+    // #2681. One finding, and it carries rule 6's arithmetic so nothing is lost.
+    const h = analyzeGraphHealth(editGraph({ denoise: 0.65, steps: 50 }), OBJECT_INFO);
+    expect(h.findings.filter((x) => x.kind === "partial_denoise_empty_latent")).toHaveLength(0);
+    const hits = h.findings.filter((x) => x.kind === "edit_reference_empty_latent");
+    expect(hits).toHaveLength(1);
+    expect(hits[0].detail).toContain("ALSO runs denoise=0.65");
+    expect(hits[0].detail).toContain("#2678");
   });
 });

@@ -146,7 +146,7 @@ export function registerWorkflowComposeTools(server: McpServer): void {
         .optional()
         .default(true)
         .describe(
-          'action:"validate" — Include graph-health heuristics (disconnected nodes, duplicate model loads, orphaned branches, muted/bypassed nodes, a sampler running denoise below 1.0 on an empty latent) as info/warning issues plus a structured health section. Never affects `valid`.',
+          'action:"validate" — Include graph-health heuristics (disconnected nodes, duplicate model loads, orphaned branches, muted/bypassed nodes, a sampler running denoise below 1.0 on an empty latent, an image-edit graph whose sampled canvas is not derived from the reference) as info/warning issues plus a structured health section. Never affects `valid`.',
         ),
       node_type: z
         .string()

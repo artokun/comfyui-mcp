@@ -1,4 +1,4 @@
-import type { WorkflowJSON, ObjectInfo } from "../comfyui/types.js";
+import type { WorkflowJSON, WorkflowNode, ObjectInfo } from "../comfyui/types.js";
 
 /**
  * Graph-health heuristics for ComfyUI workflows.
@@ -8,7 +8,8 @@ import type { WorkflowJSON, ObjectInfo } from "../comfyui/types.js";
  * duplicate model loads wasting VRAM, sampler branches whose outputs never reach
  * a save node, muted/bypassed nodes silently dropping connections, and samplers set
  * to a partial denoise over an empty latent (a graph that runs clean and returns a
- * flat field).
+ * flat field), and image-edit graphs whose sampled canvas is not derived from the
+ * reference image at all.
  *
  * Prior art: filliptm/ComfyUI_FL-MCP `workflow_overview` reports node-type
  * histograms, disconnected nodes, and missing required inputs — but client-side
@@ -28,7 +29,8 @@ export interface HealthFinding {
     | "orphaned_branch"
     | "muted_or_bypassed"
     | "no_output_reachable"
-    | "partial_denoise_empty_latent";
+    | "partial_denoise_empty_latent"
+    | "edit_reference_empty_latent";
   severity: "warning" | "info";
   node_ids: string[];
   node_type?: string;
@@ -134,6 +136,115 @@ function producesEmptyLatent(
     return false; // IMAGE / LATENT / … — this latent may be derived
   }
   return true;
+}
+
+// --- Image-edit reference geometry ---------------------------------------
+//
+// ComfyUI's Qwen edit text encoders carry the source image on CONDITIONING as
+// `reference_latents`, at a HARD-CODED budget (comfy_extras/nodes_qwen.py, both
+// TextEncodeQwenImageEdit and …Plus):
+//
+//   total = int(1024 * 1024)
+//   scale_by = math.sqrt(total / (w * h))
+//   width = round(w * scale_by / 8.0) * 8   # height likewise
+//   ref_latents.append(vae.encode(...))
+//
+// so the reference is always ~1.05 MP at the SOURCE image's aspect ratio — a
+// geometry computed at run time from pixels a static check cannot see.
+//
+// The transformer then places the reference tokens and the sampled tokens on the
+// SAME centred RoPE grid (comfy/ldm/qwen_image/model.py `process_img`, called once
+// for `x` and once per ref): both get
+// `linspace(offset, len - 1 + offset) - (len // 2)` on the h and w axes, differing
+// only in the `index` (t) channel. Reference token (i, j) and output token (i, j)
+// therefore name the same coordinate ONLY when the two grids have the same shape.
+//
+// An `Empty*Latent*` node's dimensions are literals, so they can agree with a
+// run-time-derived reference only by coincidence. #2681 sampled a 1104x1472 canvas
+// (1.63 MP) against that 1.05 MP reference — 1.24x linear. Unlike #2678 this does
+// not depend on denoise: at denoise 1.0 the graph renders a plausible image, it just
+// re-synthesises the subject instead of copying it.
+//
+// Measured on the 533 workflow templates ComfyUI bundles
+// (comfyui_workflow_templates_json): 33 samplers take `positive` from a node that
+// sets reference_latents, 31 of them take `latent_image` from a `VAEEncode`, and NONE
+// takes it from an empty latent. The remaining 2 are the Qwen-Image-Layered templates,
+// whose `EmptyQwenImageLayeredLatentImage` genuinely is a different tensor rank from
+// its reference — they reach reference_latents through a generic `ReferenceLatent`
+// fed by a `CLIPTextEncode`, never through a Qwen edit encoder. That measurement is
+// why this rule keys on the two Qwen edit ENCODERS and not on `ReferenceLatent`:
+// including `ReferenceLatent` scores 2 false positives on the same corpus, and its
+// reference geometry is whatever latent it is handed, so the equal-shape invariant
+// is not universal for it.
+const QWEN_EDIT_ENCODERS = new Set(["TextEncodeQwenImageEdit", "TextEncodeQwenImageEditPlus"]);
+
+// `total = int(1024 * 1024)` in both encoders' execute().
+const QWEN_EDIT_REFERENCE_PIXELS = 1024 * 1024;
+
+// `image` on TextEncodeQwenImageEdit, `image1`..`image3` on …Plus.
+const EDIT_IMAGE_SLOT_RE = /^image[0-9]*$/;
+
+// Bound on the conditioning walk. Chains are a handful of nodes long in practice;
+// this only stops a pathological graph from costing real time.
+const CONDITIONING_WALK_LIMIT = 64;
+
+/**
+ * Does this node actually append `reference_latents`?
+ *
+ * Both guards transcribe the encoder's own control flow, and both are
+ * false-positive guards rather than defensive noise:
+ *   - `if vae is not None` — with no VAE the node never calls `vae.encode` and
+ *     appends nothing, so it is a plain (if VL-conditioned) text encoder and an
+ *     empty latent under it is ordinary txt2img.
+ *   - `if image is not None` — same, with no image there is no reference at all.
+ */
+function emitsEditReferenceLatents(node: WorkflowNode | undefined): boolean {
+  if (!node || !QWEN_EDIT_ENCODERS.has(node.class_type)) return false;
+  if (!isConnection(node.inputs?.vae)) return false;
+  return Object.entries(node.inputs ?? {}).some(
+    ([slot, value]) => EDIT_IMAGE_SLOT_RE.test(slot) && isConnection(value),
+  );
+}
+
+/**
+ * Walk a sampler's `positive` input upstream along CONDITIONING links, looking for
+ * an edit encoder that really emits reference latents. Returns its node id, or null.
+ *
+ * Only CONDITIONING-typed slots are followed, decided from real `/object_info` types
+ * rather than slot names — so a `ControlNetApply`'s `image` input is not mistaken for
+ * part of the conditioning chain. A node absent from object_info ends the walk on that
+ * branch: an uninstalled class has no known slot types, and guessing them would be the
+ * only way to produce a false positive here.
+ */
+function findEditReferenceEncoder(
+  workflow: WorkflowJSON,
+  sampler: WorkflowNode,
+  objectInfo: ObjectInfo,
+): string | null {
+  const start = sampler.inputs?.positive;
+  if (!isConnection(start)) return null;
+
+  const seen = new Set<string>();
+  const queue: string[] = [start[0]];
+  while (queue.length > 0 && seen.size < CONDITIONING_WALK_LIMIT) {
+    const id = queue.shift() as string;
+    if (seen.has(id)) continue;
+    seen.add(id);
+
+    const node = workflow[id];
+    if (!node) continue;
+    if (emitsEditReferenceLatents(node)) return id;
+
+    const def = objectInfo[node.class_type];
+    if (!def) continue;
+    const slots = { ...(def.input?.required ?? {}), ...(def.input?.optional ?? {}) };
+    for (const [slot, value] of Object.entries(node.inputs ?? {})) {
+      if (!isConnection(value)) continue;
+      if (slots[slot]?.[0] !== "CONDITIONING") continue;
+      queue.push(value[0]);
+    }
+  }
+  return null;
 }
 
 // Hardcoded output classes, mirroring workflow-validator.ts step 4.
@@ -391,6 +502,22 @@ export function analyzeGraphHealth(
     }
   }
 
+  // --- Empty latent under an image-edit reference (shared by rules 6 and 7) --
+  // Computed before rule 6 so that rule 6 can stand down where rule 7 speaks: both
+  // findings would name the same sampler and prescribe the same fix, but rule 6 also
+  // offers "to generate from scratch, set denoise to 1.0", which for an edit graph is
+  // the wrong half of the advice — #2681 is exactly that graph at denoise 1.0.
+  const editReferenceSamplers = new Map<string, { encoderId: string; emptyId: string }>();
+  for (const id of nodeIds) {
+    const node = workflow[id];
+    const latentInput = node.inputs?.latent_image;
+    if (!isConnection(latentInput)) continue;
+    if (!producesEmptyLatent(workflow[latentInput[0]], objectInfo)) continue;
+    const encoderId = findEditReferenceEncoder(workflow, node, objectInfo);
+    if (encoderId === null) continue;
+    editReferenceSamplers.set(id, { encoderId, emptyId: latentInput[0] });
+  }
+
   // --- 6. Partial denoise fed by an empty latent (warning) -----------------
   // A denoise low enough to truncate the schedule exists to PRESERVE part of the
   // incoming latent. If that latent is generated empty there is nothing to preserve:
@@ -423,6 +550,7 @@ export function analyzeGraphHealth(
   //     connection whose runtime value cannot be known statically.
   //   - The schedule test is ComfyUI's own arithmetic, not a rounded threshold.
   for (const id of nodeIds) {
+    if (editReferenceSamplers.has(id)) continue; // rule 7 says it, and says more
     const node = workflow[id];
     const denoise = node.inputs?.denoise;
     if (typeof denoise !== "number" || !Number.isFinite(denoise)) continue;
@@ -457,6 +585,70 @@ export function analyzeGraphHealth(
         `error; on flow-matching models (Qwen, Flux, SD3, WAN) the output collapses to a flat, ` +
         `near-uniform field. To edit an existing image, feed latent_image from an encode of it ` +
         `(VAEEncode; VAEEncodeAudio for audio). To generate from scratch, set denoise to 1.0.`,
+    });
+  }
+
+  // --- 7. Empty latent under an image-edit reference (warning) -------------
+  // See QWEN_EDIT_ENCODERS above for the mechanism and the corpus measurement. In
+  // short: the encoder's reference latent is built from the SOURCE at run time and
+  // the transformer aligns it with the sampled latent on a shared centred RoPE grid,
+  // so a canvas whose size is a literal cannot be relied on to line up with it.
+  //
+  // Scope matches rule 6's: DIRECT latent connection only, and the encoder must be
+  // reached through CONDITIONING slots typed by real object_info. Unlike rule 6 there
+  // is no denoise condition — this one fires at denoise 1.0, which is the whole point.
+  for (const [id, { encoderId, emptyId }] of editReferenceSamplers) {
+    const node = workflow[id];
+    const emptyNode = workflow[emptyId];
+    const encoderType = workflow[encoderId].class_type;
+
+    const width = emptyNode.inputs?.width;
+    const height = emptyNode.inputs?.height;
+    const area =
+      typeof width === "number" && typeof height === "number" && width > 0 && height > 0
+        ? width * height
+        : null;
+
+    let geometry = "";
+    if (area !== null) {
+      const ratio = area / QWEN_EDIT_REFERENCE_PIXELS;
+      geometry =
+        ratio >= 0.95 && ratio <= 1.05
+          ? ` Its ${width}x${height} canvas does match that budget in AREA, but the reference also keeps the SOURCE image's aspect ratio, which is not knowable until the graph runs — equal area is not equal shape.`
+          : ` Here ${width}x${height} = ${area} px is ${ratio.toFixed(2)}x the ${QWEN_EDIT_REFERENCE_PIXELS} px budget (${Math.sqrt(ratio).toFixed(2)}x linear), so the two grids provably differ.`;
+    }
+
+    // Rule 6 stood down for this node, so say its part here rather than lose it.
+    const denoise = node.inputs?.denoise;
+    const steps = node.inputs?.steps;
+    const alsoTruncated =
+      typeof denoise === "number" &&
+      Number.isFinite(denoise) &&
+      startsBelowSigmaMax(denoise, steps);
+    const truncation = alsoTruncated
+      ? ` This sampler ALSO runs denoise=${denoise} over that empty latent, which truncates the sigma schedule and collapses the output to a flat field (#2678); feeding latent_image from the source fixes both.`
+      : "";
+
+    findings.push({
+      kind: "edit_reference_empty_latent",
+      severity: "warning",
+      node_ids: [id, emptyId, encoderId],
+      node_type: node.class_type,
+      detail:
+        `Node ${id} (${node.class_type}) takes latent_image straight from node ${emptyId} ` +
+        `(${emptyNode.class_type}), which generates an EMPTY latent, while its positive ` +
+        `conditioning comes from node ${encoderId} (${encoderType}) with a VAE and a reference ` +
+        `image connected — so that conditioning carries reference_latents. ComfyUI scales every ` +
+        `such reference to int(1024*1024) px at the SOURCE's aspect ratio and then aligns the ` +
+        `reference tokens with the sampled tokens on one shared, centred RoPE grid, so the model ` +
+        `can only copy detail when the sampled latent has the reference's geometry.${geometry} ` +
+        `Unlike a partial denoise this does not depend on denoise: the graph runs clean at ` +
+        `denoise 1.0 and returns a plausible image, but re-synthesises the subject instead of ` +
+        `preserving it — materials read as plastic/CGI and printed detail comes back as generic ` +
+        `shapes (#2681).${truncation} Feed latent_image from a VAEEncode of the same image you ` +
+        `gave the encoder (ComfyUI's own Qwen edit templates use FluxKontextImageScale -> ` +
+        `VAEEncode). If you deliberately want a canvas unrelated to the reference, this warning ` +
+        `is expected.`,
     });
   }
 
