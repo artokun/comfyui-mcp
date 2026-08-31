@@ -138,3 +138,66 @@ describe("create_workflow action:\"validate\" render — authoritative combo err
     expect(text).toContain("### Graph health");
   });
 });
+
+describe('create_workflow action:"validate" render -- a health WARNING is not "No issues found" (#2678)', () => {
+  // The reported graph validated clean and executed with no error, then rendered a
+  // flat field. If the verdict line still reads "No issues found. The workflow is
+  // ready to execute." above the warning that says so, the finding is shipped dormant:
+  // the caller stops reading at line 3.
+  const withHealthWarning = (severity: "warning" | "info"): ValidationResult =>
+    ({
+      valid: true,
+      summary: `Workflow is valid with ${severity === "warning" ? 1 : 0} warning(s)`,
+      issues: [
+        {
+          severity,
+          node_id: "9",
+          node_type: "KSampler",
+          kind: "partial_denoise_empty_latent",
+          health: true,
+          message: "Node 9 (KSampler) runs denoise=0.65 on a latent taken straight from node 8 (EmptyLatentImage)",
+        },
+      ],
+      health: {
+        summary: "5 nodes, 5 types",
+        findings: [
+          {
+            severity,
+            kind: "partial_denoise_empty_latent",
+            detail:
+              "Node 9 (KSampler) runs denoise=0.65 on a latent taken straight from node 8 (EmptyLatentImage), which emits an EMPTY latent.",
+            node_ids: ["9", "8"],
+            node_type: "KSampler",
+          },
+        ],
+      },
+    }) as never;
+
+  it("does not claim 'No issues found' when a graph-health warning is present", async () => {
+    const text = await run(withHealthWarning("warning"));
+    expect(text).not.toContain("No issues found");
+    expect(text).not.toContain("ready to execute");
+    // It must still be honest that ComfyUI will accept and run the graph...
+    expect(text).toContain("No blocking errors");
+    // ...and point at the section that explains why that is not the same as correct.
+    expect(text).toMatch(/1 graph-health warning/);
+    expect(text).toContain("### Graph health");
+    expect(text).toContain("EmptyLatentImage");
+  });
+
+  it("leaves the plain ready-to-execute wording alone for an INFO-level finding", async () => {
+    const text = await run(withHealthWarning("info"));
+    expect(text).toContain("No issues found. The workflow is ready to execute.");
+    expect(text).toContain("### Graph health");
+  });
+
+  it("still says ready to execute for a genuinely clean graph with no health findings", async () => {
+    const text = await run({
+      valid: true,
+      summary: "Workflow is valid",
+      issues: [],
+      health: { summary: "3 nodes, 3 types", findings: [] } as never,
+    });
+    expect(text).toContain("No issues found. The workflow is ready to execute.");
+  });
+});
