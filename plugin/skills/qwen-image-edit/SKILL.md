@@ -262,16 +262,22 @@ If `qweneditutils` custom node is unavailable, use the built-in `TextEncodeQwenI
 Replace node 6 and add node 8. KSampler latent_image connects to `["8", 0]` instead of `["6", 1]`.
 
 **Do not leave that `EmptyLatentImage` wired to the sampler.** It is shown above only
-because it is what the Plus encoder's own signature leaves you needing, and it is wrong
-at *every* denoise:
+because it is what the Plus encoder's own signature leaves you needing, and it fails in a
+different way on each side of denoise 1.0:
 
-- Below 1.0 it renders a flat, near-uniform field. The encoder emits CONDITIONING only,
-  so the latent is genuinely empty, and a truncated sigma schedule exists to preserve an
-  incoming latent that here has nothing in it (#2678).
-- At 1.0 it renders a plausible image that is not your source. The reference the encoder
-  attached is ~1.05 MP at the source's aspect ratio, the empty latent's size is a
-  literal, and the model aligns the two on one shared grid — so it re-synthesises rather
-  than copies (#2681). See "Resolution on an edit graph".
+- Below 1.0 it renders a flat, near-uniform field, always. The encoder emits CONDITIONING
+  only, so the latent is genuinely empty, and a truncated sigma schedule exists to
+  preserve an incoming latent that here has nothing in it (#2678).
+- At 1.0 it renders a plausible image that is not your source — *unless* its width and
+  height happen to equal the geometry the encoder derived, which is ~1.05 MP at the
+  source's aspect ratio. A 1024x1024 empty latent over an exactly-square source does line
+  up, and is fine. 1104x1472 over that same source does not: the model aligns reference
+  and output on one shared grid, cannot copy across grids that far apart, and
+  re-synthesises instead (#2681). See "Resolution on an edit graph".
+
+The second case is the trap, because it depends on a source you may not have looked at
+and it fails silently. A `VAEEncode` removes the coincidence — it cannot be the wrong
+size, because it is derived from the same pixels the encoder saw.
 
 Feed `latent_image` from a `VAEEncode` of the same image you gave the encoder, scaled
 once up front so both see identical geometry:
@@ -350,7 +356,7 @@ This produces a grid image showing all combinations, useful for finding the best
 1. **Upload source images first** with `upload_image (action:"image")` before building the workflow
 2. **Match output resolution** to the next pipeline step (e.g., 832x480 for WAN FLF) — but only on a *generation* graph. On an edit graph the size is the source's; resize the RESULT afterwards instead of sampling at the size you want
 3. **Lightning LoRA + denoise 1.0** works well. The model handles structure preservation through conditioning
-4. **An edit graph's `latent_image` always comes from a `VAEEncode` of the source, never from an `EmptyLatentImage`** — at sub-1.0 denoise the empty latent decodes to a flat, near-uniform field (#2678), and at denoise 1.0 it decouples the sampled canvas from the reference and the subject gets re-synthesised (#2681). Neither errors. `create_workflow (action:"validate")` flags both pairings (`partial_denoise_empty_latent`, `edit_reference_empty_latent`)
+4. **Take an edit graph's `latent_image` from a `VAEEncode` of the source, not from an `EmptyLatentImage`** — at sub-1.0 denoise the empty latent decodes to a flat, near-uniform field (#2678), and at denoise 1.0 it is right only if its literal size happens to equal the geometry the encoder derived from the source, which is exactly the coincidence a `VAEEncode` removes (#2681). Neither failure errors. `create_workflow (action:"validate")` flags both pairings (`partial_denoise_empty_latent`, `edit_reference_empty_latent`)
 5. The **lrzjason Pro variant** is best for multi-image compositions where you need fine control over which images get VL-resized
 6. **Use `get_workflow (action:"analyze")`** to understand any saved Qwen edit workflow before modifying or executing it. It returns a structured summary, not raw JSON. Only use `get_workflow` when you need the actual JSON for `enqueue_workflow` or `create_workflow (action:"modify")`.
 

@@ -181,7 +181,10 @@ const QWEN_EDIT_ENCODERS = new Set(["TextEncodeQwenImageEdit", "TextEncodeQwenIm
 // `total = int(1024 * 1024)` in both encoders' execute().
 const QWEN_EDIT_REFERENCE_PIXELS = 1024 * 1024;
 
-// `image` on TextEncodeQwenImageEdit, `image1`..`image3` on …Plus.
+// `image` on TextEncodeQwenImageEdit, `image1`..`image3` on …Plus. The name alone is
+// not enough — a `TextEncodeQwenImageEdit` carrying an `image1` key is malformed, and
+// accepting it would classify a node as emitting references over a slot its own class
+// does not have. So the slot must ALSO be declared IMAGE in object_info.
 const EDIT_IMAGE_SLOT_RE = /^image[0-9]*$/;
 
 // Bound on the conditioning walk. Chains are a handful of nodes long in practice;
@@ -198,17 +201,45 @@ const CONDITIONING_WALK_LIMIT = 64;
  *     empty latent under it is ordinary txt2img.
  *   - `if image is not None` — same, with no image there is no reference at all.
  */
-function emitsEditReferenceLatents(node: WorkflowNode | undefined): boolean {
+function emitsEditReferenceLatents(
+  node: WorkflowNode | undefined,
+  objectInfo: ObjectInfo,
+): boolean {
   if (!node || !QWEN_EDIT_ENCODERS.has(node.class_type)) return false;
+
+  // `vae` is the first half of ComfyUI's own condition, transcribed: with nothing wired
+  // there the encoder never calls `vae.encode` and appends nothing.
   if (!isConnection(node.inputs?.vae)) return false;
+
+  // The image slot is the second half, and its TYPE is checked as well as its name: a
+  // key the class does not declare cannot stand in for one it does (a
+  // `TextEncodeQwenImageEdit` carrying `image1` is malformed, not an edit graph). That
+  // one test also settles the unknown-class case without a separate branch — a class
+  // absent from object_info has no declared slots, so nothing is typed IMAGE and the
+  // answer is "decline", the same direction `producesEmptyLatent` takes. Guards that
+  // only restate this were removed after a mutation run showed no test could tell them
+  // apart from their absence.
+  const def = objectInfo[node.class_type];
+  const slots = { ...(def?.input?.required ?? {}), ...(def?.input?.optional ?? {}) };
   return Object.entries(node.inputs ?? {}).some(
-    ([slot, value]) => EDIT_IMAGE_SLOT_RE.test(slot) && isConnection(value),
+    ([slot, value]) =>
+      EDIT_IMAGE_SLOT_RE.test(slot) && isConnection(value) && slots[slot]?.[0] === "IMAGE",
   );
 }
 
 /**
  * Walk a sampler's `positive` input upstream along CONDITIONING links, looking for
  * an edit encoder that really emits reference latents. Returns its node id, or null.
+ *
+ * KNOWN LIMIT (raised in review): the walk assumes a node that passes CONDITIONING
+ * through also passes `reference_latents` through, and a transform that rebuilt the
+ * entry from a fresh dict would break that — rule 7 would report a reference the sampler
+ * never receives, and would suppress rule 6 while doing it. Measured against the
+ * installed ComfyUI: the only conditioning entries built from a fresh `{}` are in
+ * nodes_hunyuan3d.py and nodes_lotus.py, and neither node takes a CONDITIONING input, so
+ * neither can sit mid-chain. Every stock transform (`ConditioningZeroOut`,
+ * `conditioning_set_values`, …) does `t[1].copy()` and preserves the key. A custom node
+ * could still do it; if one ever shows up, this is where to key off it.
  *
  * Only CONDITIONING-typed slots are followed, decided from real `/object_info` types
  * rather than slot names — so a `ControlNetApply`'s `image` input is not mistaken for
@@ -236,7 +267,7 @@ function findEditReferenceEncoder(
 
     const node = workflow[id];
     if (!node) continue;
-    if (emitsEditReferenceLatents(node)) return id;
+    if (emitsEditReferenceLatents(node, objectInfo)) return id;
 
     const def = objectInfo[node.class_type];
     if (!def) continue;
@@ -615,10 +646,15 @@ export function analyzeGraphHealth(
     let geometry = "";
     if (area !== null) {
       const ratio = area / QWEN_EDIT_REFERENCE_PIXELS;
+      // Deliberately NOT phrased as proof. The encoder rounds each reference dimension
+      // to a multiple of 8, so an extreme aspect ratio can move the reference's area a
+      // few percent off the budget; an area gap is strong evidence, not a theorem. The
+      // claim that always holds — a literal cannot track a run-time geometry — is in the
+      // main sentence, and these clauses only add the arithmetic.
       geometry =
         ratio >= 0.95 && ratio <= 1.05
           ? ` Its ${width}x${height} canvas does match that budget in AREA, but the reference also keeps the SOURCE image's aspect ratio, which is not knowable until the graph runs — equal area is not equal shape.`
-          : ` Here ${width}x${height} = ${area} px is ${ratio.toFixed(2)}x the ${QWEN_EDIT_REFERENCE_PIXELS} px budget (${Math.sqrt(ratio).toFixed(2)}x linear), so the two grids provably differ.`;
+          : ` Here ${width}x${height} = ${area} px is ${ratio.toFixed(2)}x that ${QWEN_EDIT_REFERENCE_PIXELS} px budget in area, ${Math.sqrt(ratio).toFixed(2)}x linear.`;
     }
 
     // Rule 6 stood down for this node, so say its part here rather than lose it.
@@ -628,9 +664,15 @@ export function analyzeGraphHealth(
       typeof denoise === "number" &&
       Number.isFinite(denoise) &&
       startsBelowSigmaMax(denoise, steps);
-    const truncation = alsoTruncated
-      ? ` This sampler ALSO runs denoise=${denoise} over that empty latent, which truncates the sigma schedule and collapses the output to a flat field (#2678); feeding latent_image from the source fixes both.`
-      : "";
+    // `startsBelowSigmaMax` is true for two different reasons and they are not the same
+    // sentence: denoise <= 0 gives an EMPTY sigma tensor (zero sampling steps, the latent
+    // is handed straight back), while a positive denoise gives a schedule missing its
+    // leading sigmas. Both end in a flat field over zeros; only the second is truncation.
+    const truncation = !alsoTruncated
+      ? ""
+      : (denoise as number) <= 0
+        ? ` This sampler ALSO runs denoise=${denoise} over that empty latent, which builds an EMPTY sigma schedule — no sampling steps at all, so the empty latent is returned untouched and decodes to a flat field (#2678); feeding latent_image from the source fixes both.`
+        : ` This sampler ALSO runs denoise=${denoise} over that empty latent, which truncates the sigma schedule and collapses the output to a flat field (#2678); feeding latent_image from the source fixes both.`;
 
     findings.push({
       kind: "edit_reference_empty_latent",
@@ -644,7 +686,9 @@ export function analyzeGraphHealth(
         `image connected — so that conditioning carries reference_latents. ComfyUI scales every ` +
         `such reference to int(1024*1024) px at the SOURCE's aspect ratio and then aligns the ` +
         `reference tokens with the sampled tokens on one shared, centred RoPE grid, so the model ` +
-        `can only copy detail when the sampled latent has the reference's geometry.${geometry} ` +
+        `can only copy detail when the sampled latent has the reference's geometry. An ` +
+        `Empty*Latent* node's size is a literal and the reference's is computed from the ` +
+        `source when the graph runs, so the two line up only by coincidence.${geometry} ` +
         `Unlike a partial denoise this does not depend on denoise: the graph runs clean at ` +
         `denoise 1.0 and returns a plausible image, but re-synthesises the subject instead of ` +
         `preserving it — materials read as plastic/CGI and printed detail comes back as generic ` +

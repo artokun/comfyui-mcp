@@ -662,8 +662,13 @@ describe("analyzeGraphHealth — empty latent under an image-edit reference (#26
     expect(hits[0].node_ids).toEqual(["9", "8", "6"]);
     // The arithmetic, not a vague adjective: 1104*1472 = 1625088 px against the
     // encoder's hard-coded int(1024*1024) = 1048576 px reference budget.
-    expect(hits[0].detail).toContain("1104x1472 = 1625088 px is 1.55x the 1048576 px budget");
+    expect(hits[0].detail).toContain("1104x1472 = 1625088 px is 1.55x that 1048576 px budget");
     expect(hits[0].detail).toContain("1.24x linear");
+    // Area is strong evidence, not a theorem -- the encoder rounds each reference
+    // dimension to a multiple of 8, so an extreme aspect ratio can move its area a few
+    // percent. The message states the arithmetic and does not claim proof from it.
+    expect(hits[0].detail).not.toContain("provably");
+    expect(hits[0].detail).toContain("line up only by coincidence");
     // Rule 6 is silent here -- denoise is 1.0, so the schedule is never truncated.
     expect(h.findings.filter((x) => x.kind === "partial_denoise_empty_latent")).toHaveLength(0);
   });
@@ -799,6 +804,53 @@ describe("analyzeGraphHealth — empty latent under an image-edit reference (#26
     (g["9"] as unknown as { inputs: Record<string, unknown> }).inputs.positive = ["70", 0];
     const h = analyzeGraphHealth(g, OBJECT_INFO);
     expect(h.findings.filter((x) => x.kind === "edit_reference_empty_latent")).toHaveLength(0);
+  });
+
+  it("requires an image slot the encoder's own CLASS declares", () => {
+    // TextEncodeQwenImageEdit takes `image`, not `image1`. A node carrying `image1` is
+    // malformed, and matching on the NAME alone would classify it as emitting a
+    // reference over a slot its class does not have.
+    const bad = editGraph();
+    (bad["6"] as unknown as { class_type: string; inputs: Record<string, unknown> }).class_type =
+      "TextEncodeQwenImageEdit";
+    expect(
+      analyzeGraphHealth(bad, OBJECT_INFO).findings.filter(
+        (x) => x.kind === "edit_reference_empty_latent",
+      ),
+    ).toHaveLength(0);
+
+    // Control: the same class with the slot it DOES declare still fires, so the test
+    // above is measuring the slot and not the rename.
+    const good = editGraph();
+    const enc = good["6"] as unknown as { class_type: string; inputs: Record<string, unknown> };
+    enc.class_type = "TextEncodeQwenImageEdit";
+    enc.inputs = { clip: ["4", 1], prompt: "remove the hanger", vae: ["4", 2], image: ["5", 0] };
+    expect(
+      analyzeGraphHealth(good, OBJECT_INFO).findings.filter(
+        (x) => x.kind === "edit_reference_empty_latent",
+      ),
+    ).toHaveLength(1);
+  });
+
+  it("declines when the encoder's class is absent from object_info", () => {
+    // Same direction producesEmptyLatent takes: an uninstalled class has no known slot
+    // types, so whether it emits a reference is unknowable. Costs a warning, never
+    // raises a false one -- and the validator already errors on the unknown class.
+    const withoutEncoder = { ...(OBJECT_INFO as unknown as Record<string, unknown>) };
+    delete withoutEncoder.TextEncodeQwenImageEditPlus;
+    const h = analyzeGraphHealth(editGraph(), withoutEncoder as unknown as ObjectInfo);
+    expect(h.findings.filter((x) => x.kind === "edit_reference_empty_latent")).toHaveLength(0);
+  });
+
+  it("calls denoise 0 an EMPTY schedule, not a truncated one", () => {
+    // startsBelowSigmaMax is true for two different reasons. At denoise <= 0 ComfyUI
+    // builds an empty sigma tensor and runs no sampling steps at all -- the latent comes
+    // back untouched. Saying "truncates the schedule" there would be false.
+    const h = analyzeGraphHealth(editGraph({ denoise: 0, steps: 50 }), OBJECT_INFO);
+    const hits = h.findings.filter((x) => x.kind === "edit_reference_empty_latent");
+    expect(hits).toHaveLength(1);
+    expect(hits[0].detail).toContain("builds an EMPTY sigma schedule");
+    expect(hits[0].detail).not.toContain("truncates the sigma schedule");
   });
 
   it("replaces the partial-denoise finding rather than double-reporting the same sampler", () => {
