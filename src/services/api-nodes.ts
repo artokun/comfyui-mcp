@@ -678,12 +678,31 @@ function describeInputs(
   });
 }
 
-/** Return the input schema for a given API node (from its /object_info entry). */
-export async function getApiNodeSchema(
-  classType: string,
-  deps: ApiNodesDeps = defaultDeps,
-): Promise<ApiNodeSchema> {
-  const objectInfo = await deps.getObjectInfo();
+/**
+ * Project an /object_info entry into the schema shape. No API-node guard — the
+ * auto-added output sink (see OUTPUT_SINKS) is a plain CORE node and needs the
+ * same input description to resolve its own widget defaults.
+ */
+function nodeSchemaFrom(classType: string, def: ComfyUINodeDef): ApiNodeSchema {
+  return {
+    class_type: classType,
+    display_name: def.display_name || classType,
+    category: def.category ?? "",
+    description: def.description ?? "",
+    is_api_node: isApiNode(def),
+    is_output_node: def.output_node === true,
+    inputs: [
+      ...describeInputs(def.input?.required, true),
+      ...describeInputs(def.input?.optional, false),
+    ],
+    hidden_inputs: def.input?.hidden ? Object.keys(def.input.hidden) : [],
+    output: Array.isArray(def.output) ? def.output : [],
+    output_name: Array.isArray(def.output_name) ? def.output_name : [],
+  };
+}
+
+/** Resolve an API node's schema against an already-fetched /object_info. */
+function apiNodeSchemaFrom(objectInfo: ObjectInfo, classType: string): ApiNodeSchema {
   const def = objectInfo[classType];
 
   if (!def) {
@@ -699,21 +718,15 @@ export async function getApiNodeSchema(
     );
   }
 
-  return {
-    class_type: classType,
-    display_name: def.display_name || classType,
-    category: def.category ?? "",
-    description: def.description ?? "",
-    is_api_node: true,
-    is_output_node: def.output_node === true,
-    inputs: [
-      ...describeInputs(def.input?.required, true),
-      ...describeInputs(def.input?.optional, false),
-    ],
-    hidden_inputs: def.input?.hidden ? Object.keys(def.input.hidden) : [],
-    output: Array.isArray(def.output) ? def.output : [],
-    output_name: Array.isArray(def.output_name) ? def.output_name : [],
-  };
+  return nodeSchemaFrom(classType, def);
+}
+
+/** Return the input schema for a given API node (from its /object_info entry). */
+export async function getApiNodeSchema(
+  classType: string,
+  deps: ApiNodesDeps = defaultDeps,
+): Promise<ApiNodeSchema> {
+  return apiNodeSchemaFrom(await deps.getObjectInfo(), classType);
 }
 
 // ── V3 dynamic-combo (dotted widget) serialization ──────────────────────────
@@ -883,6 +896,113 @@ export function buildApiNodeInputs(
   return { inputs, consumed };
 }
 
+// ── Terminal output sinks ───────────────────────────────────────────────────
+//
+// ComfyUI only executes graphs that reach an OUTPUT_NODE; a bare non-output API
+// node fails /prompt validation with "prompt_no_outputs". Most API nodes are NOT
+// output nodes, so `generate` has to terminate the graph itself.
+//
+// #2686: that termination used to be "wire a SaveImage, or give up", which left
+// every non-IMAGE API node un-runnable. Measured by AST-scanning comfy_api_nodes/
+// on ComfyUI 0.33: of 241 non-output API nodes, 173 have no IMAGE output — VIDEO
+// is 112 of them, STRING ~25, AUDIO 10 (the reported ByteDanceSeedAudio), SVG 5,
+// File3D ~16. So dispatch on the node's DECLARED output type instead; that takes
+// the table to 219 of the 241. The remaining 22 return custom handle types
+// (voice selectors, Gemini input files) that no core output node consumes, and
+// keep the explanatory note.
+//
+// The chosen sink must be one the CONNECTED server registers: ComfyUI versions
+// differ on which savers exist (SaveAudioAdvanced is current, SaveAudio/-MP3/
+// -Opus are deprecated-but-still-registered, older builds have neither), and
+// naming a class the server has never heard of turns a "no outputs" 400 into a
+// "node type not found" 400 — no better. Checking /object_info, which we have
+// already fetched to resolve the API node itself, lets an older ComfyUI degrade
+// to the explanatory note instead.
+
+interface OutputSink {
+  /** Core output node that terminates the graph. */
+  class_type: string;
+  /** The sink input the API node's output link is wired into. */
+  link_input: string;
+  /** Seeds for the sink's own widgets, matching its core schema defaults. */
+  defaults?: Record<string, unknown>;
+}
+
+/**
+ * Output type → candidate sinks. BOTH lists are in preference order.
+ *
+ * Types are searched first, media before text, so a node declaring
+ * ("VIDEO", "STRING") saves the video rather than the response text. Within a
+ * type, candidates run current → deprecated → preview-only, so we write to
+ * output/ when we can and only fall back to a temp-dir preview when we can't.
+ */
+const OUTPUT_SINKS: ReadonlyArray<{ type: string; sinks: readonly OutputSink[] }> = [
+  {
+    type: "IMAGE",
+    sinks: [
+      { class_type: "SaveImage", link_input: "images", defaults: { filename_prefix: "ComfyUI" } },
+    ],
+  },
+  {
+    type: "VIDEO",
+    sinks: [
+      { class_type: "SaveVideo", link_input: "video", defaults: { filename_prefix: "video/ComfyUI" } },
+    ],
+  },
+  {
+    type: "AUDIO",
+    sinks: [
+      { class_type: "SaveAudioAdvanced", link_input: "audio", defaults: { filename_prefix: "audio/ComfyUI" } },
+      { class_type: "SaveAudio", link_input: "audio", defaults: { filename_prefix: "audio/ComfyUI" } },
+      { class_type: "PreviewAudio", link_input: "audio" },
+    ],
+  },
+  {
+    type: "SVG",
+    sinks: [
+      { class_type: "SaveSVGNode", link_input: "svg", defaults: { filename_prefix: "svg/ComfyUI" } },
+    ],
+  },
+  // SaveGLB's `mesh` is a MultiType accepting the whole File3D family, so one
+  // sink serves every 3D API node (Hunyuan3D/Tripo/Rodin/Meshy…). These are the
+  // io_type WIRE strings ("FILE_3D_GLB"), not the python class names.
+  ...(["FILE_3D_GLB", "FILE_3D_OBJ", "FILE_3D_FBX", "FILE_3D"] as const).map((type) => ({
+    type,
+    sinks: [
+      { class_type: "SaveGLB", link_input: "mesh", defaults: { filename_prefix: "3d/ComfyUI" } },
+    ],
+  })),
+  // Text last: it is the fallback for nodes that return only a response string,
+  // and for media nodes whose media sink this server does not register.
+  {
+    type: "STRING",
+    sinks: [
+      { class_type: "SaveText", link_input: "text", defaults: { filename_prefix: "ComfyUI" } },
+    ],
+  },
+];
+
+/**
+ * Pick the output node to terminate `schema`'s graph with: the first preferred
+ * output type the node declares that has a candidate sink this server registers.
+ * Returns the sink, its /object_info entry, and the API-node output slot to wire.
+ */
+function pickOutputSink(
+  schema: ApiNodeSchema,
+  objectInfo: ObjectInfo,
+): { sink: OutputSink; def: ComfyUINodeDef; slot: number } | null {
+  const outputs = schema.output.map((o) => String(o).toUpperCase());
+  for (const { type, sinks } of OUTPUT_SINKS) {
+    const slot = outputs.indexOf(type);
+    if (slot < 0) continue;
+    for (const sink of sinks) {
+      const def = objectInfo[sink.class_type];
+      if (def) return { sink, def, slot };
+    }
+  }
+  return null;
+}
+
 export interface GenerateWithApiNodeArgs {
   class_type: string;
   inputs: Record<string, unknown>;
@@ -890,7 +1010,7 @@ export interface GenerateWithApiNodeArgs {
   /**
    * Extra supporting nodes to merge into the enqueued workflow (e.g. a
    * LoadImage feeding the API node's IMAGE link input). The API node itself is
-   * always node "1", and "2" may be used for an auto-added SaveImage — extra
+   * always node "1", and "2" may be used for an auto-added output node — extra
    * node ids must avoid both.
    */
   extra_nodes?: WorkflowJSON;
@@ -919,7 +1039,10 @@ export async function generateWithApiNode(
   args: GenerateWithApiNodeArgs,
   deps: ApiNodesDeps = defaultDeps,
 ): Promise<GenerateWithApiNodeResult> {
-  const schema = await getApiNodeSchema(args.class_type, deps);
+  // One fetch, two readers: the API node's own schema and the output-sink pick
+  // both come out of this /object_info snapshot.
+  const objectInfo = await deps.getObjectInfo();
+  const schema = apiNodeSchemaFrom(objectInfo, args.class_type);
   const notes: string[] = [];
 
   const provided = args.inputs ?? {};
@@ -993,26 +1116,38 @@ export async function generateWithApiNode(
 
   // ComfyUI only executes graphs that reach a terminal OUTPUT_NODE; a bare
   // non-output API node fails validation with "prompt_no_outputs". If the API
-  // node isn't itself an output node, wire its IMAGE output into a SaveImage.
+  // node isn't itself an output node, terminate it with a sink that matches the
+  // type it actually returns (#2686 — this was IMAGE-only).
   if (!schema.is_output_node) {
-    const imageIdx = schema.output.findIndex(
-      (o) => String(o).toUpperCase() === "IMAGE",
-    );
-    if (imageIdx >= 0) {
+    const picked = pickOutputSink(schema, objectInfo);
+    if (picked) {
+      const { sink, def, slot } = picked;
+      // Resolve the sink's OWN widget values from its /object_info entry rather
+      // than hardcoding them: SaveVideo and SaveAudioAdvanced both take a
+      // REQUIRED v3 dynamic combo (`format`), which the server rebuilds from the
+      // dotted `format` + `format.<nested>` keys buildApiNodeInputs emits.
+      // Sending only the link would 400 with required_input_missing instead.
+      const { inputs: sinkInputs } = buildApiNodeInputs(nodeSchemaFrom(sink.class_type, def), {
+        [sink.link_input]: ["1", slot],
+        ...(sink.defaults ?? {}),
+      });
       workflow["2"] = {
-        class_type: "SaveImage",
-        inputs: { images: ["1", imageIdx], filename_prefix: "ComfyUI" },
-        _meta: { title: "Save Image" },
+        class_type: sink.class_type,
+        inputs: sinkInputs,
+        _meta: { title: def.display_name || sink.class_type },
       };
       notes.push(
-        "Added a SaveImage output node — ComfyUI requires a terminal output node " +
-          "for the prompt to execute.",
+        `Added a ${sink.class_type} output node wired to the ${
+          schema.output[slot]
+        } output — ComfyUI requires a terminal output node for the prompt to execute.`,
       );
     } else {
+      const declared = schema.output.length > 0 ? schema.output.join(", ") : "nothing";
       notes.push(
-        `"${args.class_type}" is not an output node and has no IMAGE output, so no ` +
-          "output node was auto-added; the prompt may fail with 'prompt_no_outputs'. " +
-          "Wire a terminal output node yourself if needed.",
+        `"${args.class_type}" is not an output node and returns ${declared}, which this ` +
+          "ComfyUI has no registered output node for, so none was auto-added; the prompt " +
+          "may fail with 'prompt_no_outputs'. Pass a terminal output node via extra_nodes " +
+          "if you need one.",
       );
     }
   }
