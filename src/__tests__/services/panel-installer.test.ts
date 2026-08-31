@@ -45,6 +45,7 @@ import {
   isProvenQuiescentQueue,
   classifyManagerTaskRecord,
   describeManagerTaskVerdict,
+  gitOwnershipRefusalMessage,
   isGitOwnershipRefusal,
   PanelInstallError,
   PANEL_REGISTRY_ID,
@@ -2139,6 +2140,23 @@ describe("runPanelAction #724 git fallback (legacy Manager 3.x no-op)", () => {
         spoofDir,
       ),
     ).toBe(false);
+  });
+
+  it("#2671 r4 the take-ownership remedy names a command the platform HAS", () => {
+    // codex gate r4. This refusal is not Windows-only — on Linux it fires
+    // routinely for a panel dir left root-owned by an install run under sudo —
+    // and `takeown` does not exist there. Naming an unrunnable command is the
+    // same defect the whole message exists to remove.
+    const dir = "/home/me/ComfyUI/custom_nodes/comfyui-agent-panel";
+    const win = gitOwnershipRefusalMessage("C:\\comfy\\panel", "manager no-op", "win32");
+    expect(win).toContain('takeown /f "C:\\comfy\\panel" /r /d y');
+    expect(win).not.toContain("chown");
+
+    const posix = gitOwnershipRefusalMessage(dir, "manager no-op", "linux");
+    expect(posix).toContain(`sudo chown -R "$(id -un)" "${dir}"`);
+    expect(posix).not.toContain("takeown");
+    // The scoped git remedy is platform-independent and must survive on both.
+    for (const m of [win, posix]) expect(m).toContain("--add safe.directory");
   });
 
   it("#2671 r3 what the REMOTE says can never make us diagnose an ownership refusal", () => {

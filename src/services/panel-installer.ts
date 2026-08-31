@@ -596,8 +596,25 @@ export function isGitOwnershipRefusal(message: string, dir?: string): boolean {
  * user. Git's actual advice is not lost: it is reproduced below, and with the
  * directory QUOTED, which git's own line omits (it breaks on a path with a
  * space, and the default ComfyUI layouts have several).
+ *
+ * The take-ownership remedy is PLATFORM-SPECIFIC (codex gate r4). This refusal
+ * is not a Windows-only condition — on Linux it fires routinely for a panel dir
+ * left owned by root because ComfyUI was installed under sudo — and handing
+ * those users `takeown` names a command their system does not have. Naming a
+ * remedy that cannot run is the same defect this whole message replaces.
  */
-export function gitOwnershipRefusalMessage(dir: string, managerReason: string): string {
+export function gitOwnershipRefusalMessage(
+  dir: string,
+  managerReason: string,
+  platform: string = process.platform,
+): string {
+  const takeOwnership =
+    platform === "win32"
+      ? `take ownership back from an ELEVATED terminal:\n` +
+        `       takeown /f "${dir}" /r /d y`
+      : `take ownership back (it is commonly root-owned after an install run ` +
+        `under sudo):\n` +
+        `       sudo chown -R "$(id -un)" "${dir}"`;
   return (
     `Panel update did NOT apply: ${managerReason}, and the git fallback is ` +
     `REFUSED: git will not touch the panel checkout at ${dir} because that ` +
@@ -611,8 +628,7 @@ export function gitOwnershipRefusalMessage(dir: string, managerReason: string): 
     `  1. Trust just this one checkout, then retry the update:\n` +
     `       git config --global --add safe.directory "${dir}"\n` +
     `  2. Or, if the directory should not belong to another account at all, ` +
-    `take ownership back from an ELEVATED terminal:\n` +
-    `       takeown /f "${dir}" /r /d y\n` +
+    `${takeOwnership}\n` +
     `Either way, RESTART ComfyUI afterwards.`
   );
 }
