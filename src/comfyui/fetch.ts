@@ -107,8 +107,11 @@ export function isComfyTransportFailure(err: unknown): boolean {
   return false;
 }
 
-/** Origin (scheme://host:port) of a request target, or undefined if unparsable. */
-function originOf(target: string): string | undefined {
+/** Origin (scheme://host:port) of a request target, or undefined if unparsable.
+ *  Exported because a message that names the target should name the ORIGIN:
+ *  `URL.origin` drops userinfo, path and query, so a COMFYUI_URL carrying a
+ *  credential cannot leak through a diagnostic string. */
+export function originOf(target: string): string | undefined {
   try {
     return new URL(target).origin;
   } catch {
@@ -160,7 +163,26 @@ export type ComfyFetchDiagnosticContext =
   | "get_system_stats_health"
   | "install_comfyui_environment";
 
-function classifyTargetDrift(target: string): { verdict: TargetDriftVerdict; text: string } {
+/**
+ * The comparison's RAW facts alongside its sentence.
+ *
+ * `text` is worded for a request that never CONNECTED. #2673 needs the same
+ * verdict for one the server ANSWERED and refused, where that wording would be
+ * false ("the browser can reach it and this process cannot" — this process
+ * reached it and got a 400). So the origins and the alias parenthetical come
+ * back too, and the second caller writes its own sentence from them rather than
+ * re-deriving the comparison or editing the first caller's prose.
+ */
+interface TargetDriftClassification {
+  verdict: TargetDriftVerdict;
+  text: string;
+  /** Distinct connected-panel origins; empty when the verdict is "unknown". */
+  origins: string[];
+  /** Parenthetical naming both spellings on a "same" verdict; "" otherwise. */
+  alias: string;
+}
+
+function classifyTargetDrift(target: string): TargetDriftClassification {
   const origins = (() => {
     try {
       return panelOrigins();
@@ -168,9 +190,9 @@ function classifyTargetDrift(target: string): { verdict: TargetDriftVerdict; tex
       return []; // a broken source must never replace the real network error
     }
   })();
-  if (origins.length === 0) return { verdict: "unknown", text: "" };
+  if (origins.length === 0) return { verdict: "unknown", text: "", origins: [], alias: "" };
   const want = originOf(target);
-  if (!want) return { verdict: "unknown", text: "" };
+  if (!want) return { verdict: "unknown", text: "", origins: [], alias: "" };
   const distinct = [...new Set(origins)];
   // #1175 — `includes` compares spellings, not servers. A panel on
   // http://127.0.0.1:8188 against a target of http://localhost:8188 is ONE
@@ -188,6 +210,8 @@ function classifyTargetDrift(target: string): { verdict: TargetDriftVerdict; tex
         : ` (spelled ${match} there and ${want} here — the same host, so this is not a mismatch)`;
     return {
       verdict: "same",
+      origins: distinct,
+      alias,
       text:
         ` A connected panel is on this same origin${alias}, so this is NOT a wrong-address problem: ` +
         `the browser can reach ${want} and this process cannot (a firewall, a container ` +
@@ -196,11 +220,46 @@ function classifyTargetDrift(target: string): { verdict: TargetDriftVerdict; tex
   }
   return {
     verdict: "different",
+    origins: distinct,
+    alias: "",
     text:
       ` A connected panel is on ${distinct.join(", ")} — a DIFFERENT address, which is why ` +
       `the panel works while this call does not. Point COMFYUI_URL at that origin if it is the ` +
       `server you meant.`,
   };
+}
+
+/**
+ * The same comparison, for a loader input naming a media file the server does
+ * not have (#2673).
+ *
+ * A chat attachment is uploaded by the BROWSER, to whichever ComfyUI the panel
+ * tab is on; `enqueue_workflow` posts to COMFYUI_URL. When those are two servers
+ * the file lands on one and the render reads the other, and ComfyUI answers
+ * "Invalid image file: <name>" — a rejection that says nothing about the split
+ * and that re-submitting the same workflow can never clear. This is the drift
+ * #952 already detects, reached through a 400 instead of a socket error, and it
+ * is the case the detector was NOT wired into.
+ *
+ * The SAME-origin answer earns its place too: it rules the split out, so the
+ * reader stops hunting for a second server and treats the file as genuinely
+ * absent from the one they have.
+ */
+export function describeMissingInputMediaDrift(target: string): string {
+  const { verdict, origins, alias } = classifyTargetDrift(target);
+  if (verdict === "unknown") return "";
+  if (verdict === "same") {
+    return (
+      ` A connected panel is on this same ComfyUI${alias}, so a panel-vs-headless target split ` +
+      `is RULED OUT — the file is missing from the one server both are using.`
+    );
+  }
+  return (
+    ` A connected panel is on ${origins.join(", ")} — a DIFFERENT ComfyUI from this target. An ` +
+    `image attached in the panel's chat is uploaded by the BROWSER to that server, so it is ` +
+    `genuinely absent here; that is very likely the whole answer. Run the graph on the panel ` +
+    `instead (panel_run), or point COMFYUI_URL at that origin.`
+  );
 }
 
 /**

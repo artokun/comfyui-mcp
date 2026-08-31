@@ -18,10 +18,13 @@ import {
   comfyuiFetch,
   connectedPanelFallbackOriginsNow,
   comfyHttpTimeoutSeconds,
+  describeMissingInputMediaDrift,
   isComfyTransportFailure,
   isTimeoutAbort,
+  originOf,
   raceAbort,
 } from "./fetch.js";
+import { isKnownLoaderInput } from "./loader-asset-inputs.js";
 import {
   choosePanelFallbackOrigin,
   describeDeclinedPanelFallback,
@@ -788,7 +791,7 @@ export async function enqueuePrompt(
     }),
   });
   if (!res.ok) {
-    throw await buildEnqueueError(res);
+    throw await buildEnqueueError(res, url);
   }
   // A bare res.json() here is the worst place in the codebase for one, and the
   // same family as #1149/#1160/#828. This is a MUTATING POST that already
@@ -913,7 +916,98 @@ function safeField(v: unknown): string {
   return scrubbed === null ? "(withheld: contains a configured credential)" : scrubbed;
 }
 
-async function buildEnqueueError(res: Response): Promise<ComfyUIError> {
+/** One node error as ComfyUI reports it. `type` and `extra_info.input_name` are
+ *  machine tokens the server never localises; `message`/`details` are prose and
+ *  are only ever displayed, never matched on. */
+interface ComfyNodeErrorEntry {
+  type?: string;
+  message?: string;
+  details?: string;
+  extra_info?: { input_name?: string };
+}
+
+/**
+ * ComfyUI error `type`s that mean "the value you gave this input is not
+ * something this server has".
+ *
+ * Which one fires is decided by the node, not by us: `validate_inputs` skips the
+ * combo-membership check for any input the node declares in its own
+ * `VALIDATE_INPUTS`, so `LoadImage.image` — which does — can only ever fail as
+ * `custom_validation_failed`, while a loader that leaves the check in place
+ * fails as `value_not_in_list`. Both are the SAME situation for a media
+ * selector, so both are matched — and both are stable machine tokens, unlike the
+ * English `message`/`details` beside them.
+ */
+const MISSING_VALUE_ERROR_TYPES = new Set(["custom_validation_failed", "value_not_in_list"]);
+
+interface MissingInputMedia {
+  nodeId: string;
+  classType: string;
+  inputName: string;
+}
+
+/**
+ * Loader inputs in a rejection that name a media FILE the server does not have
+ * (#2673).
+ *
+ * Restricted to the (class_type, input) allowlist, so a `custom_validation_failed`
+ * raised by some unrelated custom check — a bad width, an out-of-range strength —
+ * never collects an "upload the file" note. An unlisted loader yields nothing,
+ * which is the pre-#2673 silence rather than a wrong claim.
+ */
+function collectMissingInputMedia(
+  nodeErrors: Record<string, { class_type?: string; errors?: ComfyNodeErrorEntry[] }>,
+): MissingInputMedia[] {
+  const found: MissingInputMedia[] = [];
+  for (const [nodeId, info] of Object.entries(nodeErrors)) {
+    const classType = info?.class_type;
+    if (typeof classType !== "string") continue;
+    const errs = Array.isArray(info?.errors) ? info.errors : [];
+    for (const e of errs) {
+      if (typeof e?.type !== "string" || !MISSING_VALUE_ERROR_TYPES.has(e.type)) continue;
+      const inputName = e.extra_info?.input_name;
+      if (typeof inputName !== "string") continue;
+      if (!isKnownLoaderInput(classType, inputName)) continue;
+      found.push({ nodeId, classType, inputName });
+    }
+  }
+  return found;
+}
+
+/**
+ * The recovery note for a rejection of that shape (#2673).
+ *
+ * WHAT IT DOES NOT SAY: why the file is absent. It states the one thing the
+ * input's TYPE guarantees — ComfyUI resolves this value inside its OWN input
+ * directory, so the rejection is about a file on a server and not about the
+ * value's spelling — then hands over the machine-checked panel-vs-target
+ * comparison and the two calls that put a file on THIS target. Naming a cause we
+ * have not observed is what sent #2673's reporter to "attachment registration
+ * race, or filename handling", when nothing between the panel and `/prompt`
+ * rewrites the value at all.
+ *
+ * The last sentence is the one that saves the next render: `enqueue_workflow`
+ * passes loader values through verbatim, so re-submitting reproduces this exactly.
+ */
+function describeMissingInputMedia(missing: MissingInputMedia[], target: string): string {
+  const where = missing
+    .map((m) => `${safeField(m.classType)}.${safeField(m.inputName)} (node ${safeField(m.nodeId)})`)
+    .join(", ");
+  const origin = originOf(target) ?? target;
+  return (
+    `\n\nThat input names a FILE on the server, not a free value: ${where} is resolved inside ` +
+    `the input directory of the ComfyUI at ${origin}, and this rejection means the file is not ` +
+    `there.${describeMissingInputMediaDrift(target)} An image ATTACHED in the panel's chat is ` +
+    `uploaded by the BROWSER to whichever ComfyUI that tab is on — a separate connection from ` +
+    `this headless target (COMFYUI_URL) — so a file can exist on one and not the other. To put ` +
+    `it on THIS target: upload_image (action:"image") for a file on disk, or upload_image ` +
+    `(action:"stage") for an existing ComfyUI output; then re-enqueue with the filename it ` +
+    `returns. Re-submitting this workflow unchanged will fail identically — enqueue_workflow ` +
+    `sends loader values through verbatim and never rewrites them.`
+  );
+}
+
+async function buildEnqueueError(res: Response, target: string): Promise<ComfyUIError> {
   // unknown-ok: "" only routes to the GENERIC status message, which reports the
   // HTTP status and claims nothing about node errors. An unread body and an empty
   // body get the same honest fallback rather than a fabricated validation result.
@@ -934,10 +1028,7 @@ async function buildEnqueueError(res: Response): Promise<ComfyUIError> {
   if (parsed && typeof parsed === "object") {
     const payload = parsed as {
       error?: { message?: string; details?: string };
-      node_errors?: Record<
-        string,
-        { class_type?: string; errors?: Array<{ message?: string; details?: string }> }
-      >;
+      node_errors?: Record<string, { class_type?: string; errors?: ComfyNodeErrorEntry[] }>;
     };
     const nodeErrors = payload.node_errors ?? {};
     const lines: string[] = [];
@@ -962,8 +1053,14 @@ async function buildEnqueueError(res: Response): Promise<ComfyUIError> {
       : `ComfyUI rejected the workflow (${res.status})`;
 
     if (lines.length > 0 || payload.error?.message) {
-      const message =
-        lines.length > 0 ? `${headline}\n${lines.join("\n")}` : headline;
+      const base = lines.length > 0 ? `${headline}\n${lines.join("\n")}` : headline;
+      // #2673 — the reporter's agent got exactly `base` and stopped. It named the
+      // node and quoted ComfyUI's "Invalid image file", and said nothing about
+      // WHICH server was asked, whether a connected panel is on a different one,
+      // or how to put the file where the render will look. Appended, never
+      // substituted: ComfyUI's own diagnosis stays first and whole.
+      const missing = collectMissingInputMedia(nodeErrors);
+      const message = missing.length > 0 ? base + describeMissingInputMedia(missing, target) : base;
       return new WorkflowExecutionError(message, {
         status: res.status,
         error: payload.error,
