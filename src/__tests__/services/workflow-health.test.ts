@@ -41,6 +41,47 @@ const OBJECT_INFO = {
     output: ["UPSCALE_MODEL"],
     output_node: false,
   },
+  EmptyLatentImage: {
+    input: { required: { width: ["INT"], height: ["INT"], batch_size: ["INT"] } },
+    output: ["LATENT"],
+    output_node: false,
+  },
+  EmptySD3LatentImage: {
+    input: { required: { width: ["INT"], height: ["INT"], batch_size: ["INT"] } },
+    output: ["LATENT"],
+    output_node: false,
+  },
+  VAEEncode: {
+    input: { required: { pixels: ["IMAGE"], vae: ["VAE"] } },
+    output: ["LATENT"],
+    output_node: false,
+  },
+  LoadImage: {
+    input: { required: { image: [["ref.png"], {}] } },
+    output: ["IMAGE", "MASK"],
+    output_node: false,
+  },
+  LatentUpscale: {
+    input: { required: { samples: ["LATENT"], width: ["INT"], height: ["INT"] } },
+    output: ["LATENT"],
+    output_node: false,
+  },
+  TextEncodeQwenImageEditPlus: {
+    input: {
+      required: { clip: ["CLIP"], prompt: ["STRING"] },
+      optional: { vae: ["VAE"], image1: ["IMAGE"] },
+    },
+    output: ["CONDITIONING"],
+    output_node: false,
+  },
+  // A latent generator whose dimensions are driven by real nodes: still all zeros.
+  PrimitiveInt: { input: { required: { value: ["INT"] } }, output: ["INT"], output_node: false },
+  // An Empty*Latent*-NAMED node that actually derives its latent from an image.
+  EmptyLatentFromReference: {
+    input: { required: { reference: ["IMAGE"], batch_size: ["INT"] } },
+    output: ["LATENT"],
+    output_node: false,
+  },
   ImageUpscaleWithModel: {
     input: { required: { upscale_model: ["UPSCALE_MODEL"], image: ["IMAGE"] } },
     output: ["IMAGE"],
@@ -193,5 +234,345 @@ describe("analyzeGraphHealth", () => {
     expect(h.total_nodes).toBe(4);
     expect(h.node_type_histogram.CLIPTextEncode).toBe(2);
     expect(h.node_type_histogram.CheckpointLoaderSimple).toBe(1);
+  });
+
+  // --- partial denoise over an empty latent (#2678) -------------------------
+
+  it("flags a sampler running denoise below 1.0 on a latent straight from EmptyLatentImage", () => {
+    const h = analyzeGraphHealth(
+      wf({
+        "4": { class_type: "CheckpointLoaderSimple", inputs: { ckpt_name: "sd_xl_base.safetensors" } },
+        "8": { class_type: "EmptyLatentImage", inputs: { width: 1024, height: 1024, batch_size: 1 } },
+        "9": {
+          class_type: "KSampler",
+          inputs: { model: ["4", 0], positive: ["4", 1], negative: ["4", 1], latent_image: ["8", 0], steps: 50, denoise: 0.65 },
+        },
+        "10": { class_type: "VAEDecode", inputs: { samples: ["9", 0], vae: ["4", 2] } },
+        "11": { class_type: "SaveImage", inputs: { images: ["10", 0] } },
+      }),
+      OBJECT_INFO,
+    );
+    const f = h.findings.filter((x) => x.kind === "partial_denoise_empty_latent");
+    expect(f).toHaveLength(1);
+    expect(f[0].severity).toBe("warning");
+    // Both ends of the bad pairing are named so the caller can jump to either.
+    expect(f[0].node_ids).toEqual(["9", "8"]);
+    expect(f[0].node_type).toBe("KSampler");
+    expect(f[0].detail).toMatch(/0\.65/);
+    expect(f[0].detail).toMatch(/steps=50/);
+    expect(f[0].detail).toMatch(/VAEEncode/);
+    // The message must not overclaim across model families: a flat field is the
+    // flow-matching outcome, and it is attributed as such rather than asserted
+    // for every sampler. EPS models still render an image -- just not an edit.
+    expect(f[0].detail).toMatch(/flow-matching/);
+    // ...and it must not claim the sampler gets NO source content -- a Qwen edit
+    // encoder really does carry the reference on CONDITIONING. The precise claim is
+    // that conditioning does not seed the starting state.
+    expect(f[0].detail).toMatch(/CONDITIONING/);
+    expect(f[0].detail).toMatch(/starting state/);
+  });
+
+  // "Is this latent empty?" is decided from real object_info slot TYPES, not from the
+  // presence of links. These two cases pull in opposite directions and both must hold.
+  const withLatentSource = (source: Record<string, unknown>) =>
+    analyzeGraphHealth(
+      wf({
+        "4": { class_type: "CheckpointLoaderSimple", inputs: { ckpt_name: "sd_xl_base.safetensors" } },
+        "5": { class_type: "LoadImage", inputs: { image: "ref.png" } },
+        "7": { class_type: "PrimitiveInt", inputs: { value: 1024 } },
+        ...source,
+        "9": {
+          class_type: "KSampler",
+          inputs: {
+            model: ["4", 0], positive: ["4", 1], negative: ["4", 1], latent_image: ["8", 0],
+            steps: 50, denoise: 0.65,
+          },
+        },
+        "10": { class_type: "VAEDecode", inputs: { samples: ["9", 0], vae: ["4", 2] } },
+        "11": { class_type: "SaveImage", inputs: { images: ["10", 0] } },
+      }),
+      OBJECT_INFO,
+    ).findings.filter((x) => x.kind === "partial_denoise_empty_latent").length;
+
+  it("does NOT flag an Empty*Latent*-named node fed an IMAGE -- that latent is derived", () => {
+    expect(
+      withLatentSource({
+        "8": { class_type: "EmptyLatentFromReference", inputs: { reference: ["5", 0], batch_size: 1 } },
+      }),
+    ).toBe(0);
+  });
+
+  it("STILL flags EmptyLatentImage whose width comes from a link -- a scalar feed is not content", () => {
+    // A blanket "consumes no links" rule would go quiet here and miss a real defect:
+    // driving width from PrimitiveInt changes the shape of the zeros, not their content.
+    expect(
+      withLatentSource({
+        "8": { class_type: "EmptyLatentImage", inputs: { width: ["7", 0], height: 1024, batch_size: 1 } },
+      }),
+    ).toBe(1);
+  });
+
+  it("declines to call an UNINSTALLED custom latent node empty even with NO links", () => {
+    // The name is the only evidence available, and a name is not a fact: a custom
+    // EmptyLatent* node can synthesise content from literal configuration and take no
+    // links at all. Absent from object_info, it must not fall through to "empty".
+    expect(
+      withLatentSource({
+        "8": { class_type: "EmptyLatentFromPath", inputs: { path: "seed.latent", batch_size: 1 } },
+      }),
+    ).toBe(0);
+  });
+
+  it("declines to call an UNINSTALLED custom latent node empty when it consumes a link", () => {
+    // Absent from object_info, so what the link carries is unknowable. Staying quiet
+    // costs a warning we might have raised; guessing would cost a false one.
+    expect(
+      withLatentSource({
+        "8": { class_type: "EmptyLatentSomethingCustom", inputs: { mystery: ["5", 0] } },
+      }),
+    ).toBe(0);
+  });
+
+  it("does not crash when latent_image points at a node id that does not exist", () => {
+    const h = analyzeGraphHealth(
+      wf({
+        "9": {
+          class_type: "KSampler",
+          inputs: { model: ["4", 0], latent_image: ["999", 0], steps: 50, denoise: 0.65 },
+        },
+        "11": { class_type: "SaveImage", inputs: { images: ["9", 0] } },
+      }),
+      OBJECT_INFO,
+    );
+    expect(h.findings.filter((x) => x.kind === "partial_denoise_empty_latent")).toHaveLength(0);
+  });
+
+  it("reproduces the #2678 graph: TextEncodeQwenImageEditPlus + EmptyLatentImage at denoise 0.65", () => {
+    // The reporter's shape verbatim -- LoadImage reference, Plus encoder (CONDITIONING
+    // only), EmptyLatentImage 1024x1024, KSampler steps 50 / cfg 4 / denoise 0.65.
+    // It validated and executed with no error and rendered a texture-only field.
+    const h = analyzeGraphHealth(
+      wf({
+        "4": { class_type: "CheckpointLoaderSimple", inputs: { ckpt_name: "sd_xl_base.safetensors" } },
+        "5": { class_type: "LoadImage", inputs: { image: "ref.png" } },
+        // image1 wired from LoadImage: the reference IS reaching the encoder, so the
+        // conditioning genuinely carries source content. The finding must still fire --
+        // conditioning steers denoising but never seeds the sampler's starting state.
+        "6": { class_type: "TextEncodeQwenImageEditPlus", inputs: { clip: ["4", 1], prompt: "change the garment", image1: ["5", 0] } },
+        "7": { class_type: "TextEncodeQwenImageEditPlus", inputs: { clip: ["4", 1], prompt: "", image1: ["5", 0] } },
+        "8": { class_type: "EmptyLatentImage", inputs: { width: 1024, height: 1024, batch_size: 1 } },
+        "9": {
+          class_type: "KSampler",
+          inputs: {
+            model: ["4", 0], positive: ["6", 0], negative: ["7", 0], latent_image: ["8", 0],
+            seed: 42, steps: 50, cfg: 4, sampler_name: "euler", scheduler: "simple", denoise: 0.65,
+          },
+        },
+        "10": { class_type: "VAEDecode", inputs: { samples: ["9", 0], vae: ["4", 2] } },
+        "11": { class_type: "SaveImage", inputs: { images: ["10", 0] } },
+      }),
+      OBJECT_INFO,
+    );
+    expect(h.findings.some((x) => x.kind === "partial_denoise_empty_latent")).toBe(true);
+  });
+
+  it("does NOT flag denoise 1.0 over an empty latent -- that is ordinary txt2img", () => {
+    const h = analyzeGraphHealth(
+      wf({
+        "4": { class_type: "CheckpointLoaderSimple", inputs: { ckpt_name: "sd_xl_base.safetensors" } },
+        "8": { class_type: "EmptyLatentImage", inputs: { width: 1024, height: 1024, batch_size: 1 } },
+        "9": {
+          class_type: "KSampler",
+          inputs: { model: ["4", 0], positive: ["4", 1], negative: ["4", 1], latent_image: ["8", 0], denoise: 1.0 },
+        },
+        "10": { class_type: "VAEDecode", inputs: { samples: ["9", 0], vae: ["4", 2] } },
+        "11": { class_type: "SaveImage", inputs: { images: ["10", 0] } },
+      }),
+      OBJECT_INFO,
+    );
+    expect(h.findings.filter((x) => x.kind === "partial_denoise_empty_latent")).toHaveLength(0);
+  });
+
+  it("does NOT flag a sub-1.0 denoise fed by VAEEncode -- that is correct img2img", () => {
+    const h = analyzeGraphHealth(
+      wf({
+        "4": { class_type: "CheckpointLoaderSimple", inputs: { ckpt_name: "sd_xl_base.safetensors" } },
+        "5": { class_type: "LoadImage", inputs: { image: "ref.png" } },
+        "8": { class_type: "VAEEncode", inputs: { pixels: ["5", 0], vae: ["4", 2] } },
+        "9": {
+          class_type: "KSampler",
+          inputs: { model: ["4", 0], positive: ["4", 1], negative: ["4", 1], latent_image: ["8", 0], steps: 50, denoise: 0.65 },
+        },
+        "10": { class_type: "VAEDecode", inputs: { samples: ["9", 0], vae: ["4", 2] } },
+        "11": { class_type: "SaveImage", inputs: { images: ["10", 0] } },
+      }),
+      OBJECT_INFO,
+    );
+    expect(h.findings.filter((x) => x.kind === "partial_denoise_empty_latent")).toHaveLength(0);
+  });
+
+  it("does NOT flag a hires-fix chain where the empty latent is one hop upstream", () => {
+    // EmptyLatentImage -> KSampler(denoise 1.0) -> LatentUpscale -> KSampler(denoise 0.5).
+    // The second sampler's latent carries real content, so the direct-connection scope
+    // is what keeps this healthy graph quiet.
+    const h = analyzeGraphHealth(
+      wf({
+        "4": { class_type: "CheckpointLoaderSimple", inputs: { ckpt_name: "sd_xl_base.safetensors" } },
+        "8": { class_type: "EmptyLatentImage", inputs: { width: 512, height: 512, batch_size: 1 } },
+        "9": {
+          class_type: "KSampler",
+          inputs: { model: ["4", 0], positive: ["4", 1], negative: ["4", 1], latent_image: ["8", 0], denoise: 1.0 },
+        },
+        "12": { class_type: "LatentUpscale", inputs: { samples: ["9", 0], width: 1024, height: 1024 } },
+        "13": {
+          class_type: "KSampler",
+          inputs: { model: ["4", 0], positive: ["4", 1], negative: ["4", 1], latent_image: ["12", 0], steps: 50, denoise: 0.5 },
+        },
+        "10": { class_type: "VAEDecode", inputs: { samples: ["13", 0], vae: ["4", 2] } },
+        "11": { class_type: "SaveImage", inputs: { images: ["10", 0] } },
+      }),
+      OBJECT_INFO,
+    );
+    expect(h.findings.filter((x) => x.kind === "partial_denoise_empty_latent")).toHaveLength(0);
+  });
+
+  it("covers the whole Empty*Latent* family, not just EmptyLatentImage", () => {
+    const h = analyzeGraphHealth(
+      wf({
+        "4": { class_type: "CheckpointLoaderSimple", inputs: { ckpt_name: "sd_xl_base.safetensors" } },
+        "8": { class_type: "EmptySD3LatentImage", inputs: { width: 1024, height: 1024, batch_size: 1 } },
+        "9": {
+          class_type: "KSampler",
+          inputs: { model: ["4", 0], positive: ["4", 1], negative: ["4", 1], latent_image: ["8", 0], steps: 50, denoise: 0.8 },
+        },
+        "10": { class_type: "VAEDecode", inputs: { samples: ["9", 0], vae: ["4", 2] } },
+        "11": { class_type: "SaveImage", inputs: { images: ["10", 0] } },
+      }),
+      OBJECT_INFO,
+    );
+    const f = h.findings.filter((x) => x.kind === "partial_denoise_empty_latent");
+    expect(f).toHaveLength(1);
+    expect(f[0].detail).toMatch(/EmptySD3LatentImage/);
+  });
+
+  // The boundary is NOT a bare denoise threshold. comfy/samplers.py set_steps builds
+  // `calculate_sigmas(int(steps / denoise))[-(steps + 1):]`, which only drops leading
+  // sigmas when `int(steps / denoise) > steps`. Below, every expectation was computed
+  // from that expression, so these cases pin ComfyUI's arithmetic rather than a
+  // rounded stand-in for it.
+  const fireCount = (denoise: number, steps: number | undefined) =>
+    analyzeGraphHealth(
+      wf({
+        "4": { class_type: "CheckpointLoaderSimple", inputs: { ckpt_name: "sd_xl_base.safetensors" } },
+        "8": { class_type: "EmptyLatentImage", inputs: { width: 1024, height: 1024, batch_size: 1 } },
+        "9": {
+          class_type: "KSampler",
+          inputs: {
+            model: ["4", 0], positive: ["4", 1], negative: ["4", 1], latent_image: ["8", 0],
+            denoise, ...(steps === undefined ? {} : { steps }),
+          },
+        },
+        "10": { class_type: "VAEDecode", inputs: { samples: ["9", 0], vae: ["4", 2] } },
+        "11": { class_type: "SaveImage", inputs: { images: ["10", 0] } },
+      }),
+      OBJECT_INFO,
+    ).findings.filter((x) => x.kind === "partial_denoise_empty_latent").length;
+
+  it("does NOT fire at denoise 0.9999 with steps 50 -- int(50/0.9999)=50 is the FULL schedule", () => {
+    // A bare `denoise <= 0.9999` rule would have warned here on a healthy txt2img graph.
+    expect(fireCount(0.9999, 50)).toBe(0);
+    expect(fireCount(0.99, 50)).toBe(0);
+  });
+
+  it("fires at denoise 0.98 with steps 50 -- int(50/0.98)=51 truncates the schedule", () => {
+    expect(fireCount(0.98, 50)).toBe(1);
+  });
+
+  it("takes `steps` into account: denoise 0.9 is healthy at 4 steps and degenerate at 20", () => {
+    // int(4/0.9)  = 4  -> full schedule, an ordinary 4-step txt2img run.
+    expect(fireCount(0.9, 4)).toBe(0);
+    // int(20/0.9) = 22 -> truncated.
+    expect(fireCount(0.9, 20)).toBe(1);
+  });
+
+  it("still fires on the reported denoise 0.65 / steps 50 -- int(50/0.65)=76", () => {
+    expect(fireCount(0.65, 50)).toBe(1);
+  });
+
+  it("stays silent at denoise 1.0 regardless of steps", () => {
+    expect(fireCount(1.0, 50)).toBe(0);
+    expect(fireCount(1.0, 4)).toBe(0);
+  });
+
+  it("fires at denoise <= 0, where set_steps yields an EMPTY schedule and no sampling runs", () => {
+    expect(fireCount(0, 50)).toBe(1);
+  });
+
+  it("makes no claim when `steps` is absent or not a literal -- steps decides the boundary", () => {
+    expect(fireCount(0.65, undefined)).toBe(0);
+    expect(fireCount(0.65, 0)).toBe(0);
+  });
+
+  it("ignores a denoise that is a converted input rather than a literal widget value", () => {
+    // `["12", 0]` is a link -- its runtime value is unknowable statically, so claiming
+    // the graph is broken would be a guess.
+    const h = analyzeGraphHealth(
+      wf({
+        "4": { class_type: "CheckpointLoaderSimple", inputs: { ckpt_name: "sd_xl_base.safetensors" } },
+        "8": { class_type: "EmptyLatentImage", inputs: { width: 1024, height: 1024, batch_size: 1 } },
+        "9": {
+          class_type: "KSampler",
+          inputs: { model: ["4", 0], positive: ["4", 1], negative: ["4", 1], latent_image: ["8", 0], steps: 50, denoise: ["12", 0] },
+        },
+        "10": { class_type: "VAEDecode", inputs: { samples: ["9", 0], vae: ["4", 2] } },
+        "11": { class_type: "SaveImage", inputs: { images: ["10", 0] } },
+      }),
+      OBJECT_INFO,
+    );
+    expect(h.findings.filter((x) => x.kind === "partial_denoise_empty_latent")).toHaveLength(0);
+  });
+
+  it("ignores a non-numeric denoise -- coercion would both false-fire and false-zero", () => {
+    // The connection-tuple case above is silent for an incidental reason: ["12", 0]
+    // stringifies with a comma, so the arithmetic NaNs regardless of the guard. These
+    // two shapes are what the guard actually buys, and both are false positives:
+    //   "0.65" -> Math.trunc(50 / "0.65") = 76 > 50, so it would FIRE, and
+    //   ""     -> "" <= 0 is true, so it would fire via the empty-schedule branch.
+    const withDenoise = (denoise: unknown) =>
+      analyzeGraphHealth(
+        wf({
+          "4": { class_type: "CheckpointLoaderSimple", inputs: { ckpt_name: "sd_xl_base.safetensors" } },
+          "8": { class_type: "EmptyLatentImage", inputs: { width: 1024, height: 1024, batch_size: 1 } },
+          "9": {
+            class_type: "KSampler",
+            inputs: { model: ["4", 0], positive: ["4", 1], negative: ["4", 1], latent_image: ["8", 0], steps: 50, denoise },
+          },
+          "10": { class_type: "VAEDecode", inputs: { samples: ["9", 0], vae: ["4", 2] } },
+          "11": { class_type: "SaveImage", inputs: { images: ["10", 0] } },
+        }),
+        OBJECT_INFO,
+      ).findings.filter((x) => x.kind === "partial_denoise_empty_latent").length;
+
+    expect(withDenoise("0.65")).toBe(0);
+    expect(withDenoise("")).toBe(0);
+    expect(withDenoise(Number.NaN)).toBe(0);
+  });
+
+  it("flags an unknown custom sampler class by its slot shape, not a class allowlist", () => {
+    const h = analyzeGraphHealth(
+      wf({
+        "4": { class_type: "CheckpointLoaderSimple", inputs: { ckpt_name: "sd_xl_base.safetensors" } },
+        "8": { class_type: "EmptyLatentImage", inputs: { width: 1024, height: 1024, batch_size: 1 } },
+        "9": {
+          class_type: "SomeCustomKSampler",
+          inputs: { model: ["4", 0], positive: ["4", 1], negative: ["4", 1], latent_image: ["8", 0], steps: 50, denoise: 0.5 },
+        },
+        "10": { class_type: "SaveImage", inputs: { images: ["9", 0] } },
+      }),
+      OBJECT_INFO,
+    );
+    const f = h.findings.filter((x) => x.kind === "partial_denoise_empty_latent");
+    expect(f).toHaveLength(1);
+    expect(f[0].node_type).toBe("SomeCustomKSampler");
   });
 });
