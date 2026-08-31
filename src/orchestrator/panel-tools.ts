@@ -444,6 +444,7 @@ import {
 import { getNsfwConsent, setNsfwConsent } from "../services/panel-settings.js";
 import { QueueMonitor, RUNNING_UNCONFIRMED_MS } from "../services/queue-monitor.js";
 import type { QueueSnapshot } from "../services/queue-monitor.js";
+import { stallThresholdMs } from "../services/stall-threshold.js";
 import { RunCompletions } from "./run-completion-journal.js";
 import {
   AskAnswers,
@@ -1592,7 +1593,26 @@ function unconfirmedRun(snap: QueueSnapshot): { sinceMs: number | null } | null 
   if (!snap.running) return null;
   if (snap.lastServerContactTs === null) return { sinceMs: null };
   const sinceMs = Date.now() - snap.lastServerContactTs;
-  return sinceMs >= RUNNING_UNCONFIRMED_MS ? { sinceMs } : null;
+  return sinceMs >= unconfirmedAfterMs() ? { sinceMs } : null;
+}
+
+/**
+ * #2684 — the silence past which a believed run stops being stated as fact.
+ *
+ * `min` of the two, and the direction matters. `report()` calls the server dead
+ * at `stallThresholdMs()` — that is when the STALLED notice fires. If this note
+ * downgraded LATER than that, the reported contradiction survives verbatim for
+ * any threshold under 30 s, and both are reachable: `COMFYUI_MCP_STALL_S` takes
+ * any value above zero, and the live panel setting floors at 15 s. Taking the
+ * min means the busy note is never more confident than the stall note about the
+ * same server, whatever the threshold is configured to.
+ *
+ * It can only ever downgrade EARLIER, never later, which is the safe direction:
+ * the cost is a note that says "unconfirmed" a little sooner, and the fence it
+ * annotates does not move either way.
+ */
+function unconfirmedAfterMs(): number {
+  return Math.min(RUNNING_UNCONFIRMED_MS, stallThresholdMs());
 }
 
 /**

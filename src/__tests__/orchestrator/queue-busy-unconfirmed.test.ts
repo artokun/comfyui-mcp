@@ -32,6 +32,7 @@ import {
 import { QueueMonitor, RUNNING_UNCONFIRMED_MS } from "../../services/queue-monitor.js";
 import { markReplyTimeout } from "../../services/ui-bridge.js";
 import { formatQueueNote } from "../../orchestrator/queue-note.js";
+import { stallThresholdMs } from "../../services/stall-threshold.js";
 import { WorkflowTargetStore } from "../../services/workflow-target-store.js";
 
 const TAB = "11111111-2222-4333-8444-555555555555";
@@ -53,6 +54,7 @@ type QMPriv = {
     lastFrameTs: number | null;
   };
 };
+// oxlint-disable-next-line anti-slop/no-chained-type-assertions -- the defect is a TIMESTAMP the monitor exposes no setter for; back-dating the real singleton's heartbeat is the only way to reach it, and mocking snapshot() would test the mock (same reach as graph-read-during-render.test.ts).
 const qm = QueueMonitor as unknown as QMPriv;
 
 function defByName(name: string) {
@@ -67,6 +69,7 @@ const textOf = (res: ToolResult): string =>
 function makeBridge(opts?: { timeoutCmds?: Set<string> }) {
   const sent: string[] = [];
   const timeoutCmds = opts?.timeoutCmds ?? new Set<string>();
+  // oxlint-disable-next-line anti-slop/no-chained-type-assertions -- a test double for the bridge surface these tools touch; widening to the full interface would add dozens of unused members without making the double more faithful.
   const bridge = {
     send: async (cmd: Record<string, unknown>, o?: { onDispatchedRid?: (rid: string) => void }) => {
       sent.push(String(cmd.cmd));
@@ -277,6 +280,31 @@ describe("#2684: the STALLED notice and the busy note can no longer contradict",
     qm.state.lastServerAliveTs = Date.now();
     expect(QueueMonitor.snapshot().lastServerContactTs).toBeGreaterThan(contact as number);
     expect(QueueMonitor.report(STALL_MS).stalled).toBe(false);
+  });
+
+  it("a LOWER stall threshold moves the downgrade with it, not past it", async () => {
+    // The contradiction is only gone if the busy note downgrades no later than
+    // the stall note calls the server dead. A fixed 30 s constant does NOT get
+    // that: `COMFYUI_MCP_STALL_S` accepts any value above zero and the live panel
+    // setting floors at 15 s, so at a 10 s threshold and 20 s of silence the old
+    // shape would print "appears STALLED" and "is still running" together again —
+    // the reported session, reproduced under a supported configuration.
+    const prev = process.env.COMFYUI_MCP_STALL_S;
+    process.env.COMFYUI_MCP_STALL_S = "10";
+    try {
+      startRender(20_000);
+      expect(formatQueueNote(QueueMonitor.report(stallThresholdMs()))).toMatch(/appears STALLED/);
+
+      const { bridge } = makeBridge({ timeoutCmds: new Set(["graph_outline"]) });
+      const ctx = makePanelToolCtx(bridge, TAB, new WorkflowTargetStore());
+      const text = textOf(await defByName("panel_graph_outline").handler({} as never, ctx));
+
+      expect(text).not.toMatch(/is still running/);
+      expect(text).toMatch(/UNCONFIRMED/);
+    } finally {
+      if (prev === undefined) delete process.env.COMFYUI_MCP_STALL_S;
+      else process.env.COMFYUI_MCP_STALL_S = prev;
+    }
   });
 
   it("a server that has NEVER answered is unconfirmed, not fresh", async () => {
