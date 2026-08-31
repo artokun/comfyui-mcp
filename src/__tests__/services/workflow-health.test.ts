@@ -312,6 +312,17 @@ describe("analyzeGraphHealth", () => {
     ).toBe(1);
   });
 
+  it("declines to call an UNINSTALLED custom latent node empty even with NO links", () => {
+    // The name is the only evidence available, and a name is not a fact: a custom
+    // EmptyLatent* node can synthesise content from literal configuration and take no
+    // links at all. Absent from object_info, it must not fall through to "empty".
+    expect(
+      withLatentSource({
+        "8": { class_type: "EmptyLatentFromPath", inputs: { path: "seed.latent", batch_size: 1 } },
+      }),
+    ).toBe(0);
+  });
+
   it("declines to call an UNINSTALLED custom latent node empty when it consumes a link", () => {
     // Absent from object_info, so what the link carries is unknowable. Staying quiet
     // costs a warning we might have raised; guessing would cost a false one.

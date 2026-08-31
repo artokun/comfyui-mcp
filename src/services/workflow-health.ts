@@ -106,9 +106,9 @@ const SCALAR_INPUT_TYPES = new Set(["INT", "FLOAT", "STRING", "BOOLEAN"]);
  * from its name. A width/height/batch_size feed is a scalar and changes only the
  * shape of the zeros; an IMAGE/LATENT/anything-else feed can carry a picture.
  *
- * A node or slot missing from object_info is an uninstalled custom node: what its
- * link carries is unknowable, so it is NOT called empty. That direction is the
- * safe one — it costs a warning we might have raised, never a false one.
+ * A node missing from object_info, or a connected slot missing from its definition,
+ * is NOT called empty — whether it is, is unknowable. That direction is the safe one:
+ * it costs a warning we might have raised, never a false one.
  */
 function producesEmptyLatent(
   node: { class_type: string; inputs?: Record<string, unknown> } | undefined,
@@ -116,8 +116,14 @@ function producesEmptyLatent(
 ): boolean {
   if (!node || !EMPTY_LATENT_RE.test(node.class_type)) return false;
 
+  // An uninstalled node has no semantics here — its NAME is the only evidence, and a
+  // name is not a fact. A custom `EmptyLatent…` could synthesise content from literal
+  // configuration and never take a link at all, so a link-free unknown node must not
+  // fall through to "empty". Nothing is lost by staying quiet: the validator already
+  // reports an unknown class as a missing_node_type ERROR.
   const def = objectInfo[node.class_type];
-  const slots = { ...(def?.input?.required ?? {}), ...(def?.input?.optional ?? {}) };
+  if (!def) return false;
+  const slots = { ...(def.input?.required ?? {}), ...(def.input?.optional ?? {}) };
 
   for (const [name, value] of Object.entries(node.inputs ?? {})) {
     if (!isConnection(value)) continue;
