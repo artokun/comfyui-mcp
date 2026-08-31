@@ -38,7 +38,7 @@ Author and check ComfyUI workflow JSON. Driven by the `action` parameter:
   action:"modify" (REQUIRED) — Array of operations to apply in order. Each has an 'op' field: set_input, add_node, remove_node, connect, or insert_between
 </ParamField>
 <ParamField path="health" type="boolean" default="true">
-  action:"validate" — Include graph-health heuristics (disconnected nodes, duplicate model loads, orphaned branches, muted/bypassed nodes) as info/warning issues plus a structured health section. Never affects `valid`.
+  action:"validate" — Include graph-health heuristics (disconnected nodes, duplicate model loads, orphaned branches, muted/bypassed nodes, a sampler running denoise below 1.0 on an empty latent) as info/warning issues plus a structured health section. Never affects `valid`.
 </ParamField>
 <ParamField path="node_type" type="string">
   action:"node_info" — Filter by node class_type name (case-insensitive substring match). Omit to list all available nodes.
