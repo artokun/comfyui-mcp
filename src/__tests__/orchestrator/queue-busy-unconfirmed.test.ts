@@ -189,7 +189,14 @@ describe("#2684: an ack timeout stops blaming a run the server never confirmed",
     // Deliberately right, and stated as a property so it cannot be tuned away:
     // a single timed-out poll is not evidence a render finished. The downgrade
     // only fires past the threshold.
-    startRender(RUNNING_UNCONFIRMED_MS - 5_000);
+    //
+    // The blip is a FIXED 5 s, not `RUNNING_UNCONFIRMED_MS - 5_000`. Deriving the
+    // setup from the constant under test makes it move with any mutation of that
+    // constant, so the assertion below stays green no matter what the threshold
+    // becomes — a control that shares the mutation's dependency is not a control.
+    // Setting the threshold to 0 must fail this test, so pin the premise first.
+    expect(RUNNING_UNCONFIRMED_MS).toBeGreaterThan(5_000);
+    startRender(5_000);
 
     const { bridge } = makeBridge({ timeoutCmds: new Set(["graph_outline"]) });
     const ctx = makePanelToolCtx(bridge, TAB, new WorkflowTargetStore());
