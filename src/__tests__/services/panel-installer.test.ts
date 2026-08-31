@@ -2089,7 +2089,20 @@ describe("runPanelAction #724 git fallback (legacy Manager 3.x no-op)", () => {
       "Um eine Ausnahme für dieses Verzeichnis hinzuzufügen, rufen Sie auf:\n\n" +
       "\tgit config --global --add safe.directory C:/comfy/panel";
     expect(isGitOwnershipRefusal(translated)).toBe(true);
-    expect(isGitOwnershipRefusal("fatal: detected dubious ownership in repository")).toBe(true);
+    expect(
+      isGitOwnershipRefusal(
+        "fatal: detected dubious ownership in repository at 'C:/comfy/panel'\n" +
+          "To add an exception for this directory, call:\n\n" +
+          "\tgit config --global --add safe.directory C:/comfy/panel",
+      ),
+    ).toBe(true);
+    // The PROSE on its own is deliberately NOT a signal (codex gate r5). It is
+    // the half of git's message that translation removes, so it never covered a
+    // case the command did not — while being spoofable by any repo-derived
+    // string that lands in a gate message. Measured on git 2.54.0: the advice
+    // line accompanies the fatal for status, fetch, rev-parse, merge, log and
+    // ls-files, and in a bare repo, so dropping it costs no real detection.
+    expect(isGitOwnershipRefusal("fatal: detected dubious ownership in repository")).toBe(false);
     // Unrelated git failures must stay unclassified.
     expect(isGitOwnershipRefusal("fatal: not a git repository")).toBe(false);
     expect(isGitOwnershipRefusal("error: Your local changes would be overwritten")).toBe(false);
@@ -2108,7 +2121,10 @@ describe("runPanelAction #724 git fallback (legacy Manager 3.x no-op)", () => {
     // codex gate r2. runGit embeds the panel dir in every message, so a path
     // containing the words would match a bare substring test and rob a real
     // failure of its own correct diagnosis.
-    const spoofDir = "C:\\work\\dubious ownership\\panel";
+    // The path has to carry the full advice COMMAND to be a spoof at all now
+    // (r5 tightened the anchor), so that is what an adversarial checkout dir
+    // looks like here.
+    const spoofDir = "C:\\work\\git config --global --add safe.directory\\panel";
     expect(
       isGitOwnershipRefusal(
         `git status --porcelain in ${spoofDir} failed: fatal: not a git repository`,
@@ -2136,10 +2152,50 @@ describe("runPanelAction #724 git fallback (legacy Manager 3.x no-op)", () => {
     // git prints forward slashes even when we hold backslashes.
     expect(
       isGitOwnershipRefusal(
-        `fatal: not a git repository at 'C:/work/dubious ownership/panel'`,
+        `fatal: not a git repository at '${spoofDir.replace(/\\/g, "/")}'`,
         spoofDir,
       ),
     ).toBe(false);
+  });
+
+  it("#2671 r5 a repo FILENAME cannot spoof the predicate, and l10n still cannot disarm it", () => {
+    // codex gate r5. The cleanliness gate prints `git status --porcelain`
+    // verbatim, so filenames from the user's own checkout land in the message.
+    // A file named "--add safe.directory" turned a dirty-checkout refusal into
+    // an ownership diagnosis, with a remedy for a problem they do not have.
+    const dir = "C:\\comfy\\custom_nodes\\comfyui-agent-panel";
+    expect(
+      isGitOwnershipRefusal(
+        `Refusing the panel update git fallback: the panel repo at ${dir} has ` +
+          `UNCOMMITTED changes or untracked files (git status --porcelain):\n` +
+          `?? --add safe.directory\n M src/panel.js`,
+        dir,
+      ),
+    ).toBe(false);
+    // Nor via a file named for the prose, which is why the prose alternative
+    // was dropped rather than merely anchored.
+    expect(
+      isGitOwnershipRefusal(`?? detected dubious ownership in repository`, dir),
+    ).toBe(false);
+
+    // The direction that must NOT regress: git's real advice still classifies,
+    // in English and under a translated catalog. Both live in the same
+    // translatable string, so the command surviving is the whole point.
+    const advice = `\tgit config --global --add safe.directory ${dir}`;
+    expect(
+      isGitOwnershipRefusal(
+        `fatal: detected dubious ownership in repository at '${dir}'\n` +
+          `To add an exception for this directory, call:\n\n${advice}`,
+        dir,
+      ),
+    ).toBe(true);
+    expect(
+      isGitOwnershipRefusal(
+        `fatal: Unsichere Besitzverhältnisse im Repository unter '${dir}' entdeckt\n` +
+          `Um eine Ausnahme für dieses Verzeichnis hinzuzufügen, rufen Sie auf:\n\n${advice}`,
+        dir,
+      ),
+    ).toBe(true);
   });
 
   it("#2671 r4 the take-ownership remedy names a command the platform HAS", () => {
@@ -2165,16 +2221,24 @@ describe("runPanelAction #724 git fallback (legacy Manager 3.x no-op)", () => {
     // its own auth failure re-reported as an ownership problem — complete with
     // our advice to grant a trust exception it has no business asking for.
     const dir = "C:\\comfy\\custom_nodes\\comfyui-agent-panel";
+    const relayed = `run: git config --global --add safe.directory /tmp/anything`;
     const hostile =
       `git fetch --quiet in ${dir} failed: ` +
-      `remote: run: git config --global --add safe.directory /tmp/anything\n` +
+      // Note this first one is NOT at a line start — runGit's prefix precedes
+      // it — which is exactly why the filter excises to end-of-line rather
+      // than dropping whole lines.
+      `remote: ${relayed}\n` +
       `remote: detected dubious ownership in repository\n` +
       `fatal: Authentication failed for 'https://example.invalid/x.git/'`;
     expect(isGitOwnershipRefusal(hostile, dir)).toBe(false);
-    // Control: identical text on git's OWN lines still classifies, so the
-    // filter is dropping the remote channel and not the pattern.
+    // Control: the SAME advice text on a line git itself wrote still
+    // classifies, so the filter is dropping the remote channel, not the
+    // pattern.
     expect(
-      isGitOwnershipRefusal(hostile.replace(/^remote: /gm, ""), dir),
+      isGitOwnershipRefusal(
+        `git fetch --quiet in ${dir} failed: fatal: detected dubious ownership\n\t${relayed}`,
+        dir,
+      ),
     ).toBe(true);
   });
 

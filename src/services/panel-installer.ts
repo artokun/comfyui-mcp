@@ -529,31 +529,33 @@ function runGit(dir: string, args: string[], timeoutMs: number): string {
  * those readings is WRONG here — the repo is fine, and the "update it manually
  * with git pull" remedy they prescribe fails with the same fatal.
  *
- * Anchored on the remediation COMMAND git prints, `--add safe.directory`, not
- * on the prose "dubious ownership": git's whole message is one translatable
- * string, so the prose is gone under a translated catalog while the command
- * inside it stays verbatim. The prose is kept only as a second chance.
+ * Anchored on the whole remediation COMMAND git prints — `git config …
+ * --add safe.directory` on one line — and NOT on the prose "detected dubious
+ * ownership". Git wraps the entire message in one translatable string, so under
+ * a translated catalog the prose is gone while the command inside it stays
+ * verbatim. The command anchor therefore covers every case the prose would
+ * have, and the prose alternative was pure spoofing surface, so it is gone.
  *
- * The bare key `safe.directory` would have been too loose (codex gate r1): a
- * checkout living under a directory literally named `safe.directory`, or a
- * config error naming the key, would be rewritten as an ownership refusal and
- * lose its own correct diagnosis. The two-token command form cannot collide
- * with a path.
+ * That the advice is ALWAYS printed is measured, not assumed (git 2.54.0): the
+ * line appears for status, fetch, rev-parse, rev-parse @{upstream}, merge, log
+ * and ls-files, and in a bare repository too. It is part of the same die()
+ * string as the fatal, not a separately suppressible advice hint.
  *
- * That fixed one instance of a CLASS, though (codex gate r2): every gate
- * message embeds the panel dir, so any substring predicate can be spoofed by a
- * checkout path containing the words — `C:\work\dubious ownership\panel` would
- * have matched the prose alternative. So the known directory is REMOVED from
- * the haystack before testing, which retires the collision class by
- * construction rather than by making each pattern individually unspoofable.
- * A genuine refusal in such a directory still classifies, because git's advice
- * line survives the removal.
+ * The predicate got here by three tightenings, each closing a way REPO-DERIVED
+ * TEXT could spoof it — every gate message embeds strings the user controls:
+ *   r1 — the bare key `safe.directory` matched a directory NAMED that.
+ *   r2 — the panel dir is embedded in every gate message, so any pattern could
+ *        be spoofed by the checkout path. The dir is stripped before testing.
+ *   r3 — `git fetch` relays server text on `remote:` lines. Excised too.
+ *   r5 — the dirty-checkout gate embeds arbitrary FILENAMES from `git status
+ *        --porcelain`, so a file named `--add safe.directory` reclassified a
+ *        dirty checkout as an ownership refusal. Hence the full command anchor.
  *
  * DIAGNOSTIC ONLY. This classification never authorizes a mutation — it
  * rewrites a message and nothing else. comfyui-mcp deliberately does not add
  * the safe.directory exception itself: that is the user's security decision.
  */
-const GIT_OWNERSHIP_REFUSAL_RE = /--add\s+safe\.directory|dubious ownership/i;
+const GIT_OWNERSHIP_REFUSAL_RE = /\bgit\s+config\b[^\n]*--add\s+safe\.directory/i;
 
 /** Every rendering of `dir` that could appear in git's or a gate's message. */
 function pathVariants(dir: string): string[] {
