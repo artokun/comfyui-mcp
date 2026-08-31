@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { join, resolve } from "node:path";
+import { join } from "node:path";
 import { execFileSync } from "node:child_process";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -13,6 +13,8 @@ import {
   deferredUpdateScriptFor,
   isNewer,
   resolveNpmLauncher,
+  runNpmResolved,
+  type NpmLauncher,
   runSelfUpdate,
   selfUpdateStatus,
   SelfUpdateError,
@@ -1010,7 +1012,11 @@ describe("#2671 — locating npm", () => {
     });
     expect(got?.source).toBe("node-adjacent");
     expect(got?.shell).toBe(false); // never a shell off Windows
-    expect(got?.prefixArgs).toEqual([resolve(cli)]);
+    // `join` already normalized the ".."; no host-cwd `resolve` is involved,
+    // which is what lets the win32 case above evaluate correctly on a POSIX runner.
+    expect(got?.prefixArgs).toEqual([cli]);
+    // `join` collapsed the "..", so nothing downstream has to.
+    expect(got?.prefixArgs[0]).not.toContain("..");
   });
 
   it("npm nowhere → undefined (callers still get one last-resort bare attempt)", () => {
@@ -1188,15 +1194,24 @@ describe("#2671 — the scheduler's script carries THIS process's npm resolution
   const psq = (s: string) => `'${s.replace(/'/g, "''")}'`;
 
   it("defaults npm in when the caller supplies none", () => {
-    // Guard against a vacuous assertion: if npm were unresolvable on the host
-    // running this suite, the check below would pass on an empty premise.
-    // Anything running vitest was itself installed with npm, so this holds.
     const resolved = currentNpmLauncher();
-    expect(resolved).toBeDefined();
-
-    const script = deferredUpdateScriptFor(OPTS, LOG);
-    const expected = [resolved!.file, ...resolved!.prefixArgs].map(psq).join(" ");
-    expect(script).toContain(`& ${expected} i -g ${PACKAGE_NAME}@latest`);
+    // The composition itself, which holds on any host: the seam must default
+    // the launcher rather than pass opts through untouched.
+    expect(deferredUpdateScriptFor(OPTS, LOG)).toBe(
+      buildDeferredUpdateScript({ ...OPTS, npm: resolved }, LOG),
+    );
+    // And where npm IS resolvable — every host this repo builds on, since it
+    // installs with npm — pin the rendered call too, so the assertion above
+    // cannot pass merely because both sides resolved to nothing. Skipping
+    // rather than asserting `toBeDefined` keeps a pnpm/yarn-only or
+    // npm-less-Node host from going red for an environmental reason (codex
+    // gate r1).
+    if (resolved) {
+      const expected = [resolved.file, ...resolved.prefixArgs].map(psq).join(" ");
+      expect(deferredUpdateScriptFor(OPTS, LOG)).toContain(
+        `& ${expected} i -g ${PACKAGE_NAME}@latest`,
+      );
+    }
   });
 
   it("an explicitly supplied launcher is not overwritten by the default", () => {
@@ -1213,5 +1228,143 @@ describe("#2671 — the scheduler's script carries THIS process's npm resolution
       LOG,
     );
     expect(script).toContain("& 'X:\\node\\node.exe' 'X:\\node\\npm-cli.js' i -g");
+  });
+});
+
+describe("#2671 r1 — npmMissing must never be claimed about a run that happened", () => {
+  // codex gate r1. `npmMissing` used to be set from "our probe found nothing
+  // AND execFile reported an error", but on the last-resort bare-name attempt
+  // an error is equally consistent with npm running and returning E404. The
+  // user then got "npm could not be found — install Node.js" for a registry
+  // problem. defaultRunNpm now asks the SHELL before making that claim; these
+  // pin the CLASSIFIER's half of the contract, that a run npm demonstrably
+  // performed is never relabelled.
+
+  it("an npm-level failure reported WITHOUT the missing flag stays npm-failed", async () => {
+    const h = makeDeps({
+      packageDir: GLOBAL_DIR,
+      currentVersion: "0.52.139",
+      latest: "0.52.165",
+      npmOk: false,
+      // The exact shape the old code mislabelled: our probe found no npm, but
+      // the bare-name attempt reached npm and npm answered.
+      npmStderr: "npm error code E404\nnpm error 404 Not Found - GET https://registry.npmjs.org/comfyui-mcp",
+      platform: "win32",
+    });
+    const res = await runSelfUpdate(h.deps);
+    expect(res.reason).toBe("npm-failed");
+    expect(res.note).not.toMatch(/npm could not be found/);
+    expect(res.note).not.toMatch(/nodejs\.org/); // no install-Node remediation
+    expect(res.note).toContain("404 Not Found");
+  });
+
+  it("defaultRunNpm reports no missing flag on a host where npm IS resolvable", async () => {
+    // Drives the REAL defaultRunNpm (not the harness fake) against the real
+    // shell, with a deliberately failing npm subcommand. npm exists here, so
+    // whatever else happens the not-found flag must stay off.
+    const res = await defaultDeps.runNpm(["run", "comfyui-mcp-no-such-script-2671"]);
+    expect(res.ok).toBe(false); // the command really did fail
+    expect(res.npmMissing).toBeUndefined(); // ...but not because npm is absent
+  }, 60_000);
+});
+
+describe("#2671 r1 — the last-resort attempt only claims 'missing' on the shell's word", () => {
+  const FAIL = { ok: false, stdout: "", stderr: "npm error code E404" };
+  const okRes = { ok: true, stdout: "", stderr: "" };
+
+  function io(over: {
+    launcher?: NpmLauncher | undefined;
+    spawnResult?: { ok: boolean; stdout?: string; stderr?: string };
+    shellResolves?: boolean | undefined;
+    calls?: Array<{ file: string; args: string[]; shell: boolean }>;
+    probes?: number[];
+  }) {
+    return {
+      platform: "win32",
+      launcher: over.launcher,
+      spawn: async (file: string, args: string[], shell: boolean) => {
+        over.calls?.push({ file, args, shell });
+        return over.spawnResult ?? FAIL;
+      },
+      shellResolvesNpm: async () => {
+        over.probes?.push(1);
+        return over.shellResolves;
+      },
+    };
+  }
+
+  it("a resolved launcher is run as-is and NEVER probed or flagged", async () => {
+    const calls: Array<{ file: string; args: string[]; shell: boolean }> = [];
+    const probes: number[] = [];
+    const res = await runNpmResolved(
+      io({
+        launcher: {
+          file: "C:\\Program Files\\nodejs\\node.exe",
+          prefixArgs: ["C:\\Program Files\\nodejs\\npm-cli.js"],
+          shell: false,
+          source: "node-adjacent",
+        },
+        calls,
+        probes,
+      }),
+      ["i", "-g", "x"],
+    );
+    expect(res.npmMissing).toBeUndefined();
+    expect(calls).toEqual([
+      {
+        file: "C:\\Program Files\\nodejs\\node.exe",
+        args: ["C:\\Program Files\\nodejs\\npm-cli.js", "i", "-g", "x"],
+        shell: false,
+      },
+    ]);
+    expect(probes).toHaveLength(0); // holding a launcher, nothing to ask
+  });
+
+  it("THE REGRESSION: unresolved launcher + npm ran and said E404 → npm-failed, not missing", async () => {
+    // The exact shape codex caught. Our probe found no npm, the bare-name
+    // attempt reached npm anyway, npm returned 404. Reporting "npm could not
+    // be found" here sends the user to install Node.js over a registry error.
+    const res = await runNpmResolved(
+      io({ launcher: undefined, shellResolves: true }),
+      ["i", "-g", "x"],
+    );
+    expect(res.ok).toBe(false);
+    expect(res.npmMissing).toBeUndefined();
+    expect(res.stderr).toContain("E404");
+  });
+
+  it("unresolved launcher + the shell cannot resolve npm either → missing", async () => {
+    const res = await runNpmResolved(
+      io({ launcher: undefined, shellResolves: false }),
+      ["i", "-g", "x"],
+    );
+    expect(res.npmMissing).toBe(true);
+  });
+
+  it("an UNANSWERABLE probe does not become a claim", async () => {
+    // `where`/`sh` itself failed to launch. That says nothing about npm, so the
+    // not-found claim stays unmade rather than being guessed at.
+    const res = await runNpmResolved(
+      io({ launcher: undefined, shellResolves: undefined }),
+      ["i", "-g", "x"],
+    );
+    expect(res.npmMissing).toBeUndefined();
+  });
+
+  it("a SUCCESSFUL last-resort attempt is never probed at all", async () => {
+    const probes: number[] = [];
+    const res = await runNpmResolved(
+      io({ launcher: undefined, spawnResult: okRes, shellResolves: false, probes }),
+      ["i", "-g", "x"],
+    );
+    expect(res.ok).toBe(true);
+    expect(res.npmMissing).toBeUndefined();
+    expect(probes).toHaveLength(0); // it worked; there is nothing to diagnose
+  });
+
+  it("the last-resort attempt is the pre-#2671 invocation, unchanged", async () => {
+    const calls: Array<{ file: string; args: string[]; shell: boolean }> = [];
+    await runNpmResolved(io({ launcher: undefined, shellResolves: true, calls }), ["i", "-g", "x"]);
+    expect(calls).toEqual([{ file: "npm.cmd", args: ["i", "-g", "x"], shell: true }]);
   });
 });

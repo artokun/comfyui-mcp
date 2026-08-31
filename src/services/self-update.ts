@@ -502,6 +502,11 @@ export function resolveNpmLauncher(io: {
     }
   }
 
+  // `join` normalizes the ".." itself, and `io.execPath` is always absolute, so
+  // there is nothing left for a `resolve()` to do here. Calling one would be
+  // worse than redundant: it resolves against the HOST's cwd and separator
+  // rules, so a Windows layout evaluated on a POSIX runner (which is exactly
+  // what the injected `platform` exists for) would come back cwd-prefixed.
   const nodeDir = dirname(io.execPath);
   const cliCandidates = isWin
     ? // Windows: node.exe and node_modules/ sit in the same directory.
@@ -516,7 +521,7 @@ export function resolveNpmLauncher(io: {
       if (io.exists(cli)) {
         return {
           file: io.execPath,
-          prefixArgs: [resolve(cli)],
+          prefixArgs: [cli],
           shell: false,
           source: "node-adjacent",
         };
@@ -538,43 +543,129 @@ export function currentNpmLauncher(): NpmLauncher | undefined {
   });
 }
 
+/** One npm spawn. Resolves and never throws; `ok` is a clean exit. */
+function spawnNpm(
+  file: string,
+  spawnArgs: string[],
+  useShell: boolean,
+  cwd?: string,
+): Promise<{ ok: boolean; stdout?: string; stderr?: string }> {
+  return new Promise((resolveP) => {
+    try {
+      // SAFE: every npm arg is a hard-coded constant (no interpolation of user
+      // input), so the shell path has no injection surface. `prefixArgs` is
+      // only ever populated on the shell:false node path.
+      const child = execFile(
+        file,
+        spawnArgs,
+        { cwd, timeout: NPM_TIMEOUT_MS, windowsHide: true, shell: useShell },
+        (err, stdout, stderr) =>
+          resolveP({ ok: !err, stdout: String(stdout ?? ""), stderr: String(stderr ?? "") }),
+      );
+      child.on("error", () => resolveP({ ok: false }));
+    } catch {
+      resolveP({ ok: false });
+    }
+  });
+}
+
+/**
+ * Ask the SHELL — not our own PATH scan — whether it can resolve npm at all
+ * (#2671, codex gate r1).
+ *
+ * This exists to keep "npm could not be found" from being asserted about a run
+ * that plainly happened. `resolveNpmLauncher` failing means only that OUR probe
+ * found nothing; the bare-name last resort still goes through cmd.exe/sh, whose
+ * resolver is not ours. If that attempt then fails because npm returned E404 or
+ * the registry timed out, calling it "npm is not installed" hands the user
+ * remediation for a problem they do not have.
+ *
+ * `where`/`command -v` answer with an EXIT CODE, so this is a structured
+ * question, not a match on cmd.exe's localized "is not recognized". A probe
+ * that cannot be spawned at all answers `undefined` — cannot tell — and callers
+ * must not read that as "missing".
+ */
+async function shellCanResolveNpm(): Promise<boolean | undefined> {
+  const isWin = process.platform === "win32";
+  const [file, probeArgs] = isWin
+    ? ["where", [npmShimName("win32")]]
+    : ["sh", ["-c", "command -v npm"]];
+  return new Promise((resolveP) => {
+    try {
+      const child = execFile(
+        file,
+        probeArgs,
+        { timeout: 15_000, windowsHide: true },
+        (err) => resolveP(!err),
+      );
+      // The probe itself never launched (no `where`, no `sh`) — that says
+      // nothing about npm.
+      child.on("error", () => resolveP(undefined));
+    } catch {
+      resolveP(undefined);
+    }
+  });
+}
+
+/**
+ * The npm-running decision, over injected IO (#2671).
+ *
+ * Split out from `defaultRunNpm` so the unresolved-launcher branch is
+ * reachable from a test: on any machine that can run this suite npm IS
+ * resolvable, so the interesting path — the one the reporter hit — would
+ * otherwise never execute under test and its guard could not be pinned.
+ */
+export async function runNpmResolved(
+  io: {
+    platform: string;
+    launcher: NpmLauncher | undefined;
+    spawn: (
+      file: string,
+      spawnArgs: string[],
+      useShell: boolean,
+      cwd?: string,
+    ) => Promise<{ ok: boolean; stdout?: string; stderr?: string }>;
+    shellResolvesNpm: () => Promise<boolean | undefined>;
+  },
+  args: string[],
+  cwd?: string,
+): Promise<{ ok: boolean; stdout?: string; stderr?: string; npmMissing?: boolean }> {
+  const { launcher } = io;
+  if (launcher) {
+    // Resolved: run it and report npm's own verdict. Never `npmMissing` — we
+    // are holding the launcher.
+    return io.spawn(launcher.file, [...launcher.prefixArgs, ...args], launcher.shell, cwd);
+  }
+
+  // LAST RESORT (#2671): npm is nowhere WE can see it, but our PATH scan is not
+  // the shell's resolver, so make the pre-#2671 bare-name attempt rather than
+  // turning a failed probe into a hard refusal. This is why the change can only
+  // add reach.
+  const res = await io.spawn(npmShimName(io.platform), args, io.platform === "win32", cwd);
+  if (res.ok) return res;
+
+  // It failed, and we could not locate npm. Only NOW is it worth asking whether
+  // npm exists at all — and the answer has to come from the SHELL, because this
+  // failure is equally consistent with "npm ran and said no" (codex gate r1).
+  // Anything other than a definite no leaves the claim unmade.
+  const resolvable = await io.shellResolvesNpm();
+  return resolvable === false ? { ...res, npmMissing: true } : res;
+}
+
 function defaultRunNpm(
   args: string[],
   cwd?: string,
 ): Promise<{ ok: boolean; stdout?: string; stderr?: string; npmMissing?: boolean }> {
-  return new Promise((resolveP) => {
-    const isWin = process.platform === "win32";
-    const launcher = currentNpmLauncher();
-    // LAST RESORT (#2671): when npm is nowhere we can see it, still make the
-    // pre-#2671 bare-name attempt. Our PATH scan is not cmd.exe's resolver, so
-    // an exotic host where the shell would have found npm must not be turned
-    // into a hard refusal by a failed probe. `npmMissing` is then reported only
-    // if that attempt ALSO fails, which makes this strictly additive.
-    const cmd = launcher?.file ?? npmShimName(process.platform);
-    const spawnArgs = [...(launcher?.prefixArgs ?? []), ...args];
-    // SAFE: every npm arg is a hard-coded constant (no interpolation of user
-    // input), so the shell path has no injection surface. `prefixArgs` is only
-    // ever populated on the shell:false node path.
-    const useShell = launcher ? launcher.shell : isWin;
-    const missing = launcher === undefined ? { npmMissing: true } : {};
-    try {
-      const child = execFile(
-        cmd,
-        spawnArgs,
-        { cwd, timeout: NPM_TIMEOUT_MS, windowsHide: true, shell: useShell },
-        (err, stdout, stderr) =>
-          resolveP({
-            ok: !err,
-            stdout: String(stdout ?? ""),
-            stderr: String(stderr ?? ""),
-            ...(err ? missing : {}),
-          }),
-      );
-      child.on("error", () => resolveP({ ok: false, ...missing }));
-    } catch {
-      resolveP({ ok: false, ...missing });
-    }
-  });
+  return runNpmResolved(
+    {
+      platform: process.platform,
+      launcher: currentNpmLauncher(),
+      spawn: spawnNpm,
+      shellResolvesNpm: shellCanResolveNpm,
+    },
+    args,
+    cwd,
+  );
 }
 
 export const defaultDeps: SelfUpdateDeps = {

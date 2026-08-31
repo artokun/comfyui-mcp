@@ -529,17 +529,22 @@ function runGit(dir: string, args: string[], timeoutMs: number): string {
  * those readings is WRONG here — the repo is fine, and the "update it manually
  * with git pull" remedy they prescribe fails with the same fatal.
  *
- * Anchored on `safe.directory` FIRST: git's whole message is one translatable
- * string, but the config key inside it is a literal command token that
- * translations keep verbatim, whereas the prose "dubious ownership" is
- * translated wherever git's l10n catalogs are installed. The prose alternative
- * is kept as a second chance, not as the primary signal.
+ * Anchored on the remediation COMMAND git prints, `--add safe.directory`, not
+ * on the prose "dubious ownership": git's whole message is one translatable
+ * string, so the prose is gone under a translated catalog while the command
+ * inside it stays verbatim. The prose is kept only as a second chance.
+ *
+ * The bare key `safe.directory` would have been too loose (codex gate r1): a
+ * checkout living under a directory literally named `safe.directory`, or a
+ * config error naming the key, would be rewritten as an ownership refusal and
+ * lose its own correct diagnosis. The two-token command form cannot collide
+ * with a path.
  *
  * DIAGNOSTIC ONLY. This classification never authorizes a mutation — it
  * rewrites a message and nothing else. comfyui-mcp deliberately does not add
  * the safe.directory exception itself: that is the user's security decision.
  */
-const GIT_OWNERSHIP_REFUSAL_RE = /safe\.directory|dubious ownership/i;
+const GIT_OWNERSHIP_REFUSAL_RE = /--add\s+safe\.directory|dubious ownership/i;
 
 export function isGitOwnershipRefusal(message: string): boolean {
   return GIT_OWNERSHIP_REFUSAL_RE.test(message);

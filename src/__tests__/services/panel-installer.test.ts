@@ -2092,6 +2092,15 @@ describe("runPanelAction #724 git fallback (legacy Manager 3.x no-op)", () => {
     // Unrelated git failures must stay unclassified.
     expect(isGitOwnershipRefusal("fatal: not a git repository")).toBe(false);
     expect(isGitOwnershipRefusal("error: Your local changes would be overwritten")).toBe(false);
+    // codex gate r1 — the bare key was too loose. A checkout under a directory
+    // literally NAMED `safe.directory`, or a config error naming the key, must
+    // keep its own diagnosis rather than be rewritten as an ownership refusal.
+    expect(
+      isGitOwnershipRefusal(
+        "fatal: not a git repository: 'C:/comfy/safe.directory/custom_nodes/panel'",
+      ),
+    ).toBe(false);
+    expect(isGitOwnershipRefusal("error: invalid key: safe.directory")).toBe(false);
   });
 
   it("locally-AHEAD checkout (HEAD ≠ upstream): NOT 'at tip', throws unverifiable", async () => {
