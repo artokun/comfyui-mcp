@@ -45,6 +45,8 @@ import {
   isProvenQuiescentQueue,
   classifyManagerTaskRecord,
   describeManagerTaskVerdict,
+  gitOwnershipRefusalMessage,
+  isGitOwnershipRefusal,
   PanelInstallError,
   PANEL_REGISTRY_ID,
   PANEL_VERSION,
@@ -1997,6 +1999,247 @@ describe("runPanelAction #724 git fallback (legacy Manager 3.x no-op)", () => {
       PanelInstallError,
     );
     expect(h.gitPulls).toEqual([]);
+  });
+
+  // -------------------------------------------------------------------------
+  // #2671 — a git OWNERSHIP refusal is its own cause, not the gate's
+  // -------------------------------------------------------------------------
+
+  /**
+   * git's real refusal, captured on Windows from
+   * `GIT_TEST_ASSUME_DIFFERENT_OWNER=1 git rev-parse --show-toplevel` (exit
+   * 128), wrapped exactly as panel-installer's runGit wraps it. Every git
+   * subcommand in the fallback produces this same fatal, which is why the gate
+   * that reports it says nothing about the cause.
+   */
+  const ownershipStderr = (gitArgs: string, atDir: string) =>
+    `git ${gitArgs} in ${atDir} failed: fatal: detected dubious ownership in repository at '${atDir}'\n` +
+    `To add an exception for this directory, call:\n\n` +
+    `\tgit config --global --add safe.directory ${atDir}`;
+
+  it("#2671 ownership refusal at the worktree-root gate names OWNERSHIP, not a broken gitdir", async () => {
+    const h = makeDeps({
+      comfyuiPath: COMFY,
+      files: { [pyPath]: pyproject(PANEL_REGISTRY_ID, "0.11.32") },
+      revs: { [dir]: REV_A },
+      updateDetails: LEGACY_NOOP,
+      gitRootError: ownershipStderr("rev-parse --show-toplevel", dir),
+      onGitPull: () => "Updating d806619..675ace8\nFast-forward",
+    });
+    const err = await runPanelAction("update", h.deps).catch((e) => e);
+    expect(err).toBeInstanceOf(PanelInstallError);
+    const msg = String(err?.message ?? err);
+
+    // The real cause, and the exact scoped remediation with the path QUOTED
+    // (git's own advice line leaves it bare, which breaks on a path with a space).
+    expect(msg).toMatch(/owned by a DIFFERENT account/);
+    expect(msg).toContain(`git config --global --add safe.directory "${dir}"`);
+    // It must also kill the dead end: retrying `git pull` by hand fails identically.
+    expect(msg).toMatch(/git pull.*would use|will not work either/s);
+    // And it must NOT keep the gate's misdiagnosis, which asserts a cause
+    // (an unprovable/copied worktree root) that is false here.
+    expect(msg).not.toMatch(/could not prove .* is the panel repo's worktree root/);
+    // Nothing was mutated.
+    expect(h.gitPulls).toEqual([]);
+  });
+
+  it("#2671 the SAME classification fires from a later gate — it is not pinned to gate order", async () => {
+    const h = makeDeps({
+      comfyuiPath: COMFY,
+      files: { [pyPath]: pyproject(PANEL_REGISTRY_ID, "0.11.32") },
+      revs: { [dir]: REV_A },
+      updateDetails: LEGACY_NOOP,
+      onGitPull: () => "Updating d806619..675ace8\nFast-forward",
+    });
+    // Worktree-root and cleanliness gates pass; the refusal surfaces at the
+    // fetch/upstream gate instead, whose own wording blames the upstream.
+    h.deps.gitUpstreamRev = () => {
+      throw new Error(ownershipStderr("rev-parse @{upstream}", dir));
+    };
+    const err = await runPanelAction("update", h.deps).catch((e) => e);
+    expect(err).toBeInstanceOf(PanelInstallError);
+    const msg = String(err?.message ?? err);
+    expect(msg).toMatch(/owned by a DIFFERENT account/);
+    expect(msg).toContain(`git config --global --add safe.directory "${dir}"`);
+    expect(h.gitPulls).toEqual([]);
+  });
+
+  it("#2671 a NON-ownership git failure keeps its own gate-specific diagnosis", async () => {
+    const h = makeDeps({
+      comfyuiPath: COMFY,
+      files: { [pyPath]: pyproject(PANEL_REGISTRY_ID, "0.11.32") },
+      revs: { [dir]: REV_A },
+      updateDetails: LEGACY_NOOP,
+      gitRootError: "fatal: not a git repository (or any of the parent directories): .git",
+      onGitPull: () => "Updating d806619..675ace8\nFast-forward",
+    });
+    const err = await runPanelAction("update", h.deps).catch((e) => e);
+    const msg = String(err?.message ?? err);
+    // The control: the re-map must not swallow everything it catches.
+    expect(msg).toMatch(/worktree root/);
+    expect(msg).not.toMatch(/owned by a DIFFERENT account/);
+  });
+
+  it("#2671 the ownership predicate anchors on the config key, which l10n keeps verbatim", () => {
+    // git wraps the whole advice in ONE translatable string, so the prose
+    // "dubious ownership" is gone under a translated catalog while the command
+    // token survives. Anchoring on the prose alone would misclassify there.
+    const translated =
+      "fatal: Unsichere Besitzverhältnisse im Repository unter 'C:/comfy/panel' entdeckt\n" +
+      "Um eine Ausnahme für dieses Verzeichnis hinzuzufügen, rufen Sie auf:\n\n" +
+      "\tgit config --global --add safe.directory C:/comfy/panel";
+    expect(isGitOwnershipRefusal(translated)).toBe(true);
+    expect(
+      isGitOwnershipRefusal(
+        "fatal: detected dubious ownership in repository at 'C:/comfy/panel'\n" +
+          "To add an exception for this directory, call:\n\n" +
+          "\tgit config --global --add safe.directory C:/comfy/panel",
+      ),
+    ).toBe(true);
+    // The PROSE on its own is deliberately NOT a signal (codex gate r5). It is
+    // the half of git's message that translation removes, so it never covered a
+    // case the command did not — while being spoofable by any repo-derived
+    // string that lands in a gate message. Measured on git 2.54.0: the advice
+    // line accompanies the fatal for status, fetch, rev-parse, merge, log and
+    // ls-files, and in a bare repo, so dropping it costs no real detection.
+    expect(isGitOwnershipRefusal("fatal: detected dubious ownership in repository")).toBe(false);
+    // Unrelated git failures must stay unclassified.
+    expect(isGitOwnershipRefusal("fatal: not a git repository")).toBe(false);
+    expect(isGitOwnershipRefusal("error: Your local changes would be overwritten")).toBe(false);
+    // codex gate r1 — the bare key was too loose. A checkout under a directory
+    // literally NAMED `safe.directory`, or a config error naming the key, must
+    // keep its own diagnosis rather than be rewritten as an ownership refusal.
+    expect(
+      isGitOwnershipRefusal(
+        "fatal: not a git repository: 'C:/comfy/safe.directory/custom_nodes/panel'",
+      ),
+    ).toBe(false);
+    expect(isGitOwnershipRefusal("error: invalid key: safe.directory")).toBe(false);
+  });
+
+  it("#2671 r2 the CHECKOUT PATH cannot spoof the predicate, in either direction", () => {
+    // codex gate r2. runGit embeds the panel dir in every message, so a path
+    // containing the words would match a bare substring test and rob a real
+    // failure of its own correct diagnosis.
+    // The path has to carry the full advice COMMAND to be a spoof at all now
+    // (r5 tightened the anchor), so that is what an adversarial checkout dir
+    // looks like here.
+    const spoofDir = "C:\\work\\git config --global --add safe.directory\\panel";
+    expect(
+      isGitOwnershipRefusal(
+        `git status --porcelain in ${spoofDir} failed: fatal: not a git repository`,
+        spoofDir,
+      ),
+    ).toBe(false);
+    // Without the dir the same message DOES match — which is what proves the
+    // removal, not some other property, is doing the work.
+    expect(
+      isGitOwnershipRefusal(
+        `git status --porcelain in ${spoofDir} failed: fatal: not a git repository`,
+      ),
+    ).toBe(true);
+    // The direction that actually matters: a REAL refusal inside that same
+    // adversarial directory must still classify. Stripping the path must not
+    // disarm detection — git's advice line survives it.
+    expect(
+      isGitOwnershipRefusal(
+        `git rev-parse in ${spoofDir} failed: fatal: detected dubious ownership in repository at '${spoofDir}'\n` +
+          `To add an exception for this directory, call:\n\n` +
+          `\tgit config --global --add safe.directory ${spoofDir}`,
+        spoofDir,
+      ),
+    ).toBe(true);
+    // git prints forward slashes even when we hold backslashes.
+    expect(
+      isGitOwnershipRefusal(
+        `fatal: not a git repository at '${spoofDir.replace(/\\/g, "/")}'`,
+        spoofDir,
+      ),
+    ).toBe(false);
+  });
+
+  it("#2671 r5 a repo FILENAME cannot spoof the predicate, and l10n still cannot disarm it", () => {
+    // codex gate r5. The cleanliness gate prints `git status --porcelain`
+    // verbatim, so filenames from the user's own checkout land in the message.
+    // A file named "--add safe.directory" turned a dirty-checkout refusal into
+    // an ownership diagnosis, with a remedy for a problem they do not have.
+    const dir = "C:\\comfy\\custom_nodes\\comfyui-agent-panel";
+    expect(
+      isGitOwnershipRefusal(
+        `Refusing the panel update git fallback: the panel repo at ${dir} has ` +
+          `UNCOMMITTED changes or untracked files (git status --porcelain):\n` +
+          `?? --add safe.directory\n M src/panel.js`,
+        dir,
+      ),
+    ).toBe(false);
+    // Nor via a file named for the prose, which is why the prose alternative
+    // was dropped rather than merely anchored.
+    expect(
+      isGitOwnershipRefusal(`?? detected dubious ownership in repository`, dir),
+    ).toBe(false);
+
+    // The direction that must NOT regress: git's real advice still classifies,
+    // in English and under a translated catalog. Both live in the same
+    // translatable string, so the command surviving is the whole point.
+    const advice = `\tgit config --global --add safe.directory ${dir}`;
+    expect(
+      isGitOwnershipRefusal(
+        `fatal: detected dubious ownership in repository at '${dir}'\n` +
+          `To add an exception for this directory, call:\n\n${advice}`,
+        dir,
+      ),
+    ).toBe(true);
+    expect(
+      isGitOwnershipRefusal(
+        `fatal: Unsichere Besitzverhältnisse im Repository unter '${dir}' entdeckt\n` +
+          `Um eine Ausnahme für dieses Verzeichnis hinzuzufügen, rufen Sie auf:\n\n${advice}`,
+        dir,
+      ),
+    ).toBe(true);
+  });
+
+  it("#2671 r4 the take-ownership remedy names a command the platform HAS", () => {
+    // codex gate r4. This refusal is not Windows-only — on Linux it fires
+    // routinely for a panel dir left root-owned by an install run under sudo —
+    // and `takeown` does not exist there. Naming an unrunnable command is the
+    // same defect the whole message exists to remove.
+    const dir = "/home/me/ComfyUI/custom_nodes/comfyui-agent-panel";
+    const win = gitOwnershipRefusalMessage("C:\\comfy\\panel", "manager no-op", "win32");
+    expect(win).toContain('takeown /f "C:\\comfy\\panel" /r /d y');
+    expect(win).not.toContain("chown");
+
+    const posix = gitOwnershipRefusalMessage(dir, "manager no-op", "linux");
+    expect(posix).toContain(`sudo chown -R "$(id -un)" "${dir}"`);
+    expect(posix).not.toContain("takeown");
+    // The scoped git remedy is platform-independent and must survive on both.
+    for (const m of [win, posix]) expect(m).toContain("--add safe.directory");
+  });
+
+  it("#2671 r3 what the REMOTE says can never make us diagnose an ownership refusal", () => {
+    // codex gate r3. `git fetch` relays server text verbatim on `remote:`
+    // lines, so a remote could put the advice string in front of us and have
+    // its own auth failure re-reported as an ownership problem — complete with
+    // our advice to grant a trust exception it has no business asking for.
+    const dir = "C:\\comfy\\custom_nodes\\comfyui-agent-panel";
+    const relayed = `run: git config --global --add safe.directory /tmp/anything`;
+    const hostile =
+      `git fetch --quiet in ${dir} failed: ` +
+      // Note this first one is NOT at a line start — runGit's prefix precedes
+      // it — which is exactly why the filter excises to end-of-line rather
+      // than dropping whole lines.
+      `remote: ${relayed}\n` +
+      `remote: detected dubious ownership in repository\n` +
+      `fatal: Authentication failed for 'https://example.invalid/x.git/'`;
+    expect(isGitOwnershipRefusal(hostile, dir)).toBe(false);
+    // Control: the SAME advice text on a line git itself wrote still
+    // classifies, so the filter is dropping the remote channel, not the
+    // pattern.
+    expect(
+      isGitOwnershipRefusal(
+        `git fetch --quiet in ${dir} failed: fatal: detected dubious ownership\n\t${relayed}`,
+        dir,
+      ),
+    ).toBe(true);
   });
 
   it("locally-AHEAD checkout (HEAD ≠ upstream): NOT 'at tip', throws unverifiable", async () => {

@@ -517,6 +517,125 @@ function runGit(dir: string, args: string[], timeoutMs: number): string {
 }
 
 /**
+ * #2671 — git's refusal to operate on a repository whose on-disk owner is not
+ * the account running us ("detected dubious ownership"). It is NOT a broken
+ * checkout: git exits 128 on EVERY subcommand, verified locally against
+ * `GIT_TEST_ASSUME_DIFFERENT_OWNER=1` for rev-parse, status, fetch and
+ * rev-parse @{upstream} — all four produce the identical fatal.
+ *
+ * That is what makes it worth naming. Each gate in the fallback catches its own
+ * git failure and narrates a cause specific to that gate ("could not prove the
+ * worktree root", "could not confirm the repo is clean"), and every one of
+ * those readings is WRONG here — the repo is fine, and the "update it manually
+ * with git pull" remedy they prescribe fails with the same fatal.
+ *
+ * Anchored on the whole remediation COMMAND git prints — `git config …
+ * --add safe.directory` on one line — and NOT on the prose "detected dubious
+ * ownership". Git wraps the entire message in one translatable string, so under
+ * a translated catalog the prose is gone while the command inside it stays
+ * verbatim. The command anchor therefore covers every case the prose would
+ * have, and the prose alternative was pure spoofing surface, so it is gone.
+ *
+ * That the advice is ALWAYS printed is measured, not assumed (git 2.54.0): the
+ * line appears for status, fetch, rev-parse, rev-parse @{upstream}, merge, log
+ * and ls-files, and in a bare repository too. It is part of the same die()
+ * string as the fatal, not a separately suppressible advice hint.
+ *
+ * The predicate got here by three tightenings, each closing a way REPO-DERIVED
+ * TEXT could spoof it — every gate message embeds strings the user controls:
+ *   r1 — the bare key `safe.directory` matched a directory NAMED that.
+ *   r2 — the panel dir is embedded in every gate message, so any pattern could
+ *        be spoofed by the checkout path. The dir is stripped before testing.
+ *   r3 — `git fetch` relays server text on `remote:` lines. Excised too.
+ *   r5 — the dirty-checkout gate embeds arbitrary FILENAMES from `git status
+ *        --porcelain`, so a file named `--add safe.directory` reclassified a
+ *        dirty checkout as an ownership refusal. Hence the full command anchor.
+ *
+ * DIAGNOSTIC ONLY. This classification never authorizes a mutation — it
+ * rewrites a message and nothing else. comfyui-mcp deliberately does not add
+ * the safe.directory exception itself: that is the user's security decision.
+ */
+const GIT_OWNERSHIP_REFUSAL_RE = /\bgit\s+config\b[^\n]*--add\s+safe\.directory/i;
+
+/** Every rendering of `dir` that could appear in git's or a gate's message. */
+function pathVariants(dir: string): string[] {
+  const variants = new Set([dir, dir.replace(/\\/g, "/"), dir.replace(/\//g, "\\")]);
+  return [...variants].filter(Boolean);
+}
+
+export function isGitOwnershipRefusal(message: string, dir?: string): boolean {
+  // Drop everything the REMOTE said (codex gate r3). `git fetch` relays server
+  // text verbatim on `remote:` lines, so a remote could put "--add
+  // safe.directory" in front of us and turn its own auth failure into a
+  // fabricated ownership diagnosis — one that tells the user to grant a trust
+  // exception it has no business asking for. Text an external party controls
+  // must never drive a local classification.
+  //
+  // Excised from the marker to end-of-line rather than by dropping whole
+  // lines: runGit prefixes the stderr with `git <args> in <dir> failed: `, so
+  // the FIRST relayed line does not begin at a line start. Git's own messages
+  // never contain "remote:" except when relaying, so nothing local is lost.
+  let haystack = message.replace(/\bremote:.*$/gim, "");
+  if (dir) {
+    for (const v of pathVariants(dir)) {
+      // Windows paths are case-insensitive, and git may echo a different case
+      // than we hold.
+      haystack = haystack.replace(new RegExp(v.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "gi"), "");
+    }
+  }
+  return GIT_OWNERSHIP_REFUSAL_RE.test(haystack);
+}
+
+/**
+ * The self-contained, actionable replacement for whichever gate happened to
+ * catch an ownership refusal first (#2671). Names the real cause, the exact
+ * scoped remediation, and why we will not apply it on the user's behalf.
+ *
+ * It deliberately does NOT relay the caught message as a "git said" tail. By
+ * the time a gate throws, git's fatal is nested inside that gate's own
+ * narration — the very misdiagnosis this replaces — so quoting it would put
+ * "could not prove … is the panel repo's worktree root" back in front of the
+ * user. Git's actual advice is not lost: it is reproduced below, and with the
+ * directory QUOTED, which git's own line omits (it breaks on a path with a
+ * space, and the default ComfyUI layouts have several).
+ *
+ * The take-ownership remedy is PLATFORM-SPECIFIC (codex gate r4). This refusal
+ * is not a Windows-only condition — on Linux it fires routinely for a panel dir
+ * left owned by root because ComfyUI was installed under sudo — and handing
+ * those users `takeown` names a command their system does not have. Naming a
+ * remedy that cannot run is the same defect this whole message replaces.
+ */
+export function gitOwnershipRefusalMessage(
+  dir: string,
+  managerReason: string,
+  platform: string = process.platform,
+): string {
+  const takeOwnership =
+    platform === "win32"
+      ? `take ownership back from an ELEVATED terminal:\n` +
+        `       takeown /f "${dir}" /r /d y`
+      : `take ownership back (it is commonly root-owned after an install run ` +
+        `under sudo):\n` +
+        `       sudo chown -R "$(id -un)" "${dir}"`;
+  return (
+    `Panel update did NOT apply: ${managerReason}, and the git fallback is ` +
+    `REFUSED: git will not touch the panel checkout at ${dir} because that ` +
+    `directory is owned by a DIFFERENT account than the one running ComfyUI. ` +
+    `The checkout is not damaged and nothing was changed — but every git ` +
+    `command there fails this way, including the "git pull" a manual retry ` +
+    `would use, so retrying by hand as this same user will not work either.\n` +
+    `Pick ONE of these; comfyui-mcp will not do either for you, because both ` +
+    `hand git back the right to run config-controlled hooks out of that ` +
+    `directory and that is your call to make:\n` +
+    `  1. Trust just this one checkout, then retry the update:\n` +
+    `       git config --global --add safe.directory "${dir}"\n` +
+    `  2. Or, if the directory should not belong to another account at all, ` +
+    `${takeOwnership}\n` +
+    `Either way, RESTART ComfyUI afterwards.`
+  );
+}
+
+/**
  * `git status --porcelain` in the panel's checkout — the #724 fallback's
  * CLEANLINESS gate. Empty output = clean; anything else (modified tracked
  * files, staged changes, untracked files) means the fallback must REFUSE:
@@ -2901,7 +3020,30 @@ function assertSwapTreeCorroborated(
   );
 }
 
-async function updateViaGitCheckoutFallback(opts: {
+/**
+ * #2671 — re-map an ownership refusal onto its real cause, wherever in the
+ * fallback it surfaced.
+ *
+ * Deliberately wrapped at the FUNCTION boundary rather than patched into the
+ * gate that happens to run first today. Every git call in the body refuses
+ * identically under this condition, so which gate reports it is an artefact of
+ * gate ORDER; pinning the classification to one of them would silently stop
+ * working the day the gates are reordered. Non-ownership failures fall through
+ * untouched — their own gate-specific diagnosis is the right one.
+ */
+async function updateViaGitCheckoutFallback(
+  opts: Parameters<typeof updateViaGitCheckoutFallbackInner>[0],
+): Promise<PanelActionResult> {
+  try {
+    return await updateViaGitCheckoutFallbackInner(opts);
+  } catch (err) {
+    const raw = err instanceof Error ? err.message : String(err);
+    if (!isGitOwnershipRefusal(raw, opts.dir)) throw err;
+    throw new PanelInstallError(gitOwnershipRefusalMessage(opts.dir, opts.managerReason));
+  }
+}
+
+async function updateViaGitCheckoutFallbackInner(opts: {
   deps: PanelInstallerDeps;
   dir: string;
   previousVersion?: string;
