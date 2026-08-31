@@ -6,7 +6,9 @@ import type { WorkflowJSON, ObjectInfo } from "../comfyui/types.js";
  * Where the hard validator (`workflow-validator.ts`) answers "will this graph
  * run?", this service answers "is this graph *healthy*?" — dead subgraphs,
  * duplicate model loads wasting VRAM, sampler branches whose outputs never reach
- * a save node, and muted/bypassed nodes silently dropping connections.
+ * a save node, muted/bypassed nodes silently dropping connections, and samplers set
+ * to a partial denoise over an empty latent (a graph that runs clean and returns a
+ * flat field).
  *
  * Prior art: filliptm/ComfyUI_FL-MCP `workflow_overview` reports node-type
  * histograms, disconnected nodes, and missing required inputs — but client-side
@@ -25,7 +27,8 @@ export interface HealthFinding {
     | "duplicate_model_load"
     | "orphaned_branch"
     | "muted_or_bypassed"
-    | "no_output_reachable";
+    | "no_output_reachable"
+    | "partial_denoise_empty_latent";
   severity: "warning" | "info";
   node_ids: string[];
   node_type?: string;
@@ -44,6 +47,19 @@ export interface GraphHealth {
 
 // Model-file extensions — kept in sync with workflow-validator.ts's isModel test.
 const MODEL_FILE_RE = /\.(safetensors|gguf|ckpt|pt|pth|bin|sft)$/i;
+
+// A latent produced from nothing — EmptyLatentImage, EmptySD3LatentImage,
+// EmptyHunyuanLatentVideo, EmptyLTXVLatentVideo, EmptyLatentAudio, and the
+// custom EmptyLatentImagePresets family. Every one of these emits ZEROS.
+const EMPTY_LATENT_RE = /^Empty[A-Za-z0-9_]*Latent/i;
+
+// ComfyUI's OWN full-denoise threshold. comfy/samplers.py KSampler.set_steps:
+//   if denoise is None or denoise > 0.9999: <full schedule>
+//   else: sigmas = calculate_sigmas(int(steps/denoise))[-(steps + 1):]
+// At or below this the sigma schedule is TRUNCATED, so sigmas[0] < sigma_max and
+// the latent_image term stops being multiplied by zero. Matching the threshold
+// exactly means this finding fires on precisely the branch that changes behaviour.
+const FULL_DENOISE_THRESHOLD = 0.9999;
 
 // Hardcoded output classes, mirroring workflow-validator.ts step 4.
 const OUTPUT_CLASSES = new Set([
@@ -298,6 +314,60 @@ export function analyzeGraphHealth(
         detail: `Node ${id} (${ct}) is ${mode} (_meta.mode) — its connections are silently dropped.`,
       });
     }
+  }
+
+  // --- 6. Partial denoise fed by an empty latent (warning) -----------------
+  // A sampler with denoise < 1.0 is being asked to keep part of its input latent.
+  // If that input is an Empty*Latent* node the input is ZEROS, so there is nothing
+  // to keep and the run is degenerate — it validates, executes without error, and
+  // returns a flat/uniform field (#2678).
+  //
+  // Why it is a certainty rather than a guess, from ComfyUI's own source:
+  //   samplers.py KSAMPLER.sample ->
+  //     noise = model_sampling.noise_scaling(sigmas[0], noise, latent_image, max_denoise)
+  //   model_sampling.py CONST.noise_scaling (flow-matching: Qwen, Flux, SD3, WAN) ->
+  //     return sigma * noise + (1.0 - sigma) * latent_image
+  // With denoise <= 0.9999 the schedule is truncated so sigmas[0] < sigma_max, which
+  // is what gives the `(1.0 - sigma) * latent_image` term any weight at all. Hand it
+  // a zero latent and that term contributes nothing: the sampler is told the clean
+  // image underneath the noise IS the empty latent, and it integrates toward exactly
+  // that. (EPS models take the sibling branch with the same consequence.) At
+  // denoise = 1.0 sigmas[0] IS sigma_max, the term is multiplied by zero, and an
+  // empty latent is correct — which is why this is scoped to the truncated branch.
+  //
+  // Deliberately DIRECT-connection only. A hires-fix chain (KSampler -> LatentUpscale
+  // -> KSampler denoise 0.5) is healthy and must never be flagged, and tracing through
+  // arbitrary latent ops to decide whether real content survives would trade a
+  // zero-false-positive check for a guess.
+  for (const id of nodeIds) {
+    const node = workflow[id];
+    const denoise = node.inputs?.denoise;
+    // A literal widget value only. A converted-to-input `denoise` is a connection
+    // tuple whose value we cannot know statically, and a non-finite value is not a
+    // claim about the schedule either way.
+    if (typeof denoise !== "number" || !Number.isFinite(denoise)) continue;
+    if (denoise > FULL_DENOISE_THRESHOLD) continue;
+
+    const latentInput = node.inputs?.latent_image;
+    if (!isConnection(latentInput)) continue;
+
+    const sourceId = latentInput[0];
+    const sourceType = workflow[sourceId]?.class_type;
+    if (!sourceType || !EMPTY_LATENT_RE.test(sourceType)) continue;
+
+    findings.push({
+      kind: "partial_denoise_empty_latent",
+      severity: "warning",
+      node_ids: [id, sourceId],
+      node_type: node.class_type,
+      detail:
+        `Node ${id} (${node.class_type}) runs denoise=${denoise} on a latent taken straight from ` +
+        `node ${sourceId} (${sourceType}), which emits an EMPTY latent. denoise < 1.0 keeps part of ` +
+        `the input latent — but there is nothing to keep, so the sampler denoises toward the empty ` +
+        `latent and the result decodes to a flat, near-uniform field. It will run without error. ` +
+        `For image editing / img2img, feed latent_image from a VAEEncode of the source image ` +
+        `instead. For text-to-image from an empty latent, set denoise to 1.0.`,
+    });
   }
 
   // --- Summary -------------------------------------------------------------

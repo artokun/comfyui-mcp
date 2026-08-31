@@ -111,7 +111,15 @@ For non-edit models (txt2img, 2512):
 | Standard edit | 40 | 4.0 | euler | simple | 0.75 | none |
 | Quality edit | 50 | 4.0 | euler | simple | 0.5-0.8 | none |
 
-**Denoise for editing**: Lower denoise = closer to source. 0.5-0.8 range for standard editing. Lightning uses 1.0 (model handles fidelity internally).
+> **The sub-1.0 denoise rows REQUIRE a `VAEEncode` latent.** Any denoise below 1.0
+> keeps part of the incoming latent, so the latent has to be the source image. Wire
+> `latent_image` from a `VAEEncode` of the source (or from a node that emits a
+> source-derived latent, like `TextEncodeQwenImageEditPlusAdvance_lrzjason` output
+> [1]). Pairing these rows with an `EmptyLatentImage` runs clean and returns a flat,
+> near-uniform field — there is no source content in an empty latent to preserve.
+> Only the `denoise = 1.0` rows are safe over an empty latent.
+
+**Denoise for editing**: Lower denoise = closer to source — *provided the latent IS the source*. 0.5-0.8 range for standard editing on a `VAEEncode` latent. Lightning uses 1.0 (model handles fidelity internally).
 
 ## Resolutions
 
@@ -216,6 +224,14 @@ If `qweneditutils` custom node is unavailable, use the built-in `TextEncodeQwenI
 
 Replace node 6 and add node 8. KSampler latent_image connects to `["8", 0]` instead of `["6", 1]`.
 
+**Set `denoise` to 1.0 on this path.** `TextEncodeQwenImageEditPlus` emits CONDITIONING only, so the `EmptyLatentImage` here is genuinely empty and carries no source pixels. A sub-1.0 denoise over it produces a flat texture instead of the edited image (#2678). If you want a sub-1.0 denoise, drop the `EmptyLatentImage` and feed `latent_image` from a `VAEEncode` of the source image instead:
+
+```json
+{
+  "8": { "class_type": "VAEEncode", "inputs": { "pixels": ["5", 0], "vae": ["4", 0] }}
+}
+```
+
 ### Basic Variant (Official ComfyUI Example)
 
 The official "Qwen 2511 Edit Simple" example uses newer built-in nodes for model patching and image scaling:
@@ -277,7 +293,7 @@ This produces a grid image showing all combinations, useful for finding the best
 1. **Upload source images first** with `upload_image (action:"image")` before building the workflow
 2. **Match output resolution** to the next pipeline step (e.g., 832x480 for WAN FLF)
 3. **Lightning LoRA + denoise 1.0** works well. The model handles structure preservation through conditioning
-4. For **img2img editing** (denoise < 1.0), use `VAEEncode` on the source image instead of `EmptyLatentImage`
+4. For **img2img editing** (denoise < 1.0), use `VAEEncode` on the source image instead of `EmptyLatentImage` — a sub-1.0 denoise over an empty latent decodes to a flat, near-uniform field with no error (#2678). `create_workflow (action:"validate")` now flags this pairing
 5. The **lrzjason Pro variant** is best for multi-image compositions where you need fine control over which images get VL-resized
 6. **Use `get_workflow (action:"analyze")`** to understand any saved Qwen edit workflow before modifying or executing it. It returns a structured summary, not raw JSON. Only use `get_workflow` when you need the actual JSON for `enqueue_workflow` or `create_workflow (action:"modify")`.
 
