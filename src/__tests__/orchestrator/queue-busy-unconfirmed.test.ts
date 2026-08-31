@@ -307,6 +307,36 @@ describe("#2684: the STALLED notice and the busy note can no longer contradict",
     }
   });
 
+  it("a RETARGET to another ComfyUI does not inherit the old target's confirmation", async () => {
+    // Raised as a P1 by the review gate: after retargeting from a running ComfyUI A
+    // to a different ComfyUI B, does the old heartbeat stay "fresh" and let these
+    // notes go on asserting A's prompt as running on B?
+    //
+    // It does not, and this pins why by EXECUTION rather than by reading start():
+    // start() nulls both liveness heartbeats on retarget, while deliberately NOT
+    // clearing runningPromptId (the first /queue poll of the new target reconciles
+    // that). So the surviving prompt id meets a null heartbeat — which this change
+    // classifies as unconfirmed, not fresh. Before it, that same state asserted a
+    // foreign server's prompt as present-tense fact, with no expiry at all.
+    startRender(0); // A is live and confirmed: heartbeats are NOW
+    expect(QueueMonitor.snapshot().lastServerContactTs).not.toBeNull();
+
+    try {
+      QueueMonitor.start("http://127.0.0.1:9998"); // genuine retarget to B
+      expect(QueueMonitor.snapshot().lastServerContactTs).toBeNull();
+      expect(QueueMonitor.snapshot().runningPromptId).not.toBeNull();
+
+      const { bridge } = makeBridge({ timeoutCmds: new Set(["graph_outline"]) });
+      const ctx = makePanelToolCtx(bridge, TAB, new WorkflowTargetStore());
+      const text = textOf(await defByName("panel_graph_outline").handler({} as never, ctx));
+
+      expect(text).not.toMatch(/is still running/);
+      expect(text).toMatch(/UNCONFIRMED/);
+    } finally {
+      QueueMonitor.stop();
+    }
+  });
+
   it("a server that has NEVER answered is unconfirmed, not fresh", async () => {
     // The one case that cannot be dated. It is MORE unverified than a lapsed
     // heartbeat, so it must not fall through to the present-tense branch — the
