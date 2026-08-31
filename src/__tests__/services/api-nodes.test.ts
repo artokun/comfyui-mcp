@@ -140,6 +140,22 @@ function sampleObjectInfo(): ObjectInfo {
         },
       },
     }),
+    // Core output node, as every real ComfyUI registers it. generate picks its
+    // auto-added sink out of /object_info, so the fixture has to carry the sinks
+    // a real server would offer. Deliberately NO SaveVideo/SaveAudio* here: that
+    // is the older-server shape, and it keeps the "no registered sink" fallback
+    // exercised by the KlingVideoNode (VIDEO) case below.
+    SaveImage: nodeDef({
+      category: "image",
+      display_name: "Save Image",
+      output_node: true,
+      input: {
+        required: {
+          images: ["IMAGE", {}],
+          filename_prefix: ["STRING", { default: "ComfyUI" }],
+        },
+      },
+    }),
   };
 }
 
@@ -428,7 +444,9 @@ describe("generateWithApiNode", () => {
     expect(result.notes.some((n) => /SaveImage/.test(n))).toBe(false);
   });
 
-  it("warns when a non-output node has no IMAGE output to wire", async () => {
+  it("warns when the server registers no output node for the declared type", async () => {
+    // KlingVideoNode returns VIDEO; sampleObjectInfo deliberately has no
+    // SaveVideo (the older-server shape), so there is nothing to wire.
     const { deps, enqueued } = makeDeps();
     const result = await generateWithApiNode(
       { class_type: "KlingVideoNode", inputs: { prompt: "x" } },
@@ -436,6 +454,249 @@ describe("generateWithApiNode", () => {
     );
     expect(Object.keys(enqueued[0].wf)).toEqual(["1"]);
     expect(result.notes.some((n) => /prompt_no_outputs/.test(n))).toBe(true);
+    // The note names the type we could not terminate, so the caller knows what
+    // to wire via extra_nodes.
+    expect(result.notes.some((n) => /returns VIDEO/.test(n))).toBe(true);
+  });
+
+  // ── #2686 — terminal output sinks beyond IMAGE ─────────────────────────────
+  //
+  // generate only ever wired a SaveImage, so every API node returning something
+  // else shipped a prompt with no output node and ComfyUI 400d it with
+  // "prompt_no_outputs". On ComfyUI 0.33 that is 173 of the 241 non-output API
+  // nodes (VIDEO 112, STRING ~25, AUDIO 10, SVG 5).
+
+  /** Core sinks, shaped as ComfyUI 0.33 /object_info reports them. */
+  const SAVE_AUDIO_ADVANCED = nodeDef({
+    category: "audio",
+    display_name: "Save Audio (Advanced)",
+    output_node: true,
+    input: {
+      required: {
+        audio: ["AUDIO", {}],
+        filename_prefix: ["STRING", { default: "audio/ComfyUI" }],
+        format: [
+          "COMFY_DYNAMICCOMBO_V3",
+          {
+            options: [
+              { key: "flac", inputs: { required: {} } },
+              {
+                key: "mp3",
+                inputs: {
+                  required: {
+                    quality: ["COMBO", { options: ["V0", "128k", "320k"], default: "V0" }],
+                  },
+                },
+              },
+            ],
+          },
+        ],
+      },
+    },
+  });
+
+  /** The deprecated-but-still-registered FLAC saver older builds ship. */
+  const SAVE_AUDIO_LEGACY = nodeDef({
+    category: "audio",
+    display_name: "Save Audio (FLAC)",
+    output_node: true,
+    input: {
+      required: {
+        audio: ["AUDIO", {}],
+        filename_prefix: ["STRING", { default: "audio/ComfyUI" }],
+      },
+    },
+  });
+
+  const SAVE_VIDEO = nodeDef({
+    category: "video",
+    display_name: "Save Video",
+    output_node: true,
+    input: {
+      required: {
+        video: ["VIDEO", {}],
+        filename_prefix: ["STRING", { default: "video/ComfyUI" }],
+        format: [
+          "COMFY_DYNAMICCOMBO_V3",
+          {
+            options: [
+              {
+                key: "auto",
+                inputs: {
+                  required: { codec: ["COMBO", { options: ["auto", "h264", "av1"] }] },
+                },
+              },
+              {
+                key: "webm",
+                inputs: { required: { codec: ["COMBO", { options: ["auto", "av1"] }] } },
+              },
+            ],
+          },
+        ],
+      },
+    },
+  });
+
+  const SAVE_TEXT = nodeDef({
+    category: "text",
+    display_name: "Save Text",
+    output_node: true,
+    input: {
+      required: {
+        text: ["STRING", { forceInput: true }],
+        filename_prefix: ["STRING", { default: "ComfyUI" }],
+        format: ["COMBO", { options: ["txt", "csv", "md", "json"], default: "txt" }],
+      },
+    },
+  });
+
+  /** The node from the report: AUDIO out, not itself an OUTPUT_NODE. */
+  const BYTEDANCE_SEED_AUDIO = nodeDef({
+    api_node: true,
+    category: "partner/audio/ByteDance",
+    display_name: "ByteDance Seed Audio 1.0",
+    output: ["AUDIO"],
+    output_name: ["audio"],
+    input: { required: { text_prompt: ["STRING", { default: "", multiline: true }] } },
+  });
+
+  /** A node returning ("STRING", "VIDEO") — the 13-node Kling-style shape. */
+  const VIDEO_AND_TEXT = nodeDef({
+    api_node: true,
+    category: "api node/video/Kling",
+    display_name: "Kling With Text",
+    output: ["STRING", "VIDEO"],
+    output_name: ["response", "video"],
+    input: { required: { prompt: ["STRING", {}] } },
+  });
+
+  it("wires an audio sink for an AUDIO-returning API node (the #2686 repro)", async () => {
+    const { deps, enqueued } = makeDeps({
+      getObjectInfo: async () => ({
+        ByteDanceSeedAudio: BYTEDANCE_SEED_AUDIO,
+        SaveAudioAdvanced: SAVE_AUDIO_ADVANCED,
+      }),
+    });
+    const result = await generateWithApiNode(
+      { class_type: "ByteDanceSeedAudio", inputs: { text_prompt: "hello" } },
+      deps,
+    );
+
+    const wf = enqueued[0].wf;
+    expect(wf["2"].class_type).toBe("SaveAudioAdvanced");
+    expect(wf["2"].inputs.audio).toEqual(["1", 0]);
+    expect(wf["2"].inputs.filename_prefix).toBe("audio/ComfyUI");
+    // The graph now HAS a terminal output node, which is the whole point: a
+    // prompt without one is what ComfyUI rejected with prompt_no_outputs.
+    expect(result.notes.some((n) => /prompt_no_outputs/.test(n))).toBe(false);
+    expect(result.notes.some((n) => /SaveAudioAdvanced output node/.test(n))).toBe(true);
+  });
+
+  it("fills the sink's own required dynamic combo in the dotted server form", async () => {
+    // SaveVideo's `format` is a REQUIRED v3 dynamic combo. Sending only the link
+    // + filename_prefix would 400 with required_input_missing, so the sink's own
+    // widgets are resolved from its /object_info entry.
+    const { deps, enqueued } = makeDeps({
+      getObjectInfo: async () => ({
+        KlingVideoNode: sampleObjectInfo().KlingVideoNode,
+        SaveVideo: SAVE_VIDEO,
+      }),
+    });
+    await generateWithApiNode({ class_type: "KlingVideoNode", inputs: { prompt: "x" } }, deps);
+
+    const sink = enqueued[0].wf["2"];
+    expect(sink.class_type).toBe("SaveVideo");
+    expect(sink.inputs).toEqual({
+      video: ["1", 0],
+      filename_prefix: "video/ComfyUI",
+      format: "auto",
+      "format.codec": "auto",
+    });
+  });
+
+  it("falls back to a sink the server actually registers", async () => {
+    // An older ComfyUI has no SaveAudioAdvanced. Naming it anyway would swap a
+    // "no outputs" 400 for a "node type not found" 400 — no better.
+    const { deps, enqueued } = makeDeps({
+      getObjectInfo: async () => ({
+        ByteDanceSeedAudio: BYTEDANCE_SEED_AUDIO,
+        SaveAudio: SAVE_AUDIO_LEGACY,
+      }),
+    });
+    await generateWithApiNode(
+      { class_type: "ByteDanceSeedAudio", inputs: { text_prompt: "hello" } },
+      deps,
+    );
+
+    const sink = enqueued[0].wf["2"];
+    expect(sink.class_type).toBe("SaveAudio");
+    expect(sink.inputs).toEqual({ audio: ["1", 0], filename_prefix: "audio/ComfyUI" });
+  });
+
+  it("prefers the media output over a sibling STRING output", async () => {
+    const { deps, enqueued } = makeDeps({
+      getObjectInfo: async () => ({
+        KlingWithText: VIDEO_AND_TEXT,
+        SaveVideo: SAVE_VIDEO,
+        SaveText: SAVE_TEXT,
+      }),
+    });
+    await generateWithApiNode({ class_type: "KlingWithText", inputs: { prompt: "x" } }, deps);
+
+    const sink = enqueued[0].wf["2"];
+    expect(sink.class_type).toBe("SaveVideo");
+    // Wired to slot 1 — the VIDEO output's real index, not a hardcoded 0.
+    expect(sink.inputs.video).toEqual(["1", 1]);
+  });
+
+  it("falls through to another declared type when the preferred sink is absent", async () => {
+    // Same node, but this server has no SaveVideo. The STRING output can still
+    // terminate the graph, so the run happens instead of being rejected.
+    const { deps, enqueued } = makeDeps({
+      getObjectInfo: async () => ({ KlingWithText: VIDEO_AND_TEXT, SaveText: SAVE_TEXT }),
+    });
+    await generateWithApiNode({ class_type: "KlingWithText", inputs: { prompt: "x" } }, deps);
+
+    const sink = enqueued[0].wf["2"];
+    expect(sink.class_type).toBe("SaveText");
+    expect(sink.inputs).toEqual({
+      text: ["1", 0],
+      filename_prefix: "ComfyUI",
+      format: "txt", // required COMBO filled from its schema default
+    });
+  });
+
+  it("wires SaveGLB for a 3D API node, preferring the model over its STRING", async () => {
+    // The ('FILE_3D_GLB', 'STRING') shape services/generate-3d.ts drives behind
+    // generate_image (action:"3d"). SaveGLB's `mesh` is a MultiType covering the
+    // whole File3D family, so one sink serves them all.
+    const model3d = nodeDef({
+      api_node: true,
+      category: "api node/3d/Tripo",
+      display_name: "Tripo Model",
+      output: ["FILE_3D_GLB", "STRING"],
+      output_name: ["model_file", "task_id"],
+      input: { required: { prompt: ["STRING", {}] } },
+    });
+    const saveGlb = nodeDef({
+      category: "3d",
+      display_name: "Save 3D Model",
+      output_node: true,
+      input: {
+        required: {
+          mesh: ["MESH", {}],
+          filename_prefix: ["STRING", { default: "3d/ComfyUI" }],
+        },
+      },
+    });
+    const { deps, enqueued } = makeDeps({
+      getObjectInfo: async () => ({ TripoModel: model3d, SaveGLB: saveGlb, SaveText: SAVE_TEXT }),
+    });
+    await generateWithApiNode({ class_type: "TripoModel", inputs: { prompt: "a chair" } }, deps);
+
+    const sink = enqueued[0].wf["2"];
+    expect(sink.class_type).toBe("SaveGLB");
+    expect(sink.inputs).toEqual({ mesh: ["1", 0], filename_prefix: "3d/ComfyUI" });
   });
 
   it("forwards disable_random_seed to enqueue", async () => {
