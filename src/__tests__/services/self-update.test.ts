@@ -14,6 +14,7 @@ import {
   isNewer,
   resolveNpmLauncher,
   runNpmResolved,
+  shellCanResolveNpm,
   type NpmLauncher,
   runSelfUpdate,
   selfUpdateStatus,
@@ -1366,5 +1367,86 @@ describe("#2671 r1 — the last-resort attempt only claims 'missing' on the shel
     const calls: Array<{ file: string; args: string[]; shell: boolean }> = [];
     await runNpmResolved(io({ launcher: undefined, shellResolves: true, calls }), ["i", "-g", "x"]);
     expect(calls).toEqual([{ file: "npm.cmd", args: ["i", "-g", "x"], shell: true }]);
+  });
+});
+
+describe("#2671 r2 — the shell probe must answer only what it actually knows", () => {
+  // codex gate r2. These pin the DISCRIMINATOR against execFile's real error
+  // shapes, measured on Windows rather than assumed:
+  //   found           -> err === null
+  //   exit 1 (no npm) -> { code: 1,       killed: false }   the only real "no"
+  //   spawn failure   -> { code: "ENOENT"               }   a STRING code
+  //   timeout kill    -> { code: null,    killed: true  }
+  // The first draft answered "cannot tell" from a child.on("error") listener,
+  // which never wins: execFile's own error handler invokes the callback first,
+  // so the promise was already settled `false` and BOTH non-answers became
+  // "npm is not installed".
+  // These drive the REAL shellCanResolveNpm against REAL child processes. An
+  // earlier draft re-implemented the classification inside the test; reverting
+  // the discriminator to `!err` left all of it green, which is the whole reason
+  // the probe command is injectable now.
+  const isWin = process.platform === "win32";
+
+  it("a command that IS resolvable answers yes", async () => {
+    const res = await shellCanResolveNpm(
+      isWin
+        ? { file: "where", args: ["where.exe"] }
+        : { file: "sh", args: ["-c", "command -v sh"] },
+    );
+    expect(res).toBe(true);
+  }, 60_000);
+
+  it("a command that is genuinely absent answers NO — a real exit code", async () => {
+    const res = await shellCanResolveNpm(
+      isWin
+        ? { file: "where", args: ["definitely-no-such-command-2671"] }
+        : { file: "sh", args: ["-c", "command -v definitely-no-such-command-2671"] },
+    );
+    expect(res).toBe(false);
+  }, 60_000);
+
+  it("a probe that cannot SPAWN answers cannot-tell, not 'npm is missing'", async () => {
+    // ENOENT arrives with a STRING code. Reading it as a failed lookup is what
+    // would send a user with a broken `where` off to reinstall Node.
+    const res = await shellCanResolveNpm({ file: "no-such-binary-2671-probe", args: [] });
+    expect(res).toBeUndefined();
+  }, 60_000);
+
+  it("a probe we KILL on timeout answers cannot-tell", async () => {
+    const res = await shellCanResolveNpm(
+      isWin
+        ? { file: "ping", args: ["-n", "30", "127.0.0.1"], timeoutMs: 700 }
+        : { file: "sleep", args: ["30"], timeoutMs: 700 },
+    );
+    expect(res).toBeUndefined();
+  }, 60_000);
+});
+
+describe("#2671 r2 — the PATH scan must not block on a dead network share", () => {
+  it("a UNC PATH entry is never stat'ed", () => {
+    // codex gate r2: `exists` is synchronous and a dead share blocks for the
+    // SMB timeout, inside a module contracted to never block startup.
+    const probed: string[] = [];
+    const got = resolveNpmLauncher({
+      platform: "win32",
+      pathEnv: "\\\\fileserver\\tools\\node;//other/share;C:\\Program Files\\nodejs",
+      execPath: "C:\\Program Files\\nodejs\\node.exe",
+      exists: (p) => {
+        probed.push(p);
+        return p === join("C:\\Program Files\\nodejs", "npm.cmd");
+      },
+    });
+    expect(got?.source).toBe("path"); // the local entry after them still works
+    expect(probed.some((p) => p.startsWith("\\\\") || p.startsWith("//"))).toBe(false);
+  });
+
+  it("a UNC entry is still walked on POSIX, where a leading // is just a path", () => {
+    const got = resolveNpmLauncher({
+      platform: "linux",
+      pathEnv: "//net/tools:/usr/bin",
+      execPath: "/usr/local/bin/node",
+      exists: (p) => p === join("//net/tools", "npm"),
+    });
+    expect(got?.source).toBe("path");
   });
 });

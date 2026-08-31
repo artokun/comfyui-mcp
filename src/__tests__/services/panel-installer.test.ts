@@ -2103,6 +2103,44 @@ describe("runPanelAction #724 git fallback (legacy Manager 3.x no-op)", () => {
     expect(isGitOwnershipRefusal("error: invalid key: safe.directory")).toBe(false);
   });
 
+  it("#2671 r2 the CHECKOUT PATH cannot spoof the predicate, in either direction", () => {
+    // codex gate r2. runGit embeds the panel dir in every message, so a path
+    // containing the words would match a bare substring test and rob a real
+    // failure of its own correct diagnosis.
+    const spoofDir = "C:\\work\\dubious ownership\\panel";
+    expect(
+      isGitOwnershipRefusal(
+        `git status --porcelain in ${spoofDir} failed: fatal: not a git repository`,
+        spoofDir,
+      ),
+    ).toBe(false);
+    // Without the dir the same message DOES match — which is what proves the
+    // removal, not some other property, is doing the work.
+    expect(
+      isGitOwnershipRefusal(
+        `git status --porcelain in ${spoofDir} failed: fatal: not a git repository`,
+      ),
+    ).toBe(true);
+    // The direction that actually matters: a REAL refusal inside that same
+    // adversarial directory must still classify. Stripping the path must not
+    // disarm detection — git's advice line survives it.
+    expect(
+      isGitOwnershipRefusal(
+        `git rev-parse in ${spoofDir} failed: fatal: detected dubious ownership in repository at '${spoofDir}'\n` +
+          `To add an exception for this directory, call:\n\n` +
+          `\tgit config --global --add safe.directory ${spoofDir}`,
+        spoofDir,
+      ),
+    ).toBe(true);
+    // git prints forward slashes even when we hold backslashes.
+    expect(
+      isGitOwnershipRefusal(
+        `fatal: not a git repository at 'C:/work/dubious ownership/panel'`,
+        spoofDir,
+      ),
+    ).toBe(false);
+  });
+
   it("locally-AHEAD checkout (HEAD ≠ upstream): NOT 'at tip', throws unverifiable", async () => {
     const h = makeDeps({
       comfyuiPath: COMFY,

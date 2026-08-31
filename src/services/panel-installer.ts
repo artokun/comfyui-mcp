@@ -540,14 +540,37 @@ function runGit(dir: string, args: string[], timeoutMs: number): string {
  * lose its own correct diagnosis. The two-token command form cannot collide
  * with a path.
  *
+ * That fixed one instance of a CLASS, though (codex gate r2): every gate
+ * message embeds the panel dir, so any substring predicate can be spoofed by a
+ * checkout path containing the words — `C:\work\dubious ownership\panel` would
+ * have matched the prose alternative. So the known directory is REMOVED from
+ * the haystack before testing, which retires the collision class by
+ * construction rather than by making each pattern individually unspoofable.
+ * A genuine refusal in such a directory still classifies, because git's advice
+ * line survives the removal.
+ *
  * DIAGNOSTIC ONLY. This classification never authorizes a mutation — it
  * rewrites a message and nothing else. comfyui-mcp deliberately does not add
  * the safe.directory exception itself: that is the user's security decision.
  */
 const GIT_OWNERSHIP_REFUSAL_RE = /--add\s+safe\.directory|dubious ownership/i;
 
-export function isGitOwnershipRefusal(message: string): boolean {
-  return GIT_OWNERSHIP_REFUSAL_RE.test(message);
+/** Every rendering of `dir` that could appear in git's or a gate's message. */
+function pathVariants(dir: string): string[] {
+  const variants = new Set([dir, dir.replace(/\\/g, "/"), dir.replace(/\//g, "\\")]);
+  return [...variants].filter(Boolean);
+}
+
+export function isGitOwnershipRefusal(message: string, dir?: string): boolean {
+  let haystack = message;
+  if (dir) {
+    for (const v of pathVariants(dir)) {
+      // Windows paths are case-insensitive, and git may echo a different case
+      // than we hold.
+      haystack = haystack.replace(new RegExp(v.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "gi"), "");
+    }
+  }
+  return GIT_OWNERSHIP_REFUSAL_RE.test(haystack);
 }
 
 /**
@@ -2986,7 +3009,7 @@ async function updateViaGitCheckoutFallback(
     return await updateViaGitCheckoutFallbackInner(opts);
   } catch (err) {
     const raw = err instanceof Error ? err.message : String(err);
-    if (!isGitOwnershipRefusal(raw)) throw err;
+    if (!isGitOwnershipRefusal(raw, opts.dir)) throw err;
     throw new PanelInstallError(gitOwnershipRefusalMessage(opts.dir, opts.managerReason));
   }
 }

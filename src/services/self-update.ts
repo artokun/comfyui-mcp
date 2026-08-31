@@ -493,6 +493,13 @@ export function resolveNpmLauncher(io: {
     // not somewhere we are willing to pick an npm up from.
     const entry = raw.trim().replace(/^"(.*)"$/, "$1");
     if (!entry) continue;
+    // Never stat a UNC path (codex gate r2). `exists` is synchronous, and a
+    // dead network share blocks on the SMB timeout — tens of seconds — inside
+    // a module whose whole contract is that it can be fired and forgotten from
+    // startup without blocking. Reach is not lost: npm genuinely living only on
+    // a share is still found by the last-resort bare-name spawn, whose own PATH
+    // walk is the shell's problem and already bounded by NPM_TIMEOUT_MS.
+    if (isWin && /^[\\/]{2}/.test(entry)) continue;
     try {
       if (io.exists(join(entry, shim))) {
         return { file: shim, prefixArgs: [], shell: isWin, source: "path" };
@@ -581,26 +588,42 @@ function spawnNpm(
  * remediation for a problem they do not have.
  *
  * `where`/`command -v` answer with an EXIT CODE, so this is a structured
- * question, not a match on cmd.exe's localized "is not recognized". A probe
- * that cannot be spawned at all answers `undefined` — cannot tell — and callers
- * must not read that as "missing".
+ * question, not a match on cmd.exe's localized "is not recognized". Only a real
+ * exit code is an ANSWER; a probe that could not run, or that we killed on
+ * timeout, returns `undefined` — cannot tell — and callers must not read that
+ * as "missing".
+ *
+ * Discriminating on `err.code` being a NUMBER is measured, not assumed (codex
+ * gate r2). execFile reports all four outcomes through the same callback:
+ *   found            -> err === null
+ *   exit 1 (no npm)  -> { code: 1,        killed: false }
+ *   spawn failure    -> { code: "ENOENT"                }   (a STRING)
+ *   timeout kill     -> { code: null,     killed: true  }
+ * An earlier draft answered `undefined` from a `child.on("error")` listener,
+ * which never fires in time: execFile's own internal error handler invokes the
+ * callback FIRST, so the promise was already settled as `false`. Both failure
+ * modes silently became "npm is not installed".
  */
-async function shellCanResolveNpm(): Promise<boolean | undefined> {
+export async function shellCanResolveNpm(
+  // Injectable so a test can drive the REAL discriminator against real spawn
+  // failures and real timeouts. A test that re-implements the classification
+  // locally proves only that the test agrees with itself: the first draft of
+  // these tests did exactly that, and reverting the discriminator left every
+  // one of them green.
+  probe?: { file: string; args: string[]; timeoutMs?: number },
+): Promise<boolean | undefined> {
   const isWin = process.platform === "win32";
-  const [file, probeArgs] = isWin
-    ? ["where", [npmShimName("win32")]]
-    : ["sh", ["-c", "command -v npm"]];
+  const { file, args, timeoutMs } = probe ?? {
+    file: isWin ? "where" : "sh",
+    args: isWin ? [npmShimName("win32")] : ["-c", "command -v npm"],
+  };
   return new Promise((resolveP) => {
     try {
-      const child = execFile(
-        file,
-        probeArgs,
-        { timeout: 15_000, windowsHide: true },
-        (err) => resolveP(!err),
-      );
-      // The probe itself never launched (no `where`, no `sh`) — that says
-      // nothing about npm.
-      child.on("error", () => resolveP(undefined));
+      execFile(file, args, { timeout: timeoutMs ?? 15_000, windowsHide: true }, (err) => {
+        if (!err) return resolveP(true);
+        const e = err as NodeJS.ErrnoException & { killed?: boolean };
+        resolveP(typeof e.code === "number" && !e.killed ? false : undefined);
+      });
     } catch {
       resolveP(undefined);
     }
