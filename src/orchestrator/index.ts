@@ -272,6 +272,11 @@ import { readComfyuiCrashLog, formatCrashNote } from "../services/crash-log.js";
 import { QueueMonitor } from "../services/queue-monitor.js";
 import { formatQueueNote } from "./queue-note.js";
 import {
+  liveStallSecondsValue,
+  setLiveStallSeconds,
+  stallThresholdMs,
+} from "../services/stall-threshold.js";
+import {
   RunCompletions,
   describe as describeCorrelation,
   type CompletionPayload,
@@ -584,24 +589,10 @@ const HEADLESS_DIRECTIVE =
   "missing models (exact file + the widget holding it) and missing node types that the list action omits, in one call. It is " +
   "the canvas-less equivalent of the panel's \"why is this red?\", so also do NOT try panel_get_errors here.";
 
-/** Live stall threshold (seconds) pushed from the panel setting via a `set_config`
- *  frame — applies WITHOUT a reconnect. null = not set, fall back to env then the
- *  built-in default. Process-global: one ComfyUI per orchestrator. */
-let liveStallSeconds: number | null = null;
-function setLiveStallSeconds(v: unknown): void {
-  const n = Number(v);
-  liveStallSeconds = Number.isFinite(n) && n > 0 ? Math.min(3600, Math.max(15, Math.round(n))) : null;
-}
-
-/** Stall threshold (ms): a running job with no node/progress advance for this long
- *  is treated as stalled. Video steps are legitimately slow, so the DEFAULT is high
- *  (180s). Precedence: live panel setting (set_config) → COMFYUI_MCP_STALL_S env
- *  (spawn value) → 180s default. */
-function stallThresholdMs(): number {
-  if (liveStallSeconds != null) return liveStallSeconds * 1000;
-  const s = Number(process.env.COMFYUI_MCP_STALL_S);
-  return Number.isFinite(s) && s > 0 ? Math.round(s * 1000) : 180000;
-}
+// #2684 — the stall threshold moved to services/stall-threshold.ts so the
+// queue-busy notes in panel-tools.ts read the SAME number this file does. While
+// it was private here, those notes could assert a run was live at a moment this
+// file was already calling the server dark.
 
 /**
  * Lockfile path for a given bridge port. The orchestrator self-registers its
@@ -4933,12 +4924,12 @@ export async function runPanelOrchestrator(): Promise<void> {
     // live ollama sessions keep their connection until restarted.
     if (event.type === "set_config" && event.tab_id) {
       if ("stall_seconds" in event) {
-        const _prevStall = liveStallSeconds;
+        const _prevStall = liveStallSecondsValue();
         setLiveStallSeconds((event as { stall_seconds?: unknown }).stall_seconds);
         // The panel re-sends set_config on every heartbeat; only log an ACTUAL change.
-        if (liveStallSeconds !== _prevStall) {
+        if (liveStallSecondsValue() !== _prevStall) {
           logger.info(
-            `[panel-orchestrator] live stall threshold → ${liveStallSeconds ?? "default"}s`,
+            `[panel-orchestrator] live stall threshold → ${liveStallSecondsValue() ?? "default"}s`,
           );
         }
       }

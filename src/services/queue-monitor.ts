@@ -130,6 +130,16 @@ export interface QueueSnapshot {
    *  reported depth is fully accounted for — the coarse recent-self-queue
    *  fallback never counts here. */
   selfAttributedProven: boolean;
+  /** #2684 — ms epoch of the last evidence the monitored ComfyUI answered HERE:
+   *  a successful `/queue` poll (`lastServerAliveTs`) or any decodable ws frame
+   *  (`lastFrameTs`), whichever is newer. null when neither has ever happened.
+   *
+   *  This is the SAME heartbeat `report()` reduces to `serverAlive`, exposed so
+   *  a consumer of `running`/`runningPromptId` can tell a live claim from a
+   *  last-known one. Every other field here is last-known state with no expiry;
+   *  without this there is no way to ask how old that state is, which is how a
+   *  never-confirmed run kept being named as present-tense fact (#2684). */
+  lastServerContactTs: number | null;
 }
 
 /**
@@ -182,6 +192,26 @@ const HISTORY_TAIL_ITEMS = 32;
 // Training nodes legitimately exceed it (hours of silent tqdm), which is why
 // report() exempts runs whose graph contains a known trainer class (#1652).
 const HARD_STALL_FLOOR_MS = 30 * 60 * 1000; // 30 minutes
+/**
+ * #2684 — how long the monitored ComfyUI may stay SILENT before a believed
+ * running prompt stops being reported as present-tense fact.
+ *
+ * Keeping the last-known run across a blip is deliberate and right: one timed-out
+ * poll is not proof a render finished, and clearing on it would falsely report an
+ * active job as done. What was wrong is that the belief had no upper bound — when
+ * the monitored target stops answering entirely (`fetchJson` returns null on abort,
+ * timeout or non-2xx, and `applyQueue` then returns before it can clear), nothing
+ * ever downgrades "is running" to "was running, unverified since".
+ *
+ * 30 s is chosen against the two clocks that bound it. Below: the poll runs at
+ * ~1 Hz with a 2.5 s timeout, so 30 s of total silence is ten-plus consecutive
+ * failed polls AND zero ws frames — well past any transient blip. Above: the
+ * default stall threshold is 180 s and the live setting floors at 15 s, so the
+ * busy note downgrades BEFORE `report()` can raise a STALLED notice off the same
+ * lapsed heartbeat. That ordering is the point: the reported session got both
+ * statements at once, one derived from the other's negation.
+ */
+export const RUNNING_UNCONFIRMED_MS = 30_000;
 // Node classes whose HEALTHY runtime legitimately exceeds the hard floor with
 // ZERO forward-progress frames: ComfyUI's built-in LoRA training only rewrites
 // a tqdm bar on stdout — no per-step `progress` WS frames — so lastActivityTs
@@ -926,7 +956,16 @@ class QueueMonitorImpl {
       lastCompleted: this.state.lastCompleted,
       selfAttributed: this.isSelfAttributed(),
       selfAttributedProven: this.isSelfAttributedProven(),
+      lastServerContactTs: this.lastServerContactTs(),
     };
+  }
+
+  /** #2684 — newest of the two liveness heartbeats, null when the monitored
+   *  server has never answered here. Shared with `report()` so the busy notes
+   *  and the STALLED notice cannot disagree about whether the server is alive. */
+  private lastServerContactTs(): number | null {
+    const ts = Math.max(this.state.lastServerAliveTs ?? 0, this.state.lastFrameTs ?? 0);
+    return ts > 0 ? ts : null;
   }
 
   /** Stall/backlog report for the turn-start injector. */
@@ -943,8 +982,8 @@ class QueueMonitorImpl {
     // 1 Hz poll fresh, so a busy decode stays live and is NOT flagged; a server
     // that stops answering (crashed / event-loop wedged) lets the heartbeat
     // lapse → a real stall still surfaces.
-    const heartbeatTs = Math.max(this.state.lastServerAliveTs ?? 0, this.state.lastFrameTs ?? 0);
-    const serverAlive = heartbeatTs > 0 && now - heartbeatTs < stallMs;
+    const heartbeatTs = this.lastServerContactTs();
+    const serverAlive = heartbeatTs !== null && now - heartbeatTs < stallMs;
     // Backstop so a genuine in-node DEADLOCK on a still-reachable server isn't
     // suppressed FOREVER: after a long hard floor of zero forward progress, flag
     // regardless of liveness. A real deadlock usually holds Python's GIL, which
