@@ -76,8 +76,11 @@ export interface SelfUpdateResult {
    *   - "locked-by-running-process" — npm failed because THIS process holds its
    *     own files open (Windows keeps sharp's libvips DLL mapped, #912).
    *   - "npm-failed" — npm failed for some other reason (see `note` for the tail).
+   *   - "npm-not-found" — npm could not be LOCATED at all (#2671), so the
+   *     failure says nothing about the update itself. Distinct from
+   *     "npm-failed": that one is npm's verdict, this one is npm never running.
    */
-  reason?: "locked-by-running-process" | "npm-failed";
+  reason?: "locked-by-running-process" | "npm-failed" | "npm-not-found";
   /** Human-facing note (reconnect instruction, reason, etc.). */
   note?: string;
 }
@@ -113,7 +116,19 @@ export interface SelfUpdateDeps {
   runNpm: (
     args: string[],
     cwd?: string,
-  ) => Promise<{ ok: boolean; stdout?: string; stderr?: string }>;
+  ) => Promise<{
+    ok: boolean;
+    stdout?: string;
+    stderr?: string;
+    /**
+     * #2671 — true only when npm could not be LOCATED (neither on PATH nor
+     * beside the running node binary) AND the last-resort bare-name spawn also
+     * failed. A STRUCTURED signal on purpose: the alternative is matching
+     * cmd.exe's "is not recognized as an internal or external command", which
+     * is localized and would misclassify on every non-English Windows.
+     */
+    npmMissing?: boolean;
+  }>;
   /** Process platform — injectable so the Windows-only deferred path is testable. */
   platform?: () => string;
   /**
@@ -207,6 +222,14 @@ export interface DeferredUpdateOpts {
   packageDir: string;
   /** Version the helper should land (for the log line; it installs @latest). */
   to: string;
+  /**
+   * #2671 — how the helper must launch npm. The helper inherits the SAME PATH
+   * this process has, so when npm was only reachable beside the node binary,
+   * a helper hard-coded to bare `npm.cmd` fails exactly as the in-process run
+   * would have — silently, into a log the user never opens. Undefined keeps
+   * the historical bare-shim call.
+   */
+  npm?: NpmLauncher;
 }
 
 /** Where the helper writes its log (named in user-facing notes). */
@@ -270,6 +293,14 @@ export function buildDeferredUpdateScript(opts: DeferredUpdateOpts, logPath: str
   // abort the helper, never let npm run in whatever directory it inherited
   // (codex gate r1). Empty for global installs (npm -g has no cwd dependence).
   const cwd = opts.mode === "local" && opts.projectRoot ? opts.projectRoot : "";
+  // #2671 — call the SAME npm the in-process attempt resolved. A node-adjacent
+  // launcher becomes `& '<node.exe>' '<npm-cli.js>' …`; both are psLiteral'd, so
+  // the default `C:\Program Files\nodejs` path survives its space. With no
+  // resolved launcher we keep the historical bare shim, which is still right
+  // whenever PATH carries npm by the time the helper actually runs.
+  const npmCall = opts.npm
+    ? [opts.npm.file, ...opts.npm.prefixArgs].map(psLiteral).join(" ")
+    : "npm.cmd";
   return [
     `# comfyui-mcp deferred self-update helper (#912). Log: ${logPath}`,
     `$ErrorActionPreference = 'Continue'`,
@@ -302,7 +333,7 @@ export function buildDeferredUpdateScript(opts: DeferredUpdateOpts, logPath: str
     `    }`,
     `  }`,
     `  if ($aborted) { break }`,
-    `  & npm.cmd ${npmArgs} *>> $log`,
+    `  & ${npmCall} ${npmArgs} *>> $log`,
     `  if ($LASTEXITCODE -eq 0) { $ok = $true } else { Start-Sleep -Seconds 10 }`,
     `}`,
     `if ($aborted) {`,
@@ -345,7 +376,14 @@ async function defaultScheduleDeferredUpdate(opts: DeferredUpdateOpts): Promise<
       }
     }
     const scriptPath = join(dir, `comfyui-mcp-self-update-${process.pid}-${Date.now()}.ps1`);
-    writeFileSync(scriptPath, buildDeferredUpdateScript(opts, logPath), "utf-8");
+    // #2671 — resolve npm HERE, the single choke point every scheduler caller
+    // passes through, rather than at each of them. `opts.npm` stays injectable
+    // for tests; production always gets this process's own resolution.
+    writeFileSync(
+      scriptPath,
+      buildDeferredUpdateScript({ ...opts, npm: opts.npm ?? currentNpmLauncher() }, logPath),
+      "utf-8",
+    );
     const spawned = await new Promise<boolean>((resolveP) => {
       const child = spawn(
         "powershell.exe",
@@ -380,27 +418,154 @@ export function deferredUpdateLogPath(): string {
   return join(tmpdir(), HELPER_LOG_NAME);
 }
 
+// ---------------------------------------------------------------------------
+// #2671 — locating npm
+// ---------------------------------------------------------------------------
+
+/**
+ * How to LAUNCH npm (#2671).
+ *
+ * npm used to be resolved as the bare name `npm.cmd`/`npm` through the
+ * inherited PATH, so an orchestrator started by a launcher that does not put
+ * the Node directory on PATH — ComfyUI Desktop, a Python venv, a service
+ * wrapper — could never self-update: Windows answered `'npm.cmd' is not
+ * recognized as an internal or external command` and the note relayed that
+ * verbatim, leaving the user to remediate by hand.
+ *
+ * npm is not actually absent in that case. It ships NEXT TO the `node` binary
+ * that is running this very process, and `process.execPath` is an absolute
+ * path we always have, PATH or no PATH.
+ */
+export interface NpmLauncher {
+  /** Executable to spawn. */
+  file: string;
+  /** Args inserted BEFORE npm's own argv (the npm-cli.js path, or nothing). */
+  prefixArgs: string[];
+  /** Whether the spawn needs a shell — a Windows `.cmd` shim does, node does not. */
+  shell: boolean;
+  /** Where it was found. Reported in diagnostics; never parsed. */
+  source: "path" | "node-adjacent";
+}
+
+/** The launcher shim name cmd.exe/sh would resolve for a bare `npm`. */
+function npmShimName(platform: string): string {
+  return platform === "win32" ? "npm.cmd" : "npm";
+}
+
+/**
+ * Resolve how to run npm (#2671). Pure over its injected IO so the Windows
+ * layouts are testable from POSIX and vice versa.
+ *
+ * Order matters:
+ *   1. PATH. When the shim is there we return the BARE name and keep the shell
+ *      exactly as before, so the invocation is byte-identical to the
+ *      pre-#2671 one on every host where it already worked. This change can
+ *      only add reach, never move the working case onto a new code path.
+ *   2. npm's own JS beside the running node binary, run by `process.execPath`
+ *      directly. Deliberately NOT the `npm.cmd` shim: a shim needs shell:true,
+ *      and `execFile` with shell:true concatenates file+args unquoted, so the
+ *      default install path `C:\Program Files\nodejs\npm.cmd` would be split
+ *      at the space and cmd.exe would try to run `C:\Program`. Spawning node
+ *      with the script as an argv entry needs no shell and no quoting.
+ *
+ * Returns undefined when npm is genuinely not locatable; callers still get one
+ * last-resort bare-name attempt before reporting that.
+ */
+export function resolveNpmLauncher(io: {
+  platform: string;
+  pathEnv: string | undefined;
+  execPath: string;
+  exists: (p: string) => boolean;
+}): NpmLauncher | undefined {
+  const isWin = io.platform === "win32";
+  const shim = npmShimName(io.platform);
+
+  const pathSep = isWin ? ";" : ":";
+  for (const raw of (io.pathEnv ?? "").split(pathSep)) {
+    // A Windows PATH entry may be quoted; an empty one means "cwd", which is
+    // not somewhere we are willing to pick an npm up from.
+    const entry = raw.trim().replace(/^"(.*)"$/, "$1");
+    if (!entry) continue;
+    try {
+      if (io.exists(join(entry, shim))) {
+        return { file: shim, prefixArgs: [], shell: isWin, source: "path" };
+      }
+    } catch {
+      /* an unreadable PATH entry is simply not where npm is */
+    }
+  }
+
+  const nodeDir = dirname(io.execPath);
+  const cliCandidates = isWin
+    ? // Windows: node.exe and node_modules/ sit in the same directory.
+      [join(nodeDir, "node_modules", "npm", "bin", "npm-cli.js")]
+    : // POSIX: <prefix>/bin/node alongside <prefix>/lib/node_modules/npm.
+      [
+        join(nodeDir, "..", "lib", "node_modules", "npm", "bin", "npm-cli.js"),
+        join(nodeDir, "node_modules", "npm", "bin", "npm-cli.js"),
+      ];
+  for (const cli of cliCandidates) {
+    try {
+      if (io.exists(cli)) {
+        return {
+          file: io.execPath,
+          prefixArgs: [resolve(cli)],
+          shell: false,
+          source: "node-adjacent",
+        };
+      }
+    } catch {
+      /* probe failure is not a location */
+    }
+  }
+  return undefined;
+}
+
+/** Resolve the npm launcher for THIS process. */
+function currentNpmLauncher(): NpmLauncher | undefined {
+  return resolveNpmLauncher({
+    platform: process.platform,
+    pathEnv: process.env.PATH ?? process.env.Path,
+    execPath: process.execPath,
+    exists: existsSync,
+  });
+}
+
 function defaultRunNpm(
   args: string[],
   cwd?: string,
-): Promise<{ ok: boolean; stdout?: string; stderr?: string }> {
+): Promise<{ ok: boolean; stdout?: string; stderr?: string; npmMissing?: boolean }> {
   return new Promise((resolveP) => {
-    // `npm` is a .cmd shim on Windows; execFile needs shell:true to run it.
-    // SAFE: every arg is a hard-coded constant (no interpolation of user input),
-    // so there is no shell-injection surface.
     const isWin = process.platform === "win32";
-    const cmd = isWin ? "npm.cmd" : "npm";
+    const launcher = currentNpmLauncher();
+    // LAST RESORT (#2671): when npm is nowhere we can see it, still make the
+    // pre-#2671 bare-name attempt. Our PATH scan is not cmd.exe's resolver, so
+    // an exotic host where the shell would have found npm must not be turned
+    // into a hard refusal by a failed probe. `npmMissing` is then reported only
+    // if that attempt ALSO fails, which makes this strictly additive.
+    const cmd = launcher?.file ?? npmShimName(process.platform);
+    const spawnArgs = [...(launcher?.prefixArgs ?? []), ...args];
+    // SAFE: every npm arg is a hard-coded constant (no interpolation of user
+    // input), so the shell path has no injection surface. `prefixArgs` is only
+    // ever populated on the shell:false node path.
+    const useShell = launcher ? launcher.shell : isWin;
+    const missing = launcher === undefined ? { npmMissing: true } : {};
     try {
       const child = execFile(
         cmd,
-        args,
-        { cwd, timeout: NPM_TIMEOUT_MS, windowsHide: true, shell: isWin },
+        spawnArgs,
+        { cwd, timeout: NPM_TIMEOUT_MS, windowsHide: true, shell: useShell },
         (err, stdout, stderr) =>
-          resolveP({ ok: !err, stdout: String(stdout ?? ""), stderr: String(stderr ?? "") }),
+          resolveP({
+            ok: !err,
+            stdout: String(stdout ?? ""),
+            stderr: String(stderr ?? ""),
+            ...(err ? missing : {}),
+          }),
       );
-      child.on("error", () => resolveP({ ok: false }));
+      child.on("error", () => resolveP({ ok: false, ...missing }));
     } catch {
-      resolveP({ ok: false });
+      resolveP({ ok: false, ...missing });
     }
   });
 }
@@ -737,6 +902,40 @@ async function applyNpmUpdate(
         `the orchestrator fully (a /mcp reconnect or auto-restart keeps a process ` +
         `holding the lock), then run: ${manualUpdateCommand(info)}${manualUpdateLocation(info)}` +
         (tail ? `\nnpm said:\n${tail}` : ""),
+    };
+  }
+
+  // #2671 — npm was never LOCATED, so nothing here is npm's verdict on the
+  // update. Checked AFTER the lock branch on purpose: an EBUSY in the output is
+  // positive proof npm actually ran, and that proof outranks our own
+  // could-not-find-it probe (which cannot see every way a shell resolves a
+  // command). npm's raw output still travels in the note either way, so a
+  // misclassification can never hide evidence from the user.
+  if (res.npmMissing) {
+    const isDefaultWin = (deps.platform?.() ?? process.platform) === "win32";
+    return {
+      action: "unavailable",
+      mode: info.mode,
+      from: info.currentVersion,
+      to: latest,
+      reason: "npm-not-found",
+      note:
+        `Cannot self-update to ${latest}: npm could not be found. It is not on ` +
+        `this server process's PATH, and there is no npm beside the Node binary ` +
+        `running it (${process.execPath}). Staying on ${info.currentVersion} — ` +
+        `nothing was changed.\nTo update, run this yourself in a terminal that ` +
+        `HAS npm: ${manualUpdateCommand(info)}${manualUpdateLocation(info)}` +
+        (isDefaultWin
+          ? `\nIf that terminal also reports npm is not recognized, Node.js is ` +
+            `not installed for this user — install it from https://nodejs.org ` +
+            `and reopen the terminal.`
+          : `\nIf that terminal also cannot find npm, install Node.js ` +
+            `(https://nodejs.org) and retry.`) +
+        `\nWhen npm IS installed, this usually means the orchestrator was ` +
+        `launched by something that does not pass the Node directory on PATH; ` +
+        `relaunching it from a shell where \`npm -v\` works lets this action ` +
+        `run on its own.` +
+        (tail ? `\nThe launch failed with:\n${tail}` : ""),
     };
   }
 

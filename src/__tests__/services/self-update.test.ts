@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { execFileSync } from "node:child_process";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -10,6 +10,7 @@ import {
   compareSemver,
   detectInstallMode,
   isNewer,
+  resolveNpmLauncher,
   runSelfUpdate,
   selfUpdateStatus,
   SelfUpdateError,
@@ -50,6 +51,7 @@ function makeDeps(opts: {
   npmOk?: boolean; // result of runNpm
   npmStderr?: string; // npm failure output (diagnostics must survive, #912)
   npmStdout?: string;
+  npmMissing?: boolean; // #2671: npm could not be LOCATED at all
   platform?: string; // injected platform (the deferred path is Windows-only)
   scheduleOk?: boolean; // whether scheduleDeferredUpdate reports a launch
   registryThrows?: boolean;
@@ -91,7 +93,12 @@ function makeDeps(opts: {
       const ok = opts.npmOk ?? true;
       return ok
         ? { ok }
-        : { ok, stderr: opts.npmStderr ?? "", stdout: opts.npmStdout ?? "" };
+        : {
+            ok,
+            stderr: opts.npmStderr ?? "",
+            stdout: opts.npmStdout ?? "",
+            ...(opts.npmMissing ? { npmMissing: true } : {}),
+          };
     },
     platform: opts.platform ? () => opts.platform! : undefined,
     scheduleDeferredUpdate: async (o) => {
@@ -948,5 +955,223 @@ describe("selfUpdateStatus and the empty-version guard (#1136 review)", () => {
     } finally {
       vi.unstubAllGlobals();
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// #2671 — self-update must not die because npm is not on THIS process's PATH
+// ---------------------------------------------------------------------------
+
+describe("#2671 — locating npm", () => {
+  // The reporter's host: comfyui-mcp launched by something that never puts the
+  // Node directory on PATH, so `npm.cmd` resolves to nothing and Windows says
+  // "'npm.cmd' is not recognized as an internal or external command".
+  const WIN_NODE_DIR = "C:\\Program Files\\nodejs";
+  const WIN_NODE = join(WIN_NODE_DIR, "node.exe");
+  const WIN_NPM_CLI = join(WIN_NODE_DIR, "node_modules", "npm", "bin", "npm-cli.js");
+  const WIN_SHIM = join(WIN_NODE_DIR, "npm.cmd");
+
+  it("PATH hit keeps the pre-#2671 invocation byte-for-byte (bare shim, shell on)", () => {
+    const got = resolveNpmLauncher({
+      platform: "win32",
+      pathEnv: `C:\\Windows\\system32;${WIN_NODE_DIR}`,
+      execPath: WIN_NODE,
+      exists: (p) => p === WIN_SHIM,
+    });
+    // The bare name, NOT an absolute path: on every host where this already
+    // worked, nothing about the spawn changes.
+    expect(got).toEqual({ file: "npm.cmd", prefixArgs: [], shell: true, source: "path" });
+  });
+
+  it("PATH miss falls back to the npm beside the RUNNING node binary", () => {
+    const got = resolveNpmLauncher({
+      platform: "win32",
+      pathEnv: "C:\\Windows\\system32;C:\\Python311\\Scripts", // no node dir
+      execPath: WIN_NODE,
+      exists: (p) => p === WIN_NPM_CLI,
+    });
+    expect(got?.source).toBe("node-adjacent");
+    // Spawns node with npm's own JS — no shell, so the space in
+    // "C:\Program Files" needs no quoting and cannot split the command.
+    expect(got?.file).toBe(WIN_NODE);
+    expect(got?.shell).toBe(false);
+    expect(got?.prefixArgs).toEqual([WIN_NPM_CLI]);
+  });
+
+  it("POSIX resolves npm through the <prefix>/lib layout, not the Windows one", () => {
+    const cli = join("/usr/local/bin", "..", "lib", "node_modules", "npm", "bin", "npm-cli.js");
+    const got = resolveNpmLauncher({
+      platform: "linux",
+      pathEnv: "/usr/bin:/bin",
+      execPath: "/usr/local/bin/node",
+      exists: (p) => p === cli,
+    });
+    expect(got?.source).toBe("node-adjacent");
+    expect(got?.shell).toBe(false); // never a shell off Windows
+    expect(got?.prefixArgs).toEqual([resolve(cli)]);
+  });
+
+  it("npm nowhere → undefined (callers still get one last-resort bare attempt)", () => {
+    expect(
+      resolveNpmLauncher({
+        platform: "win32",
+        pathEnv: "C:\\Windows\\system32",
+        execPath: WIN_NODE,
+        exists: () => false,
+      }),
+    ).toBeUndefined();
+  });
+
+  it("an empty PATH entry never becomes a resolution; a quoted one still does", () => {
+    // An empty entry means "the current directory" to cmd.exe. Picking npm up
+    // from wherever ComfyUI happens to be running is not something we do.
+    expect(
+      resolveNpmLauncher({
+        platform: "win32",
+        pathEnv: ";;  ;",
+        execPath: WIN_NODE,
+        exists: (p) => p === join(".", "npm.cmd") || p === "npm.cmd",
+      }),
+    ).toBeUndefined();
+    expect(
+      resolveNpmLauncher({
+        platform: "win32",
+        pathEnv: `"${WIN_NODE_DIR}"`,
+        execPath: WIN_NODE,
+        exists: (p) => p === WIN_SHIM,
+      })?.source,
+    ).toBe("path");
+  });
+
+  it("a PATH probe that THROWS does not abort the resolution", () => {
+    const got = resolveNpmLauncher({
+      platform: "win32",
+      pathEnv: "\\\\dead-share\\x;C:\\Windows\\system32",
+      execPath: WIN_NODE,
+      exists: (p) => {
+        if (p.startsWith("\\\\dead-share")) throw new Error("EPERM");
+        return p === WIN_NPM_CLI;
+      },
+    });
+    expect(got?.source).toBe("node-adjacent");
+  });
+});
+
+describe("#2671 — an unfindable npm is reported as such, not as a failed update", () => {
+  it("reports npm-not-found with the command to run by hand (global)", async () => {
+    const h = makeDeps({
+      packageDir: GLOBAL_DIR,
+      currentVersion: "0.52.139",
+      latest: "0.52.165",
+      npmOk: false,
+      npmMissing: true,
+      npmStderr:
+        "'npm.cmd' is not recognized as an internal or external command,\noperable program or batch file.",
+      platform: "win32",
+    });
+    const res = await runSelfUpdate(h.deps);
+    expect(res.action).toBe("unavailable");
+    // A distinct reason from "npm-failed": npm never ran, so it rendered no
+    // verdict on the update at all.
+    expect(res.reason).toBe("npm-not-found");
+    expect(res.note).toMatch(/npm could not be found/);
+    // The user must be told what to actually DO, and that nothing changed.
+    expect(res.note).toContain(`npm i -g ${PACKAGE_NAME}@latest`);
+    expect(res.note).toMatch(/nothing was changed/);
+    expect(res.note).toMatch(/nodejs\.org/);
+    // The raw launcher failure still travels, so a misclassification can never
+    // hide evidence from the user.
+    expect(res.note).toContain("is not recognized");
+    // The old note claimed npm had rejected the update. It had not.
+    expect(res.note).not.toMatch(/npm update to 0\.52\.165 failed/);
+  });
+
+  it("a LOCAL install is told WHERE to run the command", async () => {
+    const h = makeDeps({
+      packageDir: LOCAL_DIR,
+      currentVersion: "0.52.139",
+      latest: "0.52.165",
+      existing: [join(LOCAL_PROJECT, "package.json")],
+      npmOk: false,
+      npmMissing: true,
+      platform: "win32",
+    });
+    const res = await runSelfUpdate(h.deps);
+    expect(res.reason).toBe("npm-not-found");
+    expect(res.note).toContain(`npm i ${PACKAGE_NAME}@latest`);
+    expect(res.note).toContain(LOCAL_PROJECT);
+  });
+
+  it("EBUSY OUTRANKS the not-found probe — npm plainly ran, so the deferred helper still fires", async () => {
+    // The ordering guard. `npmMissing` only says our own PATH/node-adjacent
+    // probe found nothing; an EBUSY in the output is positive proof npm
+    // executed anyway. Trusting the probe over that proof would strand every
+    // Windows user whose shell resolves npm in a way we cannot see, by
+    // skipping the helper that is the ONLY way an in-place Windows update
+    // ever lands.
+    const h = makeDeps({
+      packageDir: GLOBAL_DIR,
+      currentVersion: "0.52.139",
+      latest: "0.52.165",
+      npmOk: false,
+      npmMissing: true,
+      npmStderr: "npm error code EBUSY\nnpm error EBUSY: resource busy or locked",
+      platform: "win32",
+      scheduleOk: true,
+    });
+    const res = await runSelfUpdate(h.deps);
+    expect(res.action).toBe("scheduled");
+    expect(res.reason).toBe("locked-by-running-process");
+    expect(h.scheduleCalls).toHaveLength(1);
+  });
+
+  it("a normal npm failure is untouched by the new branch", async () => {
+    const h = makeDeps({
+      packageDir: GLOBAL_DIR,
+      currentVersion: "0.19.1",
+      latest: "0.20.0",
+      npmOk: false, // npmMissing NOT set — npm ran and said no
+      npmStderr: "npm error code E404",
+      platform: "linux",
+    });
+    const res = await runSelfUpdate(h.deps);
+    expect(res.reason).toBe("npm-failed");
+    expect(res.note).toContain("npm update to 0.20.0 failed");
+    expect(res.note).not.toMatch(/npm could not be found/);
+  });
+});
+
+describe("#2671 — the DEFERRED helper must launch the same npm the caller resolved", () => {
+  const OPTS = {
+    mode: "global" as const,
+    packageDir: "C:\\Users\\me\\AppData\\Roaming\\npm\\node_modules\\comfyui-mcp",
+    to: "0.52.165",
+  };
+
+  it("a node-adjacent launcher is quoted, so 'Program Files' survives the space", () => {
+    const script = buildDeferredUpdateScript(
+      {
+        ...OPTS,
+        npm: {
+          file: "C:\\Program Files\\nodejs\\node.exe",
+          prefixArgs: ["C:\\Program Files\\nodejs\\node_modules\\npm\\bin\\npm-cli.js"],
+          shell: false,
+          source: "node-adjacent",
+        },
+      },
+      "C:\\tmp\\log.txt",
+    );
+    expect(script).toContain(
+      "& 'C:\\Program Files\\nodejs\\node.exe' " +
+        "'C:\\Program Files\\nodejs\\node_modules\\npm\\bin\\npm-cli.js' i -g",
+    );
+    // The bare shim would have failed for exactly the reason the in-process
+    // attempt did — silently, into a log nobody opens.
+    expect(script).not.toContain("& npm.cmd ");
+  });
+
+  it("with no resolved launcher the historical bare shim is kept", () => {
+    const script = buildDeferredUpdateScript(OPTS, "C:\\tmp\\log.txt");
+    expect(script).toContain("& npm.cmd i -g");
   });
 });

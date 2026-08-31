@@ -45,6 +45,7 @@ import {
   isProvenQuiescentQueue,
   classifyManagerTaskRecord,
   describeManagerTaskVerdict,
+  isGitOwnershipRefusal,
   PanelInstallError,
   PANEL_REGISTRY_ID,
   PANEL_VERSION,
@@ -1997,6 +1998,100 @@ describe("runPanelAction #724 git fallback (legacy Manager 3.x no-op)", () => {
       PanelInstallError,
     );
     expect(h.gitPulls).toEqual([]);
+  });
+
+  // -------------------------------------------------------------------------
+  // #2671 — a git OWNERSHIP refusal is its own cause, not the gate's
+  // -------------------------------------------------------------------------
+
+  /**
+   * git's real refusal, captured on Windows from
+   * `GIT_TEST_ASSUME_DIFFERENT_OWNER=1 git rev-parse --show-toplevel` (exit
+   * 128), wrapped exactly as panel-installer's runGit wraps it. Every git
+   * subcommand in the fallback produces this same fatal, which is why the gate
+   * that reports it says nothing about the cause.
+   */
+  const ownershipStderr = (gitArgs: string, atDir: string) =>
+    `git ${gitArgs} in ${atDir} failed: fatal: detected dubious ownership in repository at '${atDir}'\n` +
+    `To add an exception for this directory, call:\n\n` +
+    `\tgit config --global --add safe.directory ${atDir}`;
+
+  it("#2671 ownership refusal at the worktree-root gate names OWNERSHIP, not a broken gitdir", async () => {
+    const h = makeDeps({
+      comfyuiPath: COMFY,
+      files: { [pyPath]: pyproject(PANEL_REGISTRY_ID, "0.11.32") },
+      revs: { [dir]: REV_A },
+      updateDetails: LEGACY_NOOP,
+      gitRootError: ownershipStderr("rev-parse --show-toplevel", dir),
+      onGitPull: () => "Updating d806619..675ace8\nFast-forward",
+    });
+    const err = await runPanelAction("update", h.deps).catch((e) => e);
+    expect(err).toBeInstanceOf(PanelInstallError);
+    const msg = String(err?.message ?? err);
+
+    // The real cause, and the exact scoped remediation with the path QUOTED
+    // (git's own advice line leaves it bare, which breaks on a path with a space).
+    expect(msg).toMatch(/owned by a DIFFERENT account/);
+    expect(msg).toContain(`git config --global --add safe.directory "${dir}"`);
+    // It must also kill the dead end: retrying `git pull` by hand fails identically.
+    expect(msg).toMatch(/git pull.*would use|will not work either/s);
+    // And it must NOT keep the gate's misdiagnosis, which asserts a cause
+    // (an unprovable/copied worktree root) that is false here.
+    expect(msg).not.toMatch(/could not prove .* is the panel repo's worktree root/);
+    // Nothing was mutated.
+    expect(h.gitPulls).toEqual([]);
+  });
+
+  it("#2671 the SAME classification fires from a later gate — it is not pinned to gate order", async () => {
+    const h = makeDeps({
+      comfyuiPath: COMFY,
+      files: { [pyPath]: pyproject(PANEL_REGISTRY_ID, "0.11.32") },
+      revs: { [dir]: REV_A },
+      updateDetails: LEGACY_NOOP,
+      onGitPull: () => "Updating d806619..675ace8\nFast-forward",
+    });
+    // Worktree-root and cleanliness gates pass; the refusal surfaces at the
+    // fetch/upstream gate instead, whose own wording blames the upstream.
+    h.deps.gitUpstreamRev = () => {
+      throw new Error(ownershipStderr("rev-parse @{upstream}", dir));
+    };
+    const err = await runPanelAction("update", h.deps).catch((e) => e);
+    expect(err).toBeInstanceOf(PanelInstallError);
+    const msg = String(err?.message ?? err);
+    expect(msg).toMatch(/owned by a DIFFERENT account/);
+    expect(msg).toContain(`git config --global --add safe.directory "${dir}"`);
+    expect(h.gitPulls).toEqual([]);
+  });
+
+  it("#2671 a NON-ownership git failure keeps its own gate-specific diagnosis", async () => {
+    const h = makeDeps({
+      comfyuiPath: COMFY,
+      files: { [pyPath]: pyproject(PANEL_REGISTRY_ID, "0.11.32") },
+      revs: { [dir]: REV_A },
+      updateDetails: LEGACY_NOOP,
+      gitRootError: "fatal: not a git repository (or any of the parent directories): .git",
+      onGitPull: () => "Updating d806619..675ace8\nFast-forward",
+    });
+    const err = await runPanelAction("update", h.deps).catch((e) => e);
+    const msg = String(err?.message ?? err);
+    // The control: the re-map must not swallow everything it catches.
+    expect(msg).toMatch(/worktree root/);
+    expect(msg).not.toMatch(/owned by a DIFFERENT account/);
+  });
+
+  it("#2671 the ownership predicate anchors on the config key, which l10n keeps verbatim", () => {
+    // git wraps the whole advice in ONE translatable string, so the prose
+    // "dubious ownership" is gone under a translated catalog while the command
+    // token survives. Anchoring on the prose alone would misclassify there.
+    const translated =
+      "fatal: Unsichere Besitzverhältnisse im Repository unter 'C:/comfy/panel' entdeckt\n" +
+      "Um eine Ausnahme für dieses Verzeichnis hinzuzufügen, rufen Sie auf:\n\n" +
+      "\tgit config --global --add safe.directory C:/comfy/panel";
+    expect(isGitOwnershipRefusal(translated)).toBe(true);
+    expect(isGitOwnershipRefusal("fatal: detected dubious ownership in repository")).toBe(true);
+    // Unrelated git failures must stay unclassified.
+    expect(isGitOwnershipRefusal("fatal: not a git repository")).toBe(false);
+    expect(isGitOwnershipRefusal("error: Your local changes would be overwritten")).toBe(false);
   });
 
   it("locally-AHEAD checkout (HEAD ≠ upstream): NOT 'at tip', throws unverifiable", async () => {
