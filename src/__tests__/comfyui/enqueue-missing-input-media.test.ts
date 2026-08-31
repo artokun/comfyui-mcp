@@ -173,6 +173,12 @@ describe("#2673: a loader input naming a file the server does not have", () => {
       // The transport-failure wording would be FALSE here: this process did
       // reach the server — it got a 400 back.
       expect(message).not.toContain("this process cannot");
+      // …and the verdict states its own BOUND (gate, round 3): the comparison
+      // sees the tabs open RIGHT NOW, while the upload happened in the past, so
+      // a tab that has since closed is invisible to it. An unbounded "RULED OUT"
+      // would be a claim about history made from a snapshot of the present.
+      expect(message).toContain("visible right now");
+      expect(message).toContain("closed or navigated away");
     });
 
     it("#1175 parity: an ALIASED loopback spelling is the same server, and says so", async () => {
