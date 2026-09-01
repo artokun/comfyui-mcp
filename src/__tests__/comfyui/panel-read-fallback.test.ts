@@ -224,4 +224,43 @@ describe("authenticated panel-backed ComfyUI read fallback (#2283)", () => {
     await expect(getLogs()).rejects.toThrow(/read fallback failed safely \(TIMEOUT\)/);
     expect(panelRead).toHaveBeenCalledWith("logs");
   });
+
+  // #2703 — the reporter's own call. A dead COMFYUI_URL plus a live panel whose
+  // read declined, and the message named only the code. The relay now carries
+  // the cause; this pins that get_history's CALL SITE actually says it, because
+  // this message is built from the code here — not taken from the relay error —
+  // so a relay that carries a reason nobody reads would still ship the dead end.
+  it("names the panel-side cause behind a PANEL_FETCH_FAILED history read", async () => {
+    fetchApi.mockRejectedValue(transportFailure());
+    panelRead.mockRejectedValue(
+      new PanelComfyUIReadRelayError(
+        "The connected panel could not read ComfyUI.",
+        "PANEL_FETCH_FAILED",
+        false,
+        "fetch_comfyui_read response exceeds the 16777216-byte limit",
+      ),
+    );
+
+    const failure = await getHistory().then(
+      () => undefined,
+      (error: unknown) => error as Error,
+    );
+    expect(failure?.message).toContain("read fallback failed safely (PANEL_FETCH_FAILED)");
+    expect(failure?.message).toContain("The panel reported: fetch_comfyui_read response exceeds the 16777216-byte limit");
+    expect(panelRead).toHaveBeenCalledWith("history");
+  });
+
+  it("keeps the bare code when the relay carried no cause", async () => {
+    fetchApi.mockRejectedValue(transportFailure());
+    panelRead.mockRejectedValue(
+      new PanelComfyUIReadRelayError("The connected panel could not read ComfyUI.", "PANEL_FETCH_FAILED"),
+    );
+
+    const failure = await getHistory().then(
+      () => undefined,
+      (error: unknown) => error as Error,
+    );
+    expect(failure?.message).toContain("read fallback failed safely (PANEL_FETCH_FAILED).");
+    expect(failure?.message).not.toContain("The panel reported:");
+  });
 });

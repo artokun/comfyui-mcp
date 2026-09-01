@@ -1,0 +1,274 @@
+// #2703 — a connected-panel read that fails must say WHY, not only that it failed.
+//
+// The reporter's session had a dead COMFYUI_URL and a live sidebar panel, so the
+// #2532 read fallback was the one path that could have answered. It declined
+// with `PANEL_FETCH_FAILED`, which the relay returns for EVERY non-timeout throw
+// out of `bridge.send` — the panel's own too_large / timeout / network_error /
+// http_error / invalid_origin / redirect_error / api_unavailable, the
+// workflow-reload guard, and "Unknown command" from a pre-relay panel all
+// collapse into that one token. The error naming which of them it was already
+// existed inside the relay; it was dropped before the response was built.
+//
+// These exercise the REAL loopback relay server end to end (a live HTTP round
+// trip, the real capability and the real response MAC), because the collapse
+// happened in the response the server writes, not in a helper.
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { createHmac } from "node:crypto";
+import {
+  PANEL_IMAGE_RELAY_VERSION,
+  PanelComfyUIReadRelayError,
+  PanelImageRelayError,
+  requestPanelComfyUIRead,
+  requestPanelImage,
+  startPanelImageRelayServer,
+  verifyPanelComfyUIReadRelayCapability,
+  verifyPanelImageRelayCapability,
+} from "../../services/panel-image-relay.js";
+
+const SECRET = "b".repeat(64);
+const TARGET_URL = "http://127.0.0.1:8188";
+const TARGET_GENERATION = 3;
+
+const savedEnv = {
+  secret: process.env.COMFYUI_MCP_RELAY_SECRET,
+  url: process.env.COMFYUI_MCP_RELAY_URL,
+  comfyui: process.env.COMFYUI_URL,
+  generation: process.env.COMFYUI_MCP_TARGET_GENERATION,
+};
+
+beforeEach(() => {
+  process.env.COMFYUI_MCP_RELAY_SECRET = SECRET;
+  process.env.COMFYUI_URL = TARGET_URL;
+  process.env.COMFYUI_MCP_TARGET_GENERATION = String(TARGET_GENERATION);
+});
+
+afterEach(() => {
+  for (const [key, value] of [
+    ["COMFYUI_MCP_RELAY_SECRET", savedEnv.secret],
+    ["COMFYUI_MCP_RELAY_URL", savedEnv.url],
+    ["COMFYUI_URL", savedEnv.comfyui],
+    ["COMFYUI_MCP_TARGET_GENERATION", savedEnv.generation],
+  ] as const) {
+    if (value === undefined) delete process.env[key];
+    else process.env[key] = value;
+  }
+});
+
+/** Start the real relay in front of a bridge whose send REJECTS, which is the
+ *  exact shape a panel executor throw takes when it reaches the relay. */
+async function relayRejectingWith(error: unknown) {
+  const server = await startPanelImageRelayServer({
+    resolvePanelAgent: (value) => {
+      // Each verifier answers for ONE request shape; asking the wrong one first
+      // is how this harness turned a PANEL_FETCH_FAILED into RELAY_UNAVAILABLE.
+      const ok = ((): boolean => {
+        try {
+          if ("operation" in (value as Record<string, unknown>)) {
+            return verifyPanelComfyUIReadRelayCapability(SECRET, value);
+          }
+          return verifyPanelImageRelayCapability(SECRET, value);
+        } catch {
+          return false;
+        }
+      })();
+      return ok ? { agentKey: "orchestrator::claude", secret: SECRET } : undefined;
+    },
+    resolvePanelTab: () => "panel-tab",
+    resolveCurrentTarget: () => ({ url: TARGET_URL, generation: TARGET_GENERATION }),
+    resolvePanelTarget: () => ({ url: TARGET_URL, generation: TARGET_GENERATION }),
+    bridge: {
+      canReach: () => true,
+      send: vi.fn(async () => {
+        throw error;
+      }),
+    },
+  });
+  process.env.COMFYUI_MCP_RELAY_URL = server.endpointUrl;
+  return server;
+}
+
+describe("#2703 — a PANEL_FETCH_FAILED read names its cause", () => {
+  it("carries the panel's own message back through the signed response", async () => {
+    // The panel's real too_large text. This is the case that is INDISTINGUISH-
+    // ABLE from every other cause under the bare code, and the one where the
+    // remedy (ask for one prompt_id, not the whole history) depends entirely on
+    // knowing which it was.
+    const server = await relayRejectingWith(
+      new Error("fetch_comfyui_read response exceeds the 16777216-byte limit"),
+    );
+    try {
+      const failure = await requestPanelComfyUIRead("history").then(
+        () => undefined,
+        (error: unknown) => error,
+      );
+      expect(failure).toBeInstanceOf(PanelComfyUIReadRelayError);
+      const relayError = failure as PanelComfyUIReadRelayError;
+      expect(relayError.code).toBe("PANEL_FETCH_FAILED");
+      expect(relayError.reason).toBe("fetch_comfyui_read response exceeds the 16777216-byte limit");
+      expect(relayError.message).toContain("16777216-byte limit");
+    } finally {
+      await server.close();
+    }
+  });
+
+  it("distinguishes an old panel from a failed read, which the code alone cannot", async () => {
+    // Same code, entirely different remedy: update the panel.
+    const server = await relayRejectingWith(new Error('Unknown command "fetch_comfyui_read"'));
+    try {
+      const failure = await requestPanelComfyUIRead("history").then(
+        () => undefined,
+        (error: unknown) => error,
+      );
+      expect((failure as PanelComfyUIReadRelayError).code).toBe("PANEL_FETCH_FAILED");
+      expect((failure as PanelComfyUIReadRelayError).reason).toBe('Unknown command "fetch_comfyui_read"');
+    } finally {
+      await server.close();
+    }
+  });
+
+  it("bounds a hostile reason instead of forwarding it, and never drops the code", async () => {
+    // Control characters would let a panel forge extra lines in an agent-facing
+    // error; length would let it move a payload. Both are handled without
+    // losing the failure itself.
+    const server = await relayRejectingWith(
+      new Error(`line one\nline two${"x".repeat(500)}`),
+    );
+    try {
+      const failure = (await requestPanelComfyUIRead("history").then(
+        () => undefined,
+        (error: unknown) => error,
+      )) as PanelComfyUIReadRelayError;
+      expect(failure.code).toBe("PANEL_FETCH_FAILED");
+      expect(failure.reason).toBeDefined();
+      expect(failure.reason!.length).toBeLessThanOrEqual(200);
+      expect([...failure.reason!].every((char) => char.charCodeAt(0) >= 0x20 && char.charCodeAt(0) !== 0x7f)).toBe(true);
+      expect(failure.reason).toContain("line one line two");
+    } finally {
+      await server.close();
+    }
+  });
+
+  it("says nothing rather than something empty when the throw carries no message", async () => {
+    const server = await relayRejectingWith(new Error("   "));
+    try {
+      const failure = (await requestPanelComfyUIRead("history").then(
+        () => undefined,
+        (error: unknown) => error,
+      )) as PanelComfyUIReadRelayError;
+      expect(failure.code).toBe("PANEL_FETCH_FAILED");
+      expect(failure.reason).toBeUndefined();
+      // The pre-#2703 sentence, unchanged, with nothing bolted onto it.
+      expect(failure.message).toBe("The connected panel could not read ComfyUI.");
+    } finally {
+      await server.close();
+    }
+  });
+
+  it("carries the cause on the image relay too — one catch produces both codes", async () => {
+    const server = await relayRejectingWith(new Error("fetch_image could not reach /view: Failed to fetch"));
+    try {
+      const failure = (await requestPanelImage("render.png", "output", "").then(
+        () => undefined,
+        (error: unknown) => error,
+      )) as PanelImageRelayError;
+      expect(failure).toBeInstanceOf(PanelImageRelayError);
+      expect(failure.code).toBe("PANEL_FETCH_FAILED");
+      expect(failure.reason).toBe("fetch_image could not reach /view: Failed to fetch");
+    } finally {
+      await server.close();
+    }
+  });
+
+  it("refuses a correctly SIGNED reason that breaks the bound", async () => {
+    // A peer holding the relay secret is not thereby allowed to hand the agent
+    // an unbounded sentence: the MAC proves WHO wrote it, never that what they
+    // wrote is within contract. Without the field validation this reply is
+    // authentic, oversized, and accepted.
+    const upstream = await relayRejectingWith(new Error("genuine cause"));
+    const honestEndpoint = process.env.COMFYUI_MCP_RELAY_URL as string;
+    const { createServer } = await import("node:http");
+    const resigner = createServer((req, res) => {
+      const chunks: Buffer[] = [];
+      req.on("data", (chunk: Buffer) => chunks.push(chunk));
+      req.on("end", async () => {
+        const forwarded = await fetch(honestEndpoint, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: Buffer.concat(chunks),
+        });
+        const body = (await forwarded.json()) as Record<string, unknown>;
+        body.reason = "z".repeat(5_000);
+        body.responseMac = createHmac("sha256", SECRET)
+          .update(
+            JSON.stringify([
+              PANEL_IMAGE_RELAY_VERSION,
+              body.requestId,
+              false,
+              body.error,
+              body.updated,
+              body.reason,
+            ]),
+          )
+          .digest("hex");
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify(body));
+      });
+    });
+    await new Promise<void>((resolve) => resigner.listen(0, "127.0.0.1", () => resolve()));
+    const port = (resigner.address() as { port: number }).port;
+    process.env.COMFYUI_MCP_RELAY_URL = `http://127.0.0.1:${port}${new URL(honestEndpoint).pathname}`;
+    try {
+      const failure = (await requestPanelComfyUIRead("history").then(
+        () => undefined,
+        (error: unknown) => error,
+      )) as PanelComfyUIReadRelayError;
+      expect(failure.code).toBe("MALFORMED_REPLY");
+      expect(failure.reason).toBeUndefined();
+      expect(failure.message).not.toContain("zzz");
+    } finally {
+      await new Promise<void>((resolve) => resigner.close(() => resolve()));
+      await upstream.close();
+    }
+  });
+
+  it("refuses a reason the relay did not sign", async () => {
+    // The reason is read out loud and attributed to the panel, so it has to be
+    // covered by the response MAC. A man-in-the-middle on the loopback endpoint
+    // that appends one must be rejected outright, not believed.
+    const upstream = await relayRejectingWith(new Error("genuine cause"));
+    // Captured BEFORE the env is repointed at the proxy: reading it inside the
+    // handler makes the proxy forward to itself.
+    const honestEndpoint = process.env.COMFYUI_MCP_RELAY_URL as string;
+    const { createServer } = await import("node:http");
+    const tamper = createServer((req, res) => {
+      const chunks: Buffer[] = [];
+      req.on("data", (chunk: Buffer) => chunks.push(chunk));
+      req.on("end", async () => {
+        const forwarded = await fetch(honestEndpoint, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: Buffer.concat(chunks),
+        });
+        const body = (await forwarded.json()) as Record<string, unknown>;
+        // Same MAC, different sentence.
+        body.reason = "a cause the relay never signed";
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify(body));
+      });
+    });
+    await new Promise<void>((resolve) => tamper.listen(0, "127.0.0.1", () => resolve()));
+    const port = (tamper.address() as { port: number }).port;
+    process.env.COMFYUI_MCP_RELAY_URL = `http://127.0.0.1:${port}${new URL(honestEndpoint).pathname}`;
+    try {
+      const failure = (await requestPanelComfyUIRead("history").then(
+        () => undefined,
+        (error: unknown) => error,
+      )) as PanelComfyUIReadRelayError;
+      expect(failure.code).toBe("MALFORMED_REPLY");
+      expect(failure.message).not.toContain("never signed");
+    } finally {
+      await new Promise<void>((resolve) => tamper.close(() => resolve()));
+      await upstream.close();
+    }
+  });
+});
