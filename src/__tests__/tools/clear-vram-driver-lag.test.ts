@@ -284,6 +284,30 @@ describe("clear_vram against a driver that releases late (#2704)", () => {
     expect(textOf(res)).not.toContain(UNSETTLED_CAVEAT);
   });
 
+  it("does not hedge a no-op clear just because the baseline read failed", async () => {
+    // Nothing was asked to be released, so there is nothing to prove and the
+    // missing baseline costs nothing. Hedging here would attach a warning about
+    // an unfinished release to a call that never requested one.
+    let freeAt: number | null = null;
+    mocks.comfyApiFetch.mockImplementation(async () => {
+      freeAt = Date.now();
+      return freeOk();
+    });
+    mocks.getSystemStats.mockImplementation(async () => {
+      if (freeAt == null) throw new Error("ECONNRESET");
+      return gpuStats(STALE_FREE, TORCH_BUSY);
+    });
+
+    const pending = call({ unload_models: false, free_memory: false });
+    await vi.advanceTimersByTimeAsync(
+      CLEAR_VRAM_SETTLE_TIMEOUT_MS + CLEAR_VRAM_SETTLE_INTERVAL_MS * 2,
+    );
+    const res = await pending;
+
+    expect(textOf(res)).toContain(STALE_LINE);
+    expect(textOf(res)).not.toContain(UNSETTLED_CAVEAT);
+  });
+
   it("does not arm the wait on a device that reports no usable VRAM total", async () => {
     // `free / total` says nothing when total is 0 or tiny, and an occupancy
     // rule that reads such a device as "occupied" would block every clear_vram
