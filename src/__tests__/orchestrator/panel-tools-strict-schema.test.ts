@@ -21,6 +21,7 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import { buildPanelToolDefs, registerPanelTools, type PanelToolCtx } from "../../orchestrator/panel-tools.js";
+import { panePresence } from "../../services/panel-pane-state.js";
 
 const BOGUS_KEY = "__e2e_bogus_marker_754__";
 
@@ -45,9 +46,14 @@ describe("panel-tools #754: strict schemas reject unknown argument keys", () => 
     const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
     client = new Client({ name: "panel-tools-strict-test-client", version: "1.0.0" });
     await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+    // The Director's canvas tools are MOUNTABLE: with no Director pane open they are
+    // disabled and a call is refused before any schema runs, which would let this survey
+    // skip them. Open the pane so strictness is proven on every tool, mountable included.
+    panePresence.set("strict-schema-test-tab", "director", true);
   });
 
   afterAll(async () => {
+    panePresence.reset();
     await client.close();
     await server.close();
   });
