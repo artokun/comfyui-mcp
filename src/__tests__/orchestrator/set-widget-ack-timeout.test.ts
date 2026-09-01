@@ -34,6 +34,7 @@ const WORKFLOW_UUID = "workflow-2489";
 const NODE_IDENTITY = "node-incarnation:2489:12";
 const REPLACED_NODE_IDENTITY = "node-incarnation:2489:replacement";
 const LONG_REQUESTED_VALUE = `clip-${"x".repeat(2200)}`;
+const BINARY_WIDGET_PLACEHOLDER = "[binary]";
 const WIDGET_CAP_CLIPPED_VALUE =
   "clip-" +
   "x".repeat(100) +
@@ -159,11 +160,15 @@ function bridge(opts: {
         const readbackLength =
           queryCount <= 1
             ? PREVIOUS
+            : opts.probeLength === "binary-placeholder"
+              ? BINARY_WIDGET_PLACEHOLDER
             : opts.probeLength === "widget-cap-marker"
               ? WIDGET_CAP_CLIPPED_VALUE
               : opts.probeLength === "json-budget-marker"
                 ? JSON_BUDGET_CLIPPED_VALUE
-                : opts.probeLength ?? VALUE;
+                : opts.probeLength !== undefined
+                  ? opts.probeLength
+                  : VALUE;
         return nodeDetail(readbackLength, graphIdentity, "subgraph", nodeIdentity);
       }
       if (cmd.cmd === "graph_get_subgraph") {
@@ -281,6 +286,21 @@ describe("an unacknowledged subgraph widget write is settled by a read, not by a
     );
 
     expect(out.isError).toBe(true);
+    expect(out.text).toMatch(/"applied": "unknown"/);
+    expect(out.text).toMatch(new RegExp(`"mutation_id": "${MUTATION_RID}"`));
+    expect(out.text).not.toMatch(/"applied": false/);
+    expect(out.text).not.toMatch(/CHECKED FOR YOU/);
+  });
+
+  it.each([
+    ["the panel's unreadable [binary] placeholder", "binary-placeholder"],
+    ["a non-scalar object", { unreadable: true }],
+    ["a null widget value", null],
+  ])("keeps the timeout unknown for %s", async (_label, probeLength) => {
+    const out = await runSetWidget({ setReply: "timeout", probeLength });
+
+    expect(out.isError).toBe(true);
+    expect(out.text).toMatch(/did not reply to "graph_set_widget" within 90000 ms/);
     expect(out.text).toMatch(/"applied": "unknown"/);
     expect(out.text).toMatch(new RegExp(`"mutation_id": "${MUTATION_RID}"`));
     expect(out.text).not.toMatch(/"applied": false/);

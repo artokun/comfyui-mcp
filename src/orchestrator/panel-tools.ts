@@ -4412,7 +4412,19 @@ function setWidgetUnknownNote(): string {
   );
 }
 
+/** The panel uses this exact scalar placeholder when a live widget value is
+ * too heavy or otherwise unsafe to serialize/read back (#2003). It is not a
+ * user value that can establish the result of a timed-out mutation. */
+const PANEL_UNREADABLE_WIDGET_VALUE = "[binary]";
+
+function isReadableWidgetScalar(value: unknown): boolean {
+  if (typeof value === "string") return value !== PANEL_UNREADABLE_WIDGET_VALUE;
+  if (typeof value === "number") return Number.isFinite(value);
+  return typeof value === "boolean";
+}
+
 function widgetValuesMatch(requested: unknown, observed: unknown): boolean {
+  if (!isReadableWidgetScalar(requested) || !isReadableWidgetScalar(observed)) return false;
   if (Object.is(requested, observed)) return true;
   if (typeof requested === "number" && typeof observed === "number") {
     return Number.isFinite(requested) && Number.isFinite(observed) && requested === observed;
@@ -4519,7 +4531,9 @@ function observedWidgetFromQuery(
   const widgets = row.widgets;
   if (!widgets || typeof widgets !== "object" || Array.isArray(widgets)) return { status: "unknown" };
   if (!Object.prototype.hasOwnProperty.call(widgets, widget)) return { status: "unknown" };
-  return { status: "value", value: (widgets as Record<string, unknown>)[widget] };
+  const value = (widgets as Record<string, unknown>)[widget];
+  if (!isReadableWidgetScalar(value)) return { status: "unknown" };
+  return { status: "value", value };
 }
 
 function setWidgetTimeoutUnknown(
