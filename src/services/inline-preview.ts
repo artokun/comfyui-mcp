@@ -127,6 +127,43 @@ export interface BoundInlineImage {
 }
 
 /**
+ * Everything a bounded preview must ANNOUNCE about itself, minus the part only the caller
+ * knows (where the full-resolution pixels are, and whether they exist at all).
+ *
+ * Extracted for #2692, when `get_image action:"view"` gained the same bound. The
+ * alternative was a second hand-written copy of these four caveats, which is how the
+ * second copy ends up missing the one that matters — the animation caveat exists because
+ * an agent judged motion from a still, and a divergent copy would quietly stop saying it.
+ *
+ * Ends mid-sentence, on "— ", because the tail is the caller's: one action can point at a
+ * file it just saved, another has no file to point at, and inventing a common ending would
+ * make one of them lie.
+ */
+export function previewCaveats(preview: NonNullable<BoundInlineImage["preview"]>): string {
+  return (
+    ` PREVIEW ONLY: the inline image was downscaled to ` +
+    `${preview.width}×${preview.height} because the original ` +
+    `(${preview.originalWidth}×${preview.originalHeight}, ` +
+    `~${Math.round(preview.originalEncodedBytes / 1_048_576)} MB encoded) ` +
+    `exceeds what can be sent inline.` +
+    // Every way the preview differs from the source gets said, not just the
+    // resize (codex). An agent that is told "downscaled" and hands back a
+    // verdict on a video's motion, or on 16-bit banding, was misled by an
+    // accurate-but-incomplete sentence.
+    (preview.sourceMayBeAnimated
+      ? ` The source format can hold ANIMATION and this preview is a single still ` +
+        `PNG — if it was animated you are seeing ONE frame, so do not judge motion, ` +
+        `timing, or any later frame from it.`
+      : "") +
+    (preview.recoded
+      ? ` It was also re-encoded to 8-bit RGB PNG, so colour depth and colour space ` +
+        `differ from the source — do not judge banding or colour accuracy from it.`
+      : "") +
+    ` Do NOT judge fine detail, small text, or pixel-level artefacts from it — `
+  );
+}
+
+/**
  * Return `base64` unchanged when it fits, a downscaled PNG preview when it does not, or a
  * refusal when it cannot be reduced.
  *

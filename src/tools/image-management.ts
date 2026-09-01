@@ -19,7 +19,12 @@ import {
 } from "../services/asset-reconcile.js";
 import { viewAssetImage } from "../services/view-image.js";
 import { convertImage } from "../services/image-convert.js";
-import { boundInlineImage } from "../services/inline-preview.js";
+import {
+  DEFAULT_INLINE_BUDGET_BYTES,
+  boundInlineImage,
+  previewCaveats,
+} from "../services/inline-preview.js";
+import { acquireInlineImageSlot, budgetShortfallNote } from "../services/inline-frame-budget.js";
 import { analyzeColor } from "../services/color-analysis.js";
 import { uploadOutput } from "../services/storage-upload.js";
 import type { UploadOutputOptions } from "../services/storage-upload.js";
@@ -346,6 +351,20 @@ export function registerImageManagementTools(server: McpServer): void {
         .describe('action:"list_assets" — ISO timestamp; only return assets created at or after this time.'),
     },
     async (args) => {
+      // #2692 — CLAIM A SHARE OF THE FRAME, NOT JUST A SHARE OF ONE IMAGE.
+      //
+      // A code-mode client forwards every result of a batch in ONE IPC frame, so nine
+      // separately-legal 12 MB images add up to 108 MB against a 64 MiB limit and the whole
+      // response is lost. The per-image bound below cannot see that; the slot can, because
+      // the members of a batch are in flight together (measured: nine parallel tools/call
+      // requests over a spawned stdio server all observed nine slots open).
+      //
+      // Held from the START of the call, before the fetch, so a member that finishes
+      // downloading early still counts its siblings instead of spending a full budget.
+      // ONLY for the two actions that inline pixels — a concurrent list_assets must not
+      // widen the batch and shrink someone's preview.
+      const inlineSlot =
+        args.action === "get" || args.action === "view" ? acquireInlineImageSlot() : null;
       try {
         const json = (value: unknown) => ({
           content: [{ type: "text" as const, text: JSON.stringify(value, null, 2) }],
@@ -470,10 +489,23 @@ export function registerImageManagementTools(server: McpServer): void {
             // blew the caller's 64 MB IPC frame, so a perfectly good output could not be
             // looked at. The saved file above is untouched; only what goes on the wire is
             // capped.
+            //
+            // #2692 — and the batch this call belongs to gets a say in the ceiling. Alone,
+            // `share` returns `requested` untouched, so a single fetch is byte-for-byte
+            // what it was.
+            const requestedBudget = args.max_preview_bytes ?? DEFAULT_INLINE_BUDGET_BYTES;
+            const grantedBudget = inlineSlot ? inlineSlot.share(requestedBudget) : requestedBudget;
             const bounded = await boundInlineImage(base64, mimeType, {
-              budgetBytes: args.max_preview_bytes,
+              budgetBytes: grantedBudget,
               maxDimension: args.max_preview_dimension,
             });
+            // Only when the budget actually bit. A small image that no ceiling touched was
+            // not shrunk by anything, and a "BATCH LIMIT" line on it would train a reader to
+            // skip the line on the call where it matters.
+            const batchNote =
+              bounded.preview || bounded.refused
+                ? budgetShortfallNote(inlineSlot?.peak() ?? 1, requestedBudget, grantedBudget)
+                : "";
 
             // Could not be reduced: say so and keep the saved path, rather than emitting a
             // payload that will fail in transport — where the error names a byte count and
@@ -498,7 +530,8 @@ export function registerImageManagementTools(server: McpServer): void {
                         : `NOTHING was written locally either, so this image is not available ` +
                           `here at all — fix the save destination above and retry, or re-run ` +
                           `get_image with a smaller max_preview_dimension. The output is still ` +
-                          `intact on the ComfyUI server; do NOT re-run the render.`),
+                          `intact on the ComfyUI server; do NOT re-run the render.`) +
+                      batchNote,
                   },
                 ],
               };
@@ -507,30 +540,15 @@ export function registerImageManagementTools(server: McpServer): void {
             // A silently downscaled image is a worse failure than the one being fixed: an
             // agent reads fine detail off it and reports confidently. So the preview
             // ANNOUNCES itself, with the true dimensions and where the real file is.
+            // The caveats themselves moved to `previewCaveats` when action:"view" gained the
+            // same bound (#2692) — one copy, so neither action can drift.
             const previewNote = bounded.preview
-              ? ` PREVIEW ONLY: the inline image was downscaled to ` +
-                `${bounded.preview.width}×${bounded.preview.height} because the original ` +
-                `(${bounded.preview.originalWidth}×${bounded.preview.originalHeight}, ` +
-                `~${Math.round(bounded.preview.originalEncodedBytes / 1_048_576)} MB encoded) ` +
-                `exceeds what can be sent inline.` +
-                // Every way the preview differs from the source gets said, not just the
-                // resize (codex). An agent that is told "downscaled" and hands back a
-                // verdict on a video's motion, or on 16-bit banding, was misled by an
-                // accurate-but-incomplete sentence.
-                (bounded.preview.sourceMayBeAnimated
-                  ? ` The source format can hold ANIMATION and this preview is a single still ` +
-                    `PNG — if it was animated you are seeing ONE frame, so do not judge motion, ` +
-                    `timing, or any later frame from it.`
-                  : "") +
-                (bounded.preview.recoded
-                  ? ` It was also re-encoded to 8-bit RGB PNG, so colour depth and colour space ` +
-                    `differ from the source — do not judge banding or colour accuracy from it.`
-                  : "") +
-                ` Do NOT judge fine detail, small text, or pixel-level artefacts from it — ` +
+              ? previewCaveats(bounded.preview) +
                 (savedOnDisk
                   ? `read the full-resolution file at the path above for that.`
                   : `and note the full-resolution file was NOT saved locally (see above), so ` +
-                    `re-fetch it once the save destination is fixed.`)
+                    `re-fetch it once the save destination is fixed.`) +
+                batchNote
               : "";
 
             return {
@@ -559,13 +577,41 @@ export function registerImageManagementTools(server: McpServer): void {
               "asset_id",
               'the registered asset to inline (from action:"list_assets" or a job completion)',
             );
-            const result = await viewAssetImage(assetId);
+            // #2692 — the same inline bound action:"get" has had since #1495. This action
+            // never had one: it inlined whatever it fetched, so nine 3648×5472 assets came
+            // to 108 MB against a 64 MiB frame and the response was lost whole.
+            const viewRequested = args.max_preview_bytes ?? DEFAULT_INLINE_BUDGET_BYTES;
+            // Resolved INSIDE the service, after its fetch — not here. The batch is still
+            // filling up while this call downloads, and a share read before the fetch is a
+            // share read when the batch looks like one call. Measured: reading it here gave
+            // nine concurrent views 1,884,132 bytes against a 900,000-byte aggregate.
+            // Recorded on the way past so the notice below reports the budget that was
+            // actually spent rather than one recomputed afterwards.
+            let viewGranted = viewRequested;
+            const result = await viewAssetImage(assetId, {
+              budgetBytes: () => {
+                viewGranted = inlineSlot ? inlineSlot.share(viewRequested) : viewRequested;
+                return viewGranted;
+              },
+              maxDimension: args.max_preview_dimension,
+            });
+            // Appended to the FIRST text block (the asset header) rather than added as a new
+            // one: an extra content block changes the shape every existing consumer reads.
+            const viewNote = result.bounded
+              ? budgetShortfallNote(inlineSlot?.peak() ?? 1, viewRequested, viewGranted)
+              : "";
+            let noteAttached = !viewNote;
             return {
-              content: result.content.map((block) =>
-                block.type === "image"
-                  ? { type: "image" as const, data: block.data, mimeType: block.mimeType }
-                  : { type: "text" as const, text: block.text },
-              ),
+              content: result.content.map((block) => {
+                if (block.type === "image") {
+                  return { type: "image" as const, data: block.data, mimeType: block.mimeType };
+                }
+                if (!noteAttached) {
+                  noteAttached = true;
+                  return { type: "text" as const, text: block.text + viewNote };
+                }
+                return { type: "text" as const, text: block.text };
+              }),
             };
           }
 
@@ -887,6 +933,11 @@ export function registerImageManagementTools(server: McpServer): void {
         }
       } catch (err) {
         return errorToToolResult(err);
+      } finally {
+        // In `finally`, and paired with the acquisition at the top of this handler: a
+        // leaked slot never fails loudly, it just shrinks every later preview in the
+        // process for a batch that is long gone.
+        inlineSlot?.release();
       }
     },
   );
