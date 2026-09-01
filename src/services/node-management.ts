@@ -3185,10 +3185,11 @@ function looksLikeAPack(dir: string): boolean {
  * evidence, applied to the git route.
  *
  * CORROBORATION IS PER-IDENTITY, NOT PER-NAME. Manager may hold the pack under
- * its CNR id or its own module key rather than the repo name we derived from the
- * URL, so every identity the matched entry offers gets to vouch for the pack;
- * ONE hit is enough. Only when they ALL scan clean is the claim uncorroborated —
- * an "absent" that has to survive every spelling before it can retract a success.
+ * its CNR id, its own module key, or the repo half of its aux id rather than the
+ * repo name we derived from the URL, so every identity the matched entry offers
+ * that could be a DIRECTORY (see packDirAliases) gets to vouch for the pack; ONE
+ * hit is enough. Only when they ALL scan clean is the claim uncorroborated — an
+ * "absent" that has to survive every spelling before it can retract a success.
  *
  * NOT the `.git`-must-exist check the report proposed: the v4 route is
  * registry-first by construction, so a pack it resolved and unpacked from the
@@ -3204,16 +3205,42 @@ type ManagerClaimCorroboration =
   /** The disk could not answer — never treated as absence. */
   | { state: "unreadable" };
 
+/**
+ * The alias identities a matched Manager entry offers, reduced to values that
+ * could actually BE a directory under custom_nodes.
+ *
+ * `aux_id` is "owner/repo" — the repo half is what Manager checks the pack out
+ * as, and `packDirNameCandidates` deliberately drops any path-shaped id, so the
+ * raw value would silently vouch for nothing. Take its basename.
+ *
+ * A value carrying whitespace is dropped instead. ComfyUI imports a custom_nodes
+ * directory AS A PYTHON MODULE NAME, so a pack folder cannot have a space in it —
+ * such a value is a human TITLE, which `parseInstalled`'s array branch prefers
+ * over the real `module` key. A title is not evidence about the filesystem, and
+ * letting one scan for a same-named directory is how an unrelated pack ends up
+ * vouching for an install that never happened (codex gate, round 1).
+ */
+function packDirAliases(node: InstalledNode): string[] {
+  const aliases: string[] = [];
+  for (const raw of [node.module, node.cnrId, node.auxId]) {
+    if (typeof raw !== "string") continue;
+    const name = basename(raw.trim().replace(/[\\/]+$/, ""));
+    if (name.length === 0 || name === "." || name === "..") continue;
+    if (/[\s/\\]/.test(name) || /[\x00-\x1F\x7F]/.test(name)) continue;
+    aliases.push(name);
+  }
+  return aliases;
+}
+
 function diskCorroboratesManagerInstall(
   gitId: string,
   node: InstalledNode,
   diskRoot: string,
 ): ManagerClaimCorroboration {
-  const identities = [gitId, node.module, node.cnrId].filter(
-    (v): v is string => typeof v === "string" && v.trim().length > 0,
-  );
+  const identities = [gitId, ...packDirAliases(node)];
   let husk: string | undefined;
   let scanned: string | undefined;
+  let unreadable = false;
   for (const identity of identities) {
     const found = findPackOnDisk(identity, diskRoot);
     if (found.state === "found") {
@@ -3222,11 +3249,18 @@ function diskCorroboratesManagerInstall(
       continue;
     }
     if (found.state === "not-found") scanned ??= found.scanned;
+    else unreadable = true;
   }
-  // A husk is a POSITIVE observation about a real directory and outranks the
-  // other identities coming back clean: the pack the caller asked for is that
-  // directory, and it is broken.
+  // A husk is a POSITIVE observation of a real directory. A scan that could not
+  // answer cannot explain it away, so it is reported first — and it only ever
+  // produces a refusal, never a write.
   if (husk !== undefined) return { state: "husk", dir: husk };
+  // UNREADABLE OUTRANKS ABSENT, and this ordering is the whole point (codex gate,
+  // round 1): "absent" is the one verdict here that retracts a success AND
+  // authorizes a filesystem write, so it may only be reached when EVERY identity
+  // was conclusively scanned. One `not-found` beside one unanswerable scan is not
+  // proof of absence — it is the #796/#797 fold this file exists to avoid.
+  if (unreadable) return { state: "unreadable" };
   if (scanned !== undefined) return { state: "absent", scanned };
   return { state: "unreadable" };
 }

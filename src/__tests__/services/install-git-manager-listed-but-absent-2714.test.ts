@@ -262,6 +262,50 @@ describe("#2714 — a Manager-listed git install must be corroborated on disk", 
     expect(existsSync(PACK_DIR)).toBe(false);
   });
 
+  // ---- codex gate round 1: the identity set itself was wrong in both directions --
+
+  it("corroborates through the aux id's REPO HALF — a raw \"owner/repo\" vouches for nothing", async () => {
+    // `packDirNameCandidates` drops any path-shaped id (traversal defence), so passing
+    // `aux_id` straight through silently contributes NO candidate. Manager matched this
+    // entry by its cnr_id while the real checkout sits under the aux id's repo half, so
+    // without the basename this reads as absent and clones a SECOND copy of a pack that
+    // is already installed and working.
+    manager.installed = {
+      "ComfyUI-DaSiWa-Nodes-title": {
+        ver: "1.2.0",
+        cnr_id: "ComfyUI-DaSiWa-Nodes",
+        aux_id: "darksidewalker/dasiwa-nodes-src",
+        enabled: true,
+      },
+    };
+    makePackDir("dasiwa-nodes-src", { "__init__.py": "NODE_CLASS_MAPPINGS = {}\n" });
+
+    const { ok, error } = await install({ id: REPO, source: "git" });
+
+    expect(error).toBeUndefined();
+    expect(ok?.mechanism).toBe("manager-http");
+    expect(clonedInto()).toBeUndefined();
+    expect(existsSync(PACK_DIR)).toBe(false);
+  });
+
+  it("will not let a human TITLE vouch for the filesystem", async () => {
+    // The ARRAY payload shape: `parseInstalled` prefers `title` over the real module
+    // key, so `module` here is prose. ComfyUI imports a custom_nodes directory as a
+    // PYTHON MODULE NAME, so a value with a space in it cannot be a pack folder —
+    // scanning for one lets an unrelated same-named directory certify an install that
+    // never happened, which is this issue's own bug wearing a different hat.
+    manager.installed = [
+      { title: "Shared Title", aux_id: `darksidewalker/${REPO_NAME}`, ver: "nightly", enabled: true },
+    ] as unknown as Record<string, unknown>;
+    makePackDir("Shared Title", { "__init__.py": "NODE_CLASS_MAPPINGS = {}\n" });
+
+    const { ok, error } = await install({ id: REPO, source: "git" });
+
+    expect(error).toBeUndefined();
+    expect(ok?.mechanism).toBe("git-clone");
+    expect(clonedInto()).toBe(PACK_DIR);
+  });
+
   it("refuses a marker-only HUSK instead of reporting it as installed (#900 on the git route)", async () => {
     // The directory exists and Manager vouches for it, but ComfyUI cannot import
     // it — it will log a failure on every start. A success here is the same lie
