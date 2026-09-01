@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { buildDirectorToolDefs, DIRECTOR_TOOL_NAMES } from "../../orchestrator/director-tools.js";
+import { buildDirectorToolDefs, DIRECTOR_TOOL_NAMES, probeCalliope } from "../../orchestrator/director-tools.js";
 import type { PanelToolCtx, ToolResult } from "../../orchestrator/panel-tools.js";
 
 // The Calliope tools are a MAPPING: (tool, action, args) -> one bridge frame the pane turns
@@ -107,5 +107,32 @@ describe("Calliope tools — every action maps to one client call through the pa
       expect(res.isError, name).toBe(true);
       expect(frames, name).toHaveLength(0);
     }
+  });
+});
+
+describe("probeCalliope — the status probe is bounded and never throws", () => {
+  it("reports version and dry_run from /api/health", async () => {
+    const fetchImpl = vi.fn(async (url: string | URL | Request) => {
+      expect(String(url)).toBe("http://127.0.0.1:8247/api/health");
+      return new Response(JSON.stringify({ status: "ok", version: "1.2.1", dry_run: false }), { status: 200 });
+    }) as unknown as typeof fetch;
+    expect(await probeCalliope("http://127.0.0.1:8247/", fetchImpl)).toEqual({ reachable: true, base_url: "http://127.0.0.1:8247", version: "1.2.1", dry_run: false });
+  });
+
+  it("a refused connection or a non-2xx is 'not reachable', with the reason", async () => {
+    const down = vi.fn(async () => {
+      throw new Error("ECONNREFUSED");
+    }) as unknown as typeof fetch;
+    expect(await probeCalliope("http://127.0.0.1:1", down)).toMatchObject({ reachable: false, error: "ECONNREFUSED" });
+    const sad = vi.fn(async () => new Response("nope", { status: 503 })) as unknown as typeof fetch;
+    expect(await probeCalliope("http://127.0.0.1:1", sad)).toMatchObject({ reachable: false, error: "HTTP 503" });
+  });
+
+  it("a backend that hangs reads as unreachable within the budget", async () => {
+    const hang = vi.fn((_url: unknown, init?: RequestInit) => new Promise<Response>((_res, rej) => init?.signal?.addEventListener("abort", () => rej(new Error("aborted"))))) as unknown as typeof fetch;
+    const started = Date.now();
+    const out = await probeCalliope("http://127.0.0.1:1", hang, 50);
+    expect(out.reachable).toBe(false);
+    expect(Date.now() - started).toBeLessThan(1000);
   });
 });

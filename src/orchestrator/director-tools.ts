@@ -108,6 +108,47 @@ async function waitForJobs(ctx: PanelToolCtx, projectId: number, timeoutS: numbe
   }
 }
 
+/** Where Calliope answers — the same default the pane uses; override with CALLIOPE_BASE_URL. */
+export const DEFAULT_CALLIOPE_BASE_URL = "http://127.0.0.1:8247";
+
+export interface CalliopeProbe {
+  reachable: boolean;
+  base_url: string;
+  version?: string;
+  dry_run?: boolean;
+  error?: string;
+}
+
+/**
+ * Is Calliope up? Asked from the orchestrator, not the pane, so `panel_module status` can say
+ * so even before the Director is open — the answer decides whether opening it is worth it.
+ * Bounded: a backend that hangs reads as unreachable, not as a stuck tool.
+ */
+export async function probeCalliope(
+  baseUrl: string = process.env.CALLIOPE_BASE_URL || DEFAULT_CALLIOPE_BASE_URL,
+  fetchImpl: typeof fetch = fetch,
+  timeoutMs = 1500,
+): Promise<CalliopeProbe> {
+  const base = baseUrl.replace(/\/+$/, "");
+  const ctl = new AbortController();
+  const timer = setTimeout(() => ctl.abort(), timeoutMs);
+  try {
+    const res = await fetchImpl(`${base}/api/health`, { signal: ctl.signal });
+    if (!res.ok) return { reachable: false, base_url: base, error: `HTTP ${res.status}` };
+    const body = (await res.json().catch(() => ({}))) as Record<string, unknown>;
+    return {
+      reachable: true,
+      base_url: base,
+      ...(typeof body.version === "string" ? { version: body.version } : {}),
+      ...(typeof body.dry_run === "boolean" ? { dry_run: body.dry_run } : {}),
+    };
+  } catch (err) {
+    return { reachable: false, base_url: base, error: err instanceof Error ? err.message : String(err) };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 export function buildDirectorToolDefs(): Array<PanelToolDef & { mountGroup?: MountGroup }> {
   return [
     {
@@ -136,7 +177,7 @@ export function buildDirectorToolDefs(): Array<PanelToolDef & { mountGroup?: Mou
         const mod = PANEL_MODULES.find((m) => m.id === args.module);
         if (!mod) return refuse(`unknown module "${String(args.module)}" — panel_module list names the ones that exist`);
         if (action === "describe") return text({ ...mod, ...snap[mod.id] });
-        if (action === "status") return text({ module: mod.id, ...snap[mod.id] });
+        if (action === "status") return text({ module: mod.id, ...snap[mod.id], ...(mod.id === "director" ? { calliope: await probeCalliope() } : {}) });
         if (action === "open") {
           const res = await ctx.call({ cmd: "module_open", module: mod.id, dock: args.dock !== false }, DIRECTOR_WRITE_MS);
           if (res.isError) return res;
