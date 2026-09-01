@@ -137,6 +137,16 @@ export type ManagerMode = "remote" | "local" | "cache";
 export interface InstalledNode {
   /** Custom-node module/folder name (the key Manager uses internally). */
   module: string;
+  /**
+   * The module/folder KEY the payload actually stated, when it stated one.
+   *
+   * `module` above is a DISPLAY-or-identity blend: the array shape prefers the
+   * entry's human `title`, so a value there may be prose. Anything that reads a
+   * module as a PATH — the #2714 on-disk corroboration of a git install — must
+   * use this field instead, and treat `undefined` as "the payload named no
+   * folder key", not as a name to go looking for.
+   */
+  moduleKey?: string;
   /** ComfyUI Node Registry id, if the pack is CNR-registered. */
   cnrId?: string;
   /** GitHub/aux id for git-based packs. */
@@ -2101,8 +2111,13 @@ function runCmCli(args: string[], workspace?: string): string {
 function parseInstalled(raw: unknown): InstalledNode[] {
   if (!raw || typeof raw !== "object") return [];
 
-  const toNode = (module: string, v: Record<string, unknown>): InstalledNode => ({
+  const toNode = (
+    module: string,
+    v: Record<string, unknown>,
+    moduleKey?: string,
+  ): InstalledNode => ({
     module,
+    ...(moduleKey ? { moduleKey } : {}),
     cnrId:
       typeof v.cnr_id === "string" && v.cnr_id.length > 0 ? v.cnr_id : undefined,
     auxId:
@@ -2125,27 +2140,22 @@ function parseInstalled(raw: unknown): InstalledNode[] {
         Boolean(entry && typeof entry === "object"),
       )
       .map((entry) => {
-        // #2714 — AN EXPLICIT `module` OUTRANKS A TITLE. This branch preferred
-        // `title` — prose — even when the entry stated its own `module` key, and
-        // every consumer of this field wants the module: it is sent to
-        // ComfyUI-Manager as `node_name` on the uninstall/disable/enable routes,
-        // matched by findInstalledNode, and (as of #2714) scanned for on disk. An
-        // entry that named its module and was overridden by a label could let an
-        // unrelated same-named directory certify an install that never happened.
-        // The title→cnr_id order BELOW it is unchanged: for an entry that states
-        // no module, the title is still the name Manager displays it under.
         const module =
-          (typeof entry.module === "string" && entry.module) ||
           (typeof entry.title === "string" && entry.title) ||
+          (typeof entry.module === "string" && entry.module) ||
           (typeof entry.cnr_id === "string" && entry.cnr_id) ||
           "unknown";
-        return toNode(module, entry);
+        // #2714 — `module` above may be a human TITLE, so it is NOT safe to read as
+        // a directory name. Carry the key the payload actually stated separately;
+        // `module`'s own precedence is left exactly as it was, because it is what
+        // Manager is sent back as `node_name` and what this list displays.
+        return toNode(module, entry, typeof entry.module === "string" ? entry.module : undefined);
       });
   }
 
   return Object.entries(raw as Record<string, unknown>)
     .filter(([, v]) => Boolean(v && typeof v === "object"))
-    .map(([module, v]) => toNode(module, v as Record<string, unknown>));
+    .map(([module, v]) => toNode(module, v as Record<string, unknown>, module));
 }
 
 function stripUrlSuffix(value: string): string {
@@ -3222,6 +3232,12 @@ type ManagerClaimCorroboration =
  * as, and `packDirNameCandidates` deliberately drops any path-shaped id, so the
  * raw value would silently vouch for nothing. Take its basename.
  *
+ * It reads `moduleKey`, NEVER `module`: the array payload puts a human `title` in
+ * the latter whenever the entry has one, so a Manager record of
+ * `{title:"Friendly Label", cnr_id:"owner/repo"}` would send this scan looking for
+ * a directory called "Friendly Label" — and an unrelated pack that happens to be
+ * named that would then certify an install that never happened (gate round 3).
+ *
  * NO NAME-SHAPE HEURISTIC BEYOND THAT. Round 1 of the gate rejected values with
  * whitespace here on the reasoning that ComfyUI imports a pack directory as a
  * Python module name so it cannot contain a space. That reasoning is FALSE —
@@ -3233,7 +3249,7 @@ type ManagerClaimCorroboration =
  */
 function packDirAliases(node: InstalledNode): string[] {
   const aliases: string[] = [];
-  for (const raw of [node.module, node.cnrId, node.auxId]) {
+  for (const raw of [node.moduleKey, node.cnrId, node.auxId]) {
     if (typeof raw !== "string") continue;
     const name = basename(raw.trim().replace(/[\\/]+$/, ""));
     if (name.length === 0 || name === "." || name === "..") continue;

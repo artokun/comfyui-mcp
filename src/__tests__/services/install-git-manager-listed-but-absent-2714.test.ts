@@ -315,6 +315,30 @@ describe("#2714 — a Manager-listed git install must be corroborated on disk", 
     expect(clonedInto()).toBe(PACK_DIR);
   });
 
+  it("a TITLE-ONLY entry contributes no folder name at all", async () => {
+    // codex gate round 3. This entry states NO `module`, so `parseInstalled` promotes
+    // its human `title` into that slot — which is why the corroboration reads
+    // `moduleKey` (the key the payload actually stated) and not `module`. Reading
+    // `module` here would send the scan looking for a directory called "Friendly
+    // Label", and an unrelated pack that happens to be named that would certify an
+    // install that never happened.
+    manager.installed = [
+      {
+        title: "Friendly Label",
+        cnr_id: `someone/${REPO_NAME}`,
+        ver: "1.0.0",
+        enabled: true,
+      },
+    ];
+    makePackDir("Friendly Label", { "__init__.py": "NODE_CLASS_MAPPINGS = {}\n" });
+
+    const { ok, error } = await install({ id: REPO, source: "git" });
+
+    expect(error).toBeUndefined();
+    expect(ok?.mechanism).toBe("git-clone");
+    expect(clonedInto()).toBe(PACK_DIR);
+  });
+
   it("a pack folder with a SPACE in its name still corroborates", async () => {
     // codex gate round 2, P1. Round 1 dropped whitespace-bearing aliases on the
     // reasoning that ComfyUI imports a pack directory as a Python module name so it
