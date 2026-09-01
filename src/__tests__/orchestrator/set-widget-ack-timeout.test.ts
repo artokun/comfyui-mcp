@@ -31,6 +31,15 @@ const VALUE = 4;
 const PREVIOUS = 1;
 const GRAPH_ID = "graph:2489-subgraph";
 const WORKFLOW_UUID = "workflow-2489";
+const LONG_REQUESTED_VALUE = `clip-${"x".repeat(2200)}`;
+const WIDGET_CAP_CLIPPED_VALUE =
+  "clip-" +
+  "x".repeat(100) +
+  "…(+2100 chars cut at the 2048-char per-widget cap, which `max_chars` does not raise)";
+const JSON_BUDGET_CLIPPED_VALUE =
+  "clip-" +
+  "x".repeat(100) +
+  "…(+2100 chars cut over the `max_chars` budget; raise `max_chars` up to 60000)";
 
 const textOf = (res: ToolResult): string =>
   res.content.map((c) => ("text" in c ? (c.text ?? "") : "")).join(" ");
@@ -138,7 +147,15 @@ function bridge(opts: {
             ? opts.fencedGraphIdentity ?? GRAPH_ID
             : opts.readbackGraphIdentity ?? opts.fencedGraphIdentity ?? GRAPH_ID;
         currentGraphIdentity = graphIdentity;
-        return nodeDetail(queryCount > 1 ? opts.probeLength ?? VALUE : PREVIOUS, graphIdentity);
+        const readbackLength =
+          queryCount <= 1
+            ? PREVIOUS
+            : opts.probeLength === "widget-cap-marker"
+              ? WIDGET_CAP_CLIPPED_VALUE
+              : opts.probeLength === "json-budget-marker"
+                ? JSON_BUDGET_CLIPPED_VALUE
+                : opts.probeLength ?? VALUE;
+        return nodeDetail(readbackLength, graphIdentity);
       }
       if (cmd.cmd === "graph_get_subgraph") {
         throw new Error(`Node ${NODE_ID} (ImageFromBatch) is not a subgraph`);
@@ -232,6 +249,33 @@ describe("an unacknowledged subgraph widget write is settled by a read, not by a
     expect(out.text).toMatch(new RegExp(`"mutation_id": "${MUTATION_RID}"`));
     expect(out.text).toMatch(/"observed": 1/);
     expect(out.text).not.toMatch(/a blind retry can apply it twice/);
+  });
+
+  it("keeps the timeout unknown when the panel's per-widget cap appends its Unicode marker", async () => {
+    const out = await runSetWidget(
+      { setReply: "timeout", probeLength: "widget-cap-marker" },
+      { node_id: NODE_ID, widget: WIDGET, value: LONG_REQUESTED_VALUE },
+    );
+
+    expect(out.isError).toBe(true);
+    expect(out.text).toMatch(/did not reply to "graph_set_widget" within 90000 ms/);
+    expect(out.text).toMatch(/"applied": "unknown"/);
+    expect(out.text).toMatch(new RegExp(`"mutation_id": "${MUTATION_RID}"`));
+    expect(out.text).not.toMatch(/"applied": false/);
+    expect(out.text).not.toMatch(/CHECKED FOR YOU/);
+  });
+
+  it("keeps the timeout unknown when the serialized JSON budget appends its Unicode marker", async () => {
+    const out = await runSetWidget(
+      { setReply: "timeout", probeLength: "json-budget-marker" },
+      { node_id: NODE_ID, widget: WIDGET, value: LONG_REQUESTED_VALUE },
+    );
+
+    expect(out.isError).toBe(true);
+    expect(out.text).toMatch(/"applied": "unknown"/);
+    expect(out.text).toMatch(new RegExp(`"mutation_id": "${MUTATION_RID}"`));
+    expect(out.text).not.toMatch(/"applied": false/);
+    expect(out.text).not.toMatch(/CHECKED FOR YOU/);
   });
 
   it("returns a mutation receipt when the graph read itself cannot answer", async () => {

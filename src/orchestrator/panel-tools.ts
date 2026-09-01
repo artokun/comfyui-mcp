@@ -4422,10 +4422,18 @@ function widgetValuesMatch(requested: unknown, observed: unknown): boolean {
   return false;
 }
 
-/** A clipped string read-back cannot prove a miss: the live value may still be
- * the full requested string behind the panel's per-widget cap. */
+/** The panel appends this Unicode marker when a widget value or assembled line
+ * is clipped by its serialized-size budget. A marker can be present even when
+ * the requested value is not a string (objects are serialized before clipping),
+ * so inspect the observed value before narrowing the requested type. */
+const PANEL_CLIPPED_VALUE_MARKER = /…\(\+\d+\s+chars\s+(?:cut|over)\b/u;
+
+/** A clipped read-back cannot prove either a hit or a miss: the live value may
+ * still be the full requested value behind the panel's cap. */
 function widgetValuePossiblyClipped(requested: unknown, observed: unknown): boolean {
-  if (typeof requested !== "string" || typeof observed !== "string") return false;
+  if (typeof observed !== "string") return false;
+  if (PANEL_CLIPPED_VALUE_MARKER.test(observed)) return true;
+  if (typeof requested !== "string") return false;
   if (observed.length === 0 || observed.length >= requested.length) return false;
   return requested.startsWith(observed);
 }
