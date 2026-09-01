@@ -120,7 +120,7 @@ export function startPanelMcpHttpServer(
     // It says nothing about MCP servers the CLI's OWN config (~/.codex/config.toml
     // and friends) may add — we only know what we declared, and the handler's
     // wording is careful to claim no more than that.
-    registerPanelTools(
+    const registered = registerPanelTools(
       server,
       makePanelToolCtx(bridge, tabId, workflowTargets, onRunTicketOpened, {
         inheritsUserMcpServers: false,
@@ -146,6 +146,9 @@ export function startPanelMcpHttpServer(
       },
     });
     transport.onclose = () => {
+      // Drop this session's mountable handles: a pane flip must not keep poking a server
+      // that has gone away.
+      registered.dispose();
       const sid = transport.sessionId;
       if (sid) {
         const m = tabs.get(tabId);

@@ -18,6 +18,9 @@ panel_connect
 panel_copy_nodes
 panel_create_group
 panel_create_subgraph
+panel_director_graph
+panel_director_link
+panel_director_subgraph
 panel_disable_adult_mode
 panel_disconnect
 panel_edit_group
@@ -41,6 +44,7 @@ panel_list_nodes
 panel_list_subgraphs
 panel_list_workflows
 panel_load_workflow
+panel_module
 panel_move_group
 panel_move_node
 panel_move_rail
@@ -48,6 +52,7 @@ panel_new_workflow
 panel_node_queue_status
 panel_open_civitai
 panel_open_workflow
+panel_pane
 panel_paste_nodes
 panel_promote_widget
 panel_query_graph

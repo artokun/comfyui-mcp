@@ -24,6 +24,8 @@
 // so parity is automatic — neither path reimplements a tool.
 
 import { z } from "zod";
+import { mountRegistry, type MountGroup } from "./mountable-tools.js";
+import { buildDirectorToolDefs } from "./director-tools.js";
 import { createHash, randomUUID } from "node:crypto";
 // #873 — the operator's tool-surface policy also governs the panel surface.
 import {
@@ -19690,6 +19692,12 @@ export interface PanelToolDef {
   description: string;
   schema: PanelToolArgSchemas;
   handler: (args: Record<string, unknown>, ctx: PanelToolCtx) => Promise<ToolResult>;
+  /**
+   * Present only on a tool that exists WHILE a panel pane is open. registerPanelTools keeps
+   * the SDK handle for these and hands it to the mount registry, which enables/disables the
+   * whole group as the pane opens and closes. See mountable-tools.ts.
+   */
+  mountGroup?: MountGroup;
 }
 
 /**
@@ -20261,6 +20269,10 @@ function withRetryToken(d: PanelToolDef): PanelToolDef {
  * backends expose an identical panel toolset.
  */
 export function buildPanelToolDefs(): PanelToolDef[] {
+  return [...buildBasePanelToolDefs(), ...buildDirectorToolDefs()];
+}
+
+function buildBasePanelToolDefs(): PanelToolDef[] {
   // Local helper so each def reads like the original `tool(...)` call.
   const def = (
     name: string,
@@ -28989,7 +29001,8 @@ export function createPanelMcpServer(
  * for the HTTP transport (Codex backend). `ctx` is tab-bound, so this server's
  * tools forward to the bridge for THAT tab — same surface as the Claude path.
  */
-export function registerPanelTools(server: McpServer, ctx: PanelToolCtx): void {
+export function registerPanelTools(server: McpServer, ctx: PanelToolCtx): { dispose: () => void } {
+  const untrack: Array<() => void> = [];
   // #873 — the operator's policy applies HERE too. This path registers through
   // `registerTool` on a separate MCP server, so it bypassed the headless filter
   // entirely: with COMFYUI_MCP_TOOL_PRESET=readonly set, `panel_run` still queued
@@ -29002,7 +29015,7 @@ export function registerPanelTools(server: McpServer, ctx: PanelToolCtx): void {
       withheld.push(d.name);
       continue;
     }
-    server.registerTool(
+    const registered = server.registerTool(
       d.name,
       {
         description: d.description,
@@ -29021,6 +29034,9 @@ export function registerPanelTools(server: McpServer, ctx: PanelToolCtx): void {
         return res as never;
       }) as never,
     );
+    // A mountable tool starts in whatever state its group is in RIGHT NOW — hidden unless
+    // the pane is already open somewhere — and follows the group from here on.
+    if (d.mountGroup) untrack.push(mountRegistry.track(d.mountGroup, registered));
   }
   if (withheld.length || policy.actionAllow.length) {
     // Logged for the OPERATOR, never surfaced to the model — the point is that it does
@@ -29034,4 +29050,10 @@ export function registerPanelTools(server: McpServer, ctx: PanelToolCtx): void {
           : ""),
     );
   }
+  return {
+    dispose() {
+      for (const u of untrack) u();
+      untrack.length = 0;
+    },
+  };
 }

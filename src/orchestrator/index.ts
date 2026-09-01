@@ -132,6 +132,7 @@ import {
 import { reconcileDownloadDoneBatch } from "./download-done-loop.js";
 import { assembleVocabularyHash, describeVocabularySkew } from "../tools/vocabulary.js";
 import { buildPanelToolDefs } from "./panel-tools.js";
+import { panePresence } from "../services/panel-pane-state.js";
 
 /** The panel vocabulary hashes whose MISMATCH has already been reported (#236).
  *
@@ -3018,7 +3019,12 @@ export async function runPanelOrchestrator(): Promise<void> {
     AskAnswers.closeAsks(tabId);
     forgetAbandonedConfirmCards(tabId);
   });
-  bridge.setTabGoneListener((tabId, incarnation) => AskAnswers.retireDebt(tabId, incarnation));
+  bridge.setTabGoneListener((tabId, incarnation) => {
+    AskAnswers.retireDebt(tabId, incarnation);
+    // A tab that died without closing its pane must not leave a tool group mounted for a
+    // canvas nobody can reach.
+    panePresence.tabGone(tabId);
+  });
   // #694 — the bridge retains a late mutation only for commands that can come
   // back as a retry token, which is the retry-token layer's own set. Installed
   // here because ui-bridge cannot import panel-tools (panel-tools imports it).
@@ -5567,6 +5573,22 @@ export async function runPanelOrchestrator(): Promise<void> {
       // exact prompt id ONCE, here, and replayed until the turn that carries it
       // ends. Other agent_event kinds (download_done) keep the old best-effort
       // path — nothing is waiting on them the way a render is.
+      // A side-panel pane opened or closed. This is the switch for MOUNTABLE tool groups:
+      // presence is recorded per tab and mounts a group while ANY tab has its pane open
+      // (conversation-scoped, never tab-scoped — session-scope.ts). Not a turn event; nothing
+      // is injected into the agent, the tools simply appear in or vanish from tools/list and
+      // the client is notified.
+      if (ev.kind === "pane_state") {
+        const pe = ev as { module?: unknown; open?: unknown };
+        if (typeof pe.module === "string" && typeof pe.open === "boolean") {
+          const known = panePresence.set(event.tab_id, pe.module, pe.open);
+          logger.info(
+            `[panel-orchestrator] tab ${event.tab_id.slice(0, 8)} pane ${pe.module} ${pe.open ? "open" : "closed"}` +
+              (known ? "" : " (unknown module — ignored)"),
+          );
+        }
+        return;
+      }
       if (ev.kind === "executed") {
         // Journal the BLIND-STRIPPED copy: a replay must not resurrect pixels
         // the blind gate removed on arrival. A known completion key is the same
