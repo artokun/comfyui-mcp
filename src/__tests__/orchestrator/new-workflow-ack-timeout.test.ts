@@ -216,6 +216,9 @@ describe("#2705: an unacked workflow_new is settled by the panel's own receipt",
     expect(res.isError).toBeFalsy();
     expect(jsonOf(res).applied_but_ack_timed_out).toBe(true);
     expect(fence).toBe(NEW_UUID);
+    // …but does not tell the user their tab was SLOW when it disconnected.
+    expect(String(jsonOf(res).note)).toMatch(/disconnected mid-command/);
+    expect(String(jsonOf(res).note)).not.toMatch(/within the 15s window/);
   });
 
   it("never claims the recovered tab is BLANK, and never invites a retry", async () => {
