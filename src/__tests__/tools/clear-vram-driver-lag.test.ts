@@ -257,6 +257,33 @@ describe("clear_vram against a driver that releases late (#2704)", () => {
     expect(textOf(res)).toContain(UNSETTLED_CAVEAT);
   });
 
+  it("does not wait for a release nobody asked for", async () => {
+    // /free with both flags off releases nothing. Arming the wait purely on
+    // baseline occupancy would sit out the full cap on a busy card and then
+    // warn that it "had not finished releasing" — for an operation that was
+    // never going to move the number.
+    const sampledAt: number[] = [];
+    let freeAt: number | null = null;
+    mocks.comfyApiFetch.mockImplementation(async () => {
+      freeAt = Date.now();
+      return freeOk();
+    });
+    mocks.getSystemStats.mockImplementation(async () => {
+      sampledAt.push(Date.now());
+      return gpuStats(STALE_FREE, TORCH_BUSY); // occupied and perfectly static
+    });
+
+    const pending = call({ unload_models: false, free_memory: false });
+    await vi.advanceTimersByTimeAsync(
+      CLEAR_VRAM_SETTLE_TIMEOUT_MS + CLEAR_VRAM_SETTLE_INTERVAL_MS * 2,
+    );
+    const res = await pending;
+
+    expect(sampledAt.at(-1)! - freeAt!).toBeLessThan(CLEAR_VRAM_SETTLE_TIMEOUT_MS);
+    expect(textOf(res)).toContain(STALE_LINE);
+    expect(textOf(res)).not.toContain(UNSETTLED_CAVEAT);
+  });
+
   it("does not arm the wait on a device that reports no usable VRAM total", async () => {
     // `free / total` says nothing when total is 0 or tiny, and an occupancy
     // rule that reads such a device as "occupied" would block every clear_vram

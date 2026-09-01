@@ -105,6 +105,7 @@ async function readVramBaseline(): Promise<SystemStats | null> {
  */
 async function readSettledSystemStats(
   before: SystemStats | null,
+  releaseRequested: boolean,
 ): Promise<SettledRead<SystemStats>> {
   return settleUntilStable(
     async () => {
@@ -116,12 +117,16 @@ async function readSettledSystemStats(
     },
     vramSignature,
     {
-      baseline: settleBaselineOf(before),
+      // Only wait for movement we actually ASKED for. `/free` with both flags
+      // off releases nothing, so an occupied card would sit out the whole cap
+      // and then be told it "had not finished releasing" — a wait and a warning
+      // for an operation that was never going to move the number.
+      baseline: releaseRequested ? settleBaselineOf(before) : null,
       progressOf: vramReleaseSignature,
-      // A baseline we could not READ is not the same as a card with nothing to
-      // release. Both arrive here without keys to check, but only the second
-      // one may be published as a measured figure.
-      confirmable: before !== null,
+      // A baseline we could not READ is not the same as having nothing to
+      // prove. Both arrive here without keys to check, but only the second may
+      // be published as a measured figure.
+      confirmable: !releaseRequested || before !== null,
     },
   );
 }
@@ -183,7 +188,10 @@ export function registerMemoryManagementTools(server: McpServer): void {
         // Get updated stats — after CUDA release settles, not the first post-/free sample.
         let statsText = "";
         try {
-          const settledRead = await readSettledSystemStats(before);
+          const settledRead = await readSettledSystemStats(
+            before,
+            args.unload_models === true || args.free_memory === true,
+          );
           if (settledRead.value) {
             statsText = formatVramStats(settledRead.value, settledRead.settled);
           }
