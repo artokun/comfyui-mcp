@@ -4371,8 +4371,14 @@ const SET_WIDGET_RECONCILE_MS = 8_000;
 
 type SetWidgetReadbackScope = {
   activeView: "root" | "subgraph";
+  ownerNodeId?: string;
   graphIdentity: string;
   workflowUuid?: string;
+};
+
+type SetWidgetReadbackConnection = {
+  generation: number;
+  tabSessionId: string;
 };
 
 function setWidgetAppliedNote(widget: string): string {
@@ -4474,6 +4480,10 @@ function setWidgetReadbackScopeMatches(
   const current = viewing as Record<string, unknown>;
   if (current.scope !== expected.activeView) return false;
   if (current.graph_identity !== expected.graphIdentity) return false;
+  if (expected.activeView === "subgraph") {
+    const ownerNodeId = canonicalQueriedNodeId(current.owner_node_id);
+    if (!expected.ownerNodeId || ownerNodeId !== expected.ownerNodeId) return false;
+  }
   return expected.workflowUuid === undefined || current.workflow_uuid === expected.workflowUuid;
 }
 
@@ -4549,12 +4559,38 @@ async function settleSetWidgetAfterAckTimeout(
   mutationId: string | undefined,
   dispatchTab: string,
   expectedScope?: SetWidgetReadbackScope,
+  dispatchConnection?: SetWidgetReadbackConnection,
 ): Promise<ToolResult> {
   // Probe the tab the write was DISPATCHED to. A silent rebind of an unpinned
   // session would otherwise let a different tab's widget certify this write.
   const probeOnSessionTab = ctx.tabId === dispatchTab;
+  if (!probeOnSessionTab || !isUsablePanelConnectionIdentity(dispatchConnection)) {
+    return setWidgetTimeoutUnknown(timedOut, nodeId, widget, value, mutationId);
+  }
+  let connectionBeforeProbe: SetWidgetReadbackConnection | undefined;
+  try {
+    connectionBeforeProbe = ctx.panelConnectionIdentity?.();
+  } catch {
+    return setWidgetTimeoutUnknown(timedOut, nodeId, widget, value, mutationId);
+  }
+  if (
+    !isUsablePanelConnectionIdentity(connectionBeforeProbe) ||
+    !samePanelConnectionIdentity(dispatchConnection, connectionBeforeProbe)
+  ) {
+    return setWidgetTimeoutUnknown(timedOut, nodeId, widget, value, mutationId);
+  }
   const probe = await ctx.call(setWidgetReadbackProbe(nodeId, widget, value), SET_WIDGET_RECONCILE_MS);
-  if (probeOnSessionTab && ctx.tabId !== dispatchTab) {
+  let connectionAfterProbe: SetWidgetReadbackConnection | undefined;
+  try {
+    connectionAfterProbe = ctx.panelConnectionIdentity?.();
+  } catch {
+    return setWidgetTimeoutUnknown(timedOut, nodeId, widget, value, mutationId);
+  }
+  if (
+    ctx.tabId !== dispatchTab ||
+    !isUsablePanelConnectionIdentity(connectionAfterProbe) ||
+    !samePanelConnectionIdentity(dispatchConnection, connectionAfterProbe)
+  ) {
     return setWidgetTimeoutUnknown(timedOut, nodeId, widget, value, mutationId);
   }
   const observed = observedWidgetFromQuery(probe, nodeId, widget, expectedScope);
@@ -7660,7 +7696,9 @@ type PromotedWritePlan = {
 type OrdinaryWritePlan = {
   kind: "ordinary-write";
   activeView: "root" | "subgraph";
+  scopeOwnerNodeId?: string;
   graphIdentity: string;
+  workflowUuid?: string;
   expectedNodeType: string;
   expectedNodeIdentity?: string;
   binding: {
@@ -8538,7 +8576,11 @@ function ordinaryWritePlanFromScope(
   return {
     kind: "ordinary-write",
     activeView: scope.activeView,
+    ...(scope.scopeOwnerNodeId !== undefined
+      ? { scopeOwnerNodeId: scope.scopeOwnerNodeId }
+      : {}),
     graphIdentity: scope.graphIdentity,
+    ...(scope.workflowUuid !== undefined ? { workflowUuid: scope.workflowUuid } : {}),
     expectedNodeType: scope.nodeType,
     ...(scope.nodeIdentity !== undefined ? { expectedNodeIdentity: scope.nodeIdentity } : {}),
     binding: {
@@ -8698,6 +8740,43 @@ async function preparePromotedWidgetWrite(
     if (firstReadKind === "definitive-ordinary") {
       const drift2 = panelBindingDriftReason(ctx, "after the subgraph read", hasIdentityApi, identityBefore, tabBefore);
       if (drift2) return promotedWriteRefusal(widget, drift2);
+      // A node can be an ordinary widget in the SUBGRAPH the caller is already
+      // viewing. Keep the graph identity and node incarnation captured by the
+      // preceding graph_query instead of falling through to an unfenced write;
+      // #2489's timeout read-back needs the same target proof as the write.
+      if (targetScope?.activeView === "subgraph" && targetScope.node === "ordinary") {
+        // Older panel builds do not publish node_identity on ordinary text
+        // rows. Preserve their established conservative path; the new
+        // subgraph read-back is only eligible once the full target fence is
+        // available.
+        if (!targetScope.nodeIdentity) return null;
+        const expectedNodeType = definitiveNonPromotedNodeType(sub);
+        if (expectedNodeType !== targetScope.nodeType) {
+          return promotedWriteRefusal(
+            widget,
+            "the ordinary node type changed between the scope and subgraph reads",
+          );
+        }
+        if (ctx.tabExpectedNodeTypeFenceCapability?.() !== true) {
+          return promotedPanelBuildRefusal(
+            ctx,
+            nodeId,
+            widget,
+            "does not advertise the atomic ordinary-node write fence",
+            "enforces_expected_node_type_at_write",
+          );
+        }
+        if (ctx.tabExpectedNodeIdentityFenceCapability?.() !== true) {
+          return promotedPanelBuildRefusal(
+            ctx,
+            nodeId,
+            widget,
+            "does not advertise the atomic ordinary-node identity write fence",
+            "enforces_expected_node_identity_at_write",
+          );
+        }
+        return ordinaryWritePlanFromScope(widget, targetScope, tabBefore, identityBefore);
+      }
       return null;
     }
     // A canvas/root divergence is a panel diagnosis with its own remedy, not a
@@ -8781,7 +8860,13 @@ async function preparePromotedWidgetWrite(
         return {
           kind: "ordinary-write",
           activeView: ordinaryScope.activeView,
+          ...(ordinaryScope.scopeOwnerNodeId !== undefined
+            ? { scopeOwnerNodeId: ordinaryScope.scopeOwnerNodeId }
+            : {}),
           graphIdentity: ordinaryScope.graphIdentity,
+          ...(ordinaryScope.workflowUuid !== undefined
+            ? { workflowUuid: ordinaryScope.workflowUuid }
+            : {}),
           expectedNodeType,
           expectedNodeIdentity,
           binding: {
@@ -20955,7 +21040,8 @@ export function buildPanelToolDefs(): PanelToolDef[] {
           targetExpectedNodeIdentity: string | undefined = expectedNodeIdentity,
         ): Promise<ToolResult> => {
           let mutationId: string | undefined;
-          const dispatchTab = ctx.tabId;
+          let dispatchTab = ctx.tabId;
+          let dispatchConnection: SetWidgetReadbackConnection | undefined;
           const written = await ctx.call(
             {
               cmd: "graph_set_widget",
@@ -21014,6 +21100,20 @@ export function buildPanelToolDefs(): PanelToolDef[] {
             OBJECT_INFO_REFRESH_ACK_TIMEOUT_MS,
             (rid) => {
               mutationId = rid;
+              // UiBridge invokes this observer only after the frame has been
+              // accepted by the bound tab. Capture the actual tab/incarnation
+              // here, after the reachability wait and immediately at dispatch;
+              // a pre-call snapshot could describe a different receiver.
+              dispatchTab = ctx.tabId;
+              try {
+                const identity = ctx.panelConnectionIdentity?.();
+                if (isUsablePanelConnectionIdentity(identity)) {
+                  dispatchConnection = identity;
+                }
+              } catch {
+                // An unreadable identity must stay absent. The read-back path
+                // fails closed instead of certifying another connection.
+              }
             },
             beforeDispatch,
           );
@@ -21044,15 +21144,19 @@ export function buildPanelToolDefs(): PanelToolDef[] {
               dispatchTab,
             );
           }
-          // #2489 — ONLY a no-reply is settled by a read. An acked executor
-          // error is a definite outcome; re-deciding it from a later widget
-          // read would overwrite a better-informed verdict. Capture the tab
-          // AFTER dispatch: that is the tab the write was bound to. Host-rail
-          // writes (#2488) fence the current root/parent view, not the child
-          // graph the inner widget lives in.
+          // #2489 — ONLY a no-reply on a write proven to be in the active
+          // subgraph is settled by a read. Ordinary root writes intentionally
+          // remain on #2527's late-mutation receipt path, and Power Lora rows
+          // were handled above by #2495. An acked executor error is a definite
+          // outcome; re-deciding it from a later widget read would overwrite a
+          // better-informed verdict. Host-rail writes (#2488) fence the current
+          // root/parent view, not the child graph the inner widget lives in.
           const readbackScope = targetExpectedScope
             ? {
                 activeView: targetExpectedScope.scope ?? "subgraph",
+                ...(targetExpectedScope.scope === "subgraph"
+                  ? { ownerNodeId: targetExpectedScope.ownerNodeId }
+                  : {}),
                 graphIdentity: targetExpectedScope.graphIdentity,
                 ...(targetExpectedScope.workflowUuid !== undefined
                   ? { workflowUuid: targetExpectedScope.workflowUuid }
@@ -21061,10 +21165,19 @@ export function buildPanelToolDefs(): PanelToolDef[] {
             : ordinaryPlan
               ? {
                   activeView: ordinaryPlan.activeView,
+                  ...(ordinaryPlan.activeView === "subgraph"
+                    ? { ownerNodeId: ordinaryPlan.scopeOwnerNodeId }
+                    : {}),
                   graphIdentity: ordinaryPlan.graphIdentity,
+                  ...(ordinaryPlan.workflowUuid !== undefined
+                    ? { workflowUuid: ordinaryPlan.workflowUuid }
+                    : {}),
                 }
               : undefined;
-          const settled = isReplyTimeoutResult(classified)
+          const settled =
+            isReplyTimeoutResult(classified) &&
+            args.defer_until_idle !== true &&
+            readbackScope?.activeView === "subgraph"
             ? await settleSetWidgetAfterAckTimeout(
                 ctx,
                 classified,
@@ -21074,6 +21187,7 @@ export function buildPanelToolDefs(): PanelToolDef[] {
                 mutationId,
                 dispatchTab,
                 readbackScope,
+                dispatchConnection,
               )
             : classified;
           return stripVerifiedLastObservedSchemaNote(summarizeSetWidgetEcho(settled, echoFull));

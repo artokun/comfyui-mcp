@@ -29,6 +29,8 @@ const NODE_ID = 12;
 const WIDGET = "length";
 const VALUE = 4;
 const PREVIOUS = 1;
+const GRAPH_ID = "graph:2489-subgraph";
+const WORKFLOW_UUID = "workflow-2489";
 
 const textOf = (res: ToolResult): string =>
   res.content.map((c) => ("text" in c ? (c.text ?? "") : "")).join(" ");
@@ -50,20 +52,22 @@ let sent: Array<{
 
 function nodeDetail(
   length: unknown,
-  graphIdentity?: string,
+  graphIdentity: string = GRAPH_ID,
   scope: "root" | "subgraph" = "subgraph",
 ): Record<string, unknown> {
   return {
     viewing: {
       scope,
       ...(scope === "subgraph" ? { owner_node_id: 7, title: "batch" } : {}),
-      ...(graphIdentity ? { graph_identity: graphIdentity } : {}),
+      graph_identity: graphIdentity,
+      workflow_uuid: WORKFLOW_UUID,
     },
     nodes: [
       {
         id: NODE_ID,
         type: "ImageFromBatch",
-        ...(scope === "root" ? { is_subgraph: false } : {}),
+        is_subgraph: false,
+        node_identity: "node-incarnation:2489:12",
         widgets: { length },
         inputs: [],
       },
@@ -77,9 +81,12 @@ function bridge(opts: {
   loseTabAfterSet?: boolean;
   fencedGraphIdentity?: string;
   readbackGraphIdentity?: string;
+  changeConnectionAfterSet?: boolean;
 }) {
   let tabGone = false;
-  let currentGraphIdentity: string | undefined;
+  let queryCount = 0;
+  let currentGraphIdentity = GRAPH_ID;
+  let connectionGeneration = 1;
   return {
     send: async (
       cmd: Record<string, unknown>,
@@ -115,25 +122,26 @@ function bridge(opts: {
         }
         if (opts.loseTabAfterSet) tabGone = true;
         o?.onDispatchedRid?.(MUTATION_RID);
+        if (opts.changeConnectionAfterSet) connectionGeneration = 2;
         throw markReplyTimeout(ackTimeout("graph_set_widget", 90000));
       }
       if (cmd.cmd === "graph_query") {
-        if (opts.probeLength === "timeout") throw ackTimeout("graph_query", 8000);
-        if (opts.probeLength === "missing-node") {
-          return { viewing: { scope: "subgraph" }, nodes: [] };
+        queryCount += 1;
+        if (queryCount > 1 && opts.probeLength === "timeout") {
+          throw ackTimeout("graph_query", 8000);
+        }
+        if (queryCount > 1 && opts.probeLength === "missing-node") {
+          return { viewing: { scope: "subgraph", graph_identity: GRAPH_ID }, nodes: [] };
         }
         const graphIdentity =
-          opts.fencedGraphIdentity === undefined
-            ? undefined
-            : sent.filter((entry) => entry.cmd === "graph_query").length === 1
-              ? opts.fencedGraphIdentity
-              : opts.readbackGraphIdentity ?? opts.fencedGraphIdentity;
+          queryCount === 1
+            ? opts.fencedGraphIdentity ?? GRAPH_ID
+            : opts.readbackGraphIdentity ?? opts.fencedGraphIdentity ?? GRAPH_ID;
         currentGraphIdentity = graphIdentity;
-        return nodeDetail(
-          opts.probeLength ?? VALUE,
-          graphIdentity,
-          opts.fencedGraphIdentity === undefined ? "subgraph" : "root",
-        );
+        return nodeDetail(queryCount > 1 ? opts.probeLength ?? VALUE : PREVIOUS, graphIdentity);
+      }
+      if (cmd.cmd === "graph_get_subgraph") {
+        throw new Error(`Node ${NODE_ID} (ImageFromBatch) is not a subgraph`);
       }
       return { ok: true };
     },
@@ -146,16 +154,24 @@ function bridge(opts: {
         : [{ tab_id: TAB, title: "wf", connected_at: 0 }],
     resolveActiveTabId: () => (tabGone ? OTHER_TAB : TAB),
     refreshWorkflowUuid: () => true,
-    workflowUuidFor: () => ({ known: false }),
+    workflowUuidFor: () => ({ known: true, uuid: WORKFLOW_UUID }),
     tabCanMutateGraph: () => true,
     tabGraphMutationCapability: () => ({ known: true, canMutate: true }),
-    ...(opts.fencedGraphIdentity === undefined
-      ? {}
-      : { tabPromotedTerminalWitnessCapability: (_id: string) => true }),
+    tabConnectionIdentity: () => ({ generation: connectionGeneration, tabSessionId: "browser-tab-2489" }),
+    tabExpectedNodeTypeFenceCapability: () => true,
+    tabExpectedNodeIdentityFenceCapability: () => true,
+    tabExpectedScopeGraphIdentityFenceCapability: () => true,
+    tabPromotedTerminalWitnessCapability: () => false,
+    tabPromotedParentRailFenceCapability: () => false,
+    tabReceiverResolvable: () => true,
     promotedScopeFor: () =>
-      currentGraphIdentity
-        ? { known: true, scope: "root", ownerNodeId: null, graphIdentity: currentGraphIdentity }
-        : { known: false, reason: "no graph read yet" },
+      ({
+        known: true,
+        scope: "subgraph",
+        ownerNodeId: "7",
+        workflowUuid: WORKFLOW_UUID,
+        graphIdentity: currentGraphIdentity,
+      }),
   } as PanelToolCtx["bridge"];
 }
 
@@ -178,15 +194,20 @@ describe("an unacknowledged subgraph widget write is settled by a read, not by a
   it("reports the write as applied when the inner node holds the delivered value", async () => {
     const out = await runSetWidget({ setReply: "timeout", probeLength: VALUE });
 
-    expect(sent.map((s) => s.cmd)).toEqual(["graph_set_widget", "graph_query"]);
-    expect(sent[0]?.timeoutMs).toBe(90_000);
-    expect(sent[1]?.payload).toMatchObject({
+    expect(sent.map((s) => s.cmd)).toEqual([
+      "graph_query",
+      "graph_get_subgraph",
+      "graph_set_widget",
+      "graph_query",
+    ]);
+    expect(sent[2]?.timeoutMs).toBe(90_000);
+    expect(sent[3]?.payload).toMatchObject({
       cmd: "graph_query",
       ids: [NODE_ID],
       fields: "detail",
       limit: 1,
     });
-    expect(sent[1]?.timeoutMs).toBe(8_000);
+    expect(sent[3]?.timeoutMs).toBe(8_000);
 
     expect(out.isError).toBe(false);
     expect(out.text).toMatch(/CHECKED FOR YOU/);
@@ -199,7 +220,12 @@ describe("an unacknowledged subgraph widget write is settled by a read, not by a
   it("reports the write as NOT applied when the inner node holds a different value", async () => {
     const out = await runSetWidget({ setReply: "timeout", probeLength: PREVIOUS });
 
-    expect(sent.map((s) => s.cmd)).toEqual(["graph_set_widget", "graph_query"]);
+    expect(sent.map((s) => s.cmd)).toEqual([
+      "graph_query",
+      "graph_get_subgraph",
+      "graph_set_widget",
+      "graph_query",
+    ]);
     expect(out.isError).toBe(true);
     expect(out.text).toMatch(/"applied": false/);
     expect(out.text).toMatch(/does NOT show \\"length\\" holding the value/);
@@ -211,7 +237,12 @@ describe("an unacknowledged subgraph widget write is settled by a read, not by a
   it("returns a mutation receipt when the graph read itself cannot answer", async () => {
     const out = await runSetWidget({ setReply: "timeout", probeLength: "timeout" });
 
-    expect(sent.map((s) => s.cmd)).toEqual(["graph_set_widget", "graph_query"]);
+    expect(sent.map((s) => s.cmd)).toEqual([
+      "graph_query",
+      "graph_get_subgraph",
+      "graph_set_widget",
+      "graph_query",
+    ]);
     expect(out.isError).toBe(true);
     expect(out.text).toMatch(/may have been applied despite the missing reply/);
     expect(out.text).toMatch(/"applied": "unknown"/);
@@ -224,7 +255,12 @@ describe("an unacknowledged subgraph widget write is settled by a read, not by a
   it("claims nothing when the probe cannot name the written node", async () => {
     const out = await runSetWidget({ setReply: "timeout", probeLength: "missing-node" });
 
-    expect(sent.map((s) => s.cmd)).toEqual(["graph_set_widget", "graph_query"]);
+    expect(sent.map((s) => s.cmd)).toEqual([
+      "graph_query",
+      "graph_get_subgraph",
+      "graph_set_widget",
+      "graph_query",
+    ]);
     expect(out.isError).toBe(true);
     expect(out.text).toMatch(/"applied": "unknown"/);
     expect(out.text).not.toMatch(/CHECKED FOR YOU/);
@@ -234,7 +270,11 @@ describe("an unacknowledged subgraph widget write is settled by a read, not by a
   it("does not second-guess an ACKED executor error", async () => {
     const out = await runSetWidget({ setReply: "acked-error" });
 
-    expect(sent.map((s) => s.cmd)).not.toContain("graph_query");
+    expect(sent.map((s) => s.cmd)).toEqual([
+      "graph_query",
+      "graph_get_subgraph",
+      "graph_set_widget",
+    ]);
     expect(out.isError).toBe(true);
     expect(out.text).toMatch(/is linked/);
     expect(out.text).not.toMatch(/CHECKED FOR YOU/);
@@ -247,7 +287,11 @@ describe("an unacknowledged subgraph widget write is settled by a read, not by a
     expect(out.text).toMatch(
       /did not reply to "graph_set_widget" within 90000 ms — the ComfyUI tab may be backgrounded or frozen/,
     );
-    expect(sent.map((s) => s.cmd)).not.toContain("graph_query");
+    expect(sent.map((s) => s.cmd)).toEqual([
+      "graph_query",
+      "graph_get_subgraph",
+      "graph_set_widget",
+    ]);
     expect(out.isError).toBe(true);
     expect(out.text).toMatch(/nothing was applied/);
     expect(out.text).not.toMatch(/CHECKED FOR YOU/);
@@ -272,7 +316,11 @@ describe("an unacknowledged subgraph widget write is settled by a read, not by a
   it("does not take a graph read on a successful ACK", async () => {
     const out = await runSetWidget({ setReply: "ok" });
 
-    expect(sent.map((s) => s.cmd)).toEqual(["graph_set_widget"]);
+    expect(sent.map((s) => s.cmd)).toEqual([
+      "graph_query",
+      "graph_get_subgraph",
+      "graph_set_widget",
+    ]);
     expect(out.isError).toBe(false);
     expect(out.text).not.toMatch(/CHECKED FOR YOU/);
     expect(out.text).toMatch(/"previous": 1/);
@@ -287,7 +335,24 @@ describe("an unacknowledged subgraph widget write is settled by a read, not by a
       readbackGraphIdentity: "graph:after",
     });
 
-    expect(sent.map((s) => s.cmd)).toEqual(["graph_query", "graph_set_widget", "graph_query"]);
+    expect(sent.map((s) => s.cmd)).toEqual([
+      "graph_query",
+      "graph_get_subgraph",
+      "graph_set_widget",
+      "graph_query",
+    ]);
+    expect(out.isError).toBe(true);
+    expect(out.text).toMatch(/"applied": "unknown"/);
+    expect(out.text).not.toMatch(/CHECKED FOR YOU/);
+  });
+
+  it("does not certify a matching value after the same tab reconnects", async () => {
+    const out = await runSetWidget({
+      setReply: "timeout",
+      probeLength: VALUE,
+      changeConnectionAfterSet: true,
+    });
+
     expect(out.isError).toBe(true);
     expect(out.text).toMatch(/"applied": "unknown"/);
     expect(out.text).not.toMatch(/CHECKED FOR YOU/);
