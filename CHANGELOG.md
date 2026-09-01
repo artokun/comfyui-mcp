@@ -6,11 +6,24 @@ All notable changes to this project are documented here. This project adheres to
 
 ## Unreleased
 
+## [0.52.166] - 2026-09-01
+
 ### MCP
 
 #### Fixed
-- panel_run(to_node_id) treats the paired random-mode seed-control graph-stamp diff as queue-time volatility rather than a real graph mismatch, while outer WorkerTransport failures remain outcome-unknown and are fenced for control-plane recovery (#2120)
-- panel-connected apply_manifest adopts the current panel-reported local ComfyUI path when COMFYUI_PATH is unset (#463)
+- panel_run(to_node_id) treats the paired random-mode seed-control graph-stamp diff as queue-time volatility rather than a real graph mismatch, while outer WorkerTransport failures remain outcome-unknown and are fenced for control-plane recovery (#2120, #2670)
+- panel-connected apply_manifest adopts the current panel-reported local ComfyUI path when COMFYUI_PATH is unset (#463, #2695)
+
+- handle DaSiWa seed stamp recurrence safely
+- ignore seed-only run-to-node stamp races
+- a promoted write refused by the ownership envelope names the invariant that failed (#2690)
+- terminate a generated API-node prompt with a sink matching its output type (#2687)
+- stop asserting a run the ComfyUI server has not confirmed (#2685)
+- flag an image-edit graph whose sampled canvas is not derived from the reference (#2683)
+- flag a sampler set below full denoise over an empty latent before it renders a flat field (#2682)
+- a loader input naming a file the server does not have says where it looked, and how to fix it (#2679)
+- a Windows updater that cannot reach npm or git says so, and says what to do (#2672)
+
 
 ## [0.52.165] - 2026-08-30
 
