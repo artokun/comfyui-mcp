@@ -24,7 +24,11 @@ import {
   boundInlineImage,
   previewCaveats,
 } from "../services/inline-preview.js";
-import { acquireInlineImageSlot, budgetShortfallNote } from "../services/inline-frame-budget.js";
+import {
+  acquireInlineImageSlot,
+  budgetShortfallNote,
+  chargeInlineEmission,
+} from "../services/inline-frame-budget.js";
 import { analyzeColor } from "../services/color-analysis.js";
 import { uploadOutput } from "../services/storage-upload.js";
 import type { UploadOutputOptions } from "../services/storage-upload.js";
@@ -509,6 +513,11 @@ export function registerImageManagementTools(server: McpServer): void {
               bounded.preview || bounded.refused
                 ? budgetShortfallNote(inlineSlot?.peak() ?? 1, requestedBudget, grantedBudget)
                 : "";
+            // #2692 — the SEQUENTIAL shape the slot cannot bound. A refusal inlines nothing,
+            // so it is charged nothing; anything that goes on the wire is counted, and the
+            // running total is reported once it is within reach of the frame. Reported, never
+            // enforced — see the reasoning in inline-frame-budget.ts.
+            const frameNote = bounded.refused ? "" : chargeInlineEmission(bounded.base64.length);
 
             // Could not be reduced: say so and keep the saved path, rather than emitting a
             // payload that will fail in transport — where the error names a byte count and
@@ -534,7 +543,8 @@ export function registerImageManagementTools(server: McpServer): void {
                           `here at all — fix the save destination above and retry, or re-run ` +
                           `get_image with a smaller max_preview_dimension. The output is still ` +
                           `intact on the ComfyUI server; do NOT re-run the render.`) +
-                      batchNote,
+                      batchNote +
+                      frameNote,
                   },
                 ],
               };
@@ -561,7 +571,9 @@ export function registerImageManagementTools(server: McpServer): void {
                   text:
                     (saveError
                       ? `${saveError} The image itself is returned inline below.`
-                      : `Saved to: ${savePath}`) + previewNote,
+                      : `Saved to: ${savePath}`) +
+                    previewNote +
+                    frameNote,
                 },
                 {
                   type: "image" as const,
@@ -600,9 +612,14 @@ export function registerImageManagementTools(server: McpServer): void {
             });
             // Appended to the FIRST text block (the asset header) rather than added as a new
             // one: an extra content block changes the shape every existing consumer reads.
-            const viewNote = result.bounded
-              ? budgetShortfallNote(inlineSlot?.peak() ?? 1, viewRequested, viewGranted)
-              : "";
+            const inlined = result.content.reduce(
+              (n, block) => n + (block.type === "image" ? block.data.length : 0),
+              0,
+            );
+            const viewNote =
+              (result.bounded
+                ? budgetShortfallNote(inlineSlot?.peak() ?? 1, viewRequested, viewGranted)
+                : "") + (inlined > 0 ? chargeInlineEmission(inlined) : "");
             const firstText = result.content.findIndex((block) => block.type === "text");
             return {
               content: result.content.map((block, i) =>

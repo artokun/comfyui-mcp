@@ -47,7 +47,13 @@ vi.mock("node:fs/promises", async () => {
 });
 
 import { registerImageManagementTools } from "../../tools/image-management.js";
-import { CODE_MODE_FRAME_BYTES, resetInlineImageSlots } from "../../services/inline-frame-budget.js";
+import {
+  CODE_MODE_FRAME_BYTES,
+  chargeInlineEmission,
+  FRAME_WARN_BYTES,
+  resetInlineImageSlots,
+  runningInlineEmissionBytes,
+} from "../../services/inline-frame-budget.js";
 
 type ToolResult = {
   content: Array<{ type: string; text?: string; data?: string; mimeType?: string }>;
@@ -250,6 +256,57 @@ describe("a BATCH of view calls fits one transport frame (#2692 defect 2)", () =
     getOutputImageMock.mockResolvedValue({ base64: image, mimeType: "image/png" });
     const after = await handler({ action: "view", asset_id: "a_0" });
     expect(inlineBytes(after)).toBe(image.length);
+  });
+
+  it("SEQUENTIAL views accumulate a frame warning even though no batch forms", async () => {
+    // The shape the slot cannot bound, and the reason the disclosure exists: awaited one at
+    // a time, every call sees a peak of one and is entitled to a full budget, so nothing is
+    // shrunk — but the running total is reported once it is within reach of the frame.
+    // Asserted at the TOOL boundary, because a counter nothing calls is worth nothing.
+    const image = await noisyPngBase64(700, 700, 5150);
+    getOutputImageMock.mockResolvedValue({ base64: image, mimeType: "image/png" });
+    const handler = getImage();
+
+    // Charge the running total to ONE BYTE under the threshold, so it is this real fetch —
+    // through the production handler — that crosses it, not the setup.
+    const preload = FRAME_WARN_BYTES - image.length;
+    expect(chargeInlineEmission(preload)).toBe("");
+    const res = await handler({ action: "view", asset_id: "a_0" });
+
+    expect(textOf(res)).toContain("FRAME BUDGET");
+    expect(textOf(res)).toContain("loses the ENTIRE reply");
+    // Nothing was shrunk: the disclosure is the whole mechanism here.
+    expect(textOf(res)).not.toContain("BATCH LIMIT");
+    expect(inlineBytes(res)).toBe(image.length);
+  });
+
+  it("a REFUSED image is charged nothing — only what goes on the wire counts", async () => {
+    const image = await noisyPngBase64(700, 700, 6161);
+    getOutputImageMock.mockResolvedValue({ base64: image, mimeType: "image/png" });
+    const handler = getImage();
+
+    // A budget of 1 byte cannot be met by any real image, so it refuses and inlines nothing.
+    const before = runningInlineEmissionBytes();
+    const res = await handler({ action: "view", asset_id: "a_0", max_preview_bytes: 1 });
+    expect(inlineBytes(res)).toBe(0);
+    expect(textOf(res)).toContain("NOT rendered inline");
+    expect(runningInlineEmissionBytes()).toBe(before);
+  });
+
+  it('a REFUSED action:"get" is charged nothing, not its unshrunk original', async () => {
+    // On a refusal `bounded.base64` is still the ORIGINAL payload — boundInlineImage hands
+    // the input back untouched when it cannot reduce it. Charging that would count bytes
+    // that never went on the wire, and in the #1495 shape it would charge ~267 MB for a
+    // response that inlined nothing, warning every later call for no reason.
+    const image = await noisyPngBase64(700, 700, 7272);
+    getOutputImageMock.mockResolvedValue({ base64: image, mimeType: "image/png" });
+    const handler = getImage();
+
+    const before = runningInlineEmissionBytes();
+    const res = await handler({ action: "get", filename: "big.png", max_preview_bytes: 1 });
+    expect(textOf(res)).toContain("NOT rendered inline");
+    expect(inlineBytes(res)).toBe(0);
+    expect(runningInlineEmissionBytes()).toBe(before);
   });
 
   it("nine unshared per-image budgets would overrun the real frame", () => {

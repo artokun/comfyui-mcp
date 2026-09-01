@@ -104,6 +104,8 @@ interface OpenSlot {
 
 const open = new Set<OpenSlot>();
 
+const MB = 1_048_576;
+
 export interface InlineImageSlot {
   /** The widest batch this call has been part of, at least 1. */
   peak(): number;
@@ -171,9 +173,79 @@ export function openInlineImageSlots(): number {
 /** Test hook: drop every slot. Never called in production. */
 export function resetInlineImageSlots(): void {
   open.clear();
+  runningInlineBytes = 0;
+  lastEmissionAt = 0;
 }
 
-const MB = 1_048_576;
+/**
+ * THE SEQUENTIAL SHAPE, which the slot above cannot bound — and why this WARNS instead of
+ * shrinking.
+ *
+ * A script that awaits its fetches one at a time and forwards the results together fills the
+ * same frame as a parallel batch, but every call sees a peak of one, so every call is
+ * entitled to a full per-image budget. By the time the fifth call runs the first four are
+ * already serialized and gone; nothing this process does at call five can shrink them.
+ *
+ * Enforcing a budget across that sequence would mean charging EVERY call as though a
+ * sequence might follow — permanently lowering the single-image preview for every client,
+ * including the majority for whom each result is its own frame. That is a certain regression
+ * traded against a possible one, and it is refused.
+ *
+ * So the running total is DISCLOSED, never enforced. The distinction is the whole argument:
+ * a wrong reset here costs a missing or a spurious sentence, while a wrong reset in a
+ * shrinking ledger costs an image nobody can see. That asymmetry is what makes a clock
+ * acceptable for this and unacceptable for the budget.
+ *
+ * And the warning goes to the only actor that CAN prevent the failure — the script deciding
+ * how many images to forward. It cannot count what it has been handed; this can.
+ */
+
+/** Base64 bytes inlined since the last quiet gap. Not a budget — a counter to report. */
+let runningInlineBytes = 0;
+let lastEmissionAt = 0;
+
+/**
+ * How long a silence has to be before the running total is assumed to belong to an earlier
+ * response. Generous on purpose: over-counting produces a true-but-unnecessary sentence,
+ * while under-counting drops the warning on the run that needed it.
+ */
+const QUIET_RESET_MS = 120_000;
+
+/**
+ * Warn once the running total is within reach of the frame, not once it is already over — a
+ * sentence attached to the call that broke the limit arrives after the bytes it was meant to
+ * prevent.
+ *
+ * An integer, and compared with `>=`: a fractional threshold makes "exactly at the
+ * threshold" depend on floating point, which is not a distinction anyone should have to
+ * reason about when reading why a warning did or did not fire.
+ */
+export const FRAME_WARN_BYTES = Math.floor(CODE_MODE_FRAME_BYTES * 0.6);
+
+/**
+ * Record `bytes` of inline payload and return the warning owed to the caller, if any.
+ *
+ * `now` is injectable so the reset can be tested by BEHAVIOUR rather than by sleeping for
+ * two minutes in a unit test.
+ */
+export function chargeInlineEmission(bytes: number, now: number = Date.now()): string {
+  if (lastEmissionAt !== 0 && now - lastEmissionAt > QUIET_RESET_MS) runningInlineBytes = 0;
+  lastEmissionAt = now;
+  runningInlineBytes += bytes;
+  if (runningInlineBytes < FRAME_WARN_BYTES) return "";
+  return (
+    ` FRAME BUDGET: ~${Math.round(runningInlineBytes / MB)} MB of inline image data has been ` +
+    `handed to you recently, against a ${Math.round(CODE_MODE_FRAME_BYTES / MB)} MB limit on a ` +
+    `code-mode response. Forwarding all of it in ONE reply loses the ENTIRE reply, not just ` +
+    `the largest image. Forward a subset, or re-fetch with a smaller max_preview_bytes; the ` +
+    `full-resolution files are unaffected.`
+  );
+}
+
+/** Test hook: the running total, so a test can assert the reset rather than infer it. */
+export function runningInlineEmissionBytes(): number {
+  return runningInlineBytes;
+}
 
 /**
  * The sentence a call owes its caller when THIS file, rather than the image's own size,

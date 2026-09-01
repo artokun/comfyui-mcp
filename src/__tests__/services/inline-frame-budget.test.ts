@@ -12,6 +12,8 @@ import {
   acquireInlineImageSlot,
   aggregateInlineBudgetBytes,
   budgetShortfallNote,
+  chargeInlineEmission,
+  runningInlineEmissionBytes,
   openInlineImageSlots,
   resetInlineImageSlots,
 } from "../../services/inline-frame-budget.js";
@@ -163,6 +165,59 @@ describe("the inline frame budget shares one transport frame between a batch (#2
     // with it, so retrying the biggest image alone is not the fix.
     expect(note).toContain("WHOLE response");
     expect(note).toContain("Fetch fewer at a time");
+  });
+});
+
+describe("the running inline total is DISCLOSED for the sequential shape (#2692)", () => {
+  // The slot cannot bound a script that awaits its fetches one at a time and forwards them
+  // together: by the fifth call the first four are already sent. This counter does not try
+  // to — it reports, so the one actor that can prevent the overrun (the script deciding what
+  // to forward) has the number. A wrong reset here costs a sentence, not an image.
+  beforeEach(() => resetInlineImageSlots());
+  afterEach(() => resetInlineImageSlots());
+
+  const FRAME = 67_108_864;
+
+  it("stays silent until the running total is within reach of the frame", () => {
+    // Three 12 MB images is 36 MB — real, but still a deliverable response. Warning here
+    // would put the sentence on almost every multi-image session and teach a reader to skip
+    // it before it ever mattered.
+    expect(chargeInlineEmission(12 * 1024 * 1024, 1000)).toBe("");
+    expect(chargeInlineEmission(12 * 1024 * 1024, 2000)).toBe("");
+    expect(chargeInlineEmission(12 * 1024 * 1024, 3000)).toBe("");
+    expect(runningInlineEmissionBytes()).toBe(36 * 1024 * 1024);
+  });
+
+  it("warns BEFORE the frame is exceeded, not after it is already lost", () => {
+    // The gate's exact scenario: five sequential ~12 MB fetches. The warning has to arrive
+    // while the script can still act on it — a sentence attached to the call that pushes the
+    // total past the limit arrives too late to change what was already sent.
+    const notes = [1, 2, 3, 4, 5].map((i) => chargeInlineEmission(12 * 1024 * 1024, i * 1000));
+    expect(notes[0]).toBe("");
+    expect(notes[2]).toBe("");
+    const firstWarn = notes.findIndex((n) => n !== "");
+    expect(firstWarn).toBeGreaterThan(-1);
+    expect(runningInlineEmissionBytes() - 12 * 1024 * 1024 * (5 - firstWarn - 1)).toBeLessThan(
+      FRAME,
+    );
+    expect(notes[4]).toContain("FRAME BUDGET");
+    expect(notes[4]).toContain("loses the ENTIRE reply");
+    expect(notes[4]).toContain("Forward a subset");
+  });
+
+  it("a quiet gap resets the total, so a later session does not inherit an old one", () => {
+    expect(chargeInlineEmission(30 * 1024 * 1024, 1_000)).toBe("");
+    expect(runningInlineEmissionBytes()).toBe(30 * 1024 * 1024);
+    // Past the quiet window: these bytes cannot be in the same response as the last ones.
+    expect(chargeInlineEmission(10 * 1024 * 1024, 1_000 + 130_000)).toBe("");
+    expect(runningInlineEmissionBytes()).toBe(10 * 1024 * 1024);
+  });
+
+  it("a gap SHORTER than the window keeps accumulating", () => {
+    chargeInlineEmission(30 * 1024 * 1024, 1_000);
+    const note = chargeInlineEmission(30 * 1024 * 1024, 1_000 + 60_000);
+    expect(runningInlineEmissionBytes()).toBe(60 * 1024 * 1024);
+    expect(note).toContain("FRAME BUDGET");
   });
 });
 
