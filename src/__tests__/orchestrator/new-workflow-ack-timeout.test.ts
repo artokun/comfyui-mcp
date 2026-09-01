@@ -112,9 +112,13 @@ function makeCtx(opts: {
   listReplies?: Array<Record<string, unknown> | null>;
   rid?: string | null;
   canMutate?: boolean;
+  refuseStamp?: boolean;
 }): PanelToolCtx {
   let listIdx = 0;
   const refreshWorkflowUuid = vi.fn((_tabId: string, uuid: string) => {
+    // `refuseStamp` models the bridge declining the stamp (no routable tab for
+    // this session): a uuid was published and STILL nothing was adopted.
+    if (opts.refuseStamp) return false;
     fence = uuid;
     stamps.push(uuid);
     return true;
@@ -278,6 +282,26 @@ describe("#2705: what the recovery refuses to conclude", () => {
     expect(res.isError).toBeFalsy();
     expect(jsonOf(res).workflow_instance_adopted).toBe(false);
     expect(stamps).toEqual([]);
+    expect(fence).toBe(PRIOR_UUID);
+  });
+
+  it("reports NOT-adopted when the bridge itself declines the stamp", async () => {
+    const res = await newWorkflow().handler(
+      {},
+      makeCtx({
+        newReply: ackTimeout,
+        listReplies: [listWithActiveNewTab(appliedReceipt())],
+        refuseStamp: true,
+      }),
+    );
+    expect(res.isError).toBeFalsy();
+    const body = jsonOf(res);
+    expect(body.created).toBe(true);
+    // A uuid WAS published; the adoption still did not happen. Saying "the panel
+    // published no identity" here would name the wrong cause.
+    expect(body.workflow_instance_adopted).toBe(false);
+    expect(body.graph_binding).toBe("not_recovered");
+    expect(String(body.note)).toMatch(/this bridge did not accept the stamp/);
     expect(fence).toBe(PRIOR_UUID);
   });
 

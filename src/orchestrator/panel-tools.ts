@@ -14719,9 +14719,10 @@ async function recoverTimedOutNewWorkflow(
       `${verify.workflowUuid ? ` (${verify.workflowUuid})` : ""}, so graph tools target it rather ` +
       `than the workflow you were on.${fence ? fence.note : ""}`
     : verify.activeIsCreatedTab
-      ? ` This session's fence was NOT re-pointed: the panel reports the new tab as active but ` +
-        `published no usable workflow-instance identity for it, so graph commands will keep the ` +
-        `stamp they had. Call panel_set_workflow_target({mode:"current"}) to bind onto it.`
+      ? ` This session's fence was NOT re-pointed: the panel reports the new tab as active, but ` +
+        `${verify.workflowUuid ? `this bridge did not accept the stamp` : `it published no usable ` +
+        `workflow-instance identity for that tab`}, so graph commands keep the stamp they had. ` +
+        `Call panel_set_workflow_target({mode:"current"}) to bind onto it.`
       : ` This session's fence was NOT re-pointed: the panel's live active record does NOT name ` +
         `the tab this command created${verify.routingKey ? ` (${verify.routingKey})` : ""}, so ` +
         `another workflow is in view now and adopting an identity from it would fence you to the ` +
