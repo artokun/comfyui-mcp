@@ -18,7 +18,7 @@ import {
   TOOL_NAMES,
 } from "../../tools/vocabulary.js";
 
-const HASH = "2803dea06d1b2e91051d472a5dc189669ca742d0368725251386b8bf880b2a76";
+const HASH = "67d3d661919537706d4a715cecb9b391251d222f7e4812f777ca738c52067e80";
 
 describe("computeVocabularyHash", () => {
   it("is stable for the same names regardless of the array identity", () => {

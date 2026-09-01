@@ -59,6 +59,55 @@ export const PANEL_MODULES = [
   },
 ] as const;
 
+
+/** A Calliope call, routed through the pane: (namespace, op — dotted for story.beat.create, positional args). */
+const calliope = (ctx: PanelToolCtx, ns: string, op: string, list: unknown[], timeoutMs = DIRECTOR_WRITE_MS) =>
+  forward(ctx, "director_calliope", { ns, op, args: list }, timeoutMs);
+
+/** The defined keys of `args` among `keys`, as a request body. */
+const pick = (args: A, keys: string[]): Record<string, unknown> => {
+  const out: Record<string, unknown> = {};
+  for (const k of keys) if (args[k] !== undefined) out[k] = args[k];
+  return out;
+};
+
+const ACTIVE_JOB = /^(queued|pending|running|in_progress|processing)$/i;
+
+/** ctx.call wraps the panel's reply as text; the job list is inside it, bare or under `result`/`jobs`. */
+function jobsFromReply(res: ToolResult): Array<Record<string, unknown>> {
+  const first = res.content[0];
+  if (!first || first.type !== "text") return [];
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(first.text);
+  } catch {
+    return [];
+  }
+  const unwrap = (v: unknown): unknown => (v && typeof v === "object" && !Array.isArray(v) ? ((v as Record<string, unknown>).result ?? (v as Record<string, unknown>).jobs ?? v) : v);
+  let v = unwrap(parsed);
+  if (!Array.isArray(v)) v = unwrap(v);
+  return Array.isArray(v) ? (v as Array<Record<string, unknown>>) : [];
+}
+
+/**
+ * Block until none of a project's jobs is active, or the budget runs out. Bounded on purpose:
+ * an agent that wants to follow a render calls this, not an event stream it would have to be
+ * trusted to close.
+ */
+async function waitForJobs(ctx: PanelToolCtx, projectId: number, timeoutS: number) {
+  const budget = Math.min(Math.max(timeoutS, 1), 600) * 1000;
+  const started = Date.now();
+  for (;;) {
+    const res = await calliope(ctx, "jobs", "list", [{ project_id: projectId, limit: 200 }], DIRECTOR_READ_MS);
+    if (res.isError) return { settled: false, waited_ms: Date.now() - started, error: res.content[0]?.type === "text" ? res.content[0].text : "jobs_list failed" };
+    const jobs = jobsFromReply(res);
+    const active = jobs.filter((j) => ACTIVE_JOB.test(String(j.status ?? "")));
+    if (!active.length) return { settled: true, waited_ms: Date.now() - started, jobs };
+    if (Date.now() - started > budget) return { settled: false, waited_ms: Date.now() - started, active: active.length, jobs };
+    await new Promise((r) => setTimeout(r, 2000));
+  }
+}
+
 export function buildDirectorToolDefs(): Array<PanelToolDef & { mountGroup?: MountGroup }> {
   return [
     {
@@ -225,8 +274,276 @@ export function buildDirectorToolDefs(): Array<PanelToolDef & { mountGroup?: Mou
         return forward(ctx, `director_${action}`, rest, action === "list_blueprints" ? DIRECTOR_READ_MS : DIRECTOR_WRITE_MS);
       },
     },
+
+    // ── Calliope-backed tools ───────────────────────────────────────────────────
+    // These do not touch the canvas algebra; they reach Calliope THROUGH the pane, which owns
+    // the only client and re-reads the project after a mutation so the canvas shows what the
+    // agent did. The pane refuses a (namespace, op) pair that is not a client method.
+    {
+      name: "panel_director_project",
+      mountGroup: "director",
+      description:
+        "Calliope projects behind the Director. `list` them; `create` one (title, optional idea/genre/tone/target_duration) — then `open` it so the canvas shows it; " +
+        "`current` says which project the canvas has loaded and whether Calliope is reachable; `refresh` re-reads it; `patch` edits title/idea/genre/tone/target_duration/status; `delete` removes a project and everything in it. " +
+        "`settings_get` / `settings_set` read and write Calliope's own settings (its ComfyUI URL, queue concurrency, dry_run) — its LLM settings are dead config here: this agent is the only model in the loop.",
+      schema: {
+        action: z.enum(["list", "create", "open", "current", "refresh", "patch", "delete", "settings_get", "settings_set"]).describe("What to do."),
+        project_id: z.number().int().optional().describe("open/patch/delete: which project."),
+        title: z.string().optional(),
+        idea: z.string().optional().describe("The premise, in a sentence or a paragraph."),
+        genre: z.string().optional(),
+        tone: z.string().optional(),
+        target_duration: z.string().optional().describe("e.g. '2 min'."),
+        status: z.string().optional().describe("patch: project status."),
+        settings: z.record(z.string(), z.unknown()).optional().describe("settings_set: the keys to change."),
+      },
+      handler: async (args: A, ctx) => {
+        const action = args.action as string;
+        const required: Record<string, string[]> = { create: ["title"], open: ["project_id"], patch: ["project_id"], delete: ["project_id"], settings_set: ["settings"] };
+        const miss = need(args, action, ...(required[action] ?? []));
+        if (miss) return miss;
+        const body = pick(args, ["title", "idea", "genre", "tone", "target_duration", "status"]);
+        switch (action) {
+          case "list":
+            return calliope(ctx, "projects", "list", [], DIRECTOR_READ_MS);
+          case "create":
+            return calliope(ctx, "projects", "create", [body]);
+          case "open":
+            return forward(ctx, "director_project_open", { project_id: args.project_id }, DIRECTOR_WRITE_MS);
+          case "current":
+            return forward(ctx, "director_project_current", {}, DIRECTOR_READ_MS);
+          case "refresh":
+            return forward(ctx, "director_project_refresh", {}, DIRECTOR_WRITE_MS);
+          case "patch":
+            return calliope(ctx, "projects", "patch", [args.project_id, body]);
+          case "delete":
+            return calliope(ctx, "projects", "delete", [args.project_id]);
+          case "settings_get":
+            return calliope(ctx, "settings", "get", [], DIRECTOR_READ_MS);
+          default:
+            return calliope(ctx, "settings", "set", [args.settings]);
+        }
+      },
+    },
+    {
+      name: "panel_director_story",
+      mountGroup: "director",
+      description:
+        "The story layer of a Calliope project: Beats, Characters, Locations, Items. `read` returns the whole bundle. " +
+        "Beats (title, description, order_index) become Beat containers on the canvas; Characters (name, role, age, appearance, personality, consistency_prompt), Locations and Items (name, description, consistency_prompt) become asset nodes whose REF output wires into scenes. " +
+        "Add/update/delete each with `<entity>_add`, `<entity>_update` (needs id), `<entity>_delete` (needs id). This agent writes the story; Calliope's own generators are never called.",
+      schema: {
+        action: z
+          .enum(["read", "beat_add", "beat_update", "beat_delete", "character_add", "character_update", "character_delete", "location_add", "location_update", "location_delete", "item_add", "item_update", "item_delete"])
+          .describe("What to do."),
+        project_id: z.number().int().describe("The project."),
+        id: z.number().int().optional().describe("update/delete: the row id."),
+        title: z.string().optional().describe("Beat title."),
+        description: z.string().optional(),
+        order_index: z.number().int().optional().describe("Beat order."),
+        name: z.string().optional().describe("Character/Location/Item name."),
+        role: z.string().optional(),
+        age: z.string().optional(),
+        appearance: z.string().optional(),
+        personality: z.string().optional(),
+        consistency_prompt: z.string().optional().describe("The phrase every generation of this asset repeats, for consistency."),
+      },
+      handler: async (args: A, ctx) => {
+        const action = args.action as string;
+        const pid = args.project_id;
+        if (action === "read") return calliope(ctx, "story", "get", [pid], DIRECTOR_READ_MS);
+        const [entity, verb] = action.split("_") as [string, string];
+        const fields: Record<string, string[]> = {
+          beat: ["title", "description", "order_index"],
+          character: ["name", "role", "age", "appearance", "personality", "consistency_prompt"],
+          location: ["name", "description", "consistency_prompt"],
+          item: ["name", "description", "consistency_prompt"],
+        };
+        const nameField = entity === "beat" ? "title" : "name";
+        const miss = need(args, action, ...(verb === "add" ? [nameField] : ["id"]));
+        if (miss) return miss;
+        const body = pick(args, fields[entity] ?? []);
+        if (verb === "add") return calliope(ctx, "story", `${entity}.create`, [pid, body]);
+        if (verb === "update") return calliope(ctx, "story", `${entity}.patch`, [pid, args.id, body]);
+        return calliope(ctx, "story", `${entity}.delete`, [pid, args.id]);
+      },
+    },
+    {
+      name: "panel_director_scene",
+      mountGroup: "director",
+      description:
+        "Scenes — the shots. `list` them (with the estimated total duration); `add` one (heading, action, dialog, duration_sec, beat_id, location_id, character_ids, workflow_id, chain_from_prev); `patch` any of those by scene_id; `delete`; " +
+        "`reorder` with the full scene_ids list — order_index IS the timeline, so this is the cut order. `set_prompt` stores the exact video prompt a scene will render with (this agent authors prompts; the draft is stamped against the scene's current text so Calliope honours it — edit the scene text and you must set the prompt again).",
+      schema: {
+        action: z.enum(["list", "add", "patch", "delete", "reorder", "set_prompt"]).describe("What to do."),
+        project_id: z.number().int().describe("The project."),
+        scene_id: z.number().int().optional().describe("patch/delete/set_prompt: which scene."),
+        heading: z.string().optional(),
+        action_text: z.string().optional().describe("The scene's action line (what happens)."),
+        dialog: z.string().optional(),
+        duration_sec: z.number().int().optional(),
+        beat_id: z.number().int().nullable().optional().describe("Which Beat the scene belongs to."),
+        location_id: z.number().int().nullable().optional(),
+        character_ids: z.array(z.number().int()).optional(),
+        workflow_id: z.number().int().nullable().optional(),
+        chain_from_prev: z.boolean().optional().describe("Start this scene from the previous scene's last frame — the continuity wire."),
+        order_index: z.number().int().optional(),
+        scene_ids: z.array(z.number().int()).optional().describe("reorder: every scene id, in the new order."),
+        prompt: z.string().optional().describe("set_prompt: the full prompt text."),
+      },
+      handler: async (args: A, ctx) => {
+        const action = args.action as string;
+        const pid = args.project_id;
+        const required: Record<string, string[]> = { add: ["heading"], patch: ["scene_id"], delete: ["scene_id"], reorder: ["scene_ids"], set_prompt: ["scene_id", "prompt"] };
+        const miss = need(args, action, ...(required[action] ?? []));
+        if (miss) return miss;
+        const body = pick(args, ["heading", "dialog", "duration_sec", "beat_id", "location_id", "character_ids", "workflow_id", "chain_from_prev", "order_index"]);
+        if (args.action_text !== undefined) body.action = args.action_text;
+        switch (action) {
+          case "list":
+            return calliope(ctx, "scenes", "list", [pid], DIRECTOR_READ_MS);
+          case "add":
+            return calliope(ctx, "scenes", "create", [pid, body]);
+          case "patch":
+            return calliope(ctx, "scenes", "patch", [pid, args.scene_id, body]);
+          case "delete":
+            return calliope(ctx, "scenes", "delete", [pid, args.scene_id]);
+          case "reorder":
+            return calliope(ctx, "scenes", "reorder", [pid, { scene_ids: args.scene_ids }]);
+          default:
+            return forward(ctx, "director_scene_set_prompt", { project_id: pid, scene_id: args.scene_id, prompt: args.prompt }, DIRECTOR_WRITE_MS);
+        }
+      },
+    },
+    {
+      name: "panel_director_workflow",
+      mountGroup: "director",
+      description:
+        "The ComfyUI workflows Calliope renders with (API-format JSON; node roles come from titles like `Display Name (Input:prompt)`). `list` / `get` them; `analyze` a workflow_json to see which roles it exposes before you `register` it (name, kind, workflow_json); " +
+        "`patch` name/kind/description/prompt_profile/is_enabled; `delete`. A Scene's ports map onto the roles prompt, character, location, image, video — a workflow without the role a scene wires receives nothing there.",
+      schema: {
+        action: z.enum(["list", "get", "analyze", "register", "patch", "delete"]).describe("What to do."),
+        workflow_id: z.number().int().optional(),
+        name: z.string().optional(),
+        kind: z.string().optional().describe("e.g. 'video' or 'image'."),
+        description: z.string().optional(),
+        prompt_profile: z.string().optional(),
+        is_enabled: z.boolean().optional(),
+        workflow_json: z.record(z.string(), z.unknown()).optional().describe("analyze/register: the API-format workflow."),
+      },
+      handler: async (args: A, ctx) => {
+        const action = args.action as string;
+        const required: Record<string, string[]> = { get: ["workflow_id"], analyze: ["workflow_json"], register: ["name", "workflow_json"], patch: ["workflow_id"], delete: ["workflow_id"] };
+        const miss = need(args, action, ...(required[action] ?? []));
+        if (miss) return miss;
+        switch (action) {
+          case "list":
+            return calliope(ctx, "workflows", "list", [], DIRECTOR_READ_MS);
+          case "get":
+            return calliope(ctx, "workflows", "get", [args.workflow_id], DIRECTOR_READ_MS);
+          case "analyze":
+            return calliope(ctx, "workflows", "analyze", [{ workflow_json: args.workflow_json }], DIRECTOR_READ_MS);
+          case "register":
+            return calliope(ctx, "workflows", "create", [pick(args, ["name", "kind", "workflow_json"])]);
+          case "patch":
+            return calliope(ctx, "workflows", "patch", [args.workflow_id, pick(args, ["name", "kind", "description", "prompt_profile", "is_enabled"])]);
+          default:
+            return calliope(ctx, "workflows", "delete", [args.workflow_id]);
+        }
+      },
+    },
+    {
+      name: "panel_director_render",
+      mountGroup: "director",
+      description:
+        "Rendering through Calliope's queue. `videos_generate` enqueues scene_ids (optionally a workflow_id, input_values, and `prompts` keyed by scene id — the surest way to render exactly the text you wrote); `preview_prompt` shows what a scene would send; `assets_generate` renders portraits and environment images for character_ids/location_ids/item_ids (missing_only by default). " +
+        "`jobs_list` (filter by project_id/status), `job_get`, `job_retry`, `job_cancel`; `queue_status`, `queue_pause`, `queue_resume`. `wait` blocks until the project's jobs settle or timeout_s passes and returns them. `export` concatenates the finished clips into the film. `attach` puts a produced file (path) on a scene, character, location or item.",
+      schema: {
+        action: z
+          .enum(["videos_generate", "preview_prompt", "assets_generate", "jobs_list", "job_get", "job_retry", "job_cancel", "queue_status", "queue_pause", "queue_resume", "wait", "export", "attach"])
+          .describe("What to do."),
+        project_id: z.number().int().optional().describe("Required for videos_generate/preview_prompt/assets_generate/wait/export; filters jobs_list."),
+        scene_ids: z.array(z.number().int()).optional(),
+        scene_id: z.number().int().optional(),
+        workflow_id: z.number().int().optional(),
+        input_values: z.record(z.string(), z.unknown()).optional().describe("Extra role values (seed, width, height, duration…)."),
+        prompts: z.record(z.string(), z.string()).optional().describe("videos_generate: scene id → the exact prompt to render."),
+        character_ids: z.array(z.number().int()).optional(),
+        location_ids: z.array(z.number().int()).optional(),
+        item_ids: z.array(z.number().int()).optional(),
+        missing_only: z.boolean().optional(),
+        asset_target: z.string().optional(),
+        prompt: z.string().optional().describe("assets_generate: an explicit prompt."),
+        job_id: z.number().int().optional(),
+        status: z.string().optional().describe("jobs_list: filter."),
+        limit: z.number().int().optional(),
+        timeout_s: z.number().optional().describe("wait: how long to block (default 120, max 600)."),
+        path: z.string().optional().describe("attach: the produced file."),
+        target: z.string().optional().describe("attach: scene | character | location | item."),
+        character_id: z.number().int().optional(),
+        location_id: z.number().int().optional(),
+        item_id: z.number().int().optional(),
+        name: z.string().optional(),
+      },
+      handler: async (args: A, ctx) => {
+        const action = args.action as string;
+        const required: Record<string, string[]> = {
+          videos_generate: ["project_id", "scene_ids"],
+          preview_prompt: ["project_id", "scene_id"],
+          assets_generate: ["project_id"],
+          job_get: ["job_id"],
+          job_retry: ["job_id"],
+          job_cancel: ["job_id"],
+          wait: ["project_id"],
+          export: ["project_id"],
+          attach: ["path", "target"],
+        };
+        const miss = need(args, action, ...(required[action] ?? []));
+        if (miss) return miss;
+        const pid = args.project_id;
+        switch (action) {
+          case "videos_generate":
+            return calliope(ctx, "jobs", "generateVideos", [pid, pick(args, ["scene_ids", "workflow_id", "input_values", "prompts"])]);
+          case "preview_prompt":
+            return calliope(ctx, "jobs", "previewPrompt", [pid, pick(args, ["scene_id", "workflow_id"])], DIRECTOR_READ_MS);
+          case "assets_generate":
+            return calliope(ctx, "assets", "generate", [pid, pick(args, ["character_ids", "location_ids", "item_ids", "missing_only", "workflow_id", "input_values", "asset_target", "prompt"])]);
+          case "jobs_list":
+            return calliope(ctx, "jobs", "list", [pick(args, ["project_id", "status", "limit"])], DIRECTOR_READ_MS);
+          case "job_get":
+            return calliope(ctx, "jobs", "get", [args.job_id], DIRECTOR_READ_MS);
+          case "job_retry":
+            return calliope(ctx, "jobs", "retry", [args.job_id]);
+          case "job_cancel":
+            return calliope(ctx, "jobs", "cancel", [args.job_id]);
+          case "queue_status":
+            return calliope(ctx, "jobs", "queueStatus", [], DIRECTOR_READ_MS);
+          case "queue_pause":
+            return calliope(ctx, "jobs", "pause", []);
+          case "queue_resume":
+            return calliope(ctx, "jobs", "resume", []);
+          case "export":
+            return calliope(ctx, "jobs", "exportFilm", [pid]);
+          case "attach":
+            return calliope(ctx, "playground", "attach", [pick(args, ["path", "project_id", "target", "character_id", "location_id", "item_id", "scene_id", "name"])]);
+          default:
+            return text(await waitForJobs(ctx, pid as number, typeof args.timeout_s === "number" ? args.timeout_s : 120));
+        }
+      },
+    },
   ];
 }
 
 /** Names this module contributes — what the panel vocabulary baseline must carry. */
-export const DIRECTOR_TOOL_NAMES = ["panel_module", "panel_pane", "panel_director_graph", "panel_director_link", "panel_director_subgraph"] as const;
+export const DIRECTOR_TOOL_NAMES = [
+  "panel_module",
+  "panel_pane",
+  "panel_director_graph",
+  "panel_director_link",
+  "panel_director_subgraph",
+  "panel_director_project",
+  "panel_director_story",
+  "panel_director_scene",
+  "panel_director_workflow",
+  "panel_director_render",
+] as const;

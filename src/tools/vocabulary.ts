@@ -170,7 +170,7 @@ const PANEL_BASELINE_URL = new URL("../../docs/design/panel-surface.txt", import
  * Sorted rather than in registration order: unlike tools/list, the panel surface has
  * no observable ordering, so sorting keeps the diff readable as names are added.
  */
-export const PANEL_BASELINE_SHA256 = "1a0561113fd80a8c156c4d5543a9db2a71606dce28ed400d97eb7bef31d474a4";
+export const PANEL_BASELINE_SHA256 = "0082ddb7859c7c4dba826f0dd83c8eb269c1c7c76a7c03340c2889c81d10d0d7";
 
 /** Lazy for the same reason as the core baseline — see readBaseline(). */
 export function panelRetirementBaseline(): readonly string[] {

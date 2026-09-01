@@ -11,6 +11,7 @@
  * a red test, not a code-review argument.
  */
 
+import { buildDirectorToolDefs } from "../../orchestrator/director-tools.js";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
@@ -20,7 +21,11 @@ import { mountRegistry } from "../../orchestrator/mountable-tools.js";
 import { registerPanelTools, type PanelToolCtx } from "../../orchestrator/panel-tools.js";
 import { panePresence } from "../../services/panel-pane-state.js";
 
-const DIRECTOR = ["panel_director_graph", "panel_director_link", "panel_director_subgraph"];
+// Every tool the director group mounts — derived, so adding a Calliope tool cannot leave this
+// list describing a smaller group than the one the registry actually flips.
+const DIRECTOR = buildDirectorToolDefs()
+  .filter((d) => d.mountGroup === "director")
+  .map((d) => d.name);
 const ENTRY = ["panel_module", "panel_pane"];
 
 function fakeCtx(): PanelToolCtx {
