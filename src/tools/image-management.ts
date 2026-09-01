@@ -603,18 +603,16 @@ export function registerImageManagementTools(server: McpServer): void {
             const viewNote = result.bounded
               ? budgetShortfallNote(inlineSlot?.peak() ?? 1, viewRequested, viewGranted)
               : "";
-            let noteAttached = !viewNote;
+            const firstText = result.content.findIndex((block) => block.type === "text");
             return {
-              content: result.content.map((block) => {
-                if (block.type === "image") {
-                  return { type: "image" as const, data: block.data, mimeType: block.mimeType };
-                }
-                if (!noteAttached) {
-                  noteAttached = true;
-                  return { type: "text" as const, text: block.text + viewNote };
-                }
-                return { type: "text" as const, text: block.text };
-              }),
+              content: result.content.map((block, i) =>
+                block.type === "image"
+                  ? { type: "image" as const, data: block.data, mimeType: block.mimeType }
+                  : {
+                      type: "text" as const,
+                      text: i === firstText ? block.text + viewNote : block.text,
+                    },
+              ),
             };
           }
 
