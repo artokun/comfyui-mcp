@@ -380,12 +380,21 @@ describe("#2703 — a PANEL_FETCH_FAILED read names its cause", () => {
   });
 
   it("refuses a reason reached through a polluted prototype", async () => {
-    // `hasOwn` says "absent" for an inherited `reason` while every reader —
-    // including the MAC payload — sees it. The digest mismatch alone already
-    // refuses this reply, so the guard is the second line rather than the only
-    // one; it is here so the validator does not depend on another check's
-    // arithmetic to be correct (codex gate r2, finding 2).
+    // Codex gate r2, finding 2. `hasOwn` says "absent" for an inherited
+    // `reason` while every reader — including the MAC payload — sees it.
+    //
+    // The peer here signs the SIX-element digest INCLUDING the inherited value,
+    // which is what makes this a live hole rather than a redundancy: the
+    // response body carries no `reason` key at all, so an own-property check
+    // sees a plain reasonless failure, while `responseMacPayload` reads the
+    // prototype's value and computes exactly the digest the peer sent. The MAC
+    // therefore VERIFIES, and `validFailureReason` is the only thing left
+    // standing between a 5000-character string and the user's error message.
+    // (An earlier draft of this test had the peer sign the five-element digest;
+    // that reply is refused by the MAC and the guard never runs, so it proved
+    // nothing — mutation testing said so by leaving the guard alive.)
     const polluted: { reason?: string } = Object.prototype;
+    polluted.reason = "z".repeat(5_000);
     const server = await staticSignedReply((requestId) => {
       const unsigned = {
         version: PANEL_IMAGE_RELAY_VERSION,
@@ -398,12 +407,18 @@ describe("#2703 — a PANEL_FETCH_FAILED read names its cause", () => {
         ...unsigned,
         responseMac: createHmac("sha256", SECRET)
           .update(
-            JSON.stringify([unsigned.version, unsigned.requestId, false, unsigned.error, unsigned.updated]),
+            JSON.stringify([
+              unsigned.version,
+              unsigned.requestId,
+              false,
+              unsigned.error,
+              unsigned.updated,
+              polluted.reason,
+            ]),
           )
           .digest("hex"),
       };
     });
-    polluted.reason = "z".repeat(5_000);
     try {
       const failure = (await requestPanelComfyUIRead("history").then(
         () => undefined,

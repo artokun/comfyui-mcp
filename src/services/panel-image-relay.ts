@@ -298,12 +298,17 @@ function panelFailureReason(error: unknown): string | undefined {
  *
  *  - INHERITANCE. `hasOwn` said "absent" for a `reason` reached through the
  *    prototype while `record.reason` downstream reads it, so a polluted
- *    `Object.prototype` slipped past this gate. It does NOT reach the user even
- *    without this line - `responseMacPayload` reads the same inherited value and
- *    the digest then disagrees with the sender's, so the reply is refused as
- *    unauthenticated - but a guard whose correctness depends on a DIFFERENT
- *    guard's arithmetic is not one worth keeping. An inherited value is refused
- *    outright rather than accepted-if-safe: nothing on the wire put it there.
+ *    `Object.prototype` slipped past this gate. This one is LOAD-BEARING, and
+ *    a first draft of the comment here wrongly said it was not: the reasoning
+ *    was that `responseMacPayload` reads the same inherited value, so the
+ *    digest would disagree and the reply be refused anyway. It disagrees only
+ *    when the SENDER did not account for it. A peer that signs the six-element
+ *    digest over the inherited value sends a body with no `reason` key at all,
+ *    and the MAC then verifies perfectly - leaving this the only check between
+ *    an unbounded string and the user's error message. Mutation testing is what
+ *    said so: deleting this line killed nothing until the test signed the
+ *    polluted value. An inherited value is refused outright rather than
+ *    accepted-if-safe; nothing on the wire put it there.
  */
 function validFailureReason(record: Record<string, unknown>): boolean {
   // The EFFECTIVE value (own or inherited), because that is what every reader
