@@ -1476,26 +1476,46 @@ export function gitWritesEnabled(): boolean {
   return v === "1" || v === "true";
 }
 
+/** A git pathspec with wildcards cannot be existence-checked, so the guard below skips it. */
+const GLOB_META = /[*?[\]]/;
+
 /**
  * #2716: before this fix, the pack-name-prefixed spelling was the ONLY one that
  * reached git, so callers learned it. Anchored at the pack root it now names
  * `MyPack/MyPack/nodes.py` — and git answers a pathspec that matches nothing with an
  * EMPTY diff, not an error, so the workaround would fail silently. Refuse it instead,
- * naming the correction — but only where the disk proves the caller cannot have meant
- * it literally: the prefixed target is absent AND the de-prefixed one exists. A pack
- * that really does contain a same-named subdirectory keeps the literal reading.
+ * naming the correction — but only where the disk PROVES the caller cannot have meant it
+ * literally: the prefixed target is absent AND the de-prefixed one exists. A pack that
+ * really does contain a same-named subdirectory keeps the literal reading, and a wildcard
+ * pathspec is left alone because neither probe can decide it.
+ *
+ * `pack` reaches here two ways — the caller's spelling and the real directory name — and
+ * they differ when custom_nodes/<name> is a symlink or junction to a differently-named
+ * directory, since `packDir` is the REALPATH. Match either, or an aliased pack silently
+ * loses the correction.
  */
 function assertNotPackPrefixed(
   packDir: string,
+  packName: string,
   original: string,
   rel: string,
   deps: NodeDevDeps,
 ): void {
+  if (GLOB_META.test(rel)) return;
   const segs = rel.split("/");
-  if (segs.length < 2) return;
-  if (segs[0].toLowerCase() !== basename(packDir).toLowerCase()) return;
+  const head = segs[0].toLowerCase();
+  if (head !== basename(packDir).toLowerCase() && head !== packName.toLowerCase()) return;
   if (deps.existsSync(join(packDir, ...segs))) return;
   const stripped = segs.slice(1);
+  // Bare "<pack>" is the same mistake with nothing left after the prefix: it used to mean
+  // the pack root and now matches nothing, so it gets its own correction.
+  if (!stripped.length) {
+    throw new NodeDevError(
+      `Path "${original}" is resolved relative to the pack, so it names ` +
+        `custom_nodes/${basename(packDir)}/${rel}, which does not exist. \`paths\` ` +
+        `entries are pack-relative: omit \`paths\` to scope the whole pack, or pass "." .`,
+    );
+  }
   if (!deps.existsSync(join(packDir, ...stripped))) return;
   throw new NodeDevError(
     `Path "${original}" is resolved relative to the pack, so it names ` +
@@ -1524,6 +1544,13 @@ function assertNotPackPrefixed(
  * un-resolved root. Containment itself is unchanged: the single auditable resolver still
  * decides it (lexical + realpath, so the custom_nodes/ jail and its symlink/junction
  * check are intact), and the result must still land inside the selected pack.
+ *
+ * One deliberate consequence: `join()` collapses `..` BEFORE the resolver's hazard scan
+ * sees the string, so an INTERIOR climb that stays in the pack ("sub/../nodes.py") is now
+ * accepted as the file it names, where the old anchor refused it. Nothing escapes on that
+ * path — a climb that leaves the pack still fails the containment check below, and one
+ * that leaves custom_nodes/ still fails the resolver's — and git receives the same
+ * normalised pathspec we decided on, so there is no second interpretation.
  */
 function packRelativePath(
   packDir: string,
@@ -1547,7 +1574,7 @@ function packRelativePath(
     throw new NodeDevError(`Path "${p}" is outside the target pack.`);
   }
   const posix = rel.split(/[\\/]/).join("/") || ".";
-  assertNotPackPrefixed(packDir, p, posix, deps);
+  assertNotPackPrefixed(packDir, packName, p, posix, deps);
   return posix;
 }
 

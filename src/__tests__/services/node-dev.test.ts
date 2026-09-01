@@ -930,6 +930,79 @@ describe("nodePackGit", () => {
       expect(gitCalls[0].args).toEqual(["diff", "--", "Pack/preset_core.py"]);
     });
 
+    it("names the correction for a BARE pack name, which used to mean the pack root", () => {
+      // The same mistake with nothing after the prefix: under the old anchor "Pack"
+      // resolved to the pack itself and scoped everything; anchored it matches nothing,
+      // and git reports that as an empty result rather than an error.
+      mkPackFiles();
+      const { deps, gitCalls } = makeDeps();
+      expect(() =>
+        nodePackGit({ pack: "Pack", action: "diff", paths: ["Pack"] }, deps),
+      ).toThrow(/omit `paths` to scope the whole pack/);
+      expect(gitCalls.length).toBe(0);
+    });
+
+    it("names the correction when the pack is reached through an ALIAS directory", () => {
+      // custom_nodes/Alias -> RealPack. `packDir` is the REALPATH, so its basename is
+      // "RealPack" while the caller said "Alias"; matching only the basename would let the
+      // aliased prefix through and answer with an empty diff.
+      mkdirSync(join(customNodes, "RealPack"), { recursive: true });
+      writeFileSync(join(customNodes, "RealPack", "preset_core.py"), "x\n");
+      try {
+        symlinkSync(join(customNodes, "RealPack"), join(customNodes, "Alias"), "junction");
+      } catch {
+        return; // environment can't create junctions — skip
+      }
+      const { deps, gitCalls } = makeDeps();
+      expect(() =>
+        nodePackGit(
+          { pack: "Alias", action: "diff", paths: ["Alias/preset_core.py"] },
+          deps,
+        ),
+      ).toThrow(/drop the "Alias\/" prefix and pass "preset_core\.py"/);
+      expect(gitCalls.length).toBe(0);
+      // …and the documented spelling works through the alias.
+      nodePackGit({ pack: "Alias", action: "diff", paths: ["preset_core.py"] }, deps);
+      expect(gitCalls[0].args).toEqual(["diff", "--", "preset_core.py"]);
+    });
+
+    it("passes a wildcard pathspec through instead of existence-checking it", () => {
+      // A glob is a legitimate git pathspec that neither existence probe can decide, so
+      // the prefix guard must not touch it — including the prefixed spelling.
+      mkPackFiles();
+      const { deps, gitCalls } = makeDeps();
+      nodePackGit({ pack: "Pack", action: "diff", paths: ["*.py", "tests/**"] }, deps);
+      expect(gitCalls[0].args).toEqual(["diff", "--", "*.py", "tests/**"]);
+      const second = makeDeps();
+      nodePackGit({ pack: "Pack", action: "diff", paths: ["Pack/*.py"] }, second.deps);
+      expect(second.gitCalls[0].args).toEqual(["diff", "--", "Pack/*.py"]);
+    });
+
+    it("leaves a wildcard alone even when a literal file of that name exists", () => {
+      // POSIX allows a file literally named "*.py", and that is the one case where the
+      // prefix guard's existence probes would mistake a legitimate glob for the prefixed
+      // spelling. Simulated through the fs seam, since Windows cannot create that name.
+      mkPackFiles();
+      const literal = join(realpathSync(join(customNodes, "Pack")), "*.py");
+      const { deps, gitCalls } = makeDeps({
+        existsSync: (p: string) => p === literal || existsSync(p),
+      });
+      nodePackGit({ pack: "Pack", action: "diff", paths: ["Pack/*.py"] }, deps);
+      expect(gitCalls[0].args).toEqual(["diff", "--", "Pack/*.py"]);
+    });
+
+    it("normalises an interior climb that stays inside the pack", () => {
+      // join() collapses ".." before the resolver sees it, so "tests/../preset_core.py"
+      // names the file it means. The escaping case is covered above.
+      mkPackFiles();
+      const { deps, gitCalls } = makeDeps();
+      nodePackGit(
+        { pack: "Pack", action: "diff", paths: ["tests/../preset_core.py"] },
+        deps,
+      );
+      expect(gitCalls[0].args).toEqual(["diff", "--", "preset_core.py"]);
+    });
+
     it("refuses an empty path entry", () => {
       mkPackFiles();
       const { deps, gitCalls } = makeDeps();
