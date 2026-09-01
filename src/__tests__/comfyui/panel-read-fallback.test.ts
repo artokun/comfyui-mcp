@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const panelRead = vi.hoisted(() => vi.fn());
+const panelImage = vi.hoisted(() => vi.fn());
 const fetchApi = vi.hoisted(() => vi.fn());
 
 const VALID_OBJECT_INFO = {
@@ -58,7 +59,7 @@ vi.mock("../../services/panel-image-relay.js", async () => {
   const actual = await vi.importActual<typeof import("../../services/panel-image-relay.js")>(
     "../../services/panel-image-relay.js",
   );
-  return { ...actual, requestPanelComfyUIRead: panelRead };
+  return { ...actual, requestPanelComfyUIRead: panelRead, requestPanelImage: panelImage };
 });
 
 import {
@@ -72,6 +73,7 @@ import {
 } from "../../comfyui/client.js";
 import {
   PanelComfyUIReadRelayError,
+  PanelImageRelayError,
   PANEL_COMFYUI_READ_MAX_BYTES,
   PANEL_COMFYUI_READ_OBJECT_INFO_MAX_BYTES,
 } from "../../services/panel-image-relay.js";
@@ -86,6 +88,7 @@ function transportFailure(): TypeError {
 beforeEach(() => {
   fetchApi.mockReset();
   panelRead.mockReset();
+  panelImage.mockReset();
   resetClient();
   resetObjectInfoCache();
   vi.stubGlobal("fetch", vi.fn(async () => { throw transportFailure(); }));
@@ -248,6 +251,28 @@ describe("authenticated panel-backed ComfyUI read fallback (#2283)", () => {
     expect(failure?.message).toContain("read fallback failed safely (PANEL_FETCH_FAILED)");
     expect(failure?.message).toContain("The panel reported: fetch_comfyui_read response exceeds the 16777216-byte limit");
     expect(panelRead).toHaveBeenCalledWith("history");
+  });
+
+  // #2703 — the SIBLING call site. fetchImage builds its own message from the
+  // code the same way, and mutating this line alone left every other test green:
+  // a fix on one exit with an untested twin is a fix that half-ships.
+  it("names the panel-side cause behind a PANEL_FETCH_FAILED image read", async () => {
+    fetchApi.mockRejectedValue(transportFailure());
+    panelImage.mockRejectedValue(
+      new PanelImageRelayError(
+        "The connected panel could not fetch that image.",
+        "PANEL_FETCH_FAILED",
+        false,
+        "fetch_image could not reach /view: Failed to fetch",
+      ),
+    );
+
+    const failure = await fetchImage("render.png").then(
+      () => undefined,
+      (error: unknown) => error as Error,
+    );
+    expect(failure?.message).toContain("image relay failed safely (PANEL_FETCH_FAILED)");
+    expect(failure?.message).toContain("The panel reported: fetch_image could not reach /view: Failed to fetch");
   });
 
   it("keeps the bare code when the relay carried no cause", async () => {
