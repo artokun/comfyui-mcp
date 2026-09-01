@@ -278,6 +278,30 @@ describe("panel_free_vram against a driver that releases late (#2704)", () => {
     expect(payload.vram_after_settled).toBe(false);
   });
 
+  it("does not certify a release when two occupied cards share an identity", async () => {
+    // Identities that collide cannot be attributed per card. Keying a Map on
+    // them makes the later device overwrite the earlier, so ONE card moving
+    // clears the other's entry and certifies memory nobody saw released.
+    let freeAt: number | null = null;
+    mocks.comfyuiFetch.mockImplementation(async () => {
+      freeAt = Date.now();
+      return { status: 200 };
+    });
+    // Both devices report index 0 — indistinguishable to a per-card baseline.
+    const twin = (vramFree: number) => ({ ...gpu(vramFree, 0), name: "cuda:0", index: 0 });
+    __panelToolsTestHooks.setReadVramDevices(async () => {
+      if (freeAt == null) return [twin(STALE_FREE), twin(STALE_FREE)];
+      const since = Date.now() - freeAt;
+      // The SECOND twin releases; the first never does.
+      return [twin(STALE_FREE), twin(since >= 2_000 ? SETTLED_FREE : STALE_FREE)];
+    });
+
+    const res = await runFrozenTab();
+    const payload = JSON.parse(textOf(res)) as { vram_after_settled?: boolean };
+
+    expect(payload.vram_after_settled).toBe(false);
+  });
+
   it("does not wait for a release on a card that was already free", async () => {
     // Waiting for movement is only justified where movement is expected. An
     // idle card has nothing to release, so this must not sit out the whole cap

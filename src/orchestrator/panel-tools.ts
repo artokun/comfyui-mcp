@@ -4925,12 +4925,25 @@ function vramDeviceReleaseKeys(
   only?: ReadonlySet<string>,
 ): ReadonlyMap<string, string> {
   const keys = new Map<string, string>();
+  const ambiguous = new Set<string>();
   for (const d of devices) {
     const id = vramDeviceKey(d);
     if (only != null && !only.has(id)) continue;
+    // A repeated identity cannot be attributed to one card, and `Map.set`
+    // would silently keep the last one — letting the second device's movement
+    // clear the first device's entry. Drop it instead: an unattributable key
+    // is absent, and absence never counts as a release.
+    if (keys.has(id)) ambiguous.add(id);
     keys.set(id, `${d.vram_free ?? ""}`);
   }
+  for (const id of ambiguous) keys.delete(id);
   return keys;
+}
+
+/** Do these devices have identities we can hold a per-card baseline against? */
+function vramDevicesAreIdentifiable(devices: VramDeviceSample[]): boolean {
+  const ids = devices.map(vramDeviceKey);
+  return !ids.includes("") && new Set(ids).size === ids.length;
 }
 
 /**
@@ -4950,7 +4963,10 @@ async function readSettledVramDevices(
   // how a frozen driver number was returned as settled at ~780ms. Cards that
   // were already free are excluded rather than waited on: they will never move.
   const occupiedBefore = before != null ? occupiedVramDevices(before) : [];
-  const watched = new Set(occupiedBefore.map(vramDeviceKey));
+  // Cards we cannot tell apart cannot be proven to have released individually,
+  // so we do not pretend to: no baseline, and the result is not confirmable.
+  const identifiable = vramDevicesAreIdentifiable(occupiedBefore);
+  const watched = identifiable ? new Set(occupiedBefore.map(vramDeviceKey)) : new Set<string>();
   const baselineKeys = watched.size > 0 ? vramDeviceReleaseKeys(before!, watched) : null;
   const baseline = baselineKeys != null && baselineKeys.size > 0 ? baselineKeys : null;
   return settleUntilStable(
@@ -4959,9 +4975,10 @@ async function readSettledVramDevices(
     {
       baseline,
       progressOf: (devices) => vramDeviceReleaseKeys(devices, watched),
-      // A `before` we could not read is not the same as a box with nothing to
-      // release; only the latter may be published as a measured figure.
-      confirmable: before != null,
+      // A `before` we could not read — or occupied cards we cannot tell apart —
+      // is not the same as a box with nothing to release. Only the latter may
+      // be published as a measured figure.
+      confirmable: before != null && identifiable,
     },
   );
 }
