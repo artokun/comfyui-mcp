@@ -31,6 +31,8 @@ const VALUE = 4;
 const PREVIOUS = 1;
 const GRAPH_ID = "graph:2489-subgraph";
 const WORKFLOW_UUID = "workflow-2489";
+const NODE_IDENTITY = "node-incarnation:2489:12";
+const REPLACED_NODE_IDENTITY = "node-incarnation:2489:replacement";
 const LONG_REQUESTED_VALUE = `clip-${"x".repeat(2200)}`;
 const WIDGET_CAP_CLIPPED_VALUE =
   "clip-" +
@@ -63,6 +65,7 @@ function nodeDetail(
   length: unknown,
   graphIdentity: string = GRAPH_ID,
   scope: "root" | "subgraph" = "subgraph",
+  nodeIdentity: string = NODE_IDENTITY,
 ): Record<string, unknown> {
   return {
     viewing: {
@@ -76,7 +79,7 @@ function nodeDetail(
         id: NODE_ID,
         type: "ImageFromBatch",
         is_subgraph: false,
-        node_identity: "node-incarnation:2489:12",
+        node_identity: nodeIdentity,
         widgets: { length },
         inputs: [],
       },
@@ -90,6 +93,8 @@ function bridge(opts: {
   loseTabAfterSet?: boolean;
   fencedGraphIdentity?: string;
   readbackGraphIdentity?: string;
+  fencedNodeIdentity?: string;
+  readbackNodeIdentity?: string;
   changeConnectionAfterSet?: boolean;
 }) {
   let tabGone = false;
@@ -147,6 +152,10 @@ function bridge(opts: {
             ? opts.fencedGraphIdentity ?? GRAPH_ID
             : opts.readbackGraphIdentity ?? opts.fencedGraphIdentity ?? GRAPH_ID;
         currentGraphIdentity = graphIdentity;
+        const nodeIdentity =
+          queryCount === 1
+            ? opts.fencedNodeIdentity ?? NODE_IDENTITY
+            : opts.readbackNodeIdentity ?? opts.fencedNodeIdentity ?? NODE_IDENTITY;
         const readbackLength =
           queryCount <= 1
             ? PREVIOUS
@@ -155,7 +164,7 @@ function bridge(opts: {
               : opts.probeLength === "json-budget-marker"
                 ? JSON_BUDGET_CLIPPED_VALUE
                 : opts.probeLength ?? VALUE;
-        return nodeDetail(readbackLength, graphIdentity);
+        return nodeDetail(readbackLength, graphIdentity, "subgraph", nodeIdentity);
       }
       if (cmd.cmd === "graph_get_subgraph") {
         throw new Error(`Node ${NODE_ID} (ImageFromBatch) is not a subgraph`);
@@ -388,6 +397,25 @@ describe("an unacknowledged subgraph widget write is settled by a read, not by a
     expect(out.isError).toBe(true);
     expect(out.text).toMatch(/"applied": "unknown"/);
     expect(out.text).not.toMatch(/CHECKED FOR YOU/);
+  });
+
+  it("does not certify a matching value after the same id is replaced by a new node incarnation", async () => {
+    const out = await runSetWidget({
+      setReply: "timeout",
+      probeLength: VALUE,
+      fencedNodeIdentity: NODE_IDENTITY,
+      readbackNodeIdentity: REPLACED_NODE_IDENTITY,
+    });
+
+    expect(sent[2]?.payload).toMatchObject({
+      cmd: "graph_set_widget",
+      node_id: NODE_ID,
+      expected_node_identity: NODE_IDENTITY,
+    });
+    expect(out.isError).toBe(true);
+    expect(out.text).toMatch(/"applied": "unknown"/);
+    expect(out.text).not.toMatch(/CHECKED FOR YOU/);
+    expect(out.text).not.toMatch(/"applied": true/);
   });
 
   it("does not certify a matching value after the same tab reconnects", async () => {

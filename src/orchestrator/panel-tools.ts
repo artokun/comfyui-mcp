@@ -4500,6 +4500,7 @@ function observedWidgetFromQuery(
   nodeId: unknown,
   widget: string,
   expectedScope?: SetWidgetReadbackScope,
+  expectedNodeIdentity?: string,
 ): { status: "value"; value: unknown } | { status: "unknown" } {
   if (res.isError) return { status: "unknown" };
   const payload = parseToolResultJson(res);
@@ -4509,6 +4510,12 @@ function observedWidgetFromQuery(
   const identity = parseQueriedNodeIdentityRow(row);
   const requestedId = canonicalQueriedNodeId(nodeId);
   if (!identity || !requestedId || identity.id !== requestedId) return { status: "unknown" };
+  // The numeric id is reusable. A matching value on a replacement live object
+  // cannot certify the timed-out write, even when every graph/tab fence still
+  // matches; require the opaque per-object incarnation captured at dispatch.
+  if (!expectedNodeIdentity || identity.nodeIdentity !== expectedNodeIdentity) {
+    return { status: "unknown" };
+  }
   const widgets = row.widgets;
   if (!widgets || typeof widgets !== "object" || Array.isArray(widgets)) return { status: "unknown" };
   if (!Object.prototype.hasOwnProperty.call(widgets, widget)) return { status: "unknown" };
@@ -4568,6 +4575,7 @@ async function settleSetWidgetAfterAckTimeout(
   dispatchTab: string,
   expectedScope?: SetWidgetReadbackScope,
   dispatchConnection?: SetWidgetReadbackConnection,
+  dispatchNodeIdentity?: string,
 ): Promise<ToolResult> {
   // Probe the tab the write was DISPATCHED to. A silent rebind of an unpinned
   // session would otherwise let a different tab's widget certify this write.
@@ -4601,7 +4609,13 @@ async function settleSetWidgetAfterAckTimeout(
   ) {
     return setWidgetTimeoutUnknown(timedOut, nodeId, widget, value, mutationId);
   }
-  const observed = observedWidgetFromQuery(probe, nodeId, widget, expectedScope);
+  const observed = observedWidgetFromQuery(
+    probe,
+    nodeId,
+    widget,
+    expectedScope,
+    dispatchNodeIdentity,
+  );
   if (observed.status === "unknown") {
     return setWidgetTimeoutUnknown(timedOut, nodeId, widget, value, mutationId);
   }
@@ -21196,6 +21210,7 @@ export function buildPanelToolDefs(): PanelToolDef[] {
                 dispatchTab,
                 readbackScope,
                 dispatchConnection,
+                targetExpectedNodeIdentity,
               )
             : classified;
           return stripVerifiedLastObservedSchemaNote(summarizeSetWidgetEcho(settled, echoFull));
