@@ -171,7 +171,7 @@ import {
   resolveLegacyInnerPromotedTarget,
   promotedInnerWidgetIsLinkDriven,
   resolveInnerPromotedTarget,
-  validatePromotedSubgraphEnvelope,
+  describePromotedSubgraphEnvelope,
   isInnerLinkDrivenWriteWarning,
   shapeParentAuthoritativePromotedWrite,
   type PromotedParentRailWitness,
@@ -8024,6 +8024,47 @@ function promotedWriteRefusal(widget: string, reason: string): ToolResult {
   );
 }
 
+/**
+ * #2688 — the ownership-envelope refusal, which a retry can NOT clear.
+ *
+ * `validatePromotedSubgraphEnvelope` rejects for about twenty distinct reasons
+ * and every one of them used to arrive as "graph_get_subgraph returned a
+ * malformed, stale, or incomplete ownership envelope" plus
+ * {@link promotedWriteRefusal}'s "retry only after the panel binding and
+ * subgraph mapping are stable". The reporter did exactly that — retried,
+ * re-opened the workflow, re-bound the tab — and got the identical sentence
+ * every time, because every invariant is a pure function of ONE reply and not a
+ * binding state that settles. There was no exit from that loop and nothing to
+ * report but "something was wrong".
+ *
+ * Same fail-closed decision as before; the only thing that changes is what the
+ * caller is told. The invariant text is shape-only (field paths, indices,
+ * counts, the two compared node ids) — naming it must not become a way to read
+ * a graph this fence is refusing to write to.
+ *
+ * The all-or-nothing sentence is load-bearing, not filler: the envelope is
+ * rejected as a whole, so a caller whose OWN widget maps perfectly can be
+ * refused by an unrelated `promoted_terminals` entry, and without that line the
+ * named index reads as irrelevant to their write.
+ */
+function promotedEnvelopeInvariantRefusal(
+  widget: string,
+  invariant: string,
+  subject = "graph_get_subgraph",
+): ToolResult {
+  return fail(
+    `panel_set_widget refused the promoted "${widget}" write because ${subject}'s ownership ` +
+      `envelope failed a completeness invariant: ${invariant}. No graph_set_widget was dispatched.\n` +
+      `This is a SHAPE defect in the reply, not a binding state. Every invariant is decided from ` +
+      `that one reply alone, so against an unchanged graph the same read reproduces it — retrying, ` +
+      `panel_open_workflow and panel_set_workflow_target do not clear it.\n` +
+      `The envelope is accepted or rejected as a WHOLE: one unusable field, or one malformed ` +
+      `promoted_terminals entry, refuses every promoted write on this wrapper, including widgets ` +
+      `whose own mapping is fine. Report the invariant above together with the panel version — it ` +
+      `names the field to fix.`,
+  );
+}
+
 /** True when a successful inner write is the panel's link-driven no-op. The
  * stored value was verified, but the enclosing subgraph input still holds the
  * render value — reporting that as a durable write is the #2488 lie. */
@@ -8577,13 +8618,11 @@ async function preparePromotedWidgetWrite(
     return promotedWriteRefusal(widget, "the panel session or connection changed while the mapping was read");
   }
 
-  const envelope = validatePromotedSubgraphEnvelope(payload, nodeId as number | string);
-  if (!envelope) {
-    return promotedWriteRefusal(
-      widget,
-      "graph_get_subgraph returned a malformed, stale, or incomplete ownership envelope",
-    );
+  const described = describePromotedSubgraphEnvelope(payload, nodeId as number | string);
+  if (!described.ok) {
+    return promotedEnvelopeInvariantRefusal(widget, described.invariant);
   }
+  const envelope = described.envelope;
   // panel#1859 — ask the HELLO before reading the witness out of the envelope.
   // A build that never advertised this fence also never writes
   // `subgraph_of.graph_identity` (both landed in panel 0.15.101; v0.15.85
@@ -8820,18 +8859,27 @@ async function recheckPromotedOuterMapping(
       "the current receiver advertised complete promoted-terminal witnesses but omitted the witness array",
     );
   }
-  const envelope = validatePromotedSubgraphEnvelope(payload, outerNodeId);
-  const observedScope = envelope ? promotedScopeWitnessFromEnvelope(envelope) : null;
-  const inner = envelope
-    ? resolvePromotedWriteTarget(
-        payload,
-        widget,
-        outerNodeId,
-        ctx.tabPromotedTerminalWitnessCapability?.() === true,
-      )
-    : null;
+  // #2688 — an envelope that fails a completeness invariant is named here too.
+  // Folding it into the combined refusal below reported a shape defect in the
+  // re-read as "the promoted inner mapping changed", which sends the caller
+  // looking for a canvas edit that never happened.
+  const describedRecheck = describePromotedSubgraphEnvelope(payload, outerNodeId);
+  if (!describedRecheck.ok) {
+    return promotedEnvelopeInvariantRefusal(
+      widget,
+      describedRecheck.invariant,
+      "the pre-write graph_get_subgraph re-read",
+    );
+  }
+  const envelope = describedRecheck.envelope;
+  const observedScope = promotedScopeWitnessFromEnvelope(envelope);
+  const inner = resolvePromotedWriteTarget(
+    payload,
+    widget,
+    outerNodeId,
+    ctx.tabPromotedTerminalWitnessCapability?.() === true,
+  );
   if (
-    !envelope ||
     !observedScope ||
     observedScope.workflowUuid !== expectedScope.workflowUuid ||
     observedScope.ownerNodeId !== expectedScope.ownerNodeId ||
@@ -8933,18 +8981,23 @@ async function recheckPromotedInnerTarget(
       );
     }
     const nestedPayload = parseToolResultJson(nested);
-    const nestedEnvelope = validatePromotedSubgraphEnvelope(
+    const describedNested = describePromotedSubgraphEnvelope(
       nestedPayload,
       expectedInner.innerNodeId,
     );
-    const nestedInner = nestedEnvelope
-      ? resolvePromotedWriteTarget(
-          nestedPayload,
-          expectedInner.widget,
-          expectedInner.innerNodeId,
-          ctx.tabPromotedTerminalWitnessCapability?.() === true,
-        )
-      : null;
+    if (!describedNested.ok) {
+      return promotedEnvelopeInvariantRefusal(
+        widget,
+        describedNested.invariant,
+        "the nested graph_get_subgraph read",
+      );
+    }
+    const nestedInner = resolvePromotedWriteTarget(
+      nestedPayload,
+      expectedInner.widget,
+      expectedInner.innerNodeId,
+      ctx.tabPromotedTerminalWitnessCapability?.() === true,
+    );
     if (
       !nestedInner?.terminal ||
       (ctx.tabPromotedTerminalWitnessCapability?.() === true && !nestedInner.parentRail) ||
@@ -21401,16 +21454,21 @@ export function buildPanelToolDefs(): PanelToolDef[] {
           }
         }
         const recoveryPayload = parseToolResultJson(sub);
-        const recoveryEnvelope = validatePromotedSubgraphEnvelope(
+        const describedRecovery = describePromotedSubgraphEnvelope(
           recoveryPayload,
           args.node_id as number | string,
         );
-        if (promotedEnvelopeCarriesEvidence(recoveryPayload) && !recoveryEnvelope) {
+        const recoveryEnvelope = describedRecovery.ok ? describedRecovery.envelope : null;
+        if (promotedEnvelopeCarriesEvidence(recoveryPayload) && !describedRecovery.ok) {
+          // #2688 — the recovery path had the same unnamed refusal. A legacy
+          // envelope that carries no evidence still falls through untouched
+          // below; only a receiver that DID publish evidence and then failed an
+          // invariant reaches here, and that one is worth naming.
           return appendToolResultText(
             first,
-            `\n\n(The panel listed "${refusal.widget}" as promoted while refusing it. ` +
-              `graph_get_subgraph returned a malformed, stale, or incomplete ownership ` +
-              `envelope, so the inner write was not retried.)`,
+            `\n\n${textOfToolResult(
+              promotedEnvelopeInvariantRefusal(refusal.widget, describedRecovery.invariant),
+            )}`,
           );
         }
         const recoveryScope = recoveryEnvelope

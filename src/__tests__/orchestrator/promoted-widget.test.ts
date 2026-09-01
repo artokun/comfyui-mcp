@@ -31,6 +31,7 @@ import {
   parseSubgraphScopeRefusal,
   promotedInnerWidgetIsLinkDriven,
   resolveInnerPromotedTarget,
+  describePromotedSubgraphEnvelope,
   validatePromotedSubgraphEnvelope,
 } from "../../orchestrator/promoted-widget.js";
 import { WorkflowTargetStore } from "../../services/workflow-target-store.js";
@@ -2299,7 +2300,10 @@ describe("panel_set_widget promoted container success guards (#2314)", () => {
     );
 
     expect(isError).toBe(true);
-    expect(text).toMatch(/malformed, stale, or incomplete ownership envelope/);
+    // #2688 — the refusal names the failed invariant, not just "malformed".
+    expect(text).toMatch(
+      /`promoted_terminals\[0\]` carried a `terminal_inputs` that is missing or not an array/,
+    );
     expect(calls.filter((call) => call.cmd === "graph_set_widget")).toHaveLength(0);
   });
 
@@ -2650,9 +2654,17 @@ describe("panel_set_widget promoted container success guards (#2314)", () => {
     expect(parentRailShortfall.text).toContain("0.15.101");
     expect(parentRailShortfall.text).not.toMatch(/binding and subgraph mapping are stable/);
 
-    // Branch 3: a genuinely TRANSIENT refusal — a malformed envelope from a
-    // current panel. Same guarantee, and this is the one a retry can clear.
-    const transient = await setWidget(
+    // Branch 3: an envelope-INVARIANT refusal from a current panel. Same
+    // guarantee, and it is neither a build skew nor a retry.
+    //
+    // #2688 corrected what this branch asserted. It used to call this shape "a
+    // genuinely TRANSIENT refusal … the one a retry can clear" and pin the
+    // retry wording, but `node_count: 2` against a one-node array is decided
+    // from that single reply: retrying reproduces it exactly. The reporter
+    // proved it the expensive way, looping through retries and re-binds on a
+    // sentence that named nothing. What panel#1859 is about is the message not
+    // being the BUILD-SKEW one, and that half is unchanged.
+    const invariantFailure = await setWidget(
       { node_id: 78, widget: "quality_prompt", value: "masterpiece" },
       {
         firstWrite: "ok",
@@ -2660,10 +2672,13 @@ describe("panel_set_widget promoted container success guards (#2314)", () => {
         detailById: SAFE_ANIMA_IDENTITY_BY_ID,
       },
     );
-    expect(transient.isError).toBe(true);
-    expect(transient.text).toMatch(/No graph_set_widget was dispatched/);
-    expect(transient.text).toMatch(/binding and subgraph mapping are stable/);
-    expect(transient.text).not.toContain("0.15.101");
+    expect(invariantFailure.isError).toBe(true);
+    expect(invariantFailure.text).toMatch(/No graph_set_widget was dispatched/);
+    expect(invariantFailure.text).toMatch(
+      /`node_count` claimed 2 inner node\(s\) but `nodes` carried 1/,
+    );
+    expect(invariantFailure.text).not.toMatch(/binding and subgraph mapping are stable/);
+    expect(invariantFailure.text).not.toContain("0.15.101");
   });
 
   it("refuses a promoted mapping for a receiver without the final parent-rail fence", async () => {
@@ -2705,30 +2720,49 @@ describe("panel_set_widget promoted container success guards (#2314)", () => {
     expect(calls.map((c) => c.cmd)).not.toContain("graph_enter_subgraph");
   });
 
+  // #2688 — each row also pins WHICH invariant the refusal names. Six shapes
+  // that used to produce one indistinguishable sentence are six distinct
+  // reports now, and a row that starts naming a different field is a behaviour
+  // change this table will catch.
   it.each([
-    ["stale owner", { ...SAFE_ANIMA_SUBGRAPH, subgraph_of: { node_id: 79 } }],
-    ["wrong node count", { ...SAFE_ANIMA_SUBGRAPH, node_count: 2 }],
-    ["malformed viewing identity", { ...SAFE_ANIMA_SUBGRAPH, viewing: null }],
+    [
+      "stale owner",
+      { ...SAFE_ANIMA_SUBGRAPH, subgraph_of: { node_id: 79 } },
+      /`subgraph_of\.node_id` named node 79, not the addressed node 78/,
+    ],
+    [
+      "wrong node count",
+      { ...SAFE_ANIMA_SUBGRAPH, node_count: 2 },
+      /`node_count` claimed 2 inner node\(s\) but `nodes` carried 1/,
+    ],
+    [
+      "malformed viewing identity",
+      { ...SAFE_ANIMA_SUBGRAPH, viewing: null },
+      /`viewing` was present but did not parse as a graph-scope identity/,
+    ],
     [
       "malformed viewing workflow identity",
       { ...SAFE_ANIMA_SUBGRAPH, viewing: { scope: "subgraph", owner_node_id: 78, workflow_uuid: 42 } },
+      /`viewing` was present but did not parse as a graph-scope identity/,
     ],
     [
       "malformed viewing graph identity",
       { ...SAFE_ANIMA_SUBGRAPH, viewing: { scope: "subgraph", owner_node_id: 78, graph_identity: "" } },
+      /`viewing` was present but did not parse as a graph-scope identity/,
     ],
     [
       "malformed target graph identity",
       { ...SAFE_ANIMA_SUBGRAPH, subgraph_of: { node_id: 78, graph_identity: "" } },
+      /`subgraph_of\.graph_identity` was present but not a string of 1-256 characters/,
     ],
-  ])("refuses a %s envelope before writing the container", async (_name, subgraph) => {
+  ])("refuses a %s envelope before writing the container", async (_name, subgraph, invariant) => {
     const { text, isError, calls } = await setWidget(
       { node_id: 78, widget: "quality_prompt", value: "masterpiece" },
       { firstWrite: "ok", subgraph },
     );
 
     expect(isError).toBe(true);
-    expect(text).toMatch(/malformed, stale, or incomplete ownership envelope/);
+    expect(text).toMatch(invariant);
     expect(calls.filter((c) => c.cmd === "graph_set_widget")).toHaveLength(0);
   });
 
@@ -3848,7 +3882,9 @@ describe("panel_set_widget promoted-subgraph recovery (#1655)", () => {
       { subgraph: { ...SUBGRAPH, truncated: true } },
     );
     expect(isError).toBe(true);
-    expect(text).toMatch(/malformed, stale, or incomplete ownership envelope/);
+    expect(text).toMatch(
+      /the reply set `truncated`, so the inner node list it carried is not the whole subgraph/,
+    );
     expect(calls.map((c) => c.cmd)).not.toContain("graph_enter_subgraph");
   });
 
@@ -4053,9 +4089,12 @@ describe("panel_set_widget promoted write against a pre-#2314 panel build (panel
     expect(calls.filter((c) => c.cmd === "graph_set_widget")).toHaveLength(0);
   });
 
-  it("leaves the transient refusals on a CURRENT panel saying retry", async () => {
-    // Same handler, same fixture, current build: a malformed envelope is a
-    // genuine transient and must keep the retry advice it has always had.
+  it("keeps an envelope-invariant refusal on a CURRENT panel off the build-skew message", async () => {
+    // Same handler, same fixture, current build. #2688: this used to assert the
+    // retry wording on the premise that "a malformed envelope is a genuine
+    // transient". It is not — the invariant is decided from one reply, so the
+    // retry never arrives anywhere new. The claim this test exists to make is
+    // the build-skew one, and that is what it makes now.
     const { text, isError, calls } = await setWidget(
       { node_id: 78, widget: "quality_prompt", value: "masterpiece" },
       {
@@ -4066,7 +4105,8 @@ describe("panel_set_widget promoted write against a pre-#2314 panel build (panel
     );
 
     expect(isError).toBe(true);
-    expect(text).toMatch(/retry only after the panel binding and subgraph mapping are stable/);
+    expect(text).toMatch(/`node_count` claimed 2 inner node\(s\) but `nodes` carried 1/);
+    expect(text).not.toMatch(/retry only after the panel binding and subgraph mapping are stable/);
     expect(text).not.toContain("0.15.101");
     expect(calls.filter((c) => c.cmd === "graph_set_widget")).toHaveLength(0);
   });
@@ -4245,7 +4285,9 @@ describe("#2393 promoted-terminal witness is judged on the requested alias", () 
     );
 
     expect(isError).toBe(true);
-    expect(text).toMatch(/malformed, stale, or incomplete ownership envelope/);
+    // #2688 — names the OFFENDING index, which is not the requested alias's.
+    expect(text).toMatch(/`promoted_terminals\[1\]` was not an object/);
+    expect(text).toMatch(/accepted or rejected as a WHOLE/);
     expect(calls.filter((c) => c.cmd === "graph_set_widget")).toHaveLength(0);
   });
 
@@ -4261,8 +4303,225 @@ describe("#2393 promoted-terminal witness is judged on the requested alias", () 
     );
 
     expect(isError).toBe(true);
-    expect(text).toMatch(/malformed, stale, or incomplete ownership envelope/);
+    expect(text).toMatch(/`promoted_terminals\[1\]` had a missing or empty `widget`/);
     expect(calls.filter((c) => c.cmd === "graph_set_widget")).toHaveLength(0);
+  });
+
+  // #2688 — the WIRING. The reporter's exit from this refusal was the sentence
+  // itself: it named no invariant, and it prescribed "retry only after the
+  // panel binding and subgraph mapping are stable". They retried, re-opened the
+  // workflow, and re-bound the tab, and got the identical text every time.
+  //
+  // Deleting either half of the fix breaks a line here: drop the named
+  // invariant and the first assertion fails; route this branch back through
+  // `promotedWriteRefusal` and the last one does.
+  it("names the failed invariant and drops the retry remedy that cannot clear it", async () => {
+    const { text, isError, calls } = await setWidget(
+      { node_id: 78, widget: "quality_prompt", value: "masterpiece" },
+      {
+        firstWrite: "ok",
+        promotedTerminalWitnesses: true,
+        // An entry that resolved to neither a terminal nor an error. It is not
+        // the requested alias, and under the old wording that was invisible.
+        subgraph: withTerminals([ownEntry, { widget: "unrelated_alias" }]),
+        detailById: SAFE_ANIMA_IDENTITY_BY_ID,
+      },
+    );
+
+    expect(isError).toBe(true);
+    expect(text).toMatch(
+      /`promoted_terminals\[1\]` published neither a terminal endpoint \(`terminal_node_id`\/`terminal_node_type`\) nor an `error`/,
+    );
+    expect(text).toMatch(/accepted or rejected as a WHOLE/);
+    expect(text).toMatch(/panel_open_workflow and panel_set_workflow_target do not clear it/);
+    expect(text).not.toMatch(/retry only after the panel binding and subgraph mapping are stable/);
+    expect(calls.filter((c) => c.cmd === "graph_set_widget")).toHaveLength(0);
+  });
+
+  // The refusal must not become a read of the graph it is refusing to write to.
+  it("names the shape without quoting the offending entry's own names", async () => {
+    const { text } = await setWidget(
+      { node_id: 78, widget: "quality_prompt", value: "masterpiece" },
+      {
+        firstWrite: "ok",
+        promotedTerminalWitnesses: true,
+        subgraph: withTerminals([
+          ownEntry,
+          { widget: "SECRET_ALIAS", immediate_widget: "SECRET_INNER" },
+        ]),
+        detailById: SAFE_ANIMA_IDENTITY_BY_ID,
+      },
+    );
+
+    expect(text).toMatch(/`promoted_terminals\[1\]`/);
+    expect(text).not.toMatch(/SECRET_ALIAS|SECRET_INNER/);
+  });
+});
+
+describe("#2688 describePromotedSubgraphEnvelope names the failed invariant", () => {
+  const VALID = {
+    viewing: { scope: "subgraph", owner_node_id: 78, workflow_uuid: "wf", graph_identity: "g" },
+    subgraph_of: { node_id: 78, graph_identity: "gi" },
+    node_count: 1,
+    truncated: false,
+    nodes: [{ id: 5, type: "CheckpointLoaderSimple", widgets: { ckpt_name: "secret.safetensors" } }],
+    promoted_terminals: [{ widget: "ckpt_name", error: "unresolved" }],
+  };
+
+  const withNodes = (nodes: unknown[]) => ({ ...VALID, node_count: nodes.length, nodes });
+  const terminals = (promoted_terminals: unknown) => ({ ...VALID, promoted_terminals });
+  const goodTerminal = {
+    widget: "ckpt_name",
+    parent_rail: { authoritative: true, widget: "ckpt_name" },
+    immediate_node_id: 5,
+    immediate_widget: "ckpt_name",
+    terminal_node_id: 5,
+    terminal_node_type: "CheckpointLoaderSimple",
+    terminal_widget: "ckpt_name",
+    terminal_inputs: [{ name: "ckpt_name", type: "COMBO" }],
+    chain_depth: 0,
+  };
+  const terminalMinus = (drop: string) => {
+    const entry: Record<string, unknown> = { ...goodTerminal };
+    delete entry[drop];
+    return terminals([entry]);
+  };
+
+  it("accepts a complete envelope", () => {
+    expect(describePromotedSubgraphEnvelope(VALID, 78).ok).toBe(true);
+  });
+
+  it.each([
+    ["a non-object reply", "nope", 78, /the reply was not a JSON object/],
+    ["asserted truncation", { ...VALID, truncated: true }, 78, /the reply set `truncated`/],
+    [
+      "a missing subgraph_of",
+      { ...VALID, subgraph_of: undefined },
+      78,
+      /`subgraph_of` was missing or not an object/,
+    ],
+    [
+      "an unusable owner id",
+      { ...VALID, subgraph_of: { node_id: {} } },
+      78,
+      /`subgraph_of\.node_id` was missing or not a node id/,
+    ],
+    ["an unusable addressed id", VALID, "not-an-id", /the addressed node id was not a usable node id/],
+    [
+      "a non-integer node_count",
+      { ...VALID, node_count: 1.5 },
+      78,
+      /`node_count` was missing or not a non-negative integer/,
+    ],
+    ["a non-array nodes", { ...VALID, nodes: {} }, 78, /`nodes` was missing or not an array/],
+    [
+      "an inner node without an id",
+      withNodes([{ type: "X" }]),
+      78,
+      /`nodes\[0\]` was not an object carrying a usable `id`/,
+    ],
+    [
+      "a non-array promoted_terminals",
+      terminals({}),
+      78,
+      /`promoted_terminals` was present but not an array/,
+    ],
+    [
+      "an entry carrying both a terminal and an error",
+      terminals([{ ...goodTerminal, error: "boom" }]),
+      78,
+      /published a terminal endpoint AND an `error`/,
+    ],
+    [
+      "a terminal without immediate_node_id",
+      terminalMinus("immediate_node_id"),
+      78,
+      /published a terminal endpoint without `immediate_node_id`/,
+    ],
+    [
+      "a terminal without immediate_widget",
+      terminalMinus("immediate_widget"),
+      78,
+      /published a terminal endpoint without `immediate_widget`/,
+    ],
+    [
+      "a terminal without an authoritative parent rail",
+      terminalMinus("parent_rail"),
+      78,
+      /without a `parent_rail` asserting `authoritative:true`/,
+    ],
+    [
+      "an out-of-range chain_depth",
+      terminals([{ ...goodTerminal, chain_depth: 17 }]),
+      78,
+      /carried a `chain_depth` that is missing or outside 0-16/,
+    ],
+    [
+      "a terminal input without a name",
+      terminals([{ ...goodTerminal, terminal_inputs: [{ type: "COMBO" }] }]),
+      78,
+      /carried a `terminal_inputs\[0\]` without a non-empty `name`/,
+    ],
+    [
+      "an entry that is neither resolved nor errored",
+      terminals([{ widget: "ckpt_name" }]),
+      78,
+      /published neither a terminal endpoint .* nor an `error`/,
+    ],
+  ])("names %s", (_label, payload, owner, invariant) => {
+    const described = describePromotedSubgraphEnvelope(
+      payload as Record<string, unknown>,
+      owner as number | string,
+    );
+    expect(described.ok).toBe(false);
+    if (described.ok) return;
+    expect(described.invariant).toMatch(invariant as RegExp);
+    // Shape only: no widget value and no node type out of the graph itself.
+    expect(described.invariant).not.toMatch(/secret\.safetensors|CheckpointLoaderSimple/);
+  });
+
+  // The fence must not have moved. `validatePromotedSubgraphEnvelope` is the
+  // authorization surface every promoted write still runs through, and it is
+  // this function with the reason dropped — so the two have to agree on every
+  // shape, including the ones that are ACCEPTED.
+  it("agrees with the fence on accept, reject, and the envelope value", () => {
+    const corpus: unknown[] = [
+      VALID,
+      { ...VALID, viewing: undefined },
+      { ...VALID, promoted_terminals: undefined },
+      { ...VALID, truncated: undefined },
+      { ...VALID, subgraph_of: { node_id: "78" } },
+      withNodes([]),
+      terminals([goodTerminal]),
+      terminals([{ ...goodTerminal, chain_depth: 3 }]),
+      "nope",
+      null,
+      undefined,
+      { ...VALID, truncated: true },
+      { ...VALID, node_count: 9 },
+      { ...VALID, viewing: null },
+      terminals([{ widget: "x" }]),
+      terminalMinus("parent_rail"),
+    ];
+    let accepted = 0;
+    for (const owner of [78, "78", 79, "bad"]) {
+      for (const payload of corpus) {
+        const described = describePromotedSubgraphEnvelope(
+          payload as Record<string, unknown>,
+          owner as number | string,
+        );
+        const fenced = validatePromotedSubgraphEnvelope(
+          payload as Record<string, unknown>,
+          owner as number | string,
+        );
+        expect(described.ok).toBe(fenced !== null);
+        expect(described.ok ? described.envelope : null).toEqual(fenced);
+        if (described.ok) accepted += 1;
+      }
+    }
+    // A corpus that rejected everything would pass the loop above while proving
+    // nothing about the accepting half of the fence.
+    expect(accepted).toBeGreaterThan(0);
   });
 });
 
@@ -4722,7 +4981,9 @@ describe("panel_set_widget promoted inner identity forwarding (#2478)", () => {
     );
 
     expect(isError).toBe(true);
-    expect(text).toMatch(/malformed, stale, or incomplete ownership envelope/);
+    expect(text).toMatch(
+      /`nodes\[0\]\.node_identity` was present but not a string of 1-256 characters/,
+    );
     expect(calls.filter((call) => call.cmd === "graph_set_widget")).toHaveLength(0);
     expect(mutations).toBe(0);
   });

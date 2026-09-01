@@ -448,32 +448,85 @@ export function parsePromotedViewingIdentity(value: unknown): PromotedViewingIde
 }
 
 /**
- * Validate the ownership and completeness claims made by graph_get_subgraph.
+ * #2688 — WHY THIS RETURNS A REASON AND NOT JUST `null`.
+ *
+ * This validator has ~20 distinct rejection exits and every one of them used to
+ * surface as a single sentence: "graph_get_subgraph returned a malformed,
+ * stale, or incomplete ownership envelope", followed by "retry only after the
+ * panel binding and subgraph mapping are stable".
+ *
+ * That sentence is undiagnosable AND its remedy is wrong. Every check below is
+ * a pure function of ONE reply captured in ONE snapshot, so none of them is a
+ * binding state that settles: the reporter re-opened the workflow, re-bound the
+ * tab, and retried, and got the identical refusal every time, with no exit from
+ * the loop and nothing to report except "something in the envelope was wrong".
+ *
+ * The reason strings are deliberately SHAPE-ONLY — field paths, array indices,
+ * counts, and the two node ids that were compared (one of which is the caller's
+ * own argument). No widget name, no widget value, no node type, no title.
+ * Naming the failed invariant must not become a way to read a graph the fence
+ * is refusing to write to.
+ *
+ * The fence itself does not move. {@link validatePromotedSubgraphEnvelope} is
+ * this function with the reason discarded, so accept/reject is one decision in
+ * one place and cannot drift between the diagnostic and the authorization.
+ */
+export type PromotedSubgraphEnvelopeResult =
+  | { ok: true; envelope: PromotedSubgraphEnvelope }
+  | { ok: false; invariant: string };
+
+function envelopeInvariant(invariant: string): { ok: false; invariant: string } {
+  return { ok: false, invariant };
+}
+
+/**
+ * Validate the ownership and completeness claims made by graph_get_subgraph,
+ * and name the first claim that failed.
+ *
  * A node list is useful for a promoted write only when it names the wrapper the
  * caller asked about and contains exactly the advertised number of inner nodes.
  * The panel currently emits `truncated:false` for complete reads, but omission
  * remains accepted for older compatible replies; any asserted truncation is not.
  */
-export function validatePromotedSubgraphEnvelope(
+export function describePromotedSubgraphEnvelope(
   subgraph: Record<string, unknown> | null | undefined,
   ownerNodeId: number | string,
-): PromotedSubgraphEnvelope | null {
-  if (!isRecord(subgraph)) return null;
-  if (subgraph.truncated !== undefined && subgraph.truncated !== false) return null;
+): PromotedSubgraphEnvelopeResult {
+  if (!isRecord(subgraph)) {
+    return envelopeInvariant("the reply was not a JSON object");
+  }
+  if (subgraph.truncated !== undefined && subgraph.truncated !== false) {
+    return envelopeInvariant(
+      "the reply set `truncated`, so the inner node list it carried is not the whole subgraph",
+    );
+  }
 
   const viewing = Object.prototype.hasOwnProperty.call(subgraph, "viewing")
     ? parsePromotedViewingIdentity(subgraph.viewing)
     : undefined;
-  if (Object.prototype.hasOwnProperty.call(subgraph, "viewing") && !viewing) return null;
+  if (Object.prototype.hasOwnProperty.call(subgraph, "viewing") && !viewing) {
+    return envelopeInvariant(
+      "`viewing` was present but did not parse as a graph-scope identity " +
+        '(`scope` must be "root" or "subgraph"; `owner_node_id` must be a node id or null; ' +
+        "`workflow_uuid` and `graph_identity`, when present, must be non-empty strings)",
+    );
+  }
 
   const owner = subgraph.subgraph_of;
-  if (
-    !isRecord(owner) ||
-    !isNodeId(owner.node_id) ||
-    !isNodeId(ownerNodeId) ||
-    !sameNodeId(owner.node_id, ownerNodeId)
-  ) {
-    return null;
+  if (!isRecord(owner)) {
+    return envelopeInvariant("`subgraph_of` was missing or not an object");
+  }
+  if (!isNodeId(owner.node_id)) {
+    return envelopeInvariant("`subgraph_of.node_id` was missing or not a node id");
+  }
+  if (!isNodeId(ownerNodeId)) {
+    return envelopeInvariant("the addressed node id was not a usable node id");
+  }
+  if (!sameNodeId(owner.node_id, ownerNodeId)) {
+    return envelopeInvariant(
+      `\`subgraph_of.node_id\` named node ${stripNodeId(String(owner.node_id))}, ` +
+        `not the addressed node ${stripNodeId(String(ownerNodeId))}`,
+    );
   }
   const targetGraphIdentity = owner.graph_identity;
   if (
@@ -482,105 +535,191 @@ export function validatePromotedSubgraphEnvelope(
       targetGraphIdentity.length === 0 ||
       targetGraphIdentity.length > 256)
   ) {
-    return null;
+    return envelopeInvariant(
+      "`subgraph_of.graph_identity` was present but not a string of 1-256 characters",
+    );
   }
 
   const nodeCount = subgraph.node_count;
   const nodes = subgraph.nodes;
-  if (
-    !Number.isSafeInteger(nodeCount) ||
-    (nodeCount as number) < 0 ||
-    !Array.isArray(nodes) ||
-    nodes.length !== nodeCount
-  ) {
-    return null;
+  if (!Number.isSafeInteger(nodeCount) || (nodeCount as number) < 0) {
+    return envelopeInvariant("`node_count` was missing or not a non-negative integer");
+  }
+  if (!Array.isArray(nodes)) {
+    return envelopeInvariant("`nodes` was missing or not an array");
+  }
+  if (nodes.length !== nodeCount) {
+    return envelopeInvariant(
+      `\`node_count\` claimed ${nodeCount as number} inner node(s) but \`nodes\` carried ${nodes.length}`,
+    );
   }
 
   const normalized: Array<Record<string, unknown>> = [];
-  for (const raw of nodes) {
-    if (!isRecord(raw) || innerNodeId(raw) == null) return null;
+  for (const [index, raw] of nodes.entries()) {
+    if (!isRecord(raw) || innerNodeId(raw) == null) {
+      return envelopeInvariant(`\`nodes[${index}]\` was not an object carrying a usable \`id\``);
+    }
     const nodeIdentity = raw.node_identity;
     if (
       nodeIdentity !== undefined &&
       (typeof nodeIdentity !== "string" || nodeIdentity.length === 0 || nodeIdentity.length > 256)
     ) {
-      return null;
+      return envelopeInvariant(
+        `\`nodes[${index}].node_identity\` was present but not a string of 1-256 characters`,
+      );
     }
     normalized.push(raw);
   }
-  const promotedTerminals = Object.prototype.hasOwnProperty.call(subgraph, "promoted_terminals")
-    ? parsePromotedTerminalEntries(subgraph.promoted_terminals)
-    : undefined;
-  if (Object.prototype.hasOwnProperty.call(subgraph, "promoted_terminals") && !promotedTerminals) {
-    return null;
+  let promotedTerminals: PromotedTerminalEntry[] | undefined;
+  if (Object.prototype.hasOwnProperty.call(subgraph, "promoted_terminals")) {
+    const parsed = describePromotedTerminalEntries(subgraph.promoted_terminals);
+    if (!parsed.ok) return envelopeInvariant(parsed.invariant);
+    promotedTerminals = parsed.entries;
   }
   return {
-    nodes: normalized,
-    nodeId: stripNodeId(String(owner.node_id)),
-    nodeCount: nodeCount as number,
-    ...(targetGraphIdentity !== undefined ? { targetGraphIdentity } : {}),
-    ...(viewing ? { viewing } : {}),
-    ...(promotedTerminals ? { promotedTerminals } : {}),
+    ok: true,
+    envelope: {
+      nodes: normalized,
+      nodeId: stripNodeId(String(owner.node_id)),
+      nodeCount: nodeCount as number,
+      ...(targetGraphIdentity !== undefined ? { targetGraphIdentity } : {}),
+      ...(viewing ? { viewing } : {}),
+      ...(promotedTerminals ? { promotedTerminals } : {}),
+    },
   };
 }
 
-function parsePromotedTerminalEntries(value: unknown): PromotedTerminalEntry[] | null {
-  if (!Array.isArray(value)) return null;
+/**
+ * The fence. Identical accept/reject to
+ * {@link describePromotedSubgraphEnvelope} by construction — it IS that
+ * function with the reason dropped, so a diagnostic change can never widen
+ * what authorizes a promoted write.
+ */
+export function validatePromotedSubgraphEnvelope(
+  subgraph: Record<string, unknown> | null | undefined,
+  ownerNodeId: number | string,
+): PromotedSubgraphEnvelope | null {
+  const result = describePromotedSubgraphEnvelope(subgraph, ownerNodeId);
+  return result.ok ? result.envelope : null;
+}
+
+type PromotedTerminalEntriesResult =
+  | { ok: true; entries: PromotedTerminalEntry[] }
+  | { ok: false; invariant: string };
+
+/**
+ * The witness array is ALL-OR-NOTHING: one unusable entry refuses every
+ * promoted write on the wrapper, including widgets whose own entry is fine.
+ * That is deliberate — an array that cannot be fully parsed is not evidence of
+ * a complete alias mapping, and a partial mapping is exactly what would let a
+ * renamed promotion resolve to the wrong terminal. So each reason below names
+ * the OFFENDING INDEX, because the caller's own widget is usually not it.
+ */
+function describePromotedTerminalEntries(value: unknown): PromotedTerminalEntriesResult {
+  if (!Array.isArray(value)) {
+    return envelopeInvariant("`promoted_terminals` was present but not an array");
+  }
+  const at = (index: number, detail: string) =>
+    envelopeInvariant(`\`promoted_terminals[${index}]\` ${detail}`);
   const entries: PromotedTerminalEntry[] = [];
-  for (const raw of value) {
-    if (!isRecord(raw) || typeof raw.widget !== "string" || raw.widget.length === 0) return null;
+  for (const [index, raw] of value.entries()) {
+    if (!isRecord(raw)) return at(index, "was not an object");
+    if (typeof raw.widget !== "string" || raw.widget.length === 0) {
+      return at(index, "had a missing or empty `widget`");
+    }
     const immediateNodeId = raw.immediate_node_id;
-    if (immediateNodeId !== undefined && !isNodeId(immediateNodeId)) return null;
+    if (immediateNodeId !== undefined && !isNodeId(immediateNodeId)) {
+      return at(index, "carried an `immediate_node_id` that is not a node id");
+    }
     const immediateWidget = raw.immediate_widget;
-    if (immediateWidget !== undefined && (typeof immediateWidget !== "string" || immediateWidget.length === 0)) {
-      return null;
+    if (
+      immediateWidget !== undefined &&
+      (typeof immediateWidget !== "string" || immediateWidget.length === 0)
+    ) {
+      return at(index, "carried an `immediate_widget` that is not a non-empty string");
     }
     const error = raw.error;
-    if (error !== undefined && (typeof error !== "string" || error.length === 0)) return null;
-    const terminalRaw = raw.terminal_node_id === undefined && raw.terminal_node_type === undefined
-      ? undefined
-      : raw;
+    if (error !== undefined && (typeof error !== "string" || error.length === 0)) {
+      return at(index, "carried an `error` that is not a non-empty string");
+    }
+    const terminalRaw =
+      raw.terminal_node_id === undefined && raw.terminal_node_type === undefined ? undefined : raw;
     const parentRailRaw = raw.parent_rail;
     let parentRail: PromotedParentRailWitness | undefined;
     let terminal: PromotedTerminalWitness | undefined;
     if (terminalRaw) {
-      if (error !== undefined || immediateNodeId === undefined || immediateWidget === undefined) return null;
+      if (error !== undefined) {
+        return at(
+          index,
+          "published a terminal endpoint AND an `error`; a witness is one or the other",
+        );
+      }
+      if (immediateNodeId === undefined) {
+        return at(index, "published a terminal endpoint without `immediate_node_id`");
+      }
+      if (immediateWidget === undefined) {
+        return at(index, "published a terminal endpoint without `immediate_widget`");
+      }
       if (
         !isRecord(parentRailRaw) ||
         parentRailRaw.authoritative !== true ||
         typeof parentRailRaw.widget !== "string" ||
         parentRailRaw.widget.length === 0
       ) {
-        return null;
+        return at(
+          index,
+          "published a terminal endpoint without a `parent_rail` asserting `authoritative:true` and a non-empty `widget`",
+        );
       }
       const parentRailWidgetId = parentRailRaw.widget_id;
       if (
         parentRailWidgetId !== undefined &&
         (typeof parentRailWidgetId !== "string" || parentRailWidgetId.length === 0)
       ) {
-        return null;
+        return at(index, "carried a `parent_rail.widget_id` that is not a non-empty string");
       }
       parentRail = {
         authoritative: true,
         widget: parentRailRaw.widget,
         ...(parentRailWidgetId !== undefined ? { widgetId: parentRailWidgetId } : {}),
       };
-      if (!isNodeId(terminalRaw.terminal_node_id)) return null;
-      if (typeof terminalRaw.terminal_node_type !== "string" || terminalRaw.terminal_node_type.length === 0) {
-        return null;
+      if (!isNodeId(terminalRaw.terminal_node_id)) {
+        return at(index, "carried a `terminal_node_id` that is missing or not a node id");
       }
-      if (typeof terminalRaw.terminal_widget !== "string" || terminalRaw.terminal_widget.length === 0) {
-        return null;
+      if (
+        typeof terminalRaw.terminal_node_type !== "string" ||
+        terminalRaw.terminal_node_type.length === 0
+      ) {
+        return at(index, "carried a `terminal_node_type` that is missing or not a non-empty string");
+      }
+      if (
+        typeof terminalRaw.terminal_widget !== "string" ||
+        terminalRaw.terminal_widget.length === 0
+      ) {
+        return at(index, "carried a `terminal_widget` that is missing or not a non-empty string");
       }
       const chainDepth = terminalRaw.chain_depth;
-      if (!Number.isSafeInteger(chainDepth) || (chainDepth as number) < 0 || (chainDepth as number) > 16) {
-        return null;
+      if (
+        !Number.isSafeInteger(chainDepth) ||
+        (chainDepth as number) < 0 ||
+        (chainDepth as number) > 16
+      ) {
+        return at(index, "carried a `chain_depth` that is missing or outside 0-16");
       }
-      if (!Array.isArray(terminalRaw.terminal_inputs)) return null;
+      if (!Array.isArray(terminalRaw.terminal_inputs)) {
+        return at(index, "carried a `terminal_inputs` that is missing or not an array");
+      }
       const inputs: PromotedTerminalInput[] = [];
-      for (const input of terminalRaw.terminal_inputs) {
-        if (!isRecord(input) || typeof input.name !== "string" || input.name.length === 0) return null;
-        if (input.type !== undefined && typeof input.type !== "string") return null;
+      for (const [inputIndex, input] of terminalRaw.terminal_inputs.entries()) {
+        if (!isRecord(input) || typeof input.name !== "string" || input.name.length === 0) {
+          return at(
+            index,
+            `carried a \`terminal_inputs[${inputIndex}]\` without a non-empty \`name\``,
+          );
+        }
+        if (input.type !== undefined && typeof input.type !== "string") {
+          return at(index, `carried a \`terminal_inputs[${inputIndex}].type\` that is not a string`);
+        }
         inputs.push({ name: input.name, ...(input.type !== undefined ? { type: input.type } : {}) });
       }
       terminal = {
@@ -591,7 +730,11 @@ function parsePromotedTerminalEntries(value: unknown): PromotedTerminalEntry[] |
         chainDepth: chainDepth as number,
       };
     } else if (error === undefined) {
-      return null;
+      return at(
+        index,
+        "published neither a terminal endpoint (`terminal_node_id`/`terminal_node_type`) nor an `error`, " +
+          "so the witness array cannot be read as a complete alias mapping",
+      );
     }
     entries.push({
       widget: raw.widget,
@@ -602,7 +745,7 @@ function parsePromotedTerminalEntries(value: unknown): PromotedTerminalEntry[] |
       ...(error !== undefined ? { error } : {}),
     });
   }
-  return entries;
+  return { ok: true, entries };
 }
 
 /** Extract the target owner and workflow identity from a validated promotion
