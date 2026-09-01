@@ -302,6 +302,30 @@ describe("panel_free_vram against a driver that releases late (#2704)", () => {
     expect(payload.vram_after_settled).toBe(false);
   });
 
+  it("does not certify when the POST-free sample duplicates a watched identity", async () => {
+    // The baseline is clean — one occupied, uniquely identified card — but the
+    // sample after /free reports that identity twice. Keeping the last entry
+    // would let the released twin answer for the stale one.
+    let freeAt: number | null = null;
+    mocks.comfyuiFetch.mockImplementation(async () => {
+      freeAt = Date.now();
+      return { status: 200 };
+    });
+    __panelToolsTestHooks.setReadVramDevices(async () => {
+      if (freeAt == null) return [gpu(STALE_FREE, 0)];
+      const since = Date.now() - freeAt;
+      return [
+        gpu(STALE_FREE, since >= 400 ? TORCH_TOTAL : 0),
+        gpu(since >= 2_000 ? SETTLED_FREE : STALE_FREE, TORCH_TOTAL),
+      ];
+    });
+
+    const res = await runFrozenTab();
+    const payload = JSON.parse(textOf(res)) as { vram_after_settled?: boolean };
+
+    expect(payload.vram_after_settled).toBe(false);
+  });
+
   it("does not wait for a release on a card that was already free", async () => {
     // Waiting for movement is only justified where movement is expected. An
     // idle card has nothing to release, so this must not sit out the whole cap
