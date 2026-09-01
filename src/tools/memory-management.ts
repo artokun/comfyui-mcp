@@ -35,10 +35,10 @@ function vramSignature(stats: SystemStats): string {
  * holding ~29 GB. That is the reported bug, and testing movement against the
  * combined signature would reintroduce it.
  */
-function vramReleaseSignature(stats: SystemStats): string {
+function vramReleaseSignature(stats: SystemStats): readonly string[] {
   const gpu = stats.devices?.[0];
-  if (!gpu) return "";
-  return `${gpu.vram_free}`;
+  if (!gpu) return [""];
+  return [`${gpu.vram_free}`];
 }
 
 function formatVramStats(stats: SystemStats, settled = true): string {
@@ -68,8 +68,12 @@ function formatVramStats(stats: SystemStats, settled = true): string {
  * spend the whole settle cap on the common speculative `clear_vram`. So the
  * wait is armed by the same "occupied" rule the panel applies to these very
  * counters, and an idle card keeps exactly today's fast path.
+ *
+ * Device 0 only, deliberately: `formatVramStats` prints device 0's counters, so
+ * device 0's release is exactly what backs the number being reported. Proving a
+ * second card released would not make the printed figure any more true.
  */
-function settleBaselineOf(before: SystemStats | null): string | null {
+function settleBaselineOf(before: SystemStats | null): readonly string[] | null {
   const gpu = before?.devices?.[0];
   if (!gpu) return null;
   const free = gpu.vram_free;
@@ -99,7 +103,7 @@ async function readVramBaseline(): Promise<SystemStats | null> {
  * reading the poll must move away from before a plateau counts.
  */
 async function readSettledSystemStats(
-  baseline: string | null,
+  before: SystemStats | null,
 ): Promise<SettledRead<SystemStats>> {
   return settleUntilStable(
     async () => {
@@ -110,7 +114,14 @@ async function readSettledSystemStats(
       }
     },
     vramSignature,
-    { baseline, progressOf: vramReleaseSignature },
+    {
+      baseline: settleBaselineOf(before),
+      progressOf: vramReleaseSignature,
+      // A baseline we could not READ is not the same as a card with nothing to
+      // release. Both arrive here without keys to check, but only the second
+      // one may be published as a measured figure.
+      confirmable: before !== null,
+    },
   );
 }
 
@@ -171,7 +182,7 @@ export function registerMemoryManagementTools(server: McpServer): void {
         // Get updated stats — after CUDA release settles, not the first post-/free sample.
         let statsText = "";
         try {
-          const settledRead = await readSettledSystemStats(settleBaselineOf(before));
+          const settledRead = await readSettledSystemStats(before);
           if (settledRead.value) {
             statsText = formatVramStats(settledRead.value, settledRead.settled);
           }

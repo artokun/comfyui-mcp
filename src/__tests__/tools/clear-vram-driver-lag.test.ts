@@ -231,6 +231,32 @@ describe("clear_vram against a driver that releases late (#2704)", () => {
     expect(textOf(res)).not.toContain(UNSETTLED_CAVEAT);
   });
 
+  it("does not claim a reading is settled when the baseline could not be read", async () => {
+    // An unreadable baseline and an idle card both arrive at the settle loop
+    // with nothing to check. Collapsing them would publish an unprovable
+    // reading as a measured one — the exact failure this change exists to stop.
+    let freeAt: number | null = null;
+    mocks.comfyApiFetch.mockImplementation(async () => {
+      freeAt = Date.now();
+      return freeOk();
+    });
+    mocks.getSystemStats.mockImplementation(async () => {
+      // The pre-/free read fails; every read after /free succeeds and sits
+      // frozen on the pre-release value.
+      if (freeAt == null) throw new Error("ECONNRESET");
+      return gpuStats(STALE_FREE, TORCH_FREE_AFTER);
+    });
+
+    const pending = call({ unload_models: true, free_memory: true });
+    await vi.advanceTimersByTimeAsync(
+      CLEAR_VRAM_SETTLE_TIMEOUT_MS + CLEAR_VRAM_SETTLE_INTERVAL_MS * 2,
+    );
+    const res = await pending;
+
+    expect(textOf(res)).toContain(STALE_LINE);
+    expect(textOf(res)).toContain(UNSETTLED_CAVEAT);
+  });
+
   it("does not arm the wait on a device that reports no usable VRAM total", async () => {
     // `free / total` says nothing when total is 0 or tiny, and an occupancy
     // rule that reads such a device as "occupied" would block every clear_vram

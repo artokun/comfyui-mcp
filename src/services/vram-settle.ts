@@ -36,29 +36,48 @@ export interface SettledRead<T> {
 
 export interface SettleOptions<T> {
   /**
-   * `progressOf` of a reading taken BEFORE the mutation. Supply it and
-   * stillness stops being read as "settled": the release is only proven once
-   * the counters move away from this value.
+   * `progressOf` of a reading taken BEFORE the mutation — one key per unit that
+   * is expected to release. Supply it and stillness stops being read as
+   * "settled": the release is proven only once EVERY key has moved.
    *
-   * Omit it (or pass null) when no pre-mutation sample exists, or when the card
-   * was idle enough that no release is expected. The loop then accepts any
-   * reading that holds steady past the min wait — which cannot tell "released"
-   * from "not started yet", so `settled` is the only honest thing separating
-   * the two cases.
+   * Per-key rather than one combined string because a joined signature changes
+   * as soon as ANY unit moves. On a two-GPU box that lets card 0 releasing
+   * certify card 1, whose driver counter never moved at all — the same
+   * substitution the torch pool was making, one level up.
+   *
+   * Only include units a release is actually expected from: a card that was
+   * already free will never move, and demanding movement from it would spend
+   * the whole cap waiting for something that is not coming.
+   *
+   * Omit it (or pass null) when nothing needs proving.
    */
-  baseline?: string | null;
+  baseline?: readonly string[] | null;
   /**
    * The projection whose movement PROVES the release landed, defaulting to
-   * `signatureOf`.
+   * `signatureOf`'s value as a single key.
    *
-   * #2704 — these must be allowed to differ. `signatureOf` covers everything
-   * the caller reports, so it includes the torch pool; but the torch pool
-   * releases in ~400ms while the driver number lags seconds behind it. Testing
-   * movement against the combined signature would let that torch movement stand
-   * in as proof the DRIVER released — which is the original bug wearing a
-   * baseline. Narrow this to the counter that actually lags.
+   * #2704 — this must be allowed to differ from `signatureOf`. `signatureOf`
+   * covers everything the caller reports, so it includes the torch pool; but
+   * the torch pool releases in ~400ms while the driver number lags seconds
+   * behind it. Testing movement against the combined signature would let that
+   * torch movement stand in as proof the DRIVER released — which is the
+   * original bug wearing a baseline. Narrow this to the counters that lag.
+   *
+   * Must be index-aligned with `baseline`.
    */
-  progressOf?: (value: T) => string;
+  progressOf?: (value: T) => readonly string[];
+  /**
+   * False when the caller could not establish a baseline it TRUSTS — typically
+   * the pre-mutation read failed. The loop still returns on a plateau (there is
+   * nothing to be gained by waiting out the cap), but never reports it as
+   * confirmed.
+   *
+   * This is the difference between "idle card, nothing to release, the reading
+   * is good" and "we have no idea whether this released" — both arrive with no
+   * baseline, and collapsing them would let an unprovable reading be published
+   * as a measured one, which is the bug this whole change is about.
+   */
+  confirmable?: boolean;
 }
 
 function sleep(ms: number): Promise<void> {
@@ -92,13 +111,15 @@ export async function settleUntilStable<T>(
   options: SettleOptions<T> = {},
 ): Promise<SettledRead<T>> {
   const baseline = options.baseline ?? null;
-  const progressOf = options.progressOf ?? signatureOf;
+  const progressOf = options.progressOf ?? ((value: T) => [signatureOf(value)]);
+  const confirmable = options.confirmable ?? true;
   const started = Date.now();
   const deadline = started + VRAM_SETTLE_TIMEOUT_MS;
   let lastSig: string | null = null;
-  // Latched: a reading that moves off `baseline` proves the release landed even
-  // if a later sample happens to match `baseline` again.
-  let releaseSeen = false;
+  // Keys still sitting on their pre-mutation value. Emptying is LATCHED per
+  // key: a unit that moves has demonstrably released, even if a later sample
+  // happens to land back on the baseline value.
+  const unmoved = new Set<number>(baseline ? baseline.map((_, i) => i) : []);
 
   for (;;) {
     let current: T | null;
@@ -111,20 +132,26 @@ export async function settleUntilStable<T>(
 
     const sig = signatureOf(current);
     const elapsed = Date.now() - started;
-    if (baseline !== null && progressOf(current) !== baseline) releaseSeen = true;
+    if (baseline !== null && unmoved.size > 0) {
+      const keys = progressOf(current);
+      for (const i of [...unmoved]) {
+        // A missing key is a changed key: the unit it described is gone.
+        if (keys[i] !== baseline[i]) unmoved.delete(i);
+      }
+    }
     const stable = lastSig !== null && sig === lastSig;
     lastSig = sig;
 
-    // With a baseline, stillness counts only AFTER the release is observed.
-    // Without one, keep the pre-#2704 rule — a reading that is stable past the
-    // min wait is accepted, because there is nothing available to prove it is
-    // anything better than a guess. `sawChange` no longer SHORTENS that wait:
-    // on the #2704 card the torch pool moving was enough to satisfy it, which
-    // is precisely how a frozen driver number got returned at ~780ms.
-    const releaseObserved = baseline !== null ? releaseSeen : true;
+    // With a baseline, stillness counts only AFTER every unit has released.
+    // Without one there is nothing available to prove, so a plateau past the
+    // min wait is accepted — and `confirmable` says whether that plateau may be
+    // reported as a measured result. The old rule let ANY change shorten the
+    // min wait, which is how the torch pool moving returned a frozen driver
+    // number at ~780ms.
+    const releaseObserved = baseline === null || unmoved.size === 0;
 
     if (stable && releaseObserved && elapsed >= VRAM_SETTLE_MIN_MS) {
-      return { value: current, settled: true };
+      return { value: current, settled: baseline !== null ? true : confirmable };
     }
     if (elapsed >= VRAM_SETTLE_TIMEOUT_MS) {
       return { value: current, settled: false };

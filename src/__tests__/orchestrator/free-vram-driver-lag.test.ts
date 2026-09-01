@@ -189,6 +189,29 @@ describe("panel_free_vram against a driver that releases late (#2704)", () => {
     expect(payload.vram_after_settled).toBe(false);
   });
 
+  it("does not let one GPU releasing certify a second that never moved", async () => {
+    // Two occupied cards. cuda:0 releases at 2s; cuda:1 stays frozen for good.
+    // A release signature joined across devices changes the moment cuda:0
+    // moves, so the next stable sample would report BOTH as settled — the torch
+    // substitution one level up.
+    let freeAt: number | null = null;
+    mocks.comfyuiFetch.mockImplementation(async () => {
+      freeAt = Date.now();
+      return { status: 200 };
+    });
+    __panelToolsTestHooks.setReadVramDevices(async () => {
+      const busy = { ...gpu(STALE_FREE, 0), name: "cuda:1", index: 1 };
+      if (freeAt == null) return [gpu(STALE_FREE, 0), busy];
+      const since = Date.now() - freeAt;
+      return [gpu(since >= 2_000 ? SETTLED_FREE : STALE_FREE, since >= 400 ? TORCH_TOTAL : 0), busy];
+    });
+
+    const res = await runFrozenTab();
+    const payload = JSON.parse(textOf(res)) as { vram_after_settled?: boolean };
+
+    expect(payload.vram_after_settled).toBe(false);
+  });
+
   it("does not wait for a release on a card that was already free", async () => {
     // Waiting for movement is only justified where movement is expected. An
     // idle card has nothing to release, so this must not sit out the whole cap

@@ -4910,12 +4910,23 @@ function vramDevicesSignature(devices: VramDeviceSample[]): string {
     .join("|");
 }
 
-/** The DRIVER counters alone — the ones whose release lags. Torch hands its
- *  pool back in ~400ms while `vram_free` can stay frozen for seconds, so
- *  proving a release against the combined signature would certify the driver
- *  as released on torch's schedule (#2704). */
-function vramDevicesReleaseSignature(devices: VramDeviceSample[]): string {
-  return devices.map((d) => `${d.index ?? d.name ?? ""}:${d.vram_free ?? ""}`).join("|");
+/** Stable per-device identity, so a baseline key and a live key line up. */
+function vramDeviceKey(d: VramDeviceSample): string {
+  return `${d.index ?? d.name ?? ""}`;
+}
+
+/** The DRIVER counter of each watched device, ONE KEY PER DEVICE. Torch hands
+ *  its pool back in ~400ms while `vram_free` can stay frozen for seconds, so
+ *  proving a release against the combined signature would certify the driver as
+ *  released on torch's schedule; and joining the devices into one string would
+ *  let card 0 releasing certify card 1, which never moved (#2704). */
+function vramDeviceReleaseKeys(
+  devices: VramDeviceSample[],
+  only?: ReadonlySet<string>,
+): readonly string[] {
+  return devices
+    .filter((d) => only == null || only.has(vramDeviceKey(d)))
+    .map((d) => `${vramDeviceKey(d)}:${d.vram_free ?? ""}`);
 }
 
 /**
@@ -4929,18 +4940,24 @@ async function readSettledVramDevices(
   timeoutMs: number,
   before?: VramDeviceSample[] | null,
 ): Promise<SettledRead<VramDeviceSample[]>> {
-  // #2704 — hold the poll against the PRE-/free counters, but only when the
-  // card was occupied enough that a release is expected to move them. A still
-  // reading is otherwise indistinguishable from a release that has not begun,
-  // which is how a frozen driver number was returned as settled at ~780ms.
-  const baseline =
-    before != null && occupiedVramDevices(before).length > 0
-      ? vramDevicesReleaseSignature(before)
-      : null;
+  // #2704 — hold the poll against the PRE-/free counters, but only for the
+  // cards that were occupied enough for a release to move them. A still reading
+  // is otherwise indistinguishable from a release that has not begun, which is
+  // how a frozen driver number was returned as settled at ~780ms. Cards that
+  // were already free are excluded rather than waited on: they will never move.
+  const occupiedBefore = before != null ? occupiedVramDevices(before) : [];
+  const watched = new Set(occupiedBefore.map(vramDeviceKey));
+  const baseline = watched.size > 0 ? vramDeviceReleaseKeys(before!, watched) : null;
   return settleUntilStable(
     () => readVramDevicesMaybe(base, timeoutMs),
     vramDevicesSignature,
-    { baseline, progressOf: vramDevicesReleaseSignature },
+    {
+      baseline,
+      progressOf: (devices) => vramDeviceReleaseKeys(devices, watched),
+      // A `before` we could not read is not the same as a box with nothing to
+      // release; only the latter may be published as a measured figure.
+      confirmable: before != null,
+    },
   );
 }
 
