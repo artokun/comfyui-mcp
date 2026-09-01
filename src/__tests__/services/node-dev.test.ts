@@ -4,6 +4,7 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  realpathSync,
   rmSync,
   symlinkSync,
   writeFileSync,
@@ -764,6 +765,189 @@ describe("nodePackGit", () => {
     expect(() => nodePackGit({ pack: "Pack", action: "commit" }, deps)).toThrow(
       /message/,
     );
+  });
+
+  // -------------------------------------------------------------------------
+  // #2716 — `paths` is documented as PACK-relative, and every documented spelling
+  // was refused: relative entries were resolved against the custom_nodes/ ROOT, so
+  // "preset_core.py" landed beside the pack and failed the pack-containment check.
+  // These pin the anchor, and pin that moving it did not widen the jail.
+  // -------------------------------------------------------------------------
+  describe("paths are relative to the pack root (#2716)", () => {
+    function mkPackFiles(): void {
+      mkdirSync(join(customNodes, "Pack", "tests"), { recursive: true });
+      writeFileSync(join(customNodes, "Pack", "preset_core.py"), "x\n");
+      writeFileSync(join(customNodes, "Pack", "tests", "test_preset_core.py"), "x\n");
+    }
+
+    it("scopes a diff with the reporter's exact call", () => {
+      mkPackFiles();
+      const { deps, gitCalls } = makeDeps();
+      const res = nodePackGit(
+        {
+          pack: "Pack",
+          action: "diff",
+          paths: ["preset_core.py", "tests/test_preset_core.py"],
+        },
+        deps,
+      );
+      expect(res.success).toBe(true);
+      expect(gitCalls[0].args).toEqual([
+        "diff",
+        "--",
+        "preset_core.py",
+        "tests/test_preset_core.py",
+      ]);
+      // The pathspecs are handed to git with the PACK as cwd, so a pack-relative
+      // spelling is what git itself resolves them against.
+      expect(gitCalls[0].cwd).toBe(realpathSync(join(customNodes, "Pack")));
+    });
+
+    it("stages pack-relative paths on commit", () => {
+      mkPackFiles();
+      process.env.COMFYUI_MCP_ALLOW_GIT_WRITES = "1";
+      const { deps, gitCalls } = makeDeps();
+      const res = nodePackGit(
+        { pack: "Pack", action: "commit", message: "fix: x", paths: ["preset_core.py"] },
+        deps,
+      );
+      expect(res.success).toBe(true);
+      expect(gitCalls[0].args).toEqual([
+        "add",
+        "--end-of-options",
+        "--",
+        "preset_core.py",
+      ]);
+    });
+
+    it("accepts an absolute path that lands inside the pack", () => {
+      mkPackFiles();
+      const { deps, gitCalls } = makeDeps();
+      nodePackGit(
+        {
+          pack: "Pack",
+          action: "status",
+          paths: [join(customNodes, "Pack", "tests", "test_preset_core.py")],
+        },
+        deps,
+      );
+      expect(gitCalls[0].args).toEqual([
+        "status",
+        "--short",
+        "--branch",
+        "--",
+        "tests/test_preset_core.py",
+      ]);
+    });
+
+    it("still refuses a SIBLING pack's file by absolute path, before any git call", () => {
+      // The one shape that reaches the pack-containment check: inside custom_nodes/,
+      // outside the selected pack. Anchoring `paths` at the pack must not make a
+      // neighbouring pack reachable through the pack-scoped git surface.
+      mkPackFiles();
+      mkdirSync(join(customNodes, "Other"), { recursive: true });
+      writeFileSync(join(customNodes, "Other", "loot.py"), "secret\n");
+      const { deps, gitCalls } = makeDeps();
+      expect(() =>
+        nodePackGit(
+          {
+            pack: "Pack",
+            action: "diff",
+            paths: [join(customNodes, "Other", "loot.py")],
+          },
+          deps,
+        ),
+      ).toThrow(/outside the target pack/);
+      expect(gitCalls.length).toBe(0);
+    });
+
+    it("still refuses a path that climbs out of the pack, before any git call", () => {
+      mkPackFiles();
+      mkdirSync(join(customNodes, "Other"), { recursive: true });
+      writeFileSync(join(customNodes, "Other", "loot.py"), "secret\n");
+      const { deps, gitCalls } = makeDeps();
+      // A ".." segment is refused by the Windows-hazard scan before containment is
+      // even reached — which is why this asserts the refusal, not its wording.
+      expect(() =>
+        nodePackGit({ pack: "Pack", action: "diff", paths: ["../Other/loot.py"] }, deps),
+      ).toThrow(NodeDevError);
+      expect(gitCalls.length).toBe(0);
+    });
+
+    it("still refuses an absolute path outside custom_nodes, before any git call", () => {
+      mkPackFiles();
+      const { deps, gitCalls } = makeDeps();
+      expect(() =>
+        nodePackGit(
+          { pack: "Pack", action: "diff", paths: [join(workspace, "outside.py")] },
+          deps,
+        ),
+      ).toThrow(NodeDevError);
+      expect(gitCalls.length).toBe(0);
+    });
+
+    it("still refuses a symlink inside the pack that escapes custom_nodes", () => {
+      mkPackFiles();
+      const outside = join(tmpdir(), `node-dev-outside-${Date.now()}`);
+      mkdirSync(outside, { recursive: true });
+      writeFileSync(join(outside, "loot.py"), "secret\n");
+      try {
+        symlinkSync(outside, join(customNodes, "Pack", "link"), "junction");
+      } catch {
+        return; // environment can't create junctions — skip
+      }
+      const { deps, gitCalls } = makeDeps();
+      expect(() =>
+        nodePackGit({ pack: "Pack", action: "diff", paths: ["link/loot.py"] }, deps),
+      ).toThrow(/escapes custom_nodes/);
+      expect(gitCalls.length).toBe(0);
+      rmSync(outside, { recursive: true, force: true });
+    });
+
+    it("names the correction for the pack-name-prefixed spelling this bug forced", () => {
+      mkPackFiles();
+      const { deps, gitCalls } = makeDeps();
+      expect(() =>
+        nodePackGit(
+          { pack: "Pack", action: "diff", paths: ["Pack/preset_core.py"] },
+          deps,
+        ),
+      ).toThrow(/Drop the "Pack\/" prefix and pass "preset_core\.py"/);
+      expect(gitCalls.length).toBe(0);
+    });
+
+    it("keeps the literal reading when the pack really has a same-named subdir", () => {
+      mkPackFiles();
+      mkdirSync(join(customNodes, "Pack", "Pack"), { recursive: true });
+      writeFileSync(join(customNodes, "Pack", "Pack", "preset_core.py"), "x\n");
+      const { deps, gitCalls } = makeDeps();
+      nodePackGit(
+        { pack: "Pack", action: "diff", paths: ["Pack/preset_core.py"] },
+        deps,
+      );
+      expect(gitCalls[0].args).toEqual(["diff", "--", "Pack/preset_core.py"]);
+    });
+
+    it("refuses an empty path entry", () => {
+      mkPackFiles();
+      const { deps, gitCalls } = makeDeps();
+      expect(() =>
+        nodePackGit({ pack: "Pack", action: "diff", paths: ["  "] }, deps),
+      ).toThrow(/empty string/);
+      expect(gitCalls.length).toBe(0);
+    });
+
+    it("still refuses an NTFS alternate-data-stream path", () => {
+      mkPackFiles();
+      const { deps, gitCalls } = makeDeps();
+      expect(() =>
+        nodePackGit(
+          { pack: "Pack", action: "diff", paths: ["preset_core.py:hidden"] },
+          deps,
+        ),
+      ).toThrow(NodeDevError);
+      expect(gitCalls.length).toBe(0);
+    });
   });
 });
 

@@ -1476,19 +1476,68 @@ export function gitWritesEnabled(): boolean {
   return v === "1" || v === "true";
 }
 
-/** Jail-check a caller-supplied path and return it relative to the pack dir. */
+/**
+ * #2716: before this fix, the pack-name-prefixed spelling was the ONLY one that
+ * reached git, so callers learned it. Anchored at the pack root it now names
+ * `MyPack/MyPack/nodes.py` — and git answers a pathspec that matches nothing with an
+ * EMPTY diff, not an error, so the workaround would fail silently. Refuse it instead,
+ * naming the correction — but only where the disk proves the caller cannot have meant
+ * it literally: the prefixed target is absent AND the de-prefixed one exists. A pack
+ * that really does contain a same-named subdirectory keeps the literal reading.
+ */
+function assertNotPackPrefixed(
+  packDir: string,
+  original: string,
+  rel: string,
+  deps: NodeDevDeps,
+): void {
+  const segs = rel.split("/");
+  if (segs.length < 2) return;
+  if (segs[0].toLowerCase() !== basename(packDir).toLowerCase()) return;
+  if (deps.existsSync(join(packDir, ...segs))) return;
+  const stripped = segs.slice(1);
+  if (!deps.existsSync(join(packDir, ...stripped))) return;
+  throw new NodeDevError(
+    `Path "${original}" is resolved relative to the pack root, so it names ` +
+      `"${rel}", which does not exist. Drop the "${segs[0]}/" prefix and pass ` +
+      `"${stripped.join("/")}".`,
+  );
+}
+
+/**
+ * Jail-check one caller-supplied `paths` entry and return it relative to the pack dir.
+ *
+ * #2716: `paths` is documented as "pack-relative paths to stage/scope", and the pack is
+ * already chosen by `pack` — but a relative entry was resolved against the custom_nodes/
+ * ROOT, so the documented form ("preset_core.py") landed BESIDE the pack and every such
+ * call was refused as "outside the target pack". Anchor relative entries at the pack dir;
+ * containment is still decided by the single auditable resolver (lexical + symlink), which
+ * keeps the custom_nodes/ jail, plus the unchanged pack-containment check below.
+ */
 function packRelativePath(
   packDir: string,
   p: string,
   deps: NodeDevDeps,
   resolvedBase?: string,
 ): string {
-  const { abs } = resolveInJail(p, deps, resolvedBase);
+  const raw = (p ?? "").trim();
+  if (!raw) throw new NodeDevError("A path is required (received an empty string).");
+  // Scan the caller's OWN spelling: join() normalises away the shapes this refuses
+  // (UNC, drive-relative, NTFS alternate data streams) before resolveInJail could see them.
+  assertNoWindowsHazards(raw);
+
+  const { abs } = resolveInJail(
+    isAbsolute(raw) ? raw : join(packDir, raw),
+    deps,
+    resolvedBase,
+  );
   const rel = relative(packDir, abs);
   if (rel.startsWith("..") || isAbsolute(rel)) {
     throw new NodeDevError(`Path "${p}" is outside the target pack.`);
   }
-  return rel.split(/[\\/]/).join("/") || ".";
+  const posix = rel.split(/[\\/]/).join("/") || ".";
+  assertNotPackPrefixed(packDir, p, posix, deps);
+  return posix;
 }
 
 /** #809: the git action's real ceiling is READ_MAX_CHARS (24000) — a CODE clamp the
