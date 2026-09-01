@@ -277,27 +277,42 @@ function panelFailureReason(error: unknown): string | undefined {
 }
 
 /**
- * ABSENT or a bounded safe string - never anything else (#2703).
+ * ABSENT, or an OWN bounded safe string on the ONE code that carries one
+ * (#2703). Anything else is a malformed reply.
  *
- * Written as absent-OR-valid rather than folded into the `hasOnlyKeys` list
- * alone, because those two say different things: the key list decides which
- * fields MAY appear, and this decides what the field is allowed to contain. A
- * `reason` present but malformed is a malformed reply, not a reply with the
- * field quietly ignored - the MAC covers it, so a value we would not accept is
- * a value the writer and reader disagree about.
+ * Kept separate from the `hasOnlyKeys` list because the two say different
+ * things: the key list decides which fields MAY appear, and this decides what
+ * the field is allowed to be. A `reason` present but wrong is a malformed
+ * reply, not a reply with the field quietly ignored - the MAC covers it, so a
+ * value we would not accept is a value the writer and reader disagree about.
+ *
+ * Two refusals here that the first draft did not have (codex gate, round 2):
+ *
+ *  - THE CODE. Widening the key set let a signed `TIMEOUT` carrying a `reason`
+ *    validate, where before the extra key made it MALFORMED_REPLY. Dropping
+ *    that reason at RENDER time (the first draft did) fixed what the user sees
+ *    while still loosening the wire contract for every code except the one that
+ *    legitimately changed. Refusing it here restores the old answer for all of
+ *    them, and makes this the single place the rule is stated - the two readers
+ *    downstream may then simply repeat `response.reason`.
+ *
+ *  - INHERITANCE. `hasOwn` said "absent" for a `reason` reached through the
+ *    prototype while `record.reason` downstream reads it, so a polluted
+ *    `Object.prototype` slipped past this gate. It does NOT reach the user even
+ *    without this line - `responseMacPayload` reads the same inherited value and
+ *    the digest then disagrees with the sender's, so the reply is refused as
+ *    unauthenticated - but a guard whose correctness depends on a DIFFERENT
+ *    guard's arithmetic is not one worth keeping. An inherited value is refused
+ *    outright rather than accepted-if-safe: nothing on the wire put it there.
  */
 function validFailureReason(record: Record<string, unknown>): boolean {
-  if (!hasOwn(record, "reason")) return true;
-  return isSafeText(record.reason, PANEL_FAILURE_REASON_MAX);
-}
-
-/**
- * The reason a reader may believe: present, and on the ONE code it is minted
- * for (#2703). Shared by both readers so the rule cannot drift between them.
- */
-function keptFailureReason(response: PanelImageRelayResponseFailure, code: string): string | undefined {
-  if (code !== "PANEL_FETCH_FAILED") return undefined;
-  return response.error === code ? response.reason : undefined;
+  // The EFFECTIVE value (own or inherited), because that is what every reader
+  // of this record - including the MAC payload - will see.
+  const effective = (record as { reason?: unknown }).reason;
+  if (effective === undefined) return true;
+  if (!hasOwn(record, "reason")) return false;
+  if (record.error !== "PANEL_FETCH_FAILED") return false;
+  return isSafeText(effective, PANEL_FAILURE_REASON_MAX);
 }
 
 /** The one rendering of a carried reason, shared by both readers. */
@@ -800,17 +815,14 @@ function responseFailureMessage(response: PanelImageRelayResponseFailure): never
     "TIMEOUT",
   ]);
   const code = known.has(response.error) ? response.error : "PANEL_FETCH_FAILED";
-  // #2703 - only trust the reason on the code it was minted for, which is
-  // PANEL_FETCH_FAILED and nothing else. Two ways to get this wrong, and the
-  // first draft had the second (codex gate, finding 1):
-  //   - an UNKNOWN `error` is remapped to PANEL_FETCH_FAILED above, so keeping
-  //     its reason would attribute a sentence to a code the writer never sent;
-  //   - a known-but-different code (TIMEOUT) never carries a reason from OUR
-  //     writer, but `response` is attacker-supplied input that merely has to
-  //     verify. A correctly signed TIMEOUT+reason was accepted and appended to
-  //     the caller's timeout message. Enforce the invariant the writer honours
-  //     rather than assuming the peer honours it too.
-  const reason = keptFailureReason(response, code);
+  // #2703 - `response` reached here through validFailureReason, which admits a
+  // reason ONLY alongside a literal `PANEL_FETCH_FAILED` error. So a reason
+  // present here cannot belong to a remapped unknown code or to a TIMEOUT, and
+  // `code` necessarily equals `response.error`. A second filter at this point
+  // was written first and then removed: mutation testing showed it unreachable,
+  // and an unreachable guard that looks load-bearing misdirects the next reader
+  // about where the rule actually lives. It lives in validFailureReason.
+  const reason = response.reason;
   throw new PanelImageRelayError(
     code === "PANEL_FETCH_FAILED"
       ? `The connected panel could not fetch that image.${reasonSuffix(reason)}`
@@ -1473,9 +1485,9 @@ export async function requestPanelComfyUIRead(
       "TIMEOUT",
     ]);
     const code = known.has(response.error) ? response.error : "PANEL_FETCH_FAILED";
-    // #2703 - see responseFailureMessage for why this is PANEL_FETCH_FAILED
-    // only, and not "any code the writer did not remap".
-    const reason = keptFailureReason(response, code);
+    // #2703 - see responseFailureMessage: validFailureReason is where "only
+    // PANEL_FETCH_FAILED carries a reason" is enforced, on the way in.
+    const reason = response.reason;
     throw new PanelComfyUIReadRelayError(
       code === "PANEL_FETCH_FAILED"
         ? `The connected panel could not read ComfyUI.${reasonSuffix(reason)}`

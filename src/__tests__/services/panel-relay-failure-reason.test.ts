@@ -334,11 +334,13 @@ describe("#2703 — a PANEL_FETCH_FAILED read names its cause", () => {
     }
   });
 
-  it("does not attach a correctly signed reason to a code that never carries one", async () => {
-    // Codex gate, finding 1. Our writer only ever mints a reason alongside
-    // PANEL_FETCH_FAILED, but the response is input that merely has to verify —
-    // so the READER has to enforce that, not assume it. A signed TIMEOUT with a
-    // reason was previously appended to the caller's timeout message.
+  it("refuses a correctly signed reason on a code that never carries one", async () => {
+    // Codex gate r1 finding 1, then r2 finding 1. Our writer only ever mints a
+    // reason alongside PANEL_FETCH_FAILED, but the response is input that
+    // merely has to verify — so the READER enforces it. The first draft dropped
+    // the reason at render time and returned TIMEOUT; that fixed what the user
+    // reads while quietly widening the wire contract, since BEFORE this change
+    // the extra key made this reply MALFORMED_REPLY. It does again.
     const server = await staticSignedReply((requestId) => {
       const unsigned = {
         version: PANEL_IMAGE_RELAY_VERSION,
@@ -369,9 +371,93 @@ describe("#2703 — a PANEL_FETCH_FAILED read names its cause", () => {
         () => undefined,
         (error: unknown) => error,
       )) as PanelComfyUIReadRelayError;
-      expect(failure.code).toBe("TIMEOUT");
+      expect(failure.code).toBe("MALFORMED_REPLY");
       expect(failure.reason).toBeUndefined();
       expect(failure.message).not.toContain("must not carry");
+    } finally {
+      await server.close();
+    }
+  });
+
+  it("refuses a reason reached through a polluted prototype", async () => {
+    // `hasOwn` says "absent" for an inherited `reason` while every reader —
+    // including the MAC payload — sees it. The digest mismatch alone already
+    // refuses this reply, so the guard is the second line rather than the only
+    // one; it is here so the validator does not depend on another check's
+    // arithmetic to be correct (codex gate r2, finding 2).
+    const polluted = Object.prototype as unknown as { reason?: string };
+    const server = await staticSignedReply((requestId) => {
+      const unsigned = {
+        version: PANEL_IMAGE_RELAY_VERSION,
+        requestId,
+        ok: false,
+        error: "PANEL_FETCH_FAILED",
+        updated: Date.now(),
+      };
+      return {
+        ...unsigned,
+        responseMac: createHmac("sha256", SECRET)
+          .update(
+            JSON.stringify([unsigned.version, unsigned.requestId, false, unsigned.error, unsigned.updated]),
+          )
+          .digest("hex"),
+      };
+    });
+    polluted.reason = "z".repeat(5_000);
+    try {
+      const failure = (await requestPanelComfyUIRead("history").then(
+        () => undefined,
+        (error: unknown) => error,
+      )) as PanelComfyUIReadRelayError;
+      expect(failure.code).toBe("MALFORMED_REPLY");
+      expect(failure.message).not.toContain("zzz");
+    } finally {
+      delete polluted.reason;
+      await server.close();
+    }
+  });
+
+  it("ACCEPTS a well-formed signed reason on the same hand-built wire path", async () => {
+    // The positive control for every refusal above (codex gate r2, finding 3):
+    // those cases assert MALFORMED_REPLY, which the PRE-#2703 code also
+    // answered by rejecting the extra key — so on their own they cannot show
+    // the refusals are about the reason rather than about the path. This one
+    // travels the identical hand-built, hand-signed path and comes back
+    // ACCEPTED, so a change that broke reason support would fail HERE while the
+    // refusals stayed green, and the pair is what separates the two.
+    const server = await staticSignedReply((requestId) => {
+      const unsigned = {
+        version: PANEL_IMAGE_RELAY_VERSION,
+        requestId,
+        ok: false,
+        error: "PANEL_FETCH_FAILED",
+        updated: Date.now(),
+        reason: "fetch_comfyui_read history returned HTTP 403",
+      };
+      return {
+        ...unsigned,
+        responseMac: createHmac("sha256", SECRET)
+          .update(
+            JSON.stringify([
+              unsigned.version,
+              unsigned.requestId,
+              false,
+              unsigned.error,
+              unsigned.updated,
+              unsigned.reason,
+            ]),
+          )
+          .digest("hex"),
+      };
+    });
+    try {
+      const failure = (await requestPanelComfyUIRead("history").then(
+        () => undefined,
+        (error: unknown) => error,
+      )) as PanelComfyUIReadRelayError;
+      expect(failure.code).toBe("PANEL_FETCH_FAILED");
+      expect(failure.reason).toBe("fetch_comfyui_read history returned HTTP 403");
+      expect(failure.message).toContain("HTTP 403");
     } finally {
       await server.close();
     }
