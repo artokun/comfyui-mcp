@@ -1877,6 +1877,10 @@ export async function runPanelOrchestrator(): Promise<void> {
       bridge,
       resolvePanelAgent: panelImageRelayAgentFor,
       resolvePanelTab: scopeToRealTab,
+      resolveCurrentTarget: () => ({
+        url: getComfyUIBaseUrl(),
+        generation: getComfyuiTargetGeneration(),
+      }),
     });
     panelImageRelayEndpoint = panelImageRelayServer.endpointUrl;
   } catch (error) {
