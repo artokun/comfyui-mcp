@@ -848,6 +848,90 @@ describe("run completion across automatic goal continuation (#468)", () => {
     expect(text).toContain('get_image action:"get"');
   });
 
+  it("#2283: a matched PreviewImage completion names type:temp so get_image can fetch it without history", async () => {
+    // Headless get_image (action:"list_assets") / history can be ECONNREFUSED while the
+    // panel still queued the run. Filename-only completion text defaults
+    // get_image to type:"output" and misses PreviewImage's temp/ file.
+    const backend = new ContinuationBackend();
+    const { journal, manager, arrive } = makeHarness(backend);
+    const tab = "tab-preview-temp-ref";
+
+    journal.openRun(PROMPT_A, { tabId: tab });
+    manager.send(tab, "go");
+    await waitFor(() => backend.turns.length >= 1);
+    backend.finishTurn();
+
+    arrive(tab, {
+      kind: "executed",
+      prompt_id: PROMPT_A,
+      images: [
+        { filename: "ComfyUI_temp_00001_.png", type: "temp" },
+        { filename: "final_00001_.png" },
+      ],
+    });
+    await waitFor(() => backend.turns.length >= 2);
+
+    const text = backend.turns[1];
+    expect(backend.turnImages[1]).toEqual(["ComfyUI_temp_00001_.png", "final_00001_.png"]);
+    expect(text).toContain("This is the run YOU queued");
+    expect(text).toContain('ComfyUI_temp_00001_.png (type:"temp")');
+    expect(text).toContain("final_00001_.png");
+    expect(text).toContain("produced 2 output image(s)");
+  });
+
+  it("#2283: a custom completion note still names PreviewImage type:temp for get_image", async () => {
+    // A panel note replaces the default filename list, so the temp ref has to
+    // ride the inspect pointer or get_image defaults to type:"output".
+    const backend = new ContinuationBackend();
+    const { journal, manager, arrive } = makeHarness(backend);
+    const tab = "tab-preview-temp-note";
+
+    journal.openRun(PROMPT_A, { tabId: tab });
+    manager.send(tab, "go");
+    await waitFor(() => backend.turns.length >= 1);
+    backend.finishTurn();
+
+    arrive(tab, {
+      kind: "executed",
+      prompt_id: PROMPT_A,
+      note: "Preview tap on VAEDecode.",
+      images: [{ filename: "ComfyUI_temp_00001_.png", type: "temp" }],
+    });
+    await waitFor(() => backend.turns.length >= 2);
+
+    const text = backend.turns[1];
+    expect(text).toContain("Preview tap on VAEDecode.");
+    expect(text).toContain('ComfyUI_temp_00001_.png (type:"temp")');
+    expect(text).toContain('get_image action:"get"');
+  });
+
+  it("#2283: a text-only backend still gets PreviewImage temp coordinates", async () => {
+    class TextOnlyBackend extends ContinuationBackend {
+      readonly capabilities = { ...CLAUDE_CAPABILITIES, vision: false };
+    }
+    const backend = new TextOnlyBackend();
+    const { journal, manager, arrive } = makeHarness(backend);
+    const tab = "tab-preview-temp-text-only";
+
+    journal.openRun(PROMPT_A, { tabId: tab });
+    manager.send(tab, "go");
+    await waitFor(() => backend.turns.length >= 1);
+    backend.finishTurn();
+
+    arrive(tab, {
+      kind: "executed",
+      prompt_id: PROMPT_A,
+      images: [{ filename: "ComfyUI_temp_00002_.png", type: "temp", subfolder: "previews" }],
+    });
+    await waitFor(() => backend.turns.length >= 2);
+
+    const text = backend.turns[1];
+    expect(backend.turnImages[1]).toEqual([]);
+    expect(text).toContain("You cannot view images on this provider");
+    expect(text).toContain('ComfyUI_temp_00002_.png (type:"temp", subfolder:"previews")');
+    expect(text).toContain('get_image action:"get"');
+  });
+
   it("#1516: a completion whose outputs have no usable filename promises nothing", async () => {
     // attachedImgs is empty here for a reason that is NOT the budget, and the
     // old wording said "The image(s) are attached below" while attaching none.

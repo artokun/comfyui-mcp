@@ -14,8 +14,10 @@ import { join } from "node:path";
  * The only production path for a /view retry when the configured headless
  * ComfyUI target is unreachable. The child writes a reference-only request;
  * the orchestrator resolves an in-memory capability to a live panel and
- * performs the authenticated bridge command. No URL, origin, or file-supplied
- * tab identity crosses this channel.
+ * performs the authenticated bridge command. The child supplies only the
+ * canonical target identity it was spawned for; the orchestrator compares it
+ * with its current target before and after the bridge command. No origin or
+ * file-supplied tab identity crosses this channel.
  */
 export const PANEL_IMAGE_RELAY_VERSION = 1;
 export const PANEL_IMAGE_RELAY_MAX_BYTES = 32 * 1024 * 1024;
@@ -65,6 +67,9 @@ export interface PanelImageRelayRequest {
   version: typeof PANEL_IMAGE_RELAY_VERSION;
   requestId: string;
   capability: string;
+  /** Target identity captured by the child at spawn time. */
+  targetUrl: string;
+  targetGeneration: number;
   filename: string;
   subfolder: string;
   type: PanelImageType;
@@ -76,6 +81,9 @@ export interface PanelComfyUIReadRelayRequest {
   version: typeof PANEL_IMAGE_RELAY_VERSION;
   requestId: string;
   capability: string;
+  /** Target identity captured by the child at spawn time. */
+  targetUrl: string;
+  targetGeneration: number;
   operation: PanelComfyUIReadOperation;
   createdAt: number;
   deadlineAt: number;
@@ -83,9 +91,14 @@ export interface PanelComfyUIReadRelayRequest {
 
 export type PanelRelayRequest = PanelImageRelayRequest | PanelComfyUIReadRelayRequest;
 
+export interface PanelImageRelayTarget {
+  url: string;
+  generation: number;
+}
+
 export type PanelImageRelayAuthInput = Pick<
   PanelImageRelayRequest,
-  "requestId" | "filename" | "subfolder" | "type" | "createdAt" | "deadlineAt"
+  "requestId" | "targetUrl" | "targetGeneration" | "filename" | "subfolder" | "type" | "createdAt" | "deadlineAt"
 >;
 
 export interface PanelImageRelaySuccess {
@@ -240,9 +253,90 @@ function isSafeRelaySecret(value: unknown): value is string {
   return typeof value === "string" && RELAY_SECRET_RE.test(value);
 }
 
+const RELAY_TARGET_URL_MAX_LENGTH = 4_096;
+
+/** Keep only the identity-bearing, non-secret parts of a ComfyUI URL. */
+function canonicalRelayTargetUrl(value: unknown): string | undefined {
+  if (typeof value !== "string" || value.length === 0 || value.length > RELAY_TARGET_URL_MAX_LENGTH) return undefined;
+  try {
+    const url = new URL(value.trim());
+    if (
+      (url.protocol !== "http:" && url.protocol !== "https:") ||
+      url.username ||
+      url.password ||
+      url.search ||
+      url.hash
+    ) return undefined;
+    return `${url.protocol}//${url.host}${url.pathname.replace(/\/+$/, "")}`;
+  } catch {
+    return undefined;
+  }
+}
+
+function relayTargetFromEnv(): PanelImageRelayTarget | undefined {
+  const url = canonicalRelayTargetUrl(process.env.COMFYUI_URL);
+  const rawGeneration = process.env.COMFYUI_MCP_TARGET_GENERATION?.trim();
+  if (!url || !rawGeneration || !/^\d+$/.test(rawGeneration)) return undefined;
+  const generation = Number(rawGeneration);
+  if (!Number.isSafeInteger(generation) || generation < 0) return undefined;
+  return { url, generation };
+}
+
+function relayTargetMatches(request: PanelRelayRequest, target: PanelImageRelayTarget | undefined): boolean {
+  return !!target &&
+    canonicalRelayTargetUrl(request.targetUrl) === canonicalRelayTargetUrl(target.url) &&
+    request.targetGeneration === target.generation;
+}
+
+function currentRelayTarget(options: PanelImageRelayServerOptions): PanelImageRelayTarget | undefined {
+  try {
+    const target = options.resolveCurrentTarget();
+    if (
+      !target ||
+      typeof target.url !== "string" ||
+      !Number.isSafeInteger(target.generation) ||
+      target.generation < 0 ||
+      !canonicalRelayTargetUrl(target.url)
+    ) return undefined;
+    return target;
+  } catch {
+    return undefined;
+  }
+}
+
+function currentPanelRelayTarget(
+  options: PanelImageRelayServerOptions,
+  tabId: string,
+): PanelImageRelayTarget | undefined {
+  try {
+    const target = options.resolvePanelTarget(tabId);
+    if (
+      !target ||
+      typeof target.url !== "string" ||
+      !Number.isSafeInteger(target.generation) ||
+      target.generation < 0 ||
+      !canonicalRelayTargetUrl(target.url)
+    ) return undefined;
+    return target;
+  } catch {
+    return undefined;
+  }
+}
+
+function relayTargetsMatch(
+  options: PanelImageRelayServerOptions,
+  request: PanelRelayRequest,
+  panelTab: string,
+): boolean {
+  return relayTargetMatches(request, currentRelayTarget(options)) &&
+    relayTargetMatches(request, currentPanelRelayTarget(options, panelTab));
+}
+
 function relayAuthPayload(input: PanelImageRelayAuthInput): string {
   return JSON.stringify([
     input.requestId,
+    input.targetUrl,
+    input.targetGeneration,
     input.filename,
     input.subfolder,
     input.type,
@@ -267,13 +361,21 @@ export function verifyPanelImageRelayCapability(
   return timingSafeEqual(Buffer.from(request.capability, "hex"), Buffer.from(expected, "hex"));
 }
 
-function readRelayAuthPayload(input: Pick<PanelComfyUIReadRelayRequest, "requestId" | "operation" | "createdAt" | "deadlineAt">): string {
-  return JSON.stringify(["fetch_comfyui_read", input.requestId, input.operation, input.createdAt, input.deadlineAt]);
+function readRelayAuthPayload(input: Pick<PanelComfyUIReadRelayRequest, "requestId" | "targetUrl" | "targetGeneration" | "operation" | "createdAt" | "deadlineAt">): string {
+  return JSON.stringify([
+    "fetch_comfyui_read",
+    input.requestId,
+    input.targetUrl,
+    input.targetGeneration,
+    input.operation,
+    input.createdAt,
+    input.deadlineAt,
+  ]);
 }
 
 export function makePanelComfyUIReadRelayCapability(
   secret: string,
-  input: Pick<PanelComfyUIReadRelayRequest, "requestId" | "operation" | "createdAt" | "deadlineAt">,
+  input: Pick<PanelComfyUIReadRelayRequest, "requestId" | "targetUrl" | "targetGeneration" | "operation" | "createdAt" | "deadlineAt">,
 ): string {
   return createHmac("sha256", secret).update(readRelayAuthPayload(input)).digest("hex");
 }
@@ -478,10 +580,14 @@ function validateRequest(value: unknown, requestId: string): PanelImageRelayRequ
   const createdAt = record.createdAt;
   const deadlineAt = record.deadlineAt;
   if (
-    !hasOnlyKeys(record, ["version", "requestId", "capability", "filename", "subfolder", "type", "createdAt", "deadlineAt"]) ||
+    !hasOnlyKeys(record, ["version", "requestId", "capability", "targetUrl", "targetGeneration", "filename", "subfolder", "type", "createdAt", "deadlineAt"]) ||
     record.version !== PANEL_IMAGE_RELAY_VERSION ||
     record.requestId !== requestId ||
     !isSafeRelayCapability(capability) ||
+    !canonicalRelayTargetUrl(record.targetUrl) ||
+    typeof record.targetGeneration !== "number" ||
+    !Number.isSafeInteger(record.targetGeneration) ||
+    record.targetGeneration < 0 ||
     !isSafePanelImageRef(record.filename, record.subfolder, record.type) ||
     typeof createdAt !== "number" ||
     typeof deadlineAt !== "number" ||
@@ -500,10 +606,14 @@ function validateReadRequest(value: unknown, requestId: string): PanelComfyUIRea
   const createdAt = record.createdAt;
   const deadlineAt = record.deadlineAt;
   if (
-    !hasOnlyKeys(record, ["version", "requestId", "capability", "operation", "createdAt", "deadlineAt"]) ||
+    !hasOnlyKeys(record, ["version", "requestId", "capability", "targetUrl", "targetGeneration", "operation", "createdAt", "deadlineAt"]) ||
     record.version !== PANEL_IMAGE_RELAY_VERSION ||
     record.requestId !== requestId ||
     !isSafeRelayCapability(capability) ||
+    !canonicalRelayTargetUrl(record.targetUrl) ||
+    typeof record.targetGeneration !== "number" ||
+    !Number.isSafeInteger(record.targetGeneration) ||
+    record.targetGeneration < 0 ||
     typeof record.operation !== "string" ||
     !isPanelComfyUIReadOperation(record.operation) ||
     typeof createdAt !== "number" ||
@@ -585,6 +695,7 @@ function responseFailureMessage(response: PanelImageRelayResponseFailure): never
     "MALFORMED_REPLY",
     "NO_LIVE_PANEL",
     "PANEL_FETCH_FAILED",
+    "STALE_TARGET",
     "STALE_REQUEST",
     "TIMEOUT",
   ]);
@@ -876,6 +987,10 @@ export interface PanelImageRelayServerOptions {
   bridge: PanelImageRelayBridge;
   resolvePanelAgent: (request: PanelRelayRequest) => PanelImageRelayResolvedAgent | undefined;
   resolvePanelTab: (agentKey: string) => string | undefined;
+  /** The orchestrator's authoritative target and monotonic generation. */
+  resolveCurrentTarget: () => PanelImageRelayTarget;
+  /** The exact target identity currently proven for the selected live panel tab. */
+  resolvePanelTarget: (tabId: string) => PanelImageRelayTarget | undefined;
 }
 
 export interface PanelImageRelayServer {
@@ -945,6 +1060,11 @@ export async function startPanelImageRelayServer(
             now >= requestDeadline(request) ? "TIMEOUT" : "STALE_REQUEST",
             now >= requestDeadline(request) ? requestDeadline(request) : now,
           );
+        } else if (!relayTargetMatches(request, currentRelayTarget(options))) {
+          // A child can remain on the previous target while its agent turn drains
+          // across a retarget. Never let that authenticated child address the new
+          // live panel: the capability proves ownership, not target freshness.
+          response = failureResponse(request.requestId, "STALE_TARGET");
         } else {
           const panelTab = options.resolvePanelTab(auth.agentKey);
           if (!panelTab || !options.bridge.canReach(panelTab)) {
@@ -952,10 +1072,17 @@ export async function startPanelImageRelayServer(
               request.requestId,
               options.bridge.resolveFailure?.(auth.agentKey) === "ambiguous" ? "AMBIGUOUS_REQUESTER" : "NO_LIVE_PANEL",
             );
+          } else if (!relayTargetsMatch(options, request, panelTab)) {
+            // The global target fence does not prove that this particular tab
+            // fronts the child target. Missing, stale, or ambiguous tab proof
+            // must refuse before the targetless bridge command is dispatched.
+            response = failureResponse(request.requestId, "STALE_TARGET");
           } else {
             const remainingMs = requestDeadline(request) - Date.now();
             if (remainingMs <= 0) {
               response = failureResponse(request.requestId, "TIMEOUT", requestDeadline(request));
+            } else if (!relayTargetsMatch(options, request, panelTab)) {
+              response = failureResponse(request.requestId, "STALE_TARGET");
             } else {
               try {
                 const reply = await withinDeadline(
@@ -971,7 +1098,9 @@ export async function startPanelImageRelayServer(
                 const imagePayload = !isReadRelayRequest(request) && replyRecord
                   ? validateImagePayload({ base64: replyRecord.base64, mimeType: replyRecord.mimeType, bytes: replyRecord.bytes })
                   : undefined;
-                if (Date.now() >= requestDeadline(request)) {
+                if (!relayTargetsMatch(options, request, panelTab)) {
+                  response = failureResponse(request.requestId, "STALE_TARGET");
+                } else if (Date.now() >= requestDeadline(request)) {
                   response = failureResponse(request.requestId, "TIMEOUT", requestDeadline(request));
                 } else if (isReadRelayRequest(request)) {
                   const payload = replyRecord ? validateReadPayload(replyRecord) : undefined;
@@ -1053,11 +1182,15 @@ export async function requestPanelImage(
   const endpoint = relayEndpoint();
   const secret = process.env.COMFYUI_MCP_RELAY_SECRET;
   if (!endpoint || !isSafeRelaySecret(secret)) return undefined;
+  const target = relayTargetFromEnv();
+  if (!target) return undefined;
   const createdAt = Date.now();
   const request: PanelImageRelayRequest = {
     version: PANEL_IMAGE_RELAY_VERSION,
     requestId: `${Date.now().toString(36)}-${process.pid.toString(36)}-${randomBytes(8).toString("hex")}`,
     capability: "",
+    targetUrl: target.url,
+    targetGeneration: target.generation,
     filename,
     subfolder,
     type,
@@ -1127,12 +1260,16 @@ export async function requestPanelComfyUIRead(
   const endpoint = relayEndpoint();
   const secret = process.env.COMFYUI_MCP_RELAY_SECRET;
   if (!endpoint || !isSafeRelaySecret(secret)) return undefined;
+  const target = relayTargetFromEnv();
+  if (!target) return undefined;
   const createdAt = Date.now();
   const timeoutMs = readTimeoutMs(operation);
   const request: PanelComfyUIReadRelayRequest = {
     version: PANEL_IMAGE_RELAY_VERSION,
     requestId: `${Date.now().toString(36)}-${process.pid.toString(36)}-${randomBytes(8).toString("hex")}`,
     capability: "",
+    targetUrl: target.url,
+    targetGeneration: target.generation,
     operation,
     createdAt,
     deadlineAt: createdAt + timeoutMs,
@@ -1192,6 +1329,7 @@ export async function requestPanelComfyUIRead(
       "MALFORMED_REPLY",
       "NO_LIVE_PANEL",
       "PANEL_FETCH_FAILED",
+      "STALE_TARGET",
       "STALE_REQUEST",
       "TIMEOUT",
     ]);
@@ -1220,6 +1358,8 @@ export async function requestPanelImageFromFileChannel(
   const dir = process.env.COMFYUI_MCP_PROGRESS_DIR?.trim() ?? "";
   const secret = process.env.COMFYUI_MCP_RELAY_SECRET;
   if (!dir || !isSafeRelaySecret(secret)) return undefined;
+  const target = relayTargetFromEnv();
+  if (!target) return undefined;
   if (!isSafePanelImageRef(filename, subfolder, type)) {
     throw new PanelImageRelayError("The image reference is unsafe and was refused.", "UNSAFE_REFERENCE");
   }
@@ -1237,6 +1377,8 @@ export async function requestPanelImageFromFileChannel(
     version: PANEL_IMAGE_RELAY_VERSION,
     requestId,
     capability: "",
+    targetUrl: target.url,
+    targetGeneration: target.generation,
     filename,
     subfolder,
     type,

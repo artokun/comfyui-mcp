@@ -1877,6 +1877,25 @@ export async function runPanelOrchestrator(): Promise<void> {
       bridge,
       resolvePanelAgent: panelImageRelayAgentFor,
       resolvePanelTab: scopeToRealTab,
+      resolveCurrentTarget: () => ({
+        url: getComfyUIBaseUrl(),
+        generation: getComfyuiTargetGeneration(),
+      }),
+      resolvePanelTarget: (tabId) => {
+        // The hello URL names the exact target (including a mounted base path),
+        // while the WS Origin independently corroborates its server origin.
+        // Require both before allowing a targetless bridge command to use this
+        // tab; neither missing nor contradictory identity is safe to guess.
+        const tabOrigin = bridge.tabOrigin(tabId);
+        const serverOrigin = bridge.tabServerOrigin(tabId);
+        const claimedOrigin = canonicalOrigin(tabOrigin);
+        const observedOrigin = canonicalOrigin(serverOrigin);
+        if (!tabOrigin || !serverOrigin || !claimedOrigin || claimedOrigin !== observedOrigin) return undefined;
+        return {
+          url: tabOrigin,
+          generation: getComfyuiTargetGeneration(),
+        };
+      },
     });
     panelImageRelayEndpoint = panelImageRelayServer.endpointUrl;
   } catch (error) {
