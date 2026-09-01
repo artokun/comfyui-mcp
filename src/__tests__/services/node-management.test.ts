@@ -4081,6 +4081,20 @@ describe("node-management service", () => {
       expect(nodes[0].module).toBe("PackA");
     });
 
+    it("#2714 — an entry that states its own module is not overridden by a title", async () => {
+      // `module` is an IDENTITY here: it is sent to Manager as `node_name` on the
+      // uninstall/disable routes, matched by findInstalledNode, and scanned for on
+      // disk by the git-install corroboration. A label must not displace a module
+      // key the entry stated outright.
+      stubFetch({
+        installedBody: [
+          { title: "Pack A", module: "ComfyUI-PackA", ver: "1.0.0", cnr_id: "packa", enabled: true },
+        ],
+      });
+      const nodes = await listInstalledNodes();
+      expect(nodes[0].module).toBe("ComfyUI-PackA");
+    });
+
     it("missing enabled/is_disabled is UNKNOWN, never defaulted to a definite state", async () => {
       stubFetch({
         installedBody: {

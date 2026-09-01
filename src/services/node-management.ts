@@ -2125,17 +2125,19 @@ function parseInstalled(raw: unknown): InstalledNode[] {
         Boolean(entry && typeof entry === "object"),
       )
       .map((entry) => {
-        // #2714 — `module` IS AN IDENTITY, NOT A LABEL. This branch preferred
-        // `title` — prose — over the entry's own `module` key, and every consumer
-        // wants the module: it is sent to ComfyUI-Manager as `node_name` on the
-        // uninstall/disable/enable routes, matched by findInstalledNode, and (as
-        // of #2714) scanned for on disk. A title in that slot is wrong for all
-        // three. It stays as the LAST resort so an entry that carries nothing
-        // else still matches by the only name it has.
+        // #2714 — AN EXPLICIT `module` OUTRANKS A TITLE. This branch preferred
+        // `title` — prose — even when the entry stated its own `module` key, and
+        // every consumer of this field wants the module: it is sent to
+        // ComfyUI-Manager as `node_name` on the uninstall/disable/enable routes,
+        // matched by findInstalledNode, and (as of #2714) scanned for on disk. An
+        // entry that named its module and was overridden by a label could let an
+        // unrelated same-named directory certify an install that never happened.
+        // The title→cnr_id order BELOW it is unchanged: for an entry that states
+        // no module, the title is still the name Manager displays it under.
         const module =
           (typeof entry.module === "string" && entry.module) ||
-          (typeof entry.cnr_id === "string" && entry.cnr_id) ||
           (typeof entry.title === "string" && entry.title) ||
+          (typeof entry.cnr_id === "string" && entry.cnr_id) ||
           "unknown";
         return toNode(module, entry);
       });
