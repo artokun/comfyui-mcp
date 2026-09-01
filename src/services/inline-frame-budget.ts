@@ -21,15 +21,36 @@
  *
  * THE SIGNAL IS CONCURRENCY, NOT A CLOCK. A time window would have to guess which calls
  * share a frame, and it would shrink previews for a client that merely fetched several
- * images in a row — a real regression traded for a guess. The calls that land in one
- * code-mode frame are IN FLIGHT TOGETHER, because the script awaits them as a batch, and
- * that is directly observable from inside a tool handler.
+ * images in a row — a real regression traded for a guess. The calls of a batch that is
+ * AWAITED TOGETHER — which is the shape the report describes, and the shape `Promise.all`
+ * produces — are in flight together, and that is directly observable from inside a handler.
  *
  * MEASURED, against a real spawned stdio server rather than the in-memory pump, because
  * the whole design rests on it: nine parallel `tools/call` requests for a handler that
  * sleeps 150 ms completed in 166 ms, not 1350 ms, and every one of the nine handlers
- * observed nine slots held at once. Handlers overlap; the count is available where the
- * budget is chosen.
+ * observed nine slots held at once. Handlers overlap, and they are ADMITTED before any of
+ * them completes — a request already written to the pipe is read in microseconds, while the
+ * handler holding a slot is waiting on an HTTP fetch of a multi-megabyte image. So a
+ * "staggered" arrival in which one parallel call releases before its sibling is admitted is
+ * not a shape this transport produces.
+ *
+ * WHAT THIS DOES NOT COVER, stated plainly because the reservation is per-call and NOT per
+ * frame: a script that awaits its fetches ONE AT A TIME and forwards the results together.
+ * Each of those sees a peak of one, spends a full per-image budget, and five of them
+ * overrun the frame exactly as a parallel batch would.
+ *
+ * That gap is not closable from here, and the arithmetic says why rather than the intuition.
+ * By the time the fifth call runs, the first four have already been serialized and sent;
+ * nothing this call does can shrink them. Preventing it would mean charging EVERY call as
+ * though a sequence might follow — permanently lowering the single-image budget to
+ * aggregate/N for an N nobody knows — which is the regression this whole design refuses. A
+ * decaying cumulative cap fares no better in either direction: without a floor the fourth
+ * image in any session refuses, and with a floor of aggregate/16 nine sequential images
+ * still come to ~66 MB and overrun anyway.
+ *
+ * Reserving across a whole frame requires seeing the frame, and only the code-mode host
+ * does. That is why #2692 asks for chunking THERE, and it remains the complete fix; this
+ * bounds the shape that is visible from this side.
  *
  * WHY THE DEFAULT SINGLE-IMAGE PATH IS UNCHANGED. A call that overlaps nothing sees a peak
  * of one, so its share is the whole aggregate — 48 MB, three times the #1495 per-image
