@@ -1,5 +1,5 @@
 /**
- * Panel modules and the Director's canvas tools.
+ * Panel modules and the Director's graph tools.
  *
  * Two always-mounted entry points plus one mountable group:
  *
@@ -11,7 +11,7 @@
  *                    civitai_set_dock, training_close and training_set_dock, and no MCP tool
  *                    was ever wired to any of them, so the agent could open a pane and never
  *                    close it. One tool covers every surface, present and future.
- *   panel_director_graph / _link / _subgraph — the canvas. Mounted only while the Director
+ *   panel_director_graph / _link / _subgraph — the Director's graph. Mounted only while the Director
  *                    pane is open (see mountable-tools.ts).
  *
  * Every Director handler forwards ONE command over the bridge — `director_<action>` with the
@@ -46,7 +46,7 @@ function need(args: A, action: string, ...fields: string[]): ToolResult | null {
 const DIRECTOR_READ_MS = 12_000;
 const DIRECTOR_WRITE_MS = 20_000;
 
-/** Forward one canvas command and hand back the editor's reply. */
+/** Forward one Director graph command and hand back the editor's reply. */
 const forward = (ctx: PanelToolCtx, cmd: string, args: A, timeoutMs: number) => ctx.call({ ...args, cmd }, timeoutMs);
 
 export const PANEL_MODULES = [
@@ -214,7 +214,7 @@ export function buildDirectorToolDefs(): Array<PanelToolDef & { mountGroup?: Mou
       mountGroup: "director",
       description:
         "The Director's scene graph — nodes. `outline` returns every node (Scenes, assets, Beats with their rails) and every wire; read it first, ids come from here. " +
-        "`read_node` one node in full. `add_node` places a Scene / Character / Location / Item at canvas x,y (dropping inside a Beat joins it) and returns the id the EDITOR minted. " +
+        "`read_node` one node in full. `add_node` places a Scene / Character / Location / Item at Director graph x,y (dropping inside a Beat joins it) and returns the id the EDITOR minted. " +
         "`remove_node`, `move_node`, `set_title`, `set_color` (hex, Beats only), `set_collapsed` (subgraphs only), " +
         "`set_parent` (move a node into a Beat, or out with parent_id null), `set_pin` (show a node on its subgraph's collapsed face — only meaningful inside a subgraph). " +
         "The user can be editing the same graph by hand at the same time; re-read the outline rather than assuming your last write is the whole story.",
@@ -222,8 +222,8 @@ export function buildDirectorToolDefs(): Array<PanelToolDef & { mountGroup?: Mou
         action: z.enum(["outline", "read_node", "add_node", "remove_node", "move_node", "set_title", "set_color", "set_collapsed", "set_parent", "set_pin"]).describe("What to do."),
         id: z.string().optional().describe("Node id (from outline). Required for everything but outline/add_node."),
         kind: z.enum(["scene", "character", "location", "item"]).optional().describe("add_node: what to add."),
-        x: z.number().optional().describe("add_node/move_node: canvas x."),
-        y: z.number().optional().describe("add_node/move_node: canvas y."),
+        x: z.number().optional().describe("add_node/move_node: Director graph x."),
+        y: z.number().optional().describe("add_node/move_node: Director graph y."),
         label: z.string().optional().describe("add_node/set_title: title text."),
         color: z.string().optional().describe("set_color: hex like #34d399."),
         collapsed: z.boolean().optional().describe("set_collapsed."),
@@ -293,8 +293,8 @@ export function buildDirectorToolDefs(): Array<PanelToolDef & { mountGroup?: Mou
         to: z.number().int().optional().describe("reorder_rail: new index."),
         name: z.string().optional().describe("save_blueprint: blueprint name."),
         blueprint_id: z.string().optional().describe("apply_blueprint: id from list_blueprints."),
-        x: z.number().optional().describe("apply_blueprint: canvas x."),
-        y: z.number().optional().describe("apply_blueprint: canvas y."),
+        x: z.number().optional().describe("apply_blueprint: Director graph x."),
+        y: z.number().optional().describe("apply_blueprint: Director graph y."),
       },
       handler: async (args: A, ctx) => {
         const action = args.action as string;
@@ -317,15 +317,15 @@ export function buildDirectorToolDefs(): Array<PanelToolDef & { mountGroup?: Mou
     },
 
     // ── Calliope-backed tools ───────────────────────────────────────────────────
-    // These do not touch the canvas algebra; they reach Calliope THROUGH the pane, which owns
-    // the only client and re-reads the project after a mutation so the canvas shows what the
+    // These do not touch the Director's graph algebra; they reach Calliope THROUGH the pane, which owns
+    // the only client and re-reads the project after a mutation so the Director's graph shows what the
     // agent did. The pane refuses a (namespace, op) pair that is not a client method.
     {
       name: "panel_director_project",
       mountGroup: "director",
       description:
-        "Calliope projects behind the Director. `list` them; `create` one (title, optional idea/genre/tone/target_duration) — then `open` it so the canvas shows it; " +
-        "`current` says which project the canvas has loaded and whether Calliope is reachable; `refresh` re-reads it; `patch` edits title/idea/genre/tone/target_duration/status; `delete` removes a project and everything in it. " +
+        "Calliope projects behind the Director. `list` them; `create` one (title, optional idea/genre/tone/target_duration) — then `open` it so the Director's graph shows it; " +
+        "`current` says which project the Director's graph has loaded and whether Calliope is reachable; `refresh` re-reads it; `patch` edits title/idea/genre/tone/target_duration/status; `delete` removes a project and everything in it. " +
         "`settings_get` / `settings_set` read and write Calliope's own settings (its ComfyUI URL, queue concurrency, dry_run) — its LLM settings are dead config here: this agent is the only model in the loop.",
       schema: {
         action: z.enum(["list", "create", "open", "current", "refresh", "patch", "delete", "settings_get", "settings_set"]).describe("What to do."),
@@ -371,7 +371,7 @@ export function buildDirectorToolDefs(): Array<PanelToolDef & { mountGroup?: Mou
       mountGroup: "director",
       description:
         "The story layer of a Calliope project: Beats, Characters, Locations, Items. `read` returns the whole bundle. " +
-        "Beats (title, description, order_index) become Beat containers on the canvas; Characters (name, role, age, appearance, personality, consistency_prompt), Locations and Items (name, description, consistency_prompt) become asset nodes whose REF output wires into scenes. " +
+        "Beats (title, description, order_index) become Beat containers on the Director's graph; Characters (name, role, age, appearance, personality, consistency_prompt), Locations and Items (name, description, consistency_prompt) become asset nodes whose REF output wires into scenes. " +
         "Add/update/delete each with `<entity>_add`, `<entity>_update` (needs id), `<entity>_delete` (needs id). This agent writes the story; Calliope's own generators are never called.",
       schema: {
         action: z
