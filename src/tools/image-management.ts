@@ -270,9 +270,12 @@ export function registerImageManagementTools(server: McpServer): void {
         .positive()
         .optional()
         .describe(
-          'action:"get" — ceiling on the base64 payload returned INLINE (default ~16MB). ' +
+          'action:"get"/"view" — ceiling on the base64 payload returned INLINE (default ~16MB). ' +
             "The file saved to disk is never affected. Lower it when your client rejects " +
-            "or truncates large tool results; the reply says when it downscaled and by how much.",
+            "or truncates large tool results; the reply says when it downscaled and by how much. " +
+            "Several image fetches in flight at once SHARE a smaller aggregate ceiling, because a " +
+            "code-mode client packs a whole batch into ONE transport frame; the reply says so when " +
+            "that is what shrank the preview.",
         ),
       max_preview_dimension: z
         .number()
@@ -280,7 +283,7 @@ export function registerImageManagementTools(server: McpServer): void {
         .positive()
         .optional()
         .describe(
-          'action:"get" — ceiling on the inline preview\'s longest side in pixels ' +
+          'action:"get"/"view" — ceiling on the inline preview\'s longest side in pixels ' +
             "(default 4096). Applies even when the byte budget is satisfied, since some " +
             "consumers reject by dimension — but only for an image this server can decode; " +
             "an undecodable one under the byte budget is passed through as-is. Does not " +
@@ -361,8 +364,8 @@ export function registerImageManagementTools(server: McpServer): void {
       //
       // Held from the START of the call, before the fetch, so a member that finishes
       // downloading early still counts its siblings instead of spending a full budget.
-      // ONLY for the two actions that inline pixels — a concurrent list_assets must not
-      // widen the batch and shrink someone's preview.
+      // ONLY for the two actions that inline pixels — a concurrent action:"list_assets"
+      // must not widen the batch and shrink someone's preview.
       const inlineSlot =
         args.action === "get" || args.action === "view" ? acquireInlineImageSlot() : null;
       try {

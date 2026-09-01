@@ -43,8 +43,8 @@ const SUPPORTED_IMAGE_MIME_PREFIX = "image/";
  * assets and on non-image mime types (audio/video are not viewable inline).
  *
  * #2692 — THE #1495 BOUND WAS MISSING HERE. `get_image action:"get"` has capped its
- * inline payload since #1495; this action, the successor to the retired `view_image`,
- * inlined whatever it fetched at full encoded size. The two actions differ in where the
+ * inline payload since #1495; this action — the one the retired per-tool image viewer
+ * folded into — inlined whatever it fetched at full encoded size. The two actions differ in where the
  * pixels come from, not in what the transport can carry, so the same image that #1495
  * made viewable through `action:"get"` still blew the frame when viewed through here.
  *

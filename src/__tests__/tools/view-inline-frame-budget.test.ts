@@ -1,5 +1,5 @@
-// #2692 — a code-mode script awaited nine `view_image` results (now
-// `get_image action:"view"`) and forwarded all nine images. The serialized IPC frame came
+// #2692 — a code-mode script awaited nine `get_image action:"view"` results (the report
+// names it by the per-tool spelling that action replaced) and forwarded all nine images. The serialized IPC frame came
 // to 108,765,829 bytes against a hard 67,108,864-byte limit and the WHOLE response was
 // lost, including the eight images that were not the problem.
 //
@@ -220,7 +220,7 @@ describe("a BATCH of view calls fits one transport frame (#2692 defect 2)", () =
   });
 
   it("a NON-inlining action running alongside does not widen the batch", async () => {
-    // list_assets carries no pixels. If it took a slot it would shrink a real image's
+    // action:"list_assets" carries no pixels. If it took a slot it would shrink a real image's
     // preview for nothing, which is the over-refusal this design has to avoid.
     process.env.COMFYUI_MCP_AGGREGATE_INLINE_BYTES = String(SCALED_AGGREGATE);
     const image = await noisyPngBase64(320, 480, 4242);
