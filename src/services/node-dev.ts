@@ -1508,26 +1508,36 @@ function assertNotPackPrefixed(
  * Jail-check one caller-supplied `paths` entry and return it relative to the pack dir.
  *
  * #2716: `paths` is documented as "pack-relative paths to stage/scope", and the pack is
- * already chosen by `pack` — but a relative entry was resolved against the custom_nodes/
- * ROOT, so the documented form ("preset_core.py") landed BESIDE the pack and every such
- * call was refused as "outside the target pack". Anchor relative entries at the pack dir;
- * containment is still decided by the single auditable resolver (lexical + symlink), which
- * keeps the custom_nodes/ jail, plus the unchanged pack-containment check below.
+ * already chosen by `pack` — but a relative entry went to `resolveInJail()` as-is, and
+ * that anchors a relative input at the custom_nodes/ ROOT. So the documented form
+ * ("preset_core.py") landed BESIDE the pack and every such call was refused as "outside
+ * the target pack", leaving an undocumented pack-name prefix as the only spelling that
+ * worked. Anchor a relative entry at the pack instead.
+ *
+ * The anchor is applied to the jail-relative STRING (`<pack>/<entry>`) rather than by
+ * joining onto the resolved `packDir`, for two reasons: the resolver's Windows-hazard
+ * scan then still sees only caller-controlled segments (joining onto an absolute base
+ * would drag the install path's own segments through it), and an install whose
+ * custom_nodes/ is a junction keeps working — `packDir` is the REALPATH'd directory, so
+ * an absolute join would fail the resolver's lexical containment check against the
+ * un-resolved root. Containment itself is unchanged: the single auditable resolver still
+ * decides it (lexical + realpath, so the custom_nodes/ jail and its symlink/junction
+ * check are intact), and the result must still land inside the selected pack.
  */
 function packRelativePath(
   packDir: string,
+  packName: string,
   p: string,
   deps: NodeDevDeps,
   resolvedBase?: string,
 ): string {
   const raw = (p ?? "").trim();
+  // An empty entry would resolve to the pack itself and silently widen the command's
+  // scope to every file in it, which is what omitting `paths` already means.
   if (!raw) throw new NodeDevError("A path is required (received an empty string).");
-  // Scan the caller's OWN spelling: join() normalises away the shapes this refuses
-  // (UNC, drive-relative, NTFS alternate data streams) before resolveInJail could see them.
-  assertNoWindowsHazards(raw);
 
   const { abs } = resolveInJail(
-    isAbsolute(raw) ? raw : join(packDir, raw),
+    isAbsolute(raw) ? raw : join(packName, raw),
     deps,
     resolvedBase,
   );
@@ -1564,7 +1574,9 @@ export function nodePackGit(
     READ_MAX_CHARS,
   );
 
-  const relPaths = (options.paths ?? []).map((p) => packRelativePath(packDir, p, deps, resolvedBase));
+  const relPaths = (options.paths ?? []).map((p) =>
+    packRelativePath(packDir, name, p, deps, resolvedBase),
+  );
 
   let argv: string[];
   let timeoutMs = GIT_TIMEOUT_MS;
