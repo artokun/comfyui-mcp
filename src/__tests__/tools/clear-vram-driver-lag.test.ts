@@ -117,6 +117,14 @@ function freeOk(): Response {
 async function runClear(opts: {
   driverReleasesAtMs: number;
   baselineFree?: number;
+  /**
+   * An idle card: nothing was loaded, so /free releases nothing and NO counter
+   * moves — before or after. Keeping the counters genuinely static is what
+   * makes this a control: a fixture whose driver value differs across /free
+   * would satisfy the movement test by accident and could not detect the
+   * occupancy gate being removed.
+   */
+  idle?: boolean;
 }) {
   const sampledAt: number[] = [];
   let freeAt: number | null = null;
@@ -127,8 +135,10 @@ async function runClear(opts: {
   mocks.getSystemStats.mockImplementation(async () => {
     const now = Date.now();
     sampledAt.push(now);
+    const baselineFree = opts.baselineFree ?? STALE_FREE;
+    if (opts.idle) return gpuStats(baselineFree, TORCH_FREE_AFTER);
     // Before POST /free: the loaded card, torch pool occupied.
-    if (freeAt == null) return gpuStats(opts.baselineFree ?? STALE_FREE, TORCH_BUSY);
+    if (freeAt == null) return gpuStats(baselineFree, TORCH_BUSY);
     const since = now - freeAt;
     return gpuStats(
       since >= opts.driverReleasesAtMs ? TRUE_FREE : STALE_FREE,
@@ -210,11 +220,51 @@ describe("clear_vram against a driver that releases late (#2704)", () => {
     const { res, sampledAt, freeAt } = await runClear({
       driverReleasesAtMs: Number.MAX_SAFE_INTEGER,
       baselineFree: TRUE_FREE, // ~94% free: not occupied
+      idle: true,
     });
 
     const waited = sampledAt.at(-1)! - freeAt()!;
     expect(waited).toBeLessThan(CLEAR_VRAM_SETTLE_MIN_MS + CLEAR_VRAM_SETTLE_INTERVAL_MS * 3);
     expect(waited).toBeLessThan(CLEAR_VRAM_SETTLE_TIMEOUT_MS);
-    expect(textOf(res)).toContain(STALE_LINE);
+    expect(textOf(res)).toContain(TRUE_LINE);
+    // Nothing was in doubt here, so nothing should be hedged.
+    expect(textOf(res)).not.toContain(UNSETTLED_CAVEAT);
+  });
+
+  it("does not arm the wait on a device that reports no usable VRAM total", async () => {
+    // `free / total` says nothing when total is 0 or tiny, and an occupancy
+    // rule that reads such a device as "occupied" would block every clear_vram
+    // for the full cap on hardware it cannot measure at all.
+    const sampledAt: number[] = [];
+    let freeAt: number | null = null;
+    mocks.comfyApiFetch.mockImplementation(async () => {
+      freeAt = Date.now();
+      return freeOk();
+    });
+    mocks.getSystemStats.mockImplementation(async () => {
+      sampledAt.push(Date.now());
+      return {
+        system: { os: "win32", python_version: "3.12", embedded_python: false },
+        devices: [
+          {
+            name: "cpu",
+            type: "cpu",
+            index: 0,
+            vram_total: 0,
+            vram_free: 0,
+            torch_vram_total: 0,
+            torch_vram_free: 0,
+          },
+        ],
+      } satisfies SystemStats;
+    });
+
+    const pending = call({ unload_models: true, free_memory: true });
+    await vi.advanceTimersByTimeAsync(
+      CLEAR_VRAM_SETTLE_TIMEOUT_MS + CLEAR_VRAM_SETTLE_INTERVAL_MS * 2,
+    );
+    await pending;
+
+    expect(sampledAt.at(-1)! - freeAt!).toBeLessThan(CLEAR_VRAM_SETTLE_TIMEOUT_MS);
   });
 });
