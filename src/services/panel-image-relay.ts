@@ -262,6 +262,20 @@ const PANEL_FAILURE_REASON_MAX = 200;
  * leak #385 hit). Anything that fails the guard is dropped whole rather than
  * repaired, so the worst case is exactly the pre-#2703 bare code.
  */
+function panelFailureReason(error: unknown): string | undefined {
+  const raw = error instanceof Error ? error.message : typeof error === "string" ? error : "";
+  // Control characters are folded to spaces rather than rejecting the whole
+  // string: a message that merely wraps a line still carries its cause, and
+  // dropping it would put us back at the bare code this exists to replace.
+  const flattened = raw.replace(/[\u0000-\u001f\u007f]+/g, " ").replace(/\s+/g, " ").trim();
+  if (!flattened) return undefined;
+  const clipped =
+    flattened.length > PANEL_FAILURE_REASON_MAX
+      ? `${flattened.slice(0, PANEL_FAILURE_REASON_MAX - 1)}\u2026`
+      : flattened;
+  return isSafeText(clipped, PANEL_FAILURE_REASON_MAX) ? clipped : undefined;
+}
+
 /**
  * ABSENT or a bounded safe string - never anything else (#2703).
  *
@@ -280,20 +294,6 @@ function validFailureReason(record: Record<string, unknown>): boolean {
 /** The one rendering of a carried reason, shared by both readers. */
 function reasonSuffix(reason: string | undefined): string {
   return reason ? ` The panel reported: ${reason}` : "";
-}
-
-function panelFailureReason(error: unknown): string | undefined {
-  const raw = error instanceof Error ? error.message : typeof error === "string" ? error : "";
-  // Control characters are folded to spaces rather than rejecting the whole
-  // string: a message that merely wraps a line still carries its cause, and
-  // dropping it would put us back at the bare code this exists to replace.
-  const flattened = raw.replace(/[\u0000-\u001f\u007f]+/g, " ").replace(/\s+/g, " ").trim();
-  if (!flattened) return undefined;
-  const clipped =
-    flattened.length > PANEL_FAILURE_REASON_MAX
-      ? `${flattened.slice(0, PANEL_FAILURE_REASON_MAX - 1)}\u2026`
-      : flattened;
-  return isSafeText(clipped, PANEL_FAILURE_REASON_MAX) ? clipped : undefined;
 }
 
 /** Strict wire-level validation. Keep this stricter than the legacy tool path. */
