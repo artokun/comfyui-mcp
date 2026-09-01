@@ -3244,8 +3244,9 @@ type ManagerClaimCorroboration =
  * ComfyUI loads packs through `importlib.util.spec_from_file_location`, which
  * takes any string as the module name — and the filter it justified would have
  * dropped a real `custom_nodes/Foo Bar` and cloned a duplicate beside it (round 2).
- * The contamination it was actually defending against was `parseInstalled` putting
- * a human `title` in the `module` slot; that is fixed at its source instead.
+ * The contamination it was actually defending against is the title-in-`module`
+ * problem above, which `moduleKey` removes outright — so the heuristic bought
+ * nothing that reading the right field does not already give.
  */
 function packDirAliases(node: InstalledNode): string[] {
   const aliases: string[] = [];
