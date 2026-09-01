@@ -81,6 +81,19 @@ describe("fetchPanelBasePath (#296)", () => {
     expect(await fetchPanelBasePath("http://127.0.0.1:8188")).toBe("/opt/ComfyUI");
   });
 
+  it("reads the current panel status comfyui_path field", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      // Current panel builds expose folder_paths.base_path under this key.
+      json: async () => ({ comfyui_path: "/panel/current/ComfyUI" }),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const { fetchPanelBasePath } = await import("../../services/secure-bridge.js");
+    expect(await fetchPanelBasePath("http://127.0.0.1:8188")).toBe("/panel/current/ComfyUI");
+  });
+
   it("carries the ComfyUI auth headers so a token-gated panel answers", async () => {
     process.env.COMFYUI_AUTH_TOKEN = "abc123";
     const fetchMock = vi.fn().mockResolvedValue({
@@ -191,6 +204,27 @@ describe("resolveComfyuiPathForTarget (#296 adoption decision)", () => {
     });
     expect(out).toBe("/panel/ComfyUI");
     expect(fetchBasePath).toHaveBeenCalledWith(LOOPBACK);
+  });
+
+  it("adopts a current panel comfyui_path through the production fetcher", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({ comfyui_path: "/panel/current/ComfyUI" }),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const { resolveComfyuiPathForTarget } = await import("../../services/secure-bridge.js");
+    const out = await resolveComfyuiPathForTarget({
+      target: LOOPBACK,
+      localPath: undefined,
+      forceRemote: false,
+      isLoopback: true,
+      exists: (p) => p === "/panel/current/ComfyUI",
+    });
+
+    expect(out).toBe("/panel/current/ComfyUI");
+    expect(fetchMock).toHaveBeenCalled();
   });
 
   it("REFUSES a panel base_path that does not exist on this machine", async () => {

@@ -10,6 +10,7 @@ All notable changes to this project are documented here. This project adheres to
 
 #### Fixed
 - panel_run(to_node_id) treats the paired random-mode seed-control graph-stamp diff as queue-time volatility rather than a real graph mismatch, while outer WorkerTransport failures remain outcome-unknown and are fenced for control-plane recovery (#2120)
+- panel-connected apply_manifest adopts the current panel-reported local ComfyUI path when COMFYUI_PATH is unset (#463)
 
 ## [0.52.165] - 2026-08-30
 
