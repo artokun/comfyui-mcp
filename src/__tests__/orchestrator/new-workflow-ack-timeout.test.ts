@@ -234,6 +234,21 @@ describe("#2705: an unacked workflow_new is settled by the panel's own receipt",
     expect(String(body.note)).toMatch(/panel_graph_outline/);
     expect(String(body.note)).toMatch(/Do NOT call panel_new_workflow again/i);
   });
+
+  // Codex gate: `empty:"unknown"` next to prose that says "the blank workflow WAS
+  // created" is a reply that contradicts itself, and an agent acts on the prose.
+  // Asserting the FIELD alone left that contradiction green, so pin the words too.
+  it("does not contradict empty:\"unknown\" in the prose it ships beside it", async () => {
+    const res = await newWorkflow().handler(
+      {},
+      makeCtx({ newReply: ackTimeout, listReplies: [listWithActiveNewTab(appliedReceipt())] }),
+    );
+    const note = String(jsonOf(res).note);
+    expect(note).not.toMatch(/blank workflow WAS created/i);
+    expect(note).toMatch(/NEW WORKFLOW TAB WAS created and made active/);
+    // Nor may it assert whose nodes they are — nothing here has read that graph.
+    expect(note).not.toMatch(/belong to another workflow/i);
+  });
 });
 
 describe("#2705: what the recovery refuses to conclude", () => {
@@ -264,6 +279,7 @@ describe("#2705: what the recovery refuses to conclude", () => {
     expect(body.graph_binding).toBe("not_recovered");
     expect(stamps).toEqual([]);
     expect(fence).toBe(PRIOR_UUID);
+    expect(String(body.note)).toMatch(/DIFFERENT canvas/);
     expect(String(body.note)).toMatch(/panel_set_workflow_target/);
   });
 
@@ -285,6 +301,52 @@ describe("#2705: what the recovery refuses to conclude", () => {
     expect(res.isError).toBeFalsy();
     expect(jsonOf(res).workflow_instance_adopted).toBe(false);
     expect(stamps).toEqual([]);
+    expect(fence).toBe(PRIOR_UUID);
+  });
+
+  // Codex gate: `resolved: null` is a shape the PANEL really produces (several of
+  // its workflow_new failure paths journal it), and folding it into "a different
+  // workflow is active" would state drift that was never observed AND tell the
+  // caller to reopen by a routing key that does not exist.
+  it("says which canvas is in view is UNESTABLISHED when the receipt carries no routing identity", async () => {
+    const res = await newWorkflow().handler(
+      {},
+      makeCtx({
+        newReply: ackTimeout,
+        listReplies: [listWithActiveNewTab(appliedReceipt({ resolved: null }))],
+      }),
+    );
+    expect(res.isError).toBeFalsy();
+    const body = jsonOf(res);
+    expect(body.created).toBe(true);
+    expect(body.workflow_instance_adopted).toBe(false);
+    expect(body.routing_key).toBeUndefined();
+    const note = String(body.note);
+    expect(note).toMatch(/which canvas is in view was NOT established/);
+    expect(note).toMatch(/the receipt carried no routing identity/);
+    // Never the drift wording, and never "open it with its routing key".
+    expect(note).not.toMatch(/DIFFERENT canvas/);
+    expect(note).not.toMatch(/panel_open_workflow with/);
+    expect(fence).toBe(PRIOR_UUID);
+  });
+
+  it("says the same when the panel reports no readable ACTIVE record", async () => {
+    const res = await newWorkflow().handler(
+      {},
+      makeCtx({
+        newReply: ackTimeout,
+        // A receipt naming the tab it created, but nothing active to compare to.
+        listReplies: [{ active_confirmed: true, active: null, last_open: appliedReceipt() }],
+      }),
+    );
+    expect(res.isError).toBeFalsy();
+    const body = jsonOf(res);
+    expect(body.workflow_instance_adopted).toBe(false);
+    expect(body.routing_key).toBe(NEW_KEY);
+    const note = String(body.note);
+    expect(note).toMatch(/which canvas is in view was NOT established/);
+    expect(note).toMatch(/no readable routing identity for the active canvas/);
+    expect(note).not.toMatch(/DIFFERENT canvas/);
     expect(fence).toBe(PRIOR_UUID);
   });
 

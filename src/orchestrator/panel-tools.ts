@@ -14280,9 +14280,17 @@ interface NewWorkflowVerifyResult extends ReceiptPollCost {
   error?: string;
   /** The routing handle of the tab the receipt says this command created. */
   routingKey?: string;
-  /** The live `active` record still names that exact tab (so its identity is ours). */
-  activeIsCreatedTab?: boolean;
-  /** #716 shape-gated fence identity, and ONLY when `activeIsCreatedTab`. */
+  /** The routing handle the live `workflow_list` reports as the active canvas. */
+  activeKey?: string;
+  /**
+   * THREE states, not two (codex gate). "The active record names a different
+   * canvas" and "one of the two identities could not be read at all" are opposite
+   * facts with opposite remedies, and folding the second into the first is the
+   * absence-of-evidence collapse this repo keeps auditing for: it would tell a
+   * caller another workflow is in view when nothing was observed about what is.
+   */
+  corroboration?: "matched" | "different" | "unreadable";
+  /** #716 shape-gated fence identity, and ONLY when `corroboration === "matched"`. */
   workflowUuid?: string;
 }
 
@@ -14327,14 +14335,19 @@ async function waitForNewWorkflowReceipt(
   const error = typeof receipt.error === "string" ? receipt.error : undefined;
   if (receipt.applied === false) return { receipt: "not_applied", error, waited_ms, attempts };
   if (receipt.applied !== true) return { receipt: "unknown", error, waited_ms, attempts };
+  // The panel sets `resolved: null` on several failure paths and can report no
+  // active record at all, so EITHER side of this comparison can be missing. A
+  // missing side is `unreadable` — not `different`.
   const routingKey = routingKeyOf(receipt.resolved);
   const activeKey = routingKeyOf(parsed.active);
-  const activeIsCreatedTab = !!routingKey && routingKey === activeKey;
+  const corroboration: "matched" | "different" | "unreadable" =
+    !routingKey || !activeKey ? "unreadable" : routingKey === activeKey ? "matched" : "different";
   return {
     receipt: "applied",
     routingKey,
-    activeIsCreatedTab,
-    workflowUuid: activeIsCreatedTab ? responseWorkflowUuid(parsed.active) : undefined,
+    activeKey,
+    corroboration,
+    workflowUuid: corroboration === "matched" ? responseWorkflowUuid(parsed.active) : undefined,
     waited_ms,
     attempts,
   };
@@ -14708,26 +14721,42 @@ async function recoverTimedOutNewWorkflow(
   // #708's caveat rides EVERY recovered creation. The panel journals the receipt
   // BEFORE it decides whether the new tab is provably empty, so `applied:true`
   // proves the tab was created and is active — never that it is blank. Claiming
-  // "blank" here would be the exact fabrication the direct reply refuses to make.
+  // "blank" here would be the exact fabrication the direct reply refuses to make,
+  // and an earlier draft made it TWICE (codex gate): the lead said "the blank
+  // workflow WAS created" and this caveat then said the opposite, while the last
+  // clause asserted any nodes found "belong to another workflow" — a second
+  // unobserved claim about a graph nothing here has read.
   const blankCaveat =
     ` NOT PROVEN BLANK: the receipt records that the tab was created and made active; it does ` +
     `not carry the panel's zero-node proof, which the lost reply was going to. Call ` +
-    `panel_graph_outline before building — if it already has nodes they belong to another ` +
-    `workflow (#708) and you should open the one you actually want instead.`;
+    `panel_graph_outline before building — if it already holds nodes, this is not the fresh ` +
+    `canvas you asked for (a reconnect/tab-restore can leave the previously active graph on the ` +
+    `shared canvas — #708), so open the workflow you actually want rather than building here.`;
   const fenceNote = adopted
     ? ` This session's workflow-instance fence has been RE-POINTED at the new canvas` +
       `${verify.workflowUuid ? ` (${verify.workflowUuid})` : ""}, so graph tools target it rather ` +
       `than the workflow you were on.${fence ? fence.note : ""}`
-    : verify.activeIsCreatedTab
+    : verify.corroboration === "matched"
       ? ` This session's fence was NOT re-pointed: the panel reports the new tab as active, but ` +
         `${verify.workflowUuid ? `this bridge did not accept the stamp` : `it published no usable ` +
         `workflow-instance identity for that tab`}, so graph commands keep the stamp they had. ` +
         `Call panel_set_workflow_target({mode:"current"}) to bind onto it.`
-      : ` This session's fence was NOT re-pointed: the panel's live active record does NOT name ` +
-        `the tab this command created${verify.routingKey ? ` (${verify.routingKey})` : ""}, so ` +
-        `another workflow is in view now and adopting an identity from it would fence you to the ` +
-        `wrong canvas. Switch to the new tab (panel_open_workflow with its routing key), then ` +
-        `call panel_set_workflow_target({mode:"current"}).`;
+      : verify.corroboration === "different"
+        ? ` This session's fence was NOT re-pointed: the panel's live active record names a ` +
+          `DIFFERENT canvas (${verify.activeKey}) than the tab this command created ` +
+          `(${verify.routingKey}), so adopting an identity from it would fence you to the wrong ` +
+          `workflow. Switch to the new tab (panel_open_workflow with ${verify.routingKey}), then ` +
+          `call panel_set_workflow_target({mode:"current"}).`
+        : // UNREADABLE — one of the two identities was missing, so NOTHING was
+          // observed about which canvas is in view. Do not narrate that as drift.
+          ` This session's fence was NOT re-pointed, and which canvas is in view was NOT ` +
+          `established: ${
+            verify.routingKey
+              ? `the panel reported no readable routing identity for the active canvas`
+              : `the receipt carried no routing identity for the tab it created`
+          }, so there was nothing to compare and adopting an identity would have been a guess. ` +
+          `Call panel_list_workflows to see the open tabs, then ` +
+          `panel_set_workflow_target({mode:"current"}) once you know which one you are on.`;
   return ok({
     created: true,
     empty: "unknown",
@@ -14749,9 +14778,9 @@ async function recoverTimedOutNewWorkflow(
           ? "panel_new_workflow did not receive its acknowledgement within the 15s window"
           : "panel_new_workflow lost its acknowledgement — the tab disconnected mid-command"
       }, but the ` +
-      `panel's request-id-correlated receipt confirms the blank workflow WAS created (found after ` +
-      `${waited}). Do NOT call panel_new_workflow again — it is not idempotent and a retry would ` +
-      `leave a second blank tab.${fenceNote}${blankCaveat}`,
+      `panel's request-id-correlated receipt confirms a NEW WORKFLOW TAB WAS created and made ` +
+      `active (found after ${waited}). Do NOT call panel_new_workflow again — it is not ` +
+      `idempotent and a retry would leave a second blank tab.${fenceNote}${blankCaveat}`,
   });
 }
 
