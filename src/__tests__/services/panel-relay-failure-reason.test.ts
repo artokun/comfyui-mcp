@@ -385,7 +385,7 @@ describe("#2703 — a PANEL_FETCH_FAILED read names its cause", () => {
     // refuses this reply, so the guard is the second line rather than the only
     // one; it is here so the validator does not depend on another check's
     // arithmetic to be correct (codex gate r2, finding 2).
-    const polluted = Object.prototype as unknown as { reason?: string };
+    const polluted: { reason?: string } = Object.prototype;
     const server = await staticSignedReply((requestId) => {
       const unsigned = {
         version: PANEL_IMAGE_RELAY_VERSION,
