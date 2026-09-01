@@ -6,6 +6,11 @@ All notable changes to this project are documented here. This project adheres to
 
 ## Unreleased
 
+### MCP
+
+#### Fixed
+- panel_set_widget reconciles a missing ACK with a graph read-back and mutation receipt instead of leaving an applied subgraph write as outcome-unknown (#2489)
+
 ## [0.52.166] - 2026-09-01
 
 ### MCP
@@ -24,7 +29,6 @@ All notable changes to this project are documented here. This project adheres to
 - a loader input naming a file the server does not have says where it looked, and how to fix it (#2679)
 - a Windows updater that cannot reach npm or git says so, and says what to do (#2672)
 
-
 ## [0.52.165] - 2026-08-30
 
 ### MCP
@@ -41,7 +45,6 @@ All notable changes to this project are documented here. This project adheres to
 #### Fixed
 - check_runtime does not classify environment-authenticated paid Gemini and WaveSpeed nodes as local/free (#2543, #2665)
 - install_comfyui action:"environment" reports the pip-installed ComfyUI-Manager version from a trusted interpreter instead of a disabled custom_nodes/ComfyUI-Manager checkout (#2538, #2664)
-
 
 ## [0.52.163] - 2026-08-30
 
