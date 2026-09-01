@@ -810,16 +810,25 @@ function responseMacPayload(response: PanelRelayResponse): string {
     // `reason` is part of the SIGNED payload. A field the MAC does not cover is
     // a field the reader may not rely on, and this one is read out loud to the
     // user - an unauthenticated sentence attributed to the panel is worse than
-    // no sentence at all. `?? null` keeps "no reason" a distinct signed value,
-    // so a reasonless failure and a reasoned one never digest the same.
-    return JSON.stringify([
-      response.version,
-      response.requestId,
-      false,
-      response.error,
-      response.updated,
-      response.reason ?? null,
-    ]);
+    // no sentence at all.
+    //
+    // APPENDED, not always-present-as-null. Writing it unconditionally changed
+    // the digest of a REASONLESS failure too, and that is a compatibility break
+    // this fix has no business making: the relay server and its client are two
+    // PROCESSES. An in-place package update swaps `dist` under a running
+    // orchestrator, and the children it spawns afterwards load the new code
+    // while it still runs the old - so an old signer would meet a new verifier
+    // and every relay failure would read MALFORMED_REPLY until the orchestrator
+    // restarted. (Caught by the shipped `classifies an authenticated server
+    // TIMEOUT before deadline freshness` test, which hand-signs the pre-#2703
+    // payload; that test was the old signer, and it was right to reject the
+    // change.) Appending keeps the old shape byte-identical.
+    //
+    // The two forms still cannot be confused: a 5-element array and a
+    // 6-element one never serialise to the same string, so stripping a reason
+    // or adding one both fail verification.
+    const base = [response.version, response.requestId, false, response.error, response.updated];
+    return JSON.stringify(response.reason === undefined ? base : [...base, response.reason]);
   }
   if ("operation" in response) {
     return JSON.stringify([
