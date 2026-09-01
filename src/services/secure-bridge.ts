@@ -141,8 +141,11 @@ export async function fetchPanelBasePath(
     if (!res.ok) return undefined;
     const data = (await res.json()) as unknown;
     if (!data || typeof data !== "object") return undefined;
-    // The route's field is snake_case `base_path`; tolerate a camelCase alias.
+    // Current panel builds publish this as `comfyui_path` (the live
+    // folder_paths.base_path). Keep the original `base_path` spelling and the
+    // camelCase alias for older/interoperating panel builds.
     const raw =
+      (data as { comfyui_path?: unknown }).comfyui_path ??
       (data as { base_path?: unknown }).base_path ??
       (data as { basePath?: unknown }).basePath;
     if (typeof raw === "string" && raw.trim()) return raw.trim();
