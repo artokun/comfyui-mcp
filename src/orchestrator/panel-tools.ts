@@ -53,6 +53,7 @@ import { extname, isAbsolute, join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { comfyuiFetch } from "../comfyui/fetch.js";
 import { settleUntilStable } from "../services/vram-settle.js";
+import type { SettledRead } from "../services/vram-settle.js";
 import { assertPanelNotTargetedUnverifiable } from "../services/panel-pin-guard.js";
 import {
   findPackOnDisk,
@@ -4909,6 +4910,14 @@ function vramDevicesSignature(devices: VramDeviceSample[]): string {
     .join("|");
 }
 
+/** The DRIVER counters alone — the ones whose release lags. Torch hands its
+ *  pool back in ~400ms while `vram_free` can stay frozen for seconds, so
+ *  proving a release against the combined signature would certify the driver
+ *  as released on torch's schedule (#2704). */
+function vramDevicesReleaseSignature(devices: VramDeviceSample[]): string {
+  return devices.map((d) => `${d.index ?? d.name ?? ""}:${d.vram_free ?? ""}`).join("|");
+}
+
 /**
  * #2050 — POST /free returns when ComfyUI drops model refs; CUDA can still be
  * releasing. The 0.52.146 recurrence: panel_free_vram reported freed:true, a
@@ -4918,10 +4927,20 @@ function vramDevicesSignature(devices: VramDeviceSample[]): string {
 async function readSettledVramDevices(
   base: string,
   timeoutMs: number,
-): Promise<VramDeviceSample[] | null> {
+  before?: VramDeviceSample[] | null,
+): Promise<SettledRead<VramDeviceSample[]>> {
+  // #2704 — hold the poll against the PRE-/free counters, but only when the
+  // card was occupied enough that a release is expected to move them. A still
+  // reading is otherwise indistinguishable from a release that has not begun,
+  // which is how a frozen driver number was returned as settled at ~780ms.
+  const baseline =
+    before != null && occupiedVramDevices(before).length > 0
+      ? vramDevicesReleaseSignature(before)
+      : null;
   return settleUntilStable(
     () => readVramDevicesMaybe(base, timeoutMs),
     vramDevicesSignature,
+    { baseline, progressOf: vramDevicesReleaseSignature },
   );
 }
 
@@ -4932,6 +4951,9 @@ interface FreeVramDirectOutcome {
   reason?: string;
   before?: VramDeviceSample[] | null;
   after?: VramDeviceSample[] | null;
+  /** #2704 — false when `after` was returned at the settle cap without the
+   *  release ever being observed, i.e. the counters are reported unconfirmed. */
+  afterSettled?: boolean;
 }
 
 /** Issue ComfyUI's /free DIRECTLY against a proven-local base and read the
@@ -4962,8 +4984,8 @@ async function freeVramDirect(base: string): Promise<FreeVramDirectOutcome> {
   } finally {
     clearTimeout(timer);
   }
-  const after = await readSettledVramDevices(base, FREE_VRAM_DIRECT_TIMEOUT_MS);
-  return { ok: true, before, after };
+  const after = await readSettledVramDevices(base, FREE_VRAM_DIRECT_TIMEOUT_MS, before);
+  return { ok: true, before, after: after.value, afterSettled: after.settled };
 }
 
 /** Test injection for the direct server-side /free, so the settle can be
@@ -5016,6 +5038,11 @@ async function settleFreeVramAfterAckTimeout(
     via: `POST ${base}/free`,
     ...(direct.before != null ? { vram_before: direct.before } : {}),
     ...(direct.after != null ? { vram_after: direct.after } : {}),
+    // #2704 — a card whose release never landed inside the settle cap is
+    // reported, but never as a confirmed post-release measurement.
+    ...(direct.after != null && direct.afterSettled === false
+      ? { vram_after_settled: false }
+      : {}),
   };
   // #1866 — a 2xx from /free is not a free GPU. Ray/CLIP workers can keep a
   // device pinned. When we have occupancy numbers, they are the verdict.
@@ -5079,7 +5106,10 @@ async function annotateFreeVramAck(ctx: PanelToolCtx, res: ToolResult): Promise<
       note: UNOBSERVED_OCCUPANCY_NOTE,
     });
   }
-  const devices = await readSettledVramDevices(base, FREE_VRAM_DIRECT_TIMEOUT_MS);
+  // No pre-/free sample exists on this path — the tab already posted /free
+  // before it acked — so this read keeps the best-effort plateau rule and
+  // cannot rule out a still-settling card the way freeVramDirect can (#2704).
+  const devices = (await readSettledVramDevices(base, FREE_VRAM_DIRECT_TIMEOUT_MS)).value;
   if (devices == null) return res;
   const pinned = pinnedVramDevices(devices);
   if (pinned.length > 0) {
