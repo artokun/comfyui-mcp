@@ -232,6 +232,52 @@ describe("panel_free_vram against a driver that releases late (#2704)", () => {
     expect(payload.vram_after_settled).toBe(false);
   });
 
+  it("does not read a REORDERED device list as both cards having released", async () => {
+    // /system_stats does not promise a stable device order. Matching the
+    // baseline positionally would compare cuda:0's value against cuda:1's,
+    // find both "changed", and certify a box where nothing released at all.
+    let freeAt: number | null = null;
+    mocks.comfyuiFetch.mockImplementation(async () => {
+      freeAt = Date.now();
+      return { status: 200 };
+    });
+    const zero = () => gpu(STALE_FREE, 0);
+    // Same occupancy, DIFFERENT byte counts, so a positional compare sees a
+    // change on both entries the moment the order flips.
+    const one = () => ({ ...gpu(STALE_FREE - 4096, 0), name: "cuda:1", index: 1 });
+    __panelToolsTestHooks.setReadVramDevices(async () => {
+      if (freeAt == null) return [zero(), one()];
+      return [one(), zero()]; // reordered, but neither card moved
+    });
+
+    const res = await runFrozenTab();
+    const payload = JSON.parse(textOf(res)) as { vram_after_settled?: boolean };
+
+    expect(payload.vram_after_settled).toBe(false);
+  });
+
+  it("does not read a VANISHED device as one that released", async () => {
+    // A card that drops out of the sample proves nothing about its memory.
+    // Reading its absence as a release would certify a value nobody observed.
+    let freeAt: number | null = null;
+    mocks.comfyuiFetch.mockImplementation(async () => {
+      freeAt = Date.now();
+      return { status: 200 };
+    });
+    __panelToolsTestHooks.setReadVramDevices(async () => {
+      const busy = { ...gpu(STALE_FREE, 0), name: "cuda:1", index: 1 };
+      if (freeAt == null) return [gpu(STALE_FREE, 0), busy];
+      // cuda:1 disappears; cuda:0 genuinely releases.
+      const since = Date.now() - freeAt;
+      return [gpu(since >= 2_000 ? SETTLED_FREE : STALE_FREE, since >= 400 ? TORCH_TOTAL : 0)];
+    });
+
+    const res = await runFrozenTab();
+    const payload = JSON.parse(textOf(res)) as { vram_after_settled?: boolean };
+
+    expect(payload.vram_after_settled).toBe(false);
+  });
+
   it("does not wait for a release on a card that was already free", async () => {
     // Waiting for movement is only justified where movement is expected. An
     // idle card has nothing to release, so this must not sit out the whole cap

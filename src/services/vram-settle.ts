@@ -36,14 +36,19 @@ export interface SettledRead<T> {
 
 export interface SettleOptions<T> {
   /**
-   * `progressOf` of a reading taken BEFORE the mutation — one key per unit that
-   * is expected to release. Supply it and stillness stops being read as
-   * "settled": the release is proven only once EVERY key has moved.
+   * Identity -> pre-mutation value, one entry per unit expected to release.
+   * Supply it and stillness stops being read as "settled": the release is
+   * proven only once EVERY entry has moved.
    *
-   * Per-key rather than one combined string because a joined signature changes
+   * Per-unit rather than one combined string because a joined signature changes
    * as soon as ANY unit moves. On a two-GPU box that lets card 0 releasing
    * certify card 1, whose driver counter never moved at all — the same
    * substitution the torch pool was making, one level up.
+   *
+   * Keyed by identity rather than position because a device list can REORDER
+   * between samples. Matching by index would then compare card 0's value
+   * against card 1's, read every watched card as moved, and certify a wholly
+   * unreleased box.
    *
    * Only include units a release is actually expected from: a card that was
    * already free will never move, and demanding movement from it would spend
@@ -51,10 +56,10 @@ export interface SettleOptions<T> {
    *
    * Omit it (or pass null) when nothing needs proving.
    */
-  baseline?: readonly string[] | null;
+  baseline?: ReadonlyMap<string, string> | null;
   /**
-   * The projection whose movement PROVES the release landed, defaulting to
-   * `signatureOf`'s value as a single key.
+   * Identity -> current value, using the same identities as `baseline`.
+   * Defaults to `signatureOf`'s value under a single fixed key.
    *
    * #2704 — this must be allowed to differ from `signatureOf`. `signatureOf`
    * covers everything the caller reports, so it includes the torch pool; but
@@ -62,10 +67,8 @@ export interface SettleOptions<T> {
    * behind it. Testing movement against the combined signature would let that
    * torch movement stand in as proof the DRIVER released — which is the
    * original bug wearing a baseline. Narrow this to the counters that lag.
-   *
-   * Must be index-aligned with `baseline`.
    */
-  progressOf?: (value: T) => readonly string[];
+  progressOf?: (value: T) => ReadonlyMap<string, string>;
   /**
    * False when the caller could not establish a baseline it TRUSTS — typically
    * the pre-mutation read failed. The loop still returns on a plateau (there is
@@ -111,15 +114,16 @@ export async function settleUntilStable<T>(
   options: SettleOptions<T> = {},
 ): Promise<SettledRead<T>> {
   const baseline = options.baseline ?? null;
-  const progressOf = options.progressOf ?? ((value: T) => [signatureOf(value)]);
+  const progressOf =
+    options.progressOf ?? ((value: T) => new Map([["", signatureOf(value)]]));
   const confirmable = options.confirmable ?? true;
   const started = Date.now();
   const deadline = started + VRAM_SETTLE_TIMEOUT_MS;
   let lastSig: string | null = null;
-  // Keys still sitting on their pre-mutation value. Emptying is LATCHED per
-  // key: a unit that moves has demonstrably released, even if a later sample
-  // happens to land back on the baseline value.
-  const unmoved = new Set<number>(baseline ? baseline.map((_, i) => i) : []);
+  // Identities still sitting on their pre-mutation value. Emptying is LATCHED
+  // per identity: a unit that moves has demonstrably released, even if a later
+  // sample happens to land back on the baseline value.
+  const unmoved = new Set<string>(baseline ? baseline.keys() : []);
 
   for (;;) {
     let current: T | null;
@@ -133,10 +137,13 @@ export async function settleUntilStable<T>(
     const sig = signatureOf(current);
     const elapsed = Date.now() - started;
     if (baseline !== null && unmoved.size > 0) {
-      const keys = progressOf(current);
-      for (const i of [...unmoved]) {
-        // A missing key is a changed key: the unit it described is gone.
-        if (keys[i] !== baseline[i]) unmoved.delete(i);
+      const now = progressOf(current);
+      for (const id of [...unmoved]) {
+        const seen = now.get(id);
+        // A device that VANISHED from the sample proves nothing — absence is
+        // not a release. Leave it unmoved and let the cap expire into an
+        // honest "unconfirmed" rather than certifying a value we cannot see.
+        if (seen !== undefined && seen !== baseline.get(id)) unmoved.delete(id);
       }
     }
     const stable = lastSig !== null && sig === lastSig;

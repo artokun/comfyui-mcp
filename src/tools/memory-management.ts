@@ -35,10 +35,10 @@ function vramSignature(stats: SystemStats): string {
  * holding ~29 GB. That is the reported bug, and testing movement against the
  * combined signature would reintroduce it.
  */
-function vramReleaseSignature(stats: SystemStats): readonly string[] {
+function vramReleaseSignature(stats: SystemStats): ReadonlyMap<string, string> {
   const gpu = stats.devices?.[0];
-  if (!gpu) return [""];
-  return [`${gpu.vram_free}`];
+  if (!gpu) return new Map();
+  return new Map([[`${gpu.index ?? gpu.name ?? "0"}`, `${gpu.vram_free}`]]);
 }
 
 function formatVramStats(stats: SystemStats, settled = true): string {
@@ -73,7 +73,7 @@ function formatVramStats(stats: SystemStats, settled = true): string {
  * device 0's release is exactly what backs the number being reported. Proving a
  * second card released would not make the printed figure any more true.
  */
-function settleBaselineOf(before: SystemStats | null): readonly string[] | null {
+function settleBaselineOf(before: SystemStats | null): ReadonlyMap<string, string> | null {
   const gpu = before?.devices?.[0];
   if (!gpu) return null;
   const free = gpu.vram_free;
@@ -81,7 +81,8 @@ function settleBaselineOf(before: SystemStats | null): readonly string[] | null 
   if (!Number.isFinite(free) || !Number.isFinite(total)) return null;
   if (total < VRAM_OCCUPIED_MIN_TOTAL_BYTES) return null;
   if (free > total * VRAM_OCCUPIED_FREE_RATIO) return null;
-  return vramReleaseSignature(before as SystemStats);
+  const keys = vramReleaseSignature(before as SystemStats);
+  return keys.size > 0 ? keys : null;
 }
 
 /** Best effort — a baseline we cannot read costs precision, never the clear. */

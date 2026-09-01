@@ -4923,10 +4923,14 @@ function vramDeviceKey(d: VramDeviceSample): string {
 function vramDeviceReleaseKeys(
   devices: VramDeviceSample[],
   only?: ReadonlySet<string>,
-): readonly string[] {
-  return devices
-    .filter((d) => only == null || only.has(vramDeviceKey(d)))
-    .map((d) => `${vramDeviceKey(d)}:${d.vram_free ?? ""}`);
+): ReadonlyMap<string, string> {
+  const keys = new Map<string, string>();
+  for (const d of devices) {
+    const id = vramDeviceKey(d);
+    if (only != null && !only.has(id)) continue;
+    keys.set(id, `${d.vram_free ?? ""}`);
+  }
+  return keys;
 }
 
 /**
@@ -4947,7 +4951,8 @@ async function readSettledVramDevices(
   // were already free are excluded rather than waited on: they will never move.
   const occupiedBefore = before != null ? occupiedVramDevices(before) : [];
   const watched = new Set(occupiedBefore.map(vramDeviceKey));
-  const baseline = watched.size > 0 ? vramDeviceReleaseKeys(before!, watched) : null;
+  const baselineKeys = watched.size > 0 ? vramDeviceReleaseKeys(before!, watched) : null;
+  const baseline = baselineKeys != null && baselineKeys.size > 0 ? baselineKeys : null;
   return settleUntilStable(
     () => readVramDevicesMaybe(base, timeoutMs),
     vramDevicesSignature,
