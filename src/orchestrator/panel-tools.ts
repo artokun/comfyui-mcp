@@ -3717,8 +3717,15 @@ async function awaitTabWhileContinuingRecovery(args: {
  * workflow matching …") comes back as a normal error REPLY the bridge received
  * and relayed, NOT a timeout, so it is never treated as a candidate for recovery
  * and still fails clearly. Defensive: non-error results are never a timeout.
+ *
+ * #2705 — `cmd` is a PARAMETER, not a widened pattern. The command name stays
+ * INSIDE the anchored form, so `workflow_new`'s recovery cannot be opened by a
+ * `workflow_open` timeout and vice versa; the union type is what keeps a caller
+ * from passing a name the bridge never writes. The two accepted values contain no
+ * regex metacharacters, so they are interpolated as-is — a `RegExp` built from an
+ * arbitrary string would be the thing to avoid here, and the type forbids it.
  */
-function isAckTimeout(res: ToolResult): boolean {
+function isAckTimeout(res: ToolResult, cmd: "workflow_open" | "workflow_new" = "workflow_open"): boolean {
   if (!res?.isError) return false;
   const text = res?.content?.find((c) => c.type === "text")?.text ?? "";
   // Match the CANONICAL bridge ack-timeout SPECIFICALLY (ui-bridge.ts): a
@@ -3752,7 +3759,10 @@ function isAckTimeout(res: ToolResult): boolean {
   // isReplyTimeoutError documents). The bridge message never carries leading
   // whitespace, so trimming buys nothing and only lets a whitespace/newline-
   // prefixed acked error reach the receipt-recovery path.
-  return /^(?:Error: )?Panel tab .+? did not reply to "workflow_open" within \d+\s*ms/i.test(text);
+  return new RegExp(
+    `^(?:Error: )?Panel tab .+? did not reply to "${cmd}" within \\d+\\s*ms`,
+    "i",
+  ).test(text);
 }
 
 /**
@@ -14128,16 +14138,44 @@ function resolvedOpenPathMatches(receipt: Record<string, unknown>, path: string)
 }
 
 /**
- * Poll `workflow_list` for the #514 `last_open` receipt for this exact bridge rid.
- * Active workflow state is deliberately ignored as recovery proof. Older panels
- * without receipt fields are identified promptly and remain undetermined.
+ * How much of the poll was spent, for the caller's message. Carried on every
+ * outcome so a recovery can say how long it looked, not just what it found.
  */
-async function waitForOpenReceipt(
+interface ReceiptPollCost {
+  waited_ms: number;
+  attempts: number;
+}
+
+/**
+ * The TRANSPORT half of receipt recovery: poll `workflow_list` until the #514
+ * `last_open` receipt minted for THIS exact bridge rid AND this exact command
+ * name appears, the panel proves itself too old to have receipts, or the budget
+ * runs out. It reads the correlation and nothing else — every judgement about
+ * what the receipt MEANS belongs to the caller, because `workflow_open` and
+ * `workflow_new` corroborate an applied receipt against different things (a
+ * caller-supplied path vs the tab the command itself minted).
+ *
+ * Extracted from `waitForOpenReceipt` (#2705) rather than copied: the
+ * correlation rule — rid, `answers_only_command_rid`, AND `cmd` — is the load-
+ * bearing guard on both paths, and two copies of it would be two chances for one
+ * to drift into accepting a receipt for someone else's command.
+ *
+ * Active workflow state is deliberately ignored as recovery proof here. Older
+ * panels without receipt fields are identified promptly and remain undetermined.
+ */
+type CorrelatedReceiptProbe = ReceiptPollCost &
+  (
+    | { kind: "matched"; parsed: Record<string, unknown>; receipt: Record<string, unknown> }
+    | { kind: "unsupported" }
+    | { kind: "missing" }
+  );
+
+async function waitForCorrelatedOpenReceipt(
   ctx: PanelToolCtx,
-  path: string,
+  cmd: "workflow_open" | "workflow_new",
   rid: string,
   timing: OpenVerifyTiming,
-): Promise<OpenVerifyResult> {
+): Promise<CorrelatedReceiptProbe> {
   const start = Date.now();
   const deadline = start + timing.budgetMs;
   const intervalMs = openVerifyTimingOverride
@@ -14154,49 +14192,13 @@ async function waitForOpenReceipt(
       // #514 always includes active_confirmed, including when last_open is null.
       // Its absence identifies an older panel which cannot make recovery claims.
       if (!("active_confirmed" in parsed) && !("last_open" in parsed)) {
-        return { receipt: "unsupported", waited_ms: Date.now() - start, attempts };
+        return { kind: "unsupported", waited_ms: Date.now() - start, attempts };
       }
       const lastOpen = parsed.last_open;
       if (lastOpen && typeof lastOpen === "object") {
         const receipt = lastOpen as Record<string, unknown>;
-        if (receipt.rid === rid && receipt.answers_only_command_rid === rid && receipt.cmd === "workflow_open") {
-          // The exact RID identifies this command. Keep a target check as an
-          // accidental wrong-workflow guard; active itself is never proof.
-          if (!resolvedOpenPathMatches(receipt, path)) {
-            return { receipt: "unknown", waited_ms: Date.now() - start, attempts };
-          }
-          if (receipt.applied === true) {
-            // A receipt proves this open applied, but a later user switch could
-            // have made another canvas active before this probe.  Refresh only
-            // when the current active object still names this exact target.
-            const active = parsed.active;
-            const resolved = receipt.resolved as Record<string, unknown>;
-            const resolvedPath = resolved.path as string;
-            // The receipt has already proved the command's exact resolved path.
-            // Still require its routing claim and the live active record to
-            // corroborate the ORIGINAL request identity before refreshing.
-            const requestedIdentity = canonicalRequestedSavedIdentity(path);
-            const resolvedIdentity = canonicalSavedRecordIdentity({
-              path: resolvedPath,
-              routing_key: resolved.routing_key,
-            });
-            const workflowUuid =
-              requestedIdentity &&
-              requestedIdentity === resolvedIdentity &&
-              activeMatchesOpenRefreshTarget(active, path)
-              ? responseWorkflowUuid(active)
-              : undefined;
-            return { receipt: "applied", workflowUuid, waited_ms: Date.now() - start, attempts };
-          }
-          if (receipt.applied === false) {
-            return {
-              receipt: "not_applied",
-              error: typeof receipt.error === "string" ? receipt.error : undefined,
-              waited_ms: Date.now() - start,
-              attempts,
-            };
-          }
-          return { receipt: "unknown", waited_ms: Date.now() - start, attempts };
+        if (receipt.rid === rid && receipt.answers_only_command_rid === rid && receipt.cmd === cmd) {
+          return { kind: "matched", parsed, receipt, waited_ms: Date.now() - start, attempts };
         }
       }
     }
@@ -14204,7 +14206,138 @@ async function waitForOpenReceipt(
     if (left <= 0) break;
     await sleep(Math.min(intervalMs, left));
   }
-  return { receipt: "missing", waited_ms: Date.now() - start, attempts };
+  return { kind: "missing", waited_ms: Date.now() - start, attempts };
+}
+
+/**
+ * Poll `workflow_list` for the #514 `last_open` receipt for this exact bridge rid,
+ * then decide what it says about THIS `workflow_open`.
+ */
+async function waitForOpenReceipt(
+  ctx: PanelToolCtx,
+  path: string,
+  rid: string,
+  timing: OpenVerifyTiming,
+): Promise<OpenVerifyResult> {
+  const probe = await waitForCorrelatedOpenReceipt(ctx, "workflow_open", rid, timing);
+  const { waited_ms, attempts } = probe;
+  if (probe.kind === "unsupported") return { receipt: "unsupported", waited_ms, attempts };
+  if (probe.kind === "missing") return { receipt: "missing", waited_ms, attempts };
+  const { parsed, receipt } = probe;
+  // The exact RID identifies this command. Keep a target check as an
+  // accidental wrong-workflow guard; active itself is never proof.
+  if (!resolvedOpenPathMatches(receipt, path)) {
+    return { receipt: "unknown", waited_ms, attempts };
+  }
+  if (receipt.applied === true) {
+    // A receipt proves this open applied, but a later user switch could
+    // have made another canvas active before this probe.  Refresh only
+    // when the current active object still names this exact target.
+    const active = parsed.active;
+    const resolved = receipt.resolved as Record<string, unknown>;
+    const resolvedPath = resolved.path as string;
+    // The receipt has already proved the command's exact resolved path.
+    // Still require its routing claim and the live active record to
+    // corroborate the ORIGINAL request identity before refreshing.
+    const requestedIdentity = canonicalRequestedSavedIdentity(path);
+    const resolvedIdentity = canonicalSavedRecordIdentity({
+      path: resolvedPath,
+      routing_key: resolved.routing_key,
+    });
+    const workflowUuid =
+      requestedIdentity &&
+      requestedIdentity === resolvedIdentity &&
+      activeMatchesOpenRefreshTarget(active, path)
+      ? responseWorkflowUuid(active)
+      : undefined;
+    return { receipt: "applied", workflowUuid, waited_ms, attempts };
+  }
+  if (receipt.applied === false) {
+    return {
+      receipt: "not_applied",
+      error: typeof receipt.error === "string" ? receipt.error : undefined,
+      waited_ms,
+      attempts,
+    };
+  }
+  return { receipt: "unknown", waited_ms, attempts };
+}
+
+/** A `routing_key` from a receipt's `resolved` block, or from a `workflow_list`
+ *  record — the per-instance handle (`tmp:<uuid>` unsaved, `wf:<path>` saved) that
+ *  is the ONLY thing that distinguishes two unsaved tabs from each other. Empty,
+ *  absent, or non-string reads as "no identity", never as a match. */
+function routingKeyOf(value: unknown): string | undefined {
+  if (!value || typeof value !== "object") return undefined;
+  const key = (value as { routing_key?: unknown }).routing_key;
+  return typeof key === "string" && key.trim() ? key.trim() : undefined;
+}
+
+/** What the panel's rid-correlated receipt says about ONE `workflow_new`. */
+interface NewWorkflowVerifyResult extends ReceiptPollCost {
+  receipt: "applied" | "not_applied" | "unknown" | "unsupported" | "missing";
+  /** The panel's own error text, when it journaled one. */
+  error?: string;
+  /** The routing handle of the tab the receipt says this command created. */
+  routingKey?: string;
+  /** The live `active` record still names that exact tab (so its identity is ours). */
+  activeIsCreatedTab?: boolean;
+  /** #716 shape-gated fence identity, and ONLY when `activeIsCreatedTab`. */
+  workflowUuid?: string;
+}
+
+/**
+ * #2705 — the `workflow_new` half of receipt recovery.
+ *
+ * `panel_new_workflow` timed out after 15s, the blank tab HAD been created, and
+ * the tool returned the raw ack-timeout: no receipt lookup, and — the part that
+ * wedged the session — no fence refresh, so the next `panel_graph_outline` was
+ * refused with `workflow instance mismatch` naming the workflow the user had just
+ * left. The panel already journals this command (`noteOpenAttempt({cmd:
+ * "workflow_new", …})` on every exit, `applied:true` only where the tab exists and
+ * is active), so the evidence is a STRUCTURED, rid-correlated receipt rather than
+ * a re-read of `active` — which after a reconnect names a tab the frontend
+ * restored by itself and proves nothing about our command.
+ *
+ * CORROBORATION IS DIFFERENT FROM THE OPEN PATH, because the identity is. An open
+ * has a caller-supplied path to check the receipt against; a new workflow has no
+ * caller target at all — the command MINTS its target. So the check is: the
+ * receipt names the routing key its own execution created, and the live `active`
+ * record still names that same key. That is what makes `active.workflow_uuid`
+ * safe to adopt: the two fields come from one observation of one tab
+ * (`liveWorkflowListActive`), so a matching routing key means the uuid belongs to
+ * the tab this rid created, not to whatever happens to be in view.
+ *
+ * Nothing is adopted without that match. `applied:"unknown"` — which the panel
+ * uses for every branch where creation may have got partway, or where it
+ * deliberately RETIRED the binding proof — never adopts either: taking a fence
+ * from a live record the panel just invalidated would re-assert exactly the proof
+ * it withdrew.
+ */
+async function waitForNewWorkflowReceipt(
+  ctx: PanelToolCtx,
+  rid: string,
+  timing: OpenVerifyTiming,
+): Promise<NewWorkflowVerifyResult> {
+  const probe = await waitForCorrelatedOpenReceipt(ctx, "workflow_new", rid, timing);
+  const { waited_ms, attempts } = probe;
+  if (probe.kind === "unsupported") return { receipt: "unsupported", waited_ms, attempts };
+  if (probe.kind === "missing") return { receipt: "missing", waited_ms, attempts };
+  const { parsed, receipt } = probe;
+  const error = typeof receipt.error === "string" ? receipt.error : undefined;
+  if (receipt.applied === false) return { receipt: "not_applied", error, waited_ms, attempts };
+  if (receipt.applied !== true) return { receipt: "unknown", error, waited_ms, attempts };
+  const routingKey = routingKeyOf(receipt.resolved);
+  const activeKey = routingKeyOf(parsed.active);
+  const activeIsCreatedTab = !!routingKey && routingKey === activeKey;
+  return {
+    receipt: "applied",
+    routingKey,
+    activeIsCreatedTab,
+    workflowUuid: activeIsCreatedTab ? responseWorkflowUuid(parsed.active) : undefined,
+    waited_ms,
+    attempts,
+  };
 }
 
 /**
@@ -14451,6 +14584,210 @@ async function openWorkflowWithVerify(path: string, ctx: PanelToolCtx): Promise<
     `${toolResultText(res)}\n\nworkflow_open outcome is undetermined: ${reason}. ` +
       `Do not assume the workflow was opened; inspect the current workflow before deciding whether to retry.`,
   );
+}
+
+/**
+ * The tab's graph-MUTATION capability, in the tri-state `describeFenceRebind`
+ * consumes: `true` permitted, `false` refused (with the cause that decides which
+ * remedy is printed), `undefined` NOT KNOWN.
+ *
+ * Shared by `panel_new_workflow`'s normal and recovered paths (#2705) so both
+ * report the same `graph_binding` vocabulary for the same tab state — a recovery
+ * that invented its own binding words would be a second dialect for the one fact
+ * the caller acts on.
+ */
+function readGraphMutationCapability(ctx: PanelToolCtx): {
+  canMutate: boolean | undefined;
+  refusalCause?: "unroutable" | "disconnected" | "no_identity" | "capability" | "target_disagreement";
+} {
+  try {
+    if (ctx.tabGraphMutationCapability) {
+      const cap = ctx.tabGraphMutationCapability();
+      return {
+        canMutate: cap.known ? cap.canMutate : undefined,
+        refusalCause: cap.known && !cap.canMutate ? cap.because : undefined,
+      };
+    }
+    return { canMutate: ctx.tabCanMutateGraph?.() };
+  } catch {
+    // unknown-ok: a guard that can throw is not a guard. A probe that threw has
+    // OBSERVED nothing, and `undefined` is exactly that state for this renderer —
+    // it prints "not verified", not the refusal wording a collapsed `false` would.
+    return { canMutate: undefined };
+  }
+}
+
+/**
+ * #2705 — what to report when `workflow_new` did not ACK.
+ *
+ * The reporter's sequence: a 15s ack timeout that said the mutation "may have
+ * been applied", a blank tab that HAD in fact been created, and a session still
+ * fenced to the workflow it had just left — so the next `panel_graph_outline` was
+ * refused with `workflow instance mismatch` and the only way out was a manual
+ * `panel_set_workflow_target({mode:"current"})`.
+ *
+ * Both halves are answered from ONE structured source: the panel's #402/#514
+ * rid-correlated receipt. `applied:true` settles the outcome the timeout could
+ * not, and the routing key it names — matched against the live `active` record —
+ * is what licenses re-pointing the fence at the canvas this command created.
+ *
+ * WHAT IT DELIBERATELY DOES NOT DO. It never adopts an identity the receipt did
+ * not correlate, and it never tells the caller to retry unless the panel
+ * journaled a clean negative: `workflow_new` is not idempotent, so a wrong
+ * "safe to retry" costs the user a second blank tab — which is the failure the
+ * panel's own `applied:"unknown"` branches exist to prevent.
+ */
+async function recoverTimedOutNewWorkflow(
+  ctx: PanelToolCtx,
+  res: ToolResult,
+  dispatchedRid: string | undefined,
+): Promise<ToolResult> {
+  // The stale fence is the SECOND half of this report, so every undetermined exit
+  // names it too: an agent that reads only "outcome unknown" then meets a
+  // `workflow instance mismatch` has no way to know the two are the same event.
+  const undetermined = (reason: string): ToolResult =>
+    fail(
+      `${toolResultText(res)}\n\nworkflow_new outcome is undetermined: ${reason}. Do NOT re-issue ` +
+        `panel_new_workflow — it is NOT idempotent, so if the tab was in fact created a retry ` +
+        `leaves a SECOND blank tab behind. Call panel_list_workflows to see whether a new blank ` +
+        `tab exists. This session's workflow-instance fence was NOT re-pointed either, so a graph ` +
+        `call that now fails with "workflow instance mismatch" is that same stale fence rather ` +
+        `than a second fault — once you know which canvas you are on, clear it with ` +
+        `panel_set_workflow_target({mode:"current"}).`,
+    );
+
+  if (!dispatchedRid) {
+    return undetermined(
+      "this bridge/panel combination did not expose a request id for receipt correlation",
+    );
+  }
+  const verify = await waitForNewWorkflowReceipt(ctx, dispatchedRid, getOpenVerifyTiming());
+  const waited =
+    `${(verify.waited_ms / 1000).toFixed(1)}s (${verify.attempts} probe` +
+    `${verify.attempts === 1 ? "" : "s"})`;
+
+  if (verify.receipt === "not_applied") {
+    // The ONE branch that may say "retry": the panel journaled that nothing ran.
+    return fail(
+      `workflow_new was confirmed NOT applied by the panel's request-id-correlated receipt` +
+        `${verify.error ? `: ${verify.error}` : "."} No blank tab was created, and this session's ` +
+        `workflow target is unchanged — it is safe to call panel_new_workflow again.`,
+    );
+  }
+  if (verify.receipt !== "applied") {
+    return undetermined(
+      verify.receipt === "unsupported"
+        ? "this panel version does not provide request-id-correlated open receipts"
+        : verify.receipt === "unknown"
+          ? `the matching panel receipt did not confirm that the command was applied` +
+            `${verify.error ? ` (${verify.error})` : ""}`
+          : `no request-id-correlated panel receipt was observed in ${waited}`,
+    );
+  }
+
+  // APPLIED. The tab exists. Adopt its identity only if the receipt's routing key
+  // is still what the panel reports as active — see waitForNewWorkflowReceipt.
+  const before = currentWorkflowFence(ctx);
+  const adopted = verify.workflowUuid
+    ? refreshWorkflowUuid(ctx, { workflow_uuid: verify.workflowUuid })
+    : false;
+  const cap = readGraphMutationCapability(ctx);
+  const fence =
+    adopted && verify.workflowUuid
+      ? describeFenceRebind(
+          { status: "refreshed", uuid: verify.workflowUuid, before },
+          cap.canMutate,
+          cap.refusalCause,
+          panelTooOldNote(ctx),
+        )
+      : null;
+  // #708's caveat rides EVERY recovered creation. The panel journals the receipt
+  // BEFORE it decides whether the new tab is provably empty, so `applied:true`
+  // proves the tab was created and is active — never that it is blank. Claiming
+  // "blank" here would be the exact fabrication the direct reply refuses to make.
+  const blankCaveat =
+    ` NOT PROVEN BLANK: the receipt records that the tab was created and made active; it does ` +
+    `not carry the panel's zero-node proof, which the lost reply was going to. Call ` +
+    `panel_graph_outline before building — if it already has nodes they belong to another ` +
+    `workflow (#708) and you should open the one you actually want instead.`;
+  const fenceNote = adopted
+    ? ` This session's workflow-instance fence has been RE-POINTED at the new canvas` +
+      `${verify.workflowUuid ? ` (${verify.workflowUuid})` : ""}, so graph tools target it rather ` +
+      `than the workflow you were on.${fence ? fence.note : ""}`
+    : verify.activeIsCreatedTab
+      ? ` This session's fence was NOT re-pointed: the panel reports the new tab as active but ` +
+        `published no usable workflow-instance identity for it, so graph commands will keep the ` +
+        `stamp they had. Call panel_set_workflow_target({mode:"current"}) to bind onto it.`
+      : ` This session's fence was NOT re-pointed: the panel's live active record does NOT name ` +
+        `the tab this command created${verify.routingKey ? ` (${verify.routingKey})` : ""}, so ` +
+        `another workflow is in view now and adopting an identity from it would fence you to the ` +
+        `wrong canvas. Switch to the new tab (panel_open_workflow with its routing key), then ` +
+        `call panel_set_workflow_target({mode:"current"}).`;
+  return ok({
+    created: true,
+    empty: "unknown",
+    recovered: true,
+    // The machine-readable form of "the mutation landed, the acknowledgement did
+    // not" — so a caller never has to parse the prose to learn that (#2705).
+    applied_but_ack_timed_out: true,
+    ...(verify.routingKey ? { key: verify.routingKey, routing_key: verify.routingKey } : {}),
+    workflow_instance_adopted: adopted,
+    graph_binding: fence ? fence.binding : "not_recovered",
+    note:
+      `panel_new_workflow did not receive its acknowledgement within the 15s window, but the ` +
+      `panel's request-id-correlated receipt confirms the blank workflow WAS created (found after ` +
+      `${waited}). Do NOT call panel_new_workflow again — it is not idempotent and a retry would ` +
+      `leave a second blank tab.${fenceNote}${blankCaveat}`,
+  });
+}
+
+/**
+ * `panel_new_workflow` body. Forwards `workflow_new`, and on an ACK-TIMEOUT or a
+ * mid-command reconnect drop settles the outcome against the panel's own
+ * rid-correlated receipt instead of handing the caller an unknown (#2705).
+ */
+async function newWorkflowWithVerify(ctx: PanelToolCtx): Promise<ToolResult> {
+  let dispatchedRid: string | undefined;
+  const res = await ctx.call({ cmd: "workflow_new" }, 15000, (rid) => {
+    dispatchedRid = rid;
+  });
+  // Checked BEFORE `res.isError`: a genuine acked executor error (the panel's own
+  // "could not take the workflow switch/reload section", a thrown creation) must
+  // still surface verbatim, and only a no-reply is a candidate for recovery.
+  if (isAckTimeout(res, "workflow_new") || isReconnectDrop(res)) {
+    return recoverTimedOutNewWorkflow(ctx, res, dispatchedRid);
+  }
+  if (res.isError) return res;
+  // #932 (recurrence on 0.50.6) — a NEW canvas needs a NEW fence.
+  //
+  // workflow_new authoritatively re-points the active workflow, exactly as
+  // workflow_open does — but only the open path re-derived the command
+  // fence afterwards (openWorkflowWithVerify). So this session kept the
+  // PREVIOUS workflow's instance stamp while the user was now looking at a
+  // brand-new blank canvas, and every stamped command after it failed with
+  // "workflow instance mismatch". The reporter created a workflow and could
+  // not add a single node to it.
+  //
+  // Refresh from the panel's own live active record, the same way the open
+  // path does. The panel mints the new canvas's identity EAGERLY at
+  // creation ("so the key exists BEFORE the first edit").
+  //
+  // #814/#812 — this reply DOES carry workflow_uuid directly (#762), and the
+  // stale comment that used to stand here said otherwise. Trust it first,
+  // before ever attempting rebindWorkflowFence's independent workflow_list
+  // round trip, which can be refused by the exact fence being repaired
+  // (#1071) — the same trap a reporter hit via panel_new_workflow's own
+  // recovery attempt.
+  //
+  // NEVER fails the call on a rebind miss: the workflow WAS created, and
+  // retracting that would be the worse lie. Disclose instead, so the agent
+  // learns the graph tools are not yet usable here rather than discovering
+  // it one confusing mismatch at a time.
+  const fenceRebind = refreshFenceFromOwnReply(ctx, res) ?? (await rebindWorkflowFence(ctx));
+  const cap = readGraphMutationCapability(ctx);
+  const fence = describeFenceRebind(fenceRebind, cap.canMutate, cap.refusalCause, panelTooOldNote(ctx));
+  if (!fence || fence.binding === "bound") return res;
+  return appendNote(res, `The blank workflow WAS created.${fence.note}`);
 }
 
 /** True when a ToolResult is a MID-COMMAND reconnect drop ("disconnected
@@ -25397,56 +25734,11 @@ CHECKED FOR YOU: the graph read this message prescribes was just run, and it ` +
       "panel_new_workflow",
       "Open a brand-new BLANK workflow in a NEW TAB. Use this whenever the user wants a 'new workflow' / 'fresh canvas' / 'start over for a new project'. This does NOT touch their current workflow — it opens a separate tab. NEVER use panel_clear for a new workflow (panel_clear wipes the CURRENT graph and is only for 'clear/reset this canvas').",
       {},
-      async (_args, ctx) => {
-        const res = await ctx.call({ cmd: "workflow_new" }, 15000);
-        if (res.isError) return res;
-        // #932 (recurrence on 0.50.6) — a NEW canvas needs a NEW fence.
-        //
-        // workflow_new authoritatively re-points the active workflow, exactly as
-        // workflow_open does — but only the open path re-derived the command
-        // fence afterwards (openWorkflowWithVerify). So this session kept the
-        // PREVIOUS workflow's instance stamp while the user was now looking at a
-        // brand-new blank canvas, and every stamped command after it failed with
-        // "workflow instance mismatch". The reporter created a workflow and could
-        // not add a single node to it.
-        //
-        // Refresh from the panel's own live active record, the same way the open
-        // path does. The panel mints the new canvas's identity EAGERLY at
-        // creation ("so the key exists BEFORE the first edit").
-        //
-        // #814/#812 — this reply DOES carry workflow_uuid directly (#762), and the
-        // stale comment that used to stand here said otherwise. Trust it first,
-        // before ever attempting rebindWorkflowFence's independent workflow_list
-        // round trip, which can be refused by the exact fence being repaired
-        // (#1071) — the same trap a reporter hit via panel_new_workflow's own
-        // recovery attempt.
-        //
-        // NEVER fails the call on a rebind miss: the workflow WAS created, and
-        // retracting that would be the worse lie. Disclose instead, so the agent
-        // learns the graph tools are not yet usable here rather than discovering
-        // it one confusing mismatch at a time.
-        const fenceRebind = refreshFenceFromOwnReply(ctx, res) ?? (await rebindWorkflowFence(ctx));
-        let canMutateNow: boolean | undefined;
-        let refusalCause: "unroutable" | "disconnected" | "no_identity" | "capability" | "target_disagreement" | undefined;
-        try {
-          if (ctx.tabGraphMutationCapability) {
-            const cap = ctx.tabGraphMutationCapability();
-            canMutateNow = cap.known ? cap.canMutate : undefined;
-            if (cap.known && !cap.canMutate) refusalCause = cap.because;
-          } else {
-            canMutateNow = ctx.tabCanMutateGraph?.();
-          }
-        } catch {
-          canMutateNow = undefined; // a guard that can throw is not a guard
-          refusalCause = undefined;
-        }
-        const fence = describeFenceRebind(fenceRebind, canMutateNow, refusalCause, panelTooOldNote(ctx));
-        if (!fence || fence.binding === "bound") return res;
-        return appendNote(
-          res,
-          `The blank workflow WAS created.${fence.note}`,
-        );
-      },
+      // Verify-after-timeout (#2705), the same mechanism panel_open_workflow uses:
+      // a backgrounded/frozen tab can create the blank workflow and still miss the
+      // 15s ack window, and returning that raw timeout left the session fenced to
+      // the PREVIOUS canvas — see newWorkflowWithVerify.
+      async (_args, ctx) => newWorkflowWithVerify(ctx),
     ),
     def(
       "panel_open_workflow",
