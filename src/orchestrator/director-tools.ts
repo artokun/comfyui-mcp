@@ -29,6 +29,7 @@ import { z } from "zod";
 import type { MountGroup } from "./mountable-tools.js";
 import type { PanelToolCtx, PanelToolDef, ToolResult } from "./panel-tools.js";
 import { panePresence } from "../services/panel-pane-state.js";
+import { calliopeSupervise } from "../services/calliope-supervisor.js";
 
 type A = Record<string, unknown>;
 
@@ -158,15 +159,22 @@ export function buildDirectorToolDefs(): Array<PanelToolDef & { mountGroup?: Mou
         "`list` names them and whether each pane is open; `describe` explains one and the tools it mounts; " +
         "`open` opens its pane beside the chat (the user keeps seeing the conversation), which MOUNTS that module's tools — " +
         "call tools/list again after opening, they were not there before; `close` closes the pane and unmounts them; " +
-        "`status` reports open/mounted state. Mounting is deliberate: a module's tools exist only while its pane does.",
+        "`status` reports open/mounted state (for the director, whether Calliope answers). Mounting is deliberate: a module's tools exist only while its pane does. " +
+        "`calliope` runs the Director's Calliope bring-up from the installed panel: op `up` clones/installs/starts it if it is not already answering (first run takes minutes), `check` probes, `stop` stops what `up` started.",
       schema: {
-        action: z.enum(["list", "describe", "open", "close", "status"]).describe("What to do."),
+        action: z.enum(["list", "describe", "open", "close", "status", "calliope"]).describe("What to do."),
+        op: z.enum(["up", "check", "stop"]).optional().describe("calliope: which bring-up step (default up)."),
         module: z.string().optional().describe("Module id, e.g. \"director\". Required for describe/open/status."),
         dock: z.boolean().optional().describe("open: side-dock beside the chat (default true) rather than centred."),
       },
       handler: async (args: A, ctx) => {
         const action = args.action as string;
         const snap = panePresence.snapshot();
+        if (action === "calliope") {
+          const op = (args.op as "up" | "check" | "stop" | undefined) ?? "up";
+          const r = await calliopeSupervise(op);
+          return r.ok ? text(r) : { ...text(r), isError: true };
+        }
         if (action === "list") {
           return text({
             modules: PANEL_MODULES.map((m) => ({ id: m.id, label: m.label, summary: m.summary, open: snap[m.id]?.open ?? false, mounted: snap[m.id]?.mounted ?? false })),
