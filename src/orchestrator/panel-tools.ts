@@ -14692,13 +14692,17 @@ async function recoverTimedOutNewWorkflow(
     ? refreshWorkflowUuid(ctx, { workflow_uuid: verify.workflowUuid })
     : false;
   const cap = readGraphMutationCapability(ctx);
+  // No `panelTooOldNote` here, deliberately (#1043's gate counts its call sites
+  // and this would be a third). It is printed ONLY in the `not_recovered` branch,
+  // for a fence read that could not be made — and this call always passes
+  // `status:"refreshed"`, because it is reached only when the adoption already
+  // succeeded. Passing it would be an argument that provably cannot be read.
   const fence =
     adopted && verify.workflowUuid
       ? describeFenceRebind(
           { status: "refreshed", uuid: verify.workflowUuid, before },
           cap.canMutate,
           cap.refusalCause,
-          panelTooOldNote(ctx),
         )
       : null;
   // #708's caveat rides EVERY recovered creation. The panel journals the receipt
