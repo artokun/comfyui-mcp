@@ -86,8 +86,10 @@ vi.mock("../../services/live-interpreter.js", async (importOriginal) => {
 // ── ComfyUI-Manager v4: the queue ACCEPTS, drains "done", and the installed-pack
 //    list ANSWERS FOR the pack. Exactly the reporter's wire shape. ─────────────
 const manager = vi.hoisted(() => ({
-  /** Body served at /v2/customnode/installed. */
-  installed: {} as Record<string, unknown>,
+  /** Body served at /v2/customnode/installed. Manager serves the object-keyed
+   *  shape; the ARRAY shape is `parseInstalled`'s other branch, which is where a
+   *  human `title` can end up standing in for the module key. */
+  installed: {} as Record<string, unknown> | unknown[],
   calls: [] as string[],
 }));
 vi.mock("../../comfyui/fetch.js", () => {
@@ -296,7 +298,7 @@ describe("#2714 — a Manager-listed git install must be corroborated on disk", 
     // never happened, which is this issue's own bug wearing a different hat.
     manager.installed = [
       { title: "Shared Title", aux_id: `darksidewalker/${REPO_NAME}`, ver: "nightly", enabled: true },
-    ] as unknown as Record<string, unknown>;
+    ];
     makePackDir("Shared Title", { "__init__.py": "NODE_CLASS_MAPPINGS = {}\n" });
 
     const { ok, error } = await install({ id: REPO, source: "git" });
