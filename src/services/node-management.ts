@@ -2125,10 +2125,17 @@ function parseInstalled(raw: unknown): InstalledNode[] {
         Boolean(entry && typeof entry === "object"),
       )
       .map((entry) => {
+        // #2714 — `module` IS AN IDENTITY, NOT A LABEL. This branch preferred
+        // `title` — prose — over the entry's own `module` key, and every consumer
+        // wants the module: it is sent to ComfyUI-Manager as `node_name` on the
+        // uninstall/disable/enable routes, matched by findInstalledNode, and (as
+        // of #2714) scanned for on disk. A title in that slot is wrong for all
+        // three. It stays as the LAST resort so an entry that carries nothing
+        // else still matches by the only name it has.
         const module =
-          (typeof entry.title === "string" && entry.title) ||
           (typeof entry.module === "string" && entry.module) ||
           (typeof entry.cnr_id === "string" && entry.cnr_id) ||
+          (typeof entry.title === "string" && entry.title) ||
           "unknown";
         return toNode(module, entry);
       });
@@ -3213,12 +3220,14 @@ type ManagerClaimCorroboration =
  * as, and `packDirNameCandidates` deliberately drops any path-shaped id, so the
  * raw value would silently vouch for nothing. Take its basename.
  *
- * A value carrying whitespace is dropped instead. ComfyUI imports a custom_nodes
- * directory AS A PYTHON MODULE NAME, so a pack folder cannot have a space in it —
- * such a value is a human TITLE, which `parseInstalled`'s array branch prefers
- * over the real `module` key. A title is not evidence about the filesystem, and
- * letting one scan for a same-named directory is how an unrelated pack ends up
- * vouching for an install that never happened (codex gate, round 1).
+ * NO NAME-SHAPE HEURISTIC BEYOND THAT. Round 1 of the gate rejected values with
+ * whitespace here on the reasoning that ComfyUI imports a pack directory as a
+ * Python module name so it cannot contain a space. That reasoning is FALSE —
+ * ComfyUI loads packs through `importlib.util.spec_from_file_location`, which
+ * takes any string as the module name — and the filter it justified would have
+ * dropped a real `custom_nodes/Foo Bar` and cloned a duplicate beside it (round 2).
+ * The contamination it was actually defending against was `parseInstalled` putting
+ * a human `title` in the `module` slot; that is fixed at its source instead.
  */
 function packDirAliases(node: InstalledNode): string[] {
   const aliases: string[] = [];
@@ -3226,7 +3235,7 @@ function packDirAliases(node: InstalledNode): string[] {
     if (typeof raw !== "string") continue;
     const name = basename(raw.trim().replace(/[\\/]+$/, ""));
     if (name.length === 0 || name === "." || name === "..") continue;
-    if (/[\s/\\]/.test(name) || /[\x00-\x1F\x7F]/.test(name)) continue;
+    if (/[\x00-\x1F\x7F]/.test(name)) continue;
     aliases.push(name);
   }
   return aliases;
@@ -4350,8 +4359,11 @@ async function installCustomNodeImpl(
     // VERIFY: the Manager's installed-pack list is the FIRST witness — but it is
     // Manager's own bookkeeping, not the filesystem, so #2714 crosses it with a
     // disk scan before any success wording (see diskCorroboratesManagerInstall).
-    // A list hit that the disk does not corroborate is not an install; it falls
-    // through to the same direct clone an unregistered pack takes.
+    // Three outcomes, and only one of them writes: a scan that finds the pack
+    // ABSENT falls through to the same direct clone an unregistered pack takes; a
+    // HUSK throws; a scan that could not answer (remote, no proven scan root, an
+    // unreadable custom_nodes) keeps the Manager result and says the disk was not
+    // checked. "Could not look" is never folded into "not there".
     const installed = await listInstalledNodesAt(managerBase).catch(
       () => [] as InstalledNode[],
     );

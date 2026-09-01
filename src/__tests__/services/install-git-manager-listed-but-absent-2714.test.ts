@@ -290,14 +290,21 @@ describe("#2714 — a Manager-listed git install must be corroborated on disk", 
     expect(existsSync(PACK_DIR)).toBe(false);
   });
 
-  it("will not let a human TITLE vouch for the filesystem", async () => {
-    // The ARRAY payload shape: `parseInstalled` prefers `title` over the real module
-    // key, so `module` here is prose. ComfyUI imports a custom_nodes directory as a
-    // PYTHON MODULE NAME, so a value with a space in it cannot be a pack folder —
-    // scanning for one lets an unrelated same-named directory certify an install that
-    // never happened, which is this issue's own bug wearing a different hat.
+  it("will not let a human TITLE stand in for the module key", async () => {
+    // codex gate round 2, P1. The ARRAY payload branch of `parseInstalled` used to
+    // prefer `title` — prose — over the entry's own `module`. That put a label in a
+    // slot every consumer reads as an IDENTITY (Manager's `node_name` on
+    // uninstall/disable, findInstalledNode's matching, and this disk scan), so an
+    // unrelated `custom_nodes/Shared Title` could certify an install that never
+    // happened: this issue's own bug wearing a different hat.
     manager.installed = [
-      { title: "Shared Title", aux_id: `darksidewalker/${REPO_NAME}`, ver: "nightly", enabled: true },
+      {
+        title: "Shared Title",
+        module: REPO_NAME,
+        aux_id: `darksidewalker/${REPO_NAME}`,
+        ver: "nightly",
+        enabled: true,
+      },
     ];
     makePackDir("Shared Title", { "__init__.py": "NODE_CLASS_MAPPINGS = {}\n" });
 
@@ -306,6 +313,27 @@ describe("#2714 — a Manager-listed git install must be corroborated on disk", 
     expect(error).toBeUndefined();
     expect(ok?.mechanism).toBe("git-clone");
     expect(clonedInto()).toBe(PACK_DIR);
+  });
+
+  it("a pack folder with a SPACE in its name still corroborates", async () => {
+    // codex gate round 2, P1. Round 1 dropped whitespace-bearing aliases on the
+    // reasoning that ComfyUI imports a pack directory as a Python module name so it
+    // cannot contain a space. MEASURED FALSE: ComfyUI loads packs via
+    // `importlib.util.spec_from_file_location`, which accepts any string as the
+    // module name. The heuristic would have read a real, working pack as absent and
+    // cloned a SECOND copy beside it.
+    manager.installed = {
+      "Foo Bar": { ver: "1.0.0", cnr_id: "foo-bar", aux_id: "someone/foo-bar", enabled: true },
+    };
+    makePackDir("Foo Bar", { "__init__.py": "NODE_CLASS_MAPPINGS = {}\n" });
+
+    const { ok, error } = await install({ id: "https://github.com/someone/Foo-Bar", source: "git" });
+
+    // The install id resolves to `Foo-Bar`, which is NOT on disk; only the Manager
+    // entry's own module key ("Foo Bar") names the directory that is.
+    expect(error).toBeUndefined();
+    expect(ok?.mechanism).toBe("manager-http");
+    expect(clonedInto()).toBeUndefined();
   });
 
   it("refuses a marker-only HUSK instead of reporting it as installed (#900 on the git route)", async () => {
