@@ -14757,24 +14757,33 @@ async function recoverTimedOutNewWorkflow(
           }, so there was nothing to compare and adopting an identity would have been a guess. ` +
           `Call panel_list_workflows to see the open tabs, then ` +
           `panel_set_workflow_target({mode:"current"}) once you know which one you are on.`;
+  // Two shapes reach here and they are NOT the same event: an ack TIMEOUT is a tab
+  // that never answered inside the window; a reconnect DROP is the tab going away
+  // mid-command. What they share is that no acknowledgement arrived — which is the
+  // fact a caller acts on — so that is what the always-present field asserts, and
+  // the cause rides beside it. An earlier draft set `applied_but_ack_timed_out` on
+  // both and explained in a comment why that was fine (codex gate round 2): it is
+  // not, because the name says "timed out" and a disconnect did not.
+  const ackTimedOut = isAckTimeout(res, "workflow_new");
   return ok({
     created: true,
     empty: "unknown",
     recovered: true,
     // The machine-readable form of "the mutation landed, the acknowledgement did
     // not" — so a caller never has to parse the prose to learn that (#2705).
-    applied_but_ack_timed_out: true,
+    applied_but_unacknowledged: true,
+    unacknowledged_cause: ackTimedOut ? "ack_timeout" : "reconnect_drop",
+    // #2705's own vocabulary, kept for the case it was written about — and ONLY
+    // for that case, so a caller keying on it is never told a disconnect was a
+    // timeout. Absent on the reconnect-drop path rather than false: this field
+    // has always meant "the thing named happened".
+    ...(ackTimedOut ? { applied_but_ack_timed_out: true } : {}),
     ...(verify.routingKey ? { key: verify.routingKey, routing_key: verify.routingKey } : {}),
     workflow_instance_adopted: adopted,
     graph_binding: fence ? fence.binding : "not_recovered",
     note:
-      // Both shapes reach here and they are not the same event: an ack TIMEOUT is
-      // a tab that never answered inside the window, a reconnect DROP is the tab
-      // going away mid-command. `applied_but_ack_timed_out` covers both (in each
-      // case no acknowledgement arrived, which is the fact a caller acts on), but
-      // the prose must not tell someone their tab was slow when it disconnected.
       `${
-        isAckTimeout(res, "workflow_new")
+        ackTimedOut
           ? "panel_new_workflow did not receive its acknowledgement within the 15s window"
           : "panel_new_workflow lost its acknowledgement — the tab disconnected mid-command"
       }, but the ` +

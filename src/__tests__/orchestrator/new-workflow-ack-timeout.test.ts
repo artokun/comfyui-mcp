@@ -392,6 +392,23 @@ describe("#2705: what the recovery refuses to conclude", () => {
     expect(fence).toBe(PRIOR_UUID);
   });
 
+  // Codex gate: the test above moves BOTH correlation fields at once, so deleting
+  // either check on its own would leave it green. This moves exactly one — the
+  // panel's own "this receipt answers only for rid X" self-declaration — while
+  // `rid` still matches, which is the shape a half-correlated reply would have.
+  it.each([
+    ["answers_only_command_rid", { answers_only_command_rid: "other-rid" }],
+    ["rid", { rid: "other-rid" }],
+  ])("requires %s to agree on its own, not just its twin", async (_field, over) => {
+    const res = await newWorkflow().handler(
+      {},
+      makeCtx({ newReply: ackTimeout, listReplies: [listWithActiveNewTab(appliedReceipt(over))] }),
+    );
+    expect(res.isError).toBe(true);
+    expect(textOf(res)).toMatch(/outcome is undetermined/i);
+    expect(fence).toBe(PRIOR_UUID);
+  });
+
   it("does not accept a workflow_OPEN receipt that happens to carry this rid", async () => {
     const res = await newWorkflow().handler(
       {},
