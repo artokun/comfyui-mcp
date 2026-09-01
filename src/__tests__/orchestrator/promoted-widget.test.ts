@@ -3876,6 +3876,36 @@ describe("panel_set_widget promoted-subgraph recovery (#1655)", () => {
     expect(calls.map((c) => c.cmd)).not.toContain("graph_enter_subgraph");
   });
 
+  // Review finding (P2). The recovery path runs AFTER an outer graph_set_widget
+  // has already been dispatched and refused; only the INNER retry is skipped.
+  // Routing it through the standard refusal made it assert "No graph_set_widget
+  // was dispatched", which is false there and invites an agent to re-issue a
+  // write it has already made. The invariant is still named; the consequence
+  // clause is the one this path can actually stand behind.
+  it("names the invariant on the recovery path without claiming no write was dispatched", async () => {
+    const { text, isError, calls } = await setWidget(
+      { node_id: 78, widget: "width", value: 1024 },
+      {
+        firstWrite: "contradict",
+        firstWriteError: CONTRADICTORY,
+        preflightSubgraph: DEFINITIVE_NON_PROMOTED_SUBGRAPH,
+        // Read 2 must also classify non-promoted, so the recovery preflight
+        // returns null and the LEGACY recovery re-read below is the one that
+        // meets the malformed envelope. That is the branch under test.
+        recoveryPreflightSubgraph: DEFINITIVE_NON_PROMOTED_SUBGRAPH,
+        subgraph: { ...SUBGRAPH, node_count: 5 },
+      },
+    );
+
+    expect(isError).toBe(true);
+    expect(text).toMatch(/`node_count` claimed 5 inner node\(s\) but `nodes` carried 2/);
+    expect(text).toMatch(/The inner write was not retried\./);
+    expect(text).not.toMatch(/No graph_set_widget was dispatched/);
+    // The outer attempt is what produced the refusal being annotated, so it did
+    // happen — the message must not deny it.
+    expect(calls.filter((c) => c.cmd === "graph_set_widget").length).toBeGreaterThan(0);
+  });
+
   it("a truncated subgraph read is not treated as unique", async () => {
     const { text, isError, calls } = await setWidget(
       { node_id: 78, widget: "width", value: 1024 },
@@ -3883,7 +3913,7 @@ describe("panel_set_widget promoted-subgraph recovery (#1655)", () => {
     );
     expect(isError).toBe(true);
     expect(text).toMatch(
-      /the reply set `truncated`, so the inner node list it carried is not the whole subgraph/,
+      /the reply's `truncated` flag was not `false`, so the inner node list it carried cannot be taken as the whole subgraph/,
     );
     expect(calls.map((c) => c.cmd)).not.toContain("graph_enter_subgraph");
   });
@@ -4333,7 +4363,9 @@ describe("#2393 promoted-terminal witness is judged on the requested alias", () 
       /`promoted_terminals\[1\]` published neither a terminal endpoint \(`terminal_node_id`\/`terminal_node_type`\) nor an `error`/,
     );
     expect(text).toMatch(/accepted or rejected as a WHOLE/);
-    expect(text).toMatch(/panel_open_workflow and panel_set_workflow_target do not clear it/);
+    expect(text).toMatch(
+      /unless the panel's reply itself changes shape, panel_open_workflow and panel_set_workflow_target re-bind the tab and produce the identical refusal/,
+    );
     expect(text).not.toMatch(/retry only after the panel binding and subgraph mapping are stable/);
     expect(calls.filter((c) => c.cmd === "graph_set_widget")).toHaveLength(0);
   });
@@ -4393,7 +4425,20 @@ describe("#2688 describePromotedSubgraphEnvelope names the failed invariant", ()
 
   it.each([
     ["a non-object reply", "nope", 78, /the reply was not a JSON object/],
-    ["asserted truncation", { ...VALID, truncated: true }, 78, /the reply set `truncated`/],
+    [
+      "a truncated flag",
+      { ...VALID, truncated: true },
+      78,
+      /the reply's `truncated` flag was not `false`/,
+    ],
+    // A malformed flag is not evidence of a SHORT read, so the reason must not
+    // claim one. Same rejection, different established fact.
+    [
+      "a malformed truncated flag",
+      { ...VALID, truncated: null },
+      78,
+      /the reply's `truncated` flag was not `false`/,
+    ],
     [
       "a missing subgraph_of",
       { ...VALID, subgraph_of: undefined },
@@ -4522,6 +4567,43 @@ describe("#2688 describePromotedSubgraphEnvelope names the failed invariant", ()
     // A corpus that rejected everything would pass the loop above while proving
     // nothing about the accepting half of the fence.
     expect(accepted).toBeGreaterThan(0);
+  });
+
+  // Review finding (P0). The first draft walked the untrusted arrays with
+  // `.entries()`, which is an own-property a reply can shadow. The loops it
+  // replaced walked `Symbol.iterator`, so a payload that shadowed `entries`
+  // would have been validated against a DIFFERENT list than the one
+  // `nodes.length !== node_count` was checked against — a way past the fence.
+  // The loops are indexed now, which depends on neither hook.
+  it("validates the array it counted, not a shadowed iterator", () => {
+    const nodes: unknown[] = [null];
+    Object.defineProperty(nodes, "entries", {
+      value: function* () {
+        yield [0, { id: 5, type: "X" }];
+      },
+    });
+    const shadowed = {
+      subgraph_of: { node_id: 78 },
+      node_count: 1,
+      nodes,
+    };
+    expect(describePromotedSubgraphEnvelope(shadowed, 78).ok).toBe(false);
+    expect(validatePromotedSubgraphEnvelope(shadowed, 78)).toBeNull();
+
+    const terminals: unknown[] = [null];
+    Object.defineProperty(terminals, "entries", {
+      value: function* () {
+        yield [0, { widget: "w", error: "e" }];
+      },
+    });
+    const shadowedTerminals = {
+      subgraph_of: { node_id: 78 },
+      node_count: 1,
+      nodes: [{ id: 5, type: "X" }],
+      promoted_terminals: terminals,
+    };
+    expect(describePromotedSubgraphEnvelope(shadowedTerminals, 78).ok).toBe(false);
+    expect(validatePromotedSubgraphEnvelope(shadowedTerminals, 78)).toBeNull();
   });
 });
 

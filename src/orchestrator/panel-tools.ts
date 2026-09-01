@@ -8047,21 +8047,38 @@ function promotedWriteRefusal(widget: string, reason: string): ToolResult {
  * refused by an unrelated `promoted_terminals` entry, and without that line the
  * named index reads as irrelevant to their write.
  */
+function promotedEnvelopeInvariantText(
+  subject: string,
+  invariant: string,
+  consequence: string,
+): string {
+  return (
+    `${subject}'s ownership envelope failed a completeness invariant: ${invariant}. ` +
+    `${consequence}\n` +
+    // The remedy claim is scoped to what the verdict is actually a function of.
+    // An earlier draft said these three "do not clear it" outright; the verdict
+    // is decided from the REPLY, so what is provable is that re-reading the same
+    // receiver re-runs the same check on the same shape. Stating more than that
+    // would send the next reader hunting for a shape change that never happened.
+    `This is a SHAPE defect in the reply, not a binding state. The verdict is decided from that ` +
+    `one reply alone, so retrying re-reads the same receiver: unless the panel's reply itself ` +
+    `changes shape, panel_open_workflow and panel_set_workflow_target re-bind the tab and ` +
+    `produce the identical refusal.\n` +
+    `The envelope is accepted or rejected as a WHOLE: one unusable field, or one malformed ` +
+    `promoted_terminals entry, refuses every promoted write on this wrapper, including widgets ` +
+    `whose own mapping is fine. Report the invariant above together with the panel version — it ` +
+    `names the field to fix.`
+  );
+}
+
 function promotedEnvelopeInvariantRefusal(
   widget: string,
   invariant: string,
   subject = "graph_get_subgraph",
 ): ToolResult {
   return fail(
-    `panel_set_widget refused the promoted "${widget}" write because ${subject}'s ownership ` +
-      `envelope failed a completeness invariant: ${invariant}. No graph_set_widget was dispatched.\n` +
-      `This is a SHAPE defect in the reply, not a binding state. Every invariant is decided from ` +
-      `that one reply alone, so against an unchanged graph the same read reproduces it — retrying, ` +
-      `panel_open_workflow and panel_set_workflow_target do not clear it.\n` +
-      `The envelope is accepted or rejected as a WHOLE: one unusable field, or one malformed ` +
-      `promoted_terminals entry, refuses every promoted write on this wrapper, including widgets ` +
-      `whose own mapping is fine. Report the invariant above together with the panel version — it ` +
-      `names the field to fix.`,
+    `panel_set_widget refused the promoted "${widget}" write because ` +
+      promotedEnvelopeInvariantText(subject, invariant, "No graph_set_widget was dispatched."),
   );
 }
 
@@ -21466,9 +21483,12 @@ export function buildPanelToolDefs(): PanelToolDef[] {
           // invariant reaches here, and that one is worth naming.
           return appendToolResultText(
             first,
-            `\n\n${textOfToolResult(
-              promotedEnvelopeInvariantRefusal(refusal.widget, describedRecovery.invariant),
-            )}`,
+            `\n\n(The panel listed "${refusal.widget}" as promoted while refusing it. ` +
+              `${promotedEnvelopeInvariantText(
+                "graph_get_subgraph",
+                describedRecovery.invariant,
+                "The inner write was not retried.",
+              )})`,
           );
         }
         const recoveryScope = recoveryEnvelope

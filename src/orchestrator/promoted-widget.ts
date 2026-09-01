@@ -497,7 +497,8 @@ export function describePromotedSubgraphEnvelope(
   }
   if (subgraph.truncated !== undefined && subgraph.truncated !== false) {
     return envelopeInvariant(
-      "the reply set `truncated`, so the inner node list it carried is not the whole subgraph",
+      "the reply's `truncated` flag was not `false`, so the inner node list it carried " +
+        "cannot be taken as the whole subgraph",
     );
   }
 
@@ -555,7 +556,12 @@ export function describePromotedSubgraphEnvelope(
   }
 
   const normalized: Array<Record<string, unknown>> = [];
-  for (const [index, raw] of nodes.entries()) {
+  // Indexed, not `nodes.entries()`: the array is parsed from an untrusted reply
+  // and `entries` is an own-property a caller can shadow, which would iterate
+  // something other than what `nodes.length !== nodeCount` was checked against.
+  // The loops this replaced walked `Symbol.iterator`; an index walks neither.
+  for (let index = 0; index < nodes.length; index += 1) {
+    const raw: unknown = nodes[index];
     if (!isRecord(raw) || innerNodeId(raw) == null) {
       return envelopeInvariant(`\`nodes[${index}]\` was not an object carrying a usable \`id\``);
     }
@@ -622,7 +628,9 @@ function describePromotedTerminalEntries(value: unknown): PromotedTerminalEntrie
   const at = (index: number, detail: string) =>
     envelopeInvariant(`\`promoted_terminals[${index}]\` ${detail}`);
   const entries: PromotedTerminalEntry[] = [];
-  for (const [index, raw] of value.entries()) {
+  // Indexed for the same reason as the node loop above.
+  for (let index = 0; index < value.length; index += 1) {
+    const raw: unknown = value[index];
     if (!isRecord(raw)) return at(index, "was not an object");
     if (typeof raw.widget !== "string" || raw.widget.length === 0) {
       return at(index, "had a missing or empty `widget`");
@@ -710,7 +718,9 @@ function describePromotedTerminalEntries(value: unknown): PromotedTerminalEntrie
         return at(index, "carried a `terminal_inputs` that is missing or not an array");
       }
       const inputs: PromotedTerminalInput[] = [];
-      for (const [inputIndex, input] of terminalRaw.terminal_inputs.entries()) {
+      const rawInputs: unknown[] = terminalRaw.terminal_inputs;
+      for (let inputIndex = 0; inputIndex < rawInputs.length; inputIndex += 1) {
+        const input: unknown = rawInputs[inputIndex];
         if (!isRecord(input) || typeof input.name !== "string" || input.name.length === 0) {
           return at(
             index,
