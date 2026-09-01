@@ -3969,6 +3969,9 @@ describe("node-management service", () => {
         expect(nodes).toEqual([
           {
             module: "ComfyUI-Manager",
+            // #2714 — the object payload's key is a folder key, carried explicitly
+            // so the on-disk corroboration never has to guess whether it is one.
+            moduleKey: "ComfyUI-Manager",
             cnrId: "comfyui-manager",
             version: "3.1",
             enabled: true,
@@ -4079,6 +4082,33 @@ describe("node-management service", () => {
       const nodes = await listInstalledNodes();
       expect(nodes).toHaveLength(1);
       expect(nodes[0].module).toBe("PackA");
+    });
+
+    it("#2714 — a title-derived module carries NO folder key", async () => {
+      // `module` keeps its precedence (title first) because that is what this list
+      // displays and what Manager is sent back as `node_name`. But #2714's on-disk
+      // corroboration reads a module as a PATH, and prose is not one — so the key
+      // the payload actually stated is carried separately, and is absent when the
+      // payload stated none.
+      stubFetch({
+        installedBody: [
+          { title: "Friendly Label", ver: "1.0.0", cnr_id: "packa", enabled: true },
+          { title: "Pack A", module: "ComfyUI-PackA", ver: "1.0.0", enabled: true },
+        ],
+      });
+      const nodes = await listInstalledNodes();
+      expect(nodes[0].module).toBe("Friendly Label");
+      expect(nodes[0].moduleKey).toBeUndefined();
+      expect(nodes[1].module).toBe("Pack A");
+      expect(nodes[1].moduleKey).toBe("ComfyUI-PackA");
+    });
+
+    it("#2714 — the object shape's KEY is a folder key", async () => {
+      stubFetch({
+        installedBody: { "ComfyUI-PackB": { ver: "1.0.0", cnr_id: "packb", enabled: true } },
+      });
+      const nodes = await listInstalledNodes();
+      expect(nodes[0].moduleKey).toBe("ComfyUI-PackB");
     });
 
     it("missing enabled/is_disabled is UNKNOWN, never defaulted to a definite state", async () => {
