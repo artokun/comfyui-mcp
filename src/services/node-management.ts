@@ -3167,6 +3167,71 @@ function looksLikeAPack(dir: string): boolean {
 }
 
 /**
+ * #2714 — DOES THE DISK CORROBORATE THE MANAGER'S "IT IS INSTALLED"?
+ *
+ * The git branch of installCustomNodeImpl used to accept ComfyUI-Manager's
+ * installed-pack list as the whole proof: queue drained, `nodeInstalledMatches`
+ * true, report `Installed "<repo>" via ComfyUI-Manager`. On Manager 4.2.2 a
+ * reporter got exactly that string (done_count 2) for
+ * `https://github.com/darksidewalker/ComfyUI-DaSiWa-Nodes` while
+ * `custom_nodes/ComfyUI-DaSiWa-Nodes` did not exist at all. The list is
+ * Manager's OWN bookkeeping — for a pack it previously tracked it keeps
+ * answering after the directory is gone, and a v4 task that resolves nothing is
+ * still marked done. Neither the list nor done_count observes the filesystem.
+ *
+ * The registry branch below already crosses the list with a disk scan
+ * (`resolvePackPresence`) and already refuses a marker-only husk
+ * (`looksLikeAPack`, #900/#1816). The git branch had neither. This is that same
+ * evidence, applied to the git route.
+ *
+ * CORROBORATION IS PER-IDENTITY, NOT PER-NAME. Manager may hold the pack under
+ * its CNR id or its own module key rather than the repo name we derived from the
+ * URL, so every identity the matched entry offers gets to vouch for the pack;
+ * ONE hit is enough. Only when they ALL scan clean is the claim uncorroborated —
+ * an "absent" that has to survive every spelling before it can retract a success.
+ *
+ * NOT the `.git`-must-exist check the report proposed: the v4 route is
+ * registry-first by construction, so a pack it resolved and unpacked from the
+ * registry has no `.git` and is working exactly as designed. What matters is
+ * whether ComfyUI can import the directory, which is what `looksLikeAPack` asks.
+ */
+type ManagerClaimCorroboration =
+  | { state: "corroborated"; dir: string }
+  /** The directory is there but holds no importable pack (#900's husk). */
+  | { state: "husk"; dir: string }
+  /** Every identity was scanned for and none is on disk. */
+  | { state: "absent"; scanned: string }
+  /** The disk could not answer — never treated as absence. */
+  | { state: "unreadable" };
+
+function diskCorroboratesManagerInstall(
+  gitId: string,
+  node: InstalledNode,
+  diskRoot: string,
+): ManagerClaimCorroboration {
+  const identities = [gitId, node.module, node.cnrId].filter(
+    (v): v is string => typeof v === "string" && v.trim().length > 0,
+  );
+  let husk: string | undefined;
+  let scanned: string | undefined;
+  for (const identity of identities) {
+    const found = findPackOnDisk(identity, diskRoot);
+    if (found.state === "found") {
+      if (looksLikeAPack(found.dir)) return { state: "corroborated", dir: found.dir };
+      husk ??= found.dir;
+      continue;
+    }
+    if (found.state === "not-found") scanned ??= found.scanned;
+  }
+  // A husk is a POSITIVE observation about a real directory and outranks the
+  // other identities coming back clean: the pack the caller asked for is that
+  // directory, and it is broken.
+  if (husk !== undefined) return { state: "husk", dir: husk };
+  if (scanned !== undefined) return { state: "absent", scanned };
+  return { state: "unreadable" };
+}
+
+/**
  * Registry-zip post-verify: the target directory exists but holds no pack code.
  * Look up the registry entry's repository so the error can name the git-clone
  * fallback that actually works; a lookup failure must not hide the empty dir.
@@ -4248,19 +4313,64 @@ async function installCustomNodeImpl(
     }
     assertInstallTargetStable(targetGeneration, managerBase);
 
-    // VERIFY: /v2/customnode/installed reflects on-disk custom_nodes, so a
-    // freshly-cloned pack shows up even before a reboot. If the Manager actually
-    // installed it, we're done; otherwise it's unregistered → clone it directly.
+    // VERIFY: the Manager's installed-pack list is the FIRST witness — but it is
+    // Manager's own bookkeeping, not the filesystem, so #2714 crosses it with a
+    // disk scan before any success wording (see diskCorroboratesManagerInstall).
+    // A list hit that the disk does not corroborate is not an install; it falls
+    // through to the same direct clone an unregistered pack takes.
     const installed = await listInstalledNodesAt(managerBase).catch(
       () => [] as InstalledNode[],
     );
     assertInstallTargetStable(targetGeneration, managerBase);
-    if (nodeInstalledMatches(gitId, installed)) {
-      return withCliNote({
-        mechanism: "manager-http",
-        message: `Installed "${repoName}" via ComfyUI-Manager. Restart may be required to load new nodes.`,
-        details: status,
-      });
+    const listedNode = findInstalledNode(gitId, installed);
+    /** #2714 — why the Manager's own "installed" verdict was not taken. */
+    let uncorroboratedNote: string | undefined;
+    if (listedNode) {
+      // The disk is only consulted when it can answer ABOUT THIS SERVER: in
+      // remote mode the tree we could read is not the host's, and with no local
+      // root captured there is nothing to scan. In both cases the list is the
+      // only witness there is, and saying so is the honest report — not silence.
+      const corroboration =
+        presenceCtx.remote || !presenceCtx.diskRoot
+          ? undefined
+          : diskCorroboratesManagerInstall(gitId, listedNode, presenceCtx.diskRoot);
+      if (corroboration?.state === "absent") {
+        uncorroboratedNote =
+          `ComfyUI-Manager drained the install task and still lists "${repoName}" in its ` +
+          `installed-pack list, but NO matching pack exists under ${corroboration.scanned} ` +
+          `— so that list is describing its own bookkeeping, not this filesystem, and a ` +
+          `drained queue proves nothing landed (#2714). Nothing was installed by that route.`;
+      } else if (corroboration?.state === "husk") {
+        // Same class as #900/#1816, reached from the git route: a directory the
+        // install left behind that ComfyUI cannot import. This call is not the
+        // proven author of it, so it is named and left untouched rather than
+        // deleted, and no success is claimed over it.
+        throw new NodeManagementError(
+          `ComfyUI-Manager drained the install task and lists "${repoName}" as installed, but ` +
+            `${corroboration.dir} holds nothing ComfyUI can import — only metadata/marker files, ` +
+            `the husk of an install that did not complete. ComfyUI loads DIRECTORIES, so it will ` +
+            `fail to import that on every start. NOT reporting success: nothing usable was ` +
+            `installed. Delete ${corroboration.dir} by hand and retry the install.`,
+          status,
+        );
+      } else {
+        return withCliNote({
+          mechanism: "manager-http",
+          message:
+            `Installed "${repoName}" via ComfyUI-Manager` +
+            (corroboration?.state === "corroborated"
+              ? `, verified present on disk at ${corroboration.dir}`
+              : `. Its presence on disk was NOT verified from here (${
+                  presenceCtx.remote
+                    ? "this session targets a REMOTE ComfyUI, so the local filesystem is not the host's"
+                    : !presenceCtx.diskRoot
+                      ? "no local custom_nodes scan root could be established for the connected server"
+                      : "the local custom_nodes scan could not answer"
+                }), so ComfyUI-Manager's installed-pack list is the only witness`) +
+            `. Restart may be required to load new nodes.`,
+          details: status,
+        });
+      }
     }
     if (localWriteMismatch) {
       throw new ProcessControlError(
@@ -4272,6 +4382,10 @@ async function installCustomNodeImpl(
     const clone = () => cloneCustomNodeFallback(gitId, repoName, gitRef, status, cliWorkspace, {
       refFromVersion,
       allowSharedWorkspaceFallback: cliWorkspace !== undefined,
+      // #2714 — the default reason ("not in the ComfyUI-Manager registry") is the
+      // wrong explanation when Manager DID list the pack; state what was actually
+      // observed instead, so a subsequent refusal from here is not misattributed.
+      ...(uncorroboratedNote ? { managerRefusalNote: uncorroboratedNote } : {}),
     });
     // An accepted remote Manager task that resolves no pack still reaches this
     // helper only for its authoritative remote-target refusal; it is not a
