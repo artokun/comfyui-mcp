@@ -187,6 +187,10 @@ describe("#2705: an unacked workflow_new is settled by the panel's own receipt",
     const body = jsonOf(res);
     expect(body.created).toBe(true);
     // The machine-readable verdict the issue asked for — no prose parsing.
+    // Always present: the acknowledgement did not arrive. The issue's own field
+    // name rides along ONLY where it is literally true (see the drop test below).
+    expect(body.applied_but_unacknowledged).toBe(true);
+    expect(body.unacknowledged_cause).toBe("ack_timeout");
     expect(body.applied_but_ack_timed_out).toBe(true);
     expect(body.recovered).toBe(true);
     expect(body.routing_key).toBe(NEW_KEY);
@@ -214,7 +218,11 @@ describe("#2705: an unacked workflow_new is settled by the panel's own receipt",
       makeCtx({ newReply: reconnectDrop, listReplies: [listWithActiveNewTab(appliedReceipt())] }),
     );
     expect(res.isError).toBeFalsy();
-    expect(jsonOf(res).applied_but_ack_timed_out).toBe(true);
+    expect(jsonOf(res).applied_but_unacknowledged).toBe(true);
+    expect(jsonOf(res).unacknowledged_cause).toBe("reconnect_drop");
+    // A disconnect is NOT a timeout, so the timeout-named field must be absent —
+    // not present-and-false, which would still read as "this field applies here".
+    expect(jsonOf(res)).not.toHaveProperty("applied_but_ack_timed_out");
     expect(fence).toBe(NEW_UUID);
     // …but does not tell the user their tab was SLOW when it disconnected.
     expect(String(jsonOf(res).note)).toMatch(/disconnected mid-command/);
