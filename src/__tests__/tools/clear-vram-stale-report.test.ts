@@ -192,7 +192,12 @@ describe("clear_vram post-unload VRAM (#2050)", () => {
 
     const res = await runClear({ unload_models: true, free_memory: true });
 
-    expect(mocks.getSystemStats).not.toHaveBeenCalled();
+    // #2704 added ONE read before POST /free — the settle baseline, which must
+    // be sampled before the mutation to be worth anything. The polling this
+    // guards against is the settle LOOP, so the count is pinned exactly rather
+    // than loosened to "some": a loop leaking in behind a failed /free would
+    // run many more than one.
+    expect(mocks.getSystemStats).toHaveBeenCalledTimes(1);
     expect(textOf(res)).toMatch(/Failed to free VRAM/);
     expect(textOf(res)).not.toContain("Current VRAM:");
   });
