@@ -132,6 +132,11 @@ interface PanelImageRelayResponseFailure {
   ok: false;
   error: string;
   updated: number;
+  /** #2703 - WHY the panel could not answer, when the code alone cannot say.
+   *  Carried only for PANEL_FETCH_FAILED, the one code that stands for a whole
+   *  family of distinct panel-side causes. Signed with the rest of the response;
+   *  see panelFailureReason for what may appear here. */
+  reason?: string;
 }
 
 interface PanelImageRelayResponseSuccess extends PanelImageRelaySuccess {
@@ -173,24 +178,31 @@ export interface PanelImageRelayBridge {
 export class PanelImageRelayError extends Error {
   readonly code: string;
   readonly unavailable: boolean;
+  /** #2703 - the panel-side cause behind a PANEL_FETCH_FAILED, when one was
+   *  carried. DIAGNOSTIC PROSE ONLY: nothing branches on it. */
+  readonly reason?: string;
 
-  constructor(message: string, code: string, unavailable = false) {
+  constructor(message: string, code: string, unavailable = false, reason?: string) {
     super(message);
     this.name = "PanelImageRelayError";
     this.code = code;
     this.unavailable = unavailable;
+    if (reason !== undefined) this.reason = reason;
   }
 }
 
 export class PanelComfyUIReadRelayError extends Error {
   readonly code: string;
   readonly unavailable: boolean;
+  /** #2703 - see PanelImageRelayError.reason. */
+  readonly reason?: string;
 
-  constructor(message: string, code: string, unavailable = false) {
+  constructor(message: string, code: string, unavailable = false, reason?: string) {
     super(message);
     this.name = "PanelComfyUIReadRelayError";
     this.code = code;
     this.unavailable = unavailable;
+    if (reason !== undefined) this.reason = reason;
   }
 }
 
@@ -213,6 +225,104 @@ function isSafeText(value: unknown, max: number): value is string {
       return code < 0x20 || code === 0x7f;
     })
   );
+}
+
+/**
+ * How much of a panel-side failure cause may ride back with the code (#2703).
+ *
+ * 200 rather than the 160 used for `error`: `error` is a fixed token from a
+ * closed set, while this is a sentence. The panel's longest shipped message
+ * ("fetch_comfyui_read response exceeds the 16777216-byte limit") fits well
+ * inside it, and a bound this size cannot be used to move a payload.
+ */
+const PANEL_FAILURE_REASON_MAX = 200;
+
+/**
+ * Turn the rejected bridge send into ONE sentence naming what actually went
+ * wrong (#2703).
+ *
+ * WHY THIS EXISTS. `PANEL_FETCH_FAILED` is the answer for every non-timeout
+ * throw out of `bridge.send`, and that is a whole family of distinct,
+ * differently-actionable causes: the panel's own `too_large` (the read exceeded
+ * its byte ceiling), `timeout`, `network_error`, `http_error` with a status,
+ * `invalid_origin`, `redirect_error`, `api_unavailable`, the workflow-reload
+ * guard, and an "Unknown command" from a panel that predates the read relay.
+ * The code separates NONE of them, so the reporter on #2703 was told
+ * "the connected panel ComfyUI read fallback failed safely (PANEL_FETCH_FAILED)"
+ * - true, and unactionable. The error this catch is already holding says which
+ * one it was; it was simply being dropped on the floor.
+ *
+ * TRUST. This is panel-authored prose reaching an agent, so it is treated the
+ * way the image path already treats a panel-authored `error` string: bounded,
+ * control characters removed, and gated on `isSafeText`. Nothing parses it and
+ * nothing branches on it - it is one sentence appended to an error message.
+ * There is no credential-reflection surface behind it either: the panel's read
+ * helper builds its messages from a FIXED route, a status number, a byte count
+ * and the browser's own fetch error, never from a response body (the class of
+ * leak #385 hit). Anything that fails the guard is dropped whole rather than
+ * repaired, so the worst case is exactly the pre-#2703 bare code.
+ */
+function panelFailureReason(error: unknown): string | undefined {
+  const raw = error instanceof Error ? error.message : typeof error === "string" ? error : "";
+  // Control characters are folded to spaces rather than rejecting the whole
+  // string: a message that merely wraps a line still carries its cause, and
+  // dropping it would put us back at the bare code this exists to replace.
+  const flattened = raw.replace(/[\u0000-\u001f\u007f]+/g, " ").replace(/\s+/g, " ").trim();
+  if (!flattened) return undefined;
+  const clipped =
+    flattened.length > PANEL_FAILURE_REASON_MAX
+      ? `${flattened.slice(0, PANEL_FAILURE_REASON_MAX - 1)}\u2026`
+      : flattened;
+  return isSafeText(clipped, PANEL_FAILURE_REASON_MAX) ? clipped : undefined;
+}
+
+/**
+ * ABSENT, or an OWN bounded safe string on the ONE code that carries one
+ * (#2703). Anything else is a malformed reply.
+ *
+ * Kept separate from the `hasOnlyKeys` list because the two say different
+ * things: the key list decides which fields MAY appear, and this decides what
+ * the field is allowed to be. A `reason` present but wrong is a malformed
+ * reply, not a reply with the field quietly ignored - the MAC covers it, so a
+ * value we would not accept is a value the writer and reader disagree about.
+ *
+ * Two refusals here that the first draft did not have (codex gate, round 2):
+ *
+ *  - THE CODE. Widening the key set let a signed `TIMEOUT` carrying a `reason`
+ *    validate, where before the extra key made it MALFORMED_REPLY. Dropping
+ *    that reason at RENDER time (the first draft did) fixed what the user sees
+ *    while still loosening the wire contract for every code except the one that
+ *    legitimately changed. Refusing it here restores the old answer for all of
+ *    them, and makes this the single place the rule is stated - the two readers
+ *    downstream may then simply repeat `response.reason`.
+ *
+ *  - INHERITANCE. `hasOwn` said "absent" for a `reason` reached through the
+ *    prototype while `record.reason` downstream reads it, so a polluted
+ *    `Object.prototype` slipped past this gate. This one is LOAD-BEARING, and
+ *    a first draft of the comment here wrongly said it was not: the reasoning
+ *    was that `responseMacPayload` reads the same inherited value, so the
+ *    digest would disagree and the reply be refused anyway. It disagrees only
+ *    when the SENDER did not account for it. A peer that signs the six-element
+ *    digest over the inherited value sends a body with no `reason` key at all,
+ *    and the MAC then verifies perfectly - leaving this the only check between
+ *    an unbounded string and the user's error message. Mutation testing is what
+ *    said so: deleting this line killed nothing until the test signed the
+ *    polluted value. An inherited value is refused outright rather than
+ *    accepted-if-safe; nothing on the wire put it there.
+ */
+function validFailureReason(record: Record<string, unknown>): boolean {
+  // The EFFECTIVE value (own or inherited), because that is what every reader
+  // of this record - including the MAC payload - will see.
+  const effective = (record as { reason?: unknown }).reason;
+  if (effective === undefined) return true;
+  if (!hasOwn(record, "reason")) return false;
+  if (record.error !== "PANEL_FETCH_FAILED") return false;
+  return isSafeText(effective, PANEL_FAILURE_REASON_MAX);
+}
+
+/** The one rendering of a carried reason, shared by both readers. */
+function reasonSuffix(reason: string | undefined): string {
+  return reason ? ` The panel reported: ${reason}` : "";
 }
 
 /** Strict wire-level validation. Keep this stricter than the legacy tool path. */
@@ -671,20 +781,30 @@ function validateResponse(value: unknown, requestId: string): PanelImageRelayRes
     typeof record.error === "string" &&
     record.error.length <= 160 &&
     isSafeText(record.error, 160) &&
-    hasOnlyKeys(record, ["version", "requestId", "ok", "error", "updated"])
+    validFailureReason(record) &&
+    hasOnlyKeys(record, ["version", "requestId", "ok", "error", "updated", "reason"])
   ) {
     return record as unknown as PanelImageRelayResponseFailure;
   }
   throw new PanelImageRelayError("The panel returned a malformed image relay reply.", "MALFORMED_REPLY");
 }
 
-function failureResponse(requestId: string, error: string, updated = Date.now()): PanelImageRelayResponseFailure {
+function failureResponse(
+  requestId: string,
+  error: string,
+  updated = Date.now(),
+  reason?: string,
+): PanelImageRelayResponseFailure {
   return {
     version: PANEL_IMAGE_RELAY_VERSION,
     requestId,
     ok: false,
     error,
     updated,
+    // Omitted rather than set to undefined: the far side validates the KEY SET
+    // with hasOnlyKeys, and JSON.stringify drops an explicit undefined anyway -
+    // which would leave the two sides disagreeing about the shape they signed.
+    ...(reason === undefined ? {} : { reason }),
   };
 }
 
@@ -700,17 +820,48 @@ function responseFailureMessage(response: PanelImageRelayResponseFailure): never
     "TIMEOUT",
   ]);
   const code = known.has(response.error) ? response.error : "PANEL_FETCH_FAILED";
+  // #2703 - `response` reached here through validFailureReason, which admits a
+  // reason ONLY alongside a literal `PANEL_FETCH_FAILED` error. So a reason
+  // present here cannot belong to a remapped unknown code or to a TIMEOUT, and
+  // `code` necessarily equals `response.error`. A second filter at this point
+  // was written first and then removed: mutation testing showed it unreachable,
+  // and an unreachable guard that looks load-bearing misdirects the next reader
+  // about where the rule actually lives. It lives in validFailureReason.
+  const reason = response.reason;
   throw new PanelImageRelayError(
     code === "PANEL_FETCH_FAILED"
-      ? "The connected panel could not fetch that image."
+      ? `The connected panel could not fetch that image.${reasonSuffix(reason)}`
       : `The connected panel image relay failed (${code}).`,
     code,
+    false,
+    reason,
   );
 }
 
 function responseMacPayload(response: PanelRelayResponse): string {
   if (!response.ok) {
-    return JSON.stringify([response.version, response.requestId, false, response.error, response.updated]);
+    // `reason` is part of the SIGNED payload. A field the MAC does not cover is
+    // a field the reader may not rely on, and this one is read out loud to the
+    // user - an unauthenticated sentence attributed to the panel is worse than
+    // no sentence at all.
+    //
+    // APPENDED, not always-present-as-null. Writing it unconditionally changed
+    // the digest of a REASONLESS failure too, and that is a compatibility break
+    // this fix has no business making: the relay server and its client are two
+    // PROCESSES. An in-place package update swaps `dist` under a running
+    // orchestrator, and the children it spawns afterwards load the new code
+    // while it still runs the old - so an old signer would meet a new verifier
+    // and every relay failure would read MALFORMED_REPLY until the orchestrator
+    // restarted. (Caught by the shipped `classifies an authenticated server
+    // TIMEOUT before deadline freshness` test, which hand-signs the pre-#2703
+    // payload; that test was the old signer, and it was right to reject the
+    // change.) Appending keeps the old shape byte-identical.
+    //
+    // The two forms still cannot be confused: a 5-element array and a
+    // 6-element one never serialise to the same string, so stripping a reason
+    // or adding one both fail verification.
+    const base = [response.version, response.requestId, false, response.error, response.updated];
+    return JSON.stringify(response.reason === undefined ? base : [...base, response.reason]);
   }
   if ("operation" in response) {
     return JSON.stringify([
@@ -762,7 +913,8 @@ function validateReadResponse(
       typeof record.error === "string" &&
       record.error.length <= 160 &&
       isSafeText(record.error, 160) &&
-      hasOnlyKeys(record, ["version", "requestId", "ok", "error", "updated"])
+      validFailureReason(record) &&
+      hasOnlyKeys(record, ["version", "requestId", "ok", "error", "updated", "reason"])
     ) return record as unknown as PanelImageRelayResponseFailure;
     throw new PanelComfyUIReadRelayError("The panel returned a malformed ComfyUI read reply.", "MALFORMED_REPLY");
   }
@@ -1128,6 +1280,10 @@ export async function startPanelImageRelayServer(
                   request.requestId,
                   timedOut ? "TIMEOUT" : "PANEL_FETCH_FAILED",
                   timedOut ? requestDeadline(request) : Date.now(),
+                  // #2703 - TIMEOUT already says what happened and by when; only
+                  // PANEL_FETCH_FAILED is the code that stands for many causes,
+                  // so only it needs the sentence.
+                  timedOut ? undefined : panelFailureReason(error),
                 );
               }
             }
@@ -1334,11 +1490,16 @@ export async function requestPanelComfyUIRead(
       "TIMEOUT",
     ]);
     const code = known.has(response.error) ? response.error : "PANEL_FETCH_FAILED";
+    // #2703 - see responseFailureMessage: validFailureReason is where "only
+    // PANEL_FETCH_FAILED carries a reason" is enforced, on the way in.
+    const reason = response.reason;
     throw new PanelComfyUIReadRelayError(
       code === "PANEL_FETCH_FAILED"
-        ? "The connected panel could not read ComfyUI."
+        ? `The connected panel could not read ComfyUI.${reasonSuffix(reason)}`
         : `The connected panel ComfyUI read relay failed (${code}).`,
       code,
+      false,
+      reason,
     );
   }
   return {

@@ -274,8 +274,19 @@ async function panelReadFallback(
     if (error instanceof PanelComfyUIReadRelayError && error.unavailable) return undefined;
     const primary = primaryError instanceof Error ? primaryError.message : String(primaryError);
     const code = error instanceof PanelComfyUIReadRelayError ? error.code : "RELAY_ERROR";
+    // #2703 - the code alone was the whole answer, and PANEL_FETCH_FAILED does
+    // not distinguish "the read exceeded the relay's byte ceiling" from "the
+    // panel's fetch timed out" from "ComfyUI answered 403" from "that panel
+    // predates the read relay". The reporter got `fetch failed: connect
+    // ECONNREFUSED 127.0.0.1:8188 ... (PANEL_FETCH_FAILED)` and had nothing to
+    // act on: the headless target was dead AND the one path that could have
+    // answered declined without saying why. The relay now carries the cause
+    // (services/panel-image-relay.ts, panelFailureReason); say it here, because
+    // this message - not the relay error - is what reaches the caller.
+    const reason = error instanceof PanelComfyUIReadRelayError ? error.reason : undefined;
     throw new Error(
-      `${primary} The connected panel ComfyUI read fallback failed safely (${code}).`,
+      `${primary} The connected panel ComfyUI read fallback failed safely (${code}).` +
+        (reason ? ` The panel reported: ${reason}` : ""),
       { cause: error },
     );
   }
@@ -1628,8 +1639,13 @@ export async function fetchImage(
       } catch (relayError) {
         if (relayError instanceof PanelImageRelayError && !relayError.unavailable) {
           const primary = primaryError instanceof Error ? primaryError.message : String(primaryError);
+          // #2703 - the same collapse on the image relay's own dead end. Both
+          // codes are produced by ONE catch in the relay, so leaving this one
+          // bare would have left half the reports unactionable for the same
+          // reason the history path was.
           throw new Error(
-            `${primary} The connected panel image relay failed safely (${relayError.code}).`,
+            `${primary} The connected panel image relay failed safely (${relayError.code}).` +
+              (relayError.reason ? ` The panel reported: ${relayError.reason}` : ""),
             { cause: relayError },
           );
         }
