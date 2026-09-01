@@ -6,10 +6,17 @@ All notable changes to this project are documented here. This project adheres to
 
 ## Unreleased
 
+## [0.52.167] - 2026-09-01
+
 ### MCP
 
 #### Fixed
 - panel_set_widget reconciles a missing ACK with a graph read-back and mutation receipt instead of leaving an applied subgraph write as outcome-unknown (#2489)
+- bind panel relay to selected tab target (#2656)
+- bind panel fallback relay to target generation
+- keep Unreleased changelog; vocabulary-safe list_assets mentions
+- name PreviewImage temp refs in panel completion events
+
 
 ## [0.52.166] - 2026-09-01
 
