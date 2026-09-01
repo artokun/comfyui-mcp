@@ -15,6 +15,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createHmac } from "node:crypto";
 import {
+  PANEL_IMAGE_RELAY_HTTP_PATH,
   PANEL_IMAGE_RELAY_VERSION,
   PanelComfyUIReadRelayError,
   PanelImageRelayError,
@@ -85,6 +86,31 @@ async function relayRejectingWith(error: unknown) {
   });
   process.env.COMFYUI_MCP_RELAY_URL = server.endpointUrl;
   return server;
+}
+
+/** A fake relay peer that answers every request with one hand-built, hand-signed
+ *  reply. Used to exercise digests this codebase's own writer never produces. */
+async function staticSignedReply(
+  build: (requestId: string) => Record<string, unknown>,
+): Promise<{ close: () => Promise<void> }> {
+  const { createServer } = await import("node:http");
+  const fake = createServer((req, res) => {
+    const chunks: Buffer[] = [];
+    req.on("data", (chunk: Buffer) => chunks.push(chunk));
+    req.on("end", () => {
+      const input = JSON.parse(Buffer.concat(chunks).toString("utf8")) as { requestId: string };
+      const body = JSON.stringify(build(input.requestId));
+      res.writeHead(200, {
+        "content-type": "application/json",
+        "content-length": String(Buffer.byteLength(body)),
+      });
+      res.end(body);
+    });
+  });
+  await new Promise<void>((resolve) => fake.listen(0, "127.0.0.1", () => resolve()));
+  const port = (fake.address() as { port: number }).port;
+  process.env.COMFYUI_MCP_RELAY_URL = `http://127.0.0.1:${port}${PANEL_IMAGE_RELAY_HTTP_PATH}`;
+  return { close: () => new Promise<void>((resolve) => fake.close(() => resolve())) };
 }
 
 describe("#2703 — a PANEL_FETCH_FAILED read names its cause", () => {
@@ -228,6 +254,126 @@ describe("#2703 — a PANEL_FETCH_FAILED read names its cause", () => {
     } finally {
       await new Promise<void>((resolve) => resigner.close(() => resolve()));
       await upstream.close();
+    }
+  });
+
+  // Codex gate, finding 2: the tampering cases above are also satisfied by the
+  // PRE-#2703 reject-all-extra-keys rule, so on their own they do not separate
+  // the new contract from the old one. These three do — each one is about a
+  // response this diff must treat differently from how it treated it before.
+
+  it("verifies a hand-signed LEGACY five-element failure unchanged", async () => {
+    // The compatibility claim, stated directly instead of resting on an
+    // unrelated shipped test: a peer that signed the pre-#2703 payload (an old
+    // orchestrator serving a child spawned after an in-place package update)
+    // must still verify, and must produce the bare pre-#2703 sentence.
+    const server = await staticSignedReply((requestId) => {
+      const unsigned = {
+        version: PANEL_IMAGE_RELAY_VERSION,
+        requestId,
+        ok: false,
+        error: "PANEL_FETCH_FAILED",
+        updated: Date.now(),
+      };
+      return {
+        ...unsigned,
+        responseMac: createHmac("sha256", SECRET)
+          .update(
+            JSON.stringify([unsigned.version, unsigned.requestId, false, unsigned.error, unsigned.updated]),
+          )
+          .digest("hex"),
+      };
+    });
+    try {
+      const failure = (await requestPanelComfyUIRead("history").then(
+        () => undefined,
+        (error: unknown) => error,
+      )) as PanelComfyUIReadRelayError;
+      expect(failure.code).toBe("PANEL_FETCH_FAILED");
+      expect(failure.reason).toBeUndefined();
+      expect(failure.message).toBe("The connected panel could not read ComfyUI.");
+    } finally {
+      await server.close();
+    }
+  });
+
+  it("refuses a six-element digest whose reason was stripped in flight", async () => {
+    // The other direction from the append attack: a response SIGNED with a
+    // reason, delivered without it. Believing it would let a man-in-the-middle
+    // silently delete the diagnosis this whole change exists to deliver.
+    const server = await staticSignedReply((requestId) => {
+      const unsigned = {
+        version: PANEL_IMAGE_RELAY_VERSION,
+        requestId,
+        ok: false,
+        error: "PANEL_FETCH_FAILED",
+        updated: Date.now(),
+      };
+      const mac = createHmac("sha256", SECRET)
+        .update(
+          JSON.stringify([
+            unsigned.version,
+            unsigned.requestId,
+            false,
+            unsigned.error,
+            unsigned.updated,
+            "the reason that was signed",
+          ]),
+        )
+        .digest("hex");
+      return { ...unsigned, responseMac: mac };
+    });
+    try {
+      const failure = (await requestPanelComfyUIRead("history").then(
+        () => undefined,
+        (error: unknown) => error,
+      )) as PanelComfyUIReadRelayError;
+      expect(failure.code).toBe("MALFORMED_REPLY");
+    } finally {
+      await server.close();
+    }
+  });
+
+  it("does not attach a correctly signed reason to a code that never carries one", async () => {
+    // Codex gate, finding 1. Our writer only ever mints a reason alongside
+    // PANEL_FETCH_FAILED, but the response is input that merely has to verify —
+    // so the READER has to enforce that, not assume it. A signed TIMEOUT with a
+    // reason was previously appended to the caller's timeout message.
+    const server = await staticSignedReply((requestId) => {
+      const unsigned = {
+        version: PANEL_IMAGE_RELAY_VERSION,
+        requestId,
+        ok: false,
+        error: "TIMEOUT",
+        updated: Date.now(),
+        reason: "a sentence TIMEOUT must not carry",
+      };
+      return {
+        ...unsigned,
+        responseMac: createHmac("sha256", SECRET)
+          .update(
+            JSON.stringify([
+              unsigned.version,
+              unsigned.requestId,
+              false,
+              unsigned.error,
+              unsigned.updated,
+              unsigned.reason,
+            ]),
+          )
+          .digest("hex"),
+      };
+    });
+    try {
+      const failure = (await requestPanelComfyUIRead("history").then(
+        () => undefined,
+        (error: unknown) => error,
+      )) as PanelComfyUIReadRelayError;
+      expect(failure.code).toBe("TIMEOUT");
+      expect(failure.reason).toBeUndefined();
+      expect(failure.message).not.toContain("must not carry");
+    } finally {
+      await server.close();
     }
   });
 

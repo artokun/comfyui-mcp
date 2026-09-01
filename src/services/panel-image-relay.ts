@@ -291,6 +291,15 @@ function validFailureReason(record: Record<string, unknown>): boolean {
   return isSafeText(record.reason, PANEL_FAILURE_REASON_MAX);
 }
 
+/**
+ * The reason a reader may believe: present, and on the ONE code it is minted
+ * for (#2703). Shared by both readers so the rule cannot drift between them.
+ */
+function keptFailureReason(response: PanelImageRelayResponseFailure, code: string): string | undefined {
+  if (code !== "PANEL_FETCH_FAILED") return undefined;
+  return response.error === code ? response.reason : undefined;
+}
+
 /** The one rendering of a carried reason, shared by both readers. */
 function reasonSuffix(reason: string | undefined): string {
   return reason ? ` The panel reported: ${reason}` : "";
@@ -791,10 +800,17 @@ function responseFailureMessage(response: PanelImageRelayResponseFailure): never
     "TIMEOUT",
   ]);
   const code = known.has(response.error) ? response.error : "PANEL_FETCH_FAILED";
-  // #2703 - only trust the reason on the code it was minted for. An unknown
-  // `error` is remapped to PANEL_FETCH_FAILED above, and attaching a reason to
-  // THAT would attribute a sentence to a code the writer never sent.
-  const reason = response.error === code ? response.reason : undefined;
+  // #2703 - only trust the reason on the code it was minted for, which is
+  // PANEL_FETCH_FAILED and nothing else. Two ways to get this wrong, and the
+  // first draft had the second (codex gate, finding 1):
+  //   - an UNKNOWN `error` is remapped to PANEL_FETCH_FAILED above, so keeping
+  //     its reason would attribute a sentence to a code the writer never sent;
+  //   - a known-but-different code (TIMEOUT) never carries a reason from OUR
+  //     writer, but `response` is attacker-supplied input that merely has to
+  //     verify. A correctly signed TIMEOUT+reason was accepted and appended to
+  //     the caller's timeout message. Enforce the invariant the writer honours
+  //     rather than assuming the peer honours it too.
+  const reason = keptFailureReason(response, code);
   throw new PanelImageRelayError(
     code === "PANEL_FETCH_FAILED"
       ? `The connected panel could not fetch that image.${reasonSuffix(reason)}`
@@ -1457,8 +1473,9 @@ export async function requestPanelComfyUIRead(
       "TIMEOUT",
     ]);
     const code = known.has(response.error) ? response.error : "PANEL_FETCH_FAILED";
-    // #2703 - see responseFailureMessage: a remapped code keeps no reason.
-    const reason = response.error === code ? response.reason : undefined;
+    // #2703 - see responseFailureMessage for why this is PANEL_FETCH_FAILED
+    // only, and not "any code the writer did not remap".
+    const reason = keptFailureReason(response, code);
     throw new PanelComfyUIReadRelayError(
       code === "PANEL_FETCH_FAILED"
         ? `The connected panel could not read ComfyUI.${reasonSuffix(reason)}`
