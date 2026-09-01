@@ -10,6 +10,10 @@ describe("panel image relay orchestrator wiring (#2149)", () => {
     expect(SOURCE).toContain("resolvePanelAgent: panelImageRelayAgentFor");
     expect(SOURCE).toContain("resolvePanelTab: scopeToRealTab");
     expect(SOURCE).toContain("resolveCurrentTarget: () => ({");
+    expect(SOURCE).toContain("resolvePanelTarget: (tabId) => {");
+    expect(SOURCE).toContain("const tabOrigin = bridge.tabOrigin(tabId);");
+    expect(SOURCE).toContain("const serverOrigin = bridge.tabServerOrigin(tabId);");
+    expect(SOURCE).toContain("claimedOrigin !== observedOrigin");
     expect(SOURCE).toContain("generation: getComfyuiTargetGeneration(),");
     expect(SOURCE).toContain("COMFYUI_MCP_RELAY_SECRET: panelImageRelaySecretFor");
     expect(SOURCE).toContain("COMFYUI_MCP_RELAY_URL: panelImageRelayEndpoint");

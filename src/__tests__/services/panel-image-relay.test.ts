@@ -36,6 +36,7 @@ import {
 const dirs: string[] = [];
 const SECRET = "a".repeat(64);
 const TARGET_URL = "http://127.0.0.1:8188";
+const OTHER_TARGET_URL = "http://127.0.0.1:8189";
 const TARGET_GENERATION = 7;
 const PRODUCTION_OBJECT_INFO_DELAY_MS = 20_841;
 
@@ -567,6 +568,7 @@ describe("authenticated loopback panel image relay", () => {
       resolvePanelAgent: (value) => verifyPanelImageRelayCapability(SECRET, value) ? { agentKey: "orchestrator::claude", secret: SECRET } : undefined,
       resolvePanelTab: (agentKey) => agentKey === "orchestrator::claude" ? "pinned-live-panel" : undefined,
       resolveCurrentTarget: () => ({ url: TARGET_URL, generation: TARGET_GENERATION }),
+      resolvePanelTarget: () => ({ url: TARGET_URL, generation: TARGET_GENERATION }),
       bridge: { canReach: () => true, send },
     });
     try {
@@ -593,6 +595,7 @@ describe("authenticated loopback panel image relay", () => {
       resolvePanelAgent: (value) => verifyPanelImageRelayCapability(SECRET, value) ? { agentKey: "orchestrator::claude", secret: SECRET } : undefined,
       resolvePanelTab,
       resolveCurrentTarget: () => ({ url: TARGET_URL, generation: TARGET_GENERATION }),
+      resolvePanelTarget: () => ({ url: TARGET_URL, generation: TARGET_GENERATION }),
       bridge: { canReach: () => true, send },
     });
     try {
@@ -614,6 +617,60 @@ describe("authenticated loopback panel image relay", () => {
     }
   });
 
+  it("refuses a valid target-B capability when the selected panel tab proves target A", async () => {
+    const send = vi.fn();
+    const resolvePanelTarget = vi.fn(() => ({ url: OTHER_TARGET_URL, generation: TARGET_GENERATION }));
+    const server = await startPanelImageRelayServer({
+      resolvePanelAgent: (value) => verifyPanelImageRelayCapability(SECRET, value) ? { agentKey: "orchestrator::claude", secret: SECRET } : undefined,
+      resolvePanelTab: () => "panel-A",
+      resolveCurrentTarget: () => ({ url: TARGET_URL, generation: TARGET_GENERATION }),
+      resolvePanelTarget,
+      bridge: { canReach: () => true, send },
+    });
+    try {
+      const targetB = request("cross-target-123456", { targetUrl: TARGET_URL, targetGeneration: TARGET_GENERATION });
+      const response = await fetch(server.endpointUrl, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(targetB),
+      });
+      expect(response.status).toBe(200);
+      expect(await response.json()).toMatchObject({ ok: false, error: "STALE_TARGET", requestId: targetB.requestId });
+      expect(resolvePanelTarget).toHaveBeenCalledWith("panel-A");
+      expect(send).not.toHaveBeenCalled();
+    } finally {
+      await server.close();
+    }
+  });
+
+  it("refuses missing or ambiguous per-tab target proof before dispatch", async () => {
+    for (const resolvePanelTarget of [
+      () => undefined,
+      () => { throw new Error("panel target identity is ambiguous"); },
+    ]) {
+      const send = vi.fn();
+      const server = await startPanelImageRelayServer({
+        resolvePanelAgent: (value) => verifyPanelImageRelayCapability(SECRET, value) ? { agentKey: "orchestrator::claude", secret: SECRET } : undefined,
+        resolvePanelTab: () => "panel-tab",
+        resolveCurrentTarget: () => ({ url: TARGET_URL, generation: TARGET_GENERATION }),
+        resolvePanelTarget,
+        bridge: { canReach: () => true, send },
+      });
+      try {
+        const response = await fetch(server.endpointUrl, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify(request("missing-panel-target-123456")),
+        });
+        expect(response.status).toBe(200);
+        expect(await response.json()).toMatchObject({ ok: false, error: "STALE_TARGET" });
+        expect(send).not.toHaveBeenCalled();
+      } finally {
+        await server.close();
+      }
+    }
+  });
+
   it("drops a bridge result when the panel retargets during the in-flight request", async () => {
     let currentTarget = { url: TARGET_URL, generation: TARGET_GENERATION };
     let release: (() => void) | undefined;
@@ -625,6 +682,7 @@ describe("authenticated loopback panel image relay", () => {
       resolvePanelAgent: (value) => verifyPanelImageRelayCapability(SECRET, value) ? { agentKey: "orchestrator::claude", secret: SECRET } : undefined,
       resolvePanelTab: () => "panel-tab",
       resolveCurrentTarget: () => currentTarget,
+      resolvePanelTarget: () => currentTarget,
       bridge: { canReach: () => true, send },
     });
     try {
@@ -644,6 +702,67 @@ describe("authenticated loopback panel image relay", () => {
     }
   });
 
+  it("refuses dispatch when the selected tab retargets before the final send fence", async () => {
+    let panelTarget = { url: TARGET_URL, generation: TARGET_GENERATION };
+    let reads = 0;
+    const send = vi.fn();
+    const server = await startPanelImageRelayServer({
+      resolvePanelAgent: (value) => verifyPanelImageRelayCapability(SECRET, value) ? { agentKey: "orchestrator::claude", secret: SECRET } : undefined,
+      resolvePanelTab: () => "panel-tab",
+      resolveCurrentTarget: () => ({ url: TARGET_URL, generation: TARGET_GENERATION }),
+      resolvePanelTarget: () => {
+        reads += 1;
+        if (reads === 2) panelTarget = { url: OTHER_TARGET_URL, generation: TARGET_GENERATION };
+        return panelTarget;
+      },
+      bridge: { canReach: () => true, send },
+    });
+    try {
+      const response = await fetch(server.endpointUrl, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(request("pre-retarget-123456")),
+      });
+      expect(response.status).toBe(200);
+      expect(await response.json()).toMatchObject({ ok: false, error: "STALE_TARGET" });
+      expect(reads).toBeGreaterThanOrEqual(2);
+      expect(send).not.toHaveBeenCalled();
+    } finally {
+      await server.close();
+    }
+  });
+
+  it("drops a bridge result when the selected tab retargets in flight", async () => {
+    let panelTarget = { url: TARGET_URL, generation: TARGET_GENERATION };
+    let release: (() => void) | undefined;
+    const bridgeReply = new Promise<Record<string, unknown>>((resolve) => {
+      release = () => resolve({ ok: true, base64: "AQID", mimeType: "image/png", bytes: 3 });
+    });
+    const send = vi.fn(() => bridgeReply);
+    const server = await startPanelImageRelayServer({
+      resolvePanelAgent: (value) => verifyPanelImageRelayCapability(SECRET, value) ? { agentKey: "orchestrator::claude", secret: SECRET } : undefined,
+      resolvePanelTab: () => "panel-tab",
+      resolveCurrentTarget: () => ({ url: TARGET_URL, generation: TARGET_GENERATION }),
+      resolvePanelTarget: () => panelTarget,
+      bridge: { canReach: () => true, send },
+    });
+    try {
+      process.env.COMFYUI_MCP_RELAY_SECRET = SECRET;
+      process.env.COMFYUI_MCP_RELAY_URL = server.endpointUrl;
+      const pending = requestPanelImage("render.png", "output", "shots");
+      for (let i = 0; i < 100 && !send.mock.calls.length; i += 1) {
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+      expect(send).toHaveBeenCalledOnce();
+      panelTarget = { url: OTHER_TARGET_URL, generation: TARGET_GENERATION };
+      release?.();
+      await expect(pending).rejects.toMatchObject({ code: "STALE_TARGET" });
+    } finally {
+      release?.();
+      await server.close();
+    }
+  });
+
   it("fails closed when the live target identity is unavailable", async () => {
     const resolvePanelTab = vi.fn(() => "panel-tab");
     const send = vi.fn();
@@ -651,6 +770,7 @@ describe("authenticated loopback panel image relay", () => {
       resolvePanelAgent: (value) => verifyPanelImageRelayCapability(SECRET, value) ? { agentKey: "orchestrator::claude", secret: SECRET } : undefined,
       resolvePanelTab,
       resolveCurrentTarget: () => { throw new Error("target identity unavailable"); },
+      resolvePanelTarget: () => ({ url: TARGET_URL, generation: TARGET_GENERATION }),
       bridge: { canReach: () => true, send },
     });
     try {
@@ -683,6 +803,7 @@ describe("authenticated loopback panel image relay", () => {
       resolvePanelAgent: (value) => verifyPanelImageRelayCapability(SECRET, value) ? { agentKey: "orchestrator::claude", secret: SECRET } : undefined,
       resolvePanelTab: () => "victim-panel",
       resolveCurrentTarget: () => ({ url: TARGET_URL, generation: TARGET_GENERATION }),
+      resolvePanelTarget: () => ({ url: TARGET_URL, generation: TARGET_GENERATION }),
       bridge: { canReach: () => true, send },
     });
     try {
@@ -799,6 +920,7 @@ describe("authenticated loopback panel image relay", () => {
       resolvePanelAgent: (value) => verifyPanelImageRelayCapability(SECRET, value) ? { agentKey: "orchestrator::claude", secret: SECRET } : undefined,
       resolvePanelTab: () => "panel-tab",
       resolveCurrentTarget: () => ({ url: TARGET_URL, generation: TARGET_GENERATION }),
+      resolvePanelTarget: () => ({ url: TARGET_URL, generation: TARGET_GENERATION }),
       bridge: {
         canReach: () => true,
         send: async (_command, options) => {
@@ -853,6 +975,7 @@ describe("authenticated loopback panel image relay", () => {
             : undefined,
         resolvePanelTab: () => "panel-tab",
         resolveCurrentTarget: () => ({ url: TARGET_URL, generation: TARGET_GENERATION }),
+        resolvePanelTarget: () => ({ url: TARGET_URL, generation: TARGET_GENERATION }),
         bridge: {
           canReach: () => true,
           send: async (command) => {
@@ -908,6 +1031,7 @@ describe("authenticated loopback panel image relay", () => {
           : undefined,
       resolvePanelTab: () => "panel-tab",
       resolveCurrentTarget: () => ({ url: TARGET_URL, generation: TARGET_GENERATION }),
+      resolvePanelTarget: () => ({ url: TARGET_URL, generation: TARGET_GENERATION }),
       bridge: {
         canReach: () => true,
         send: async (command) => {
@@ -945,6 +1069,7 @@ describe("authenticated loopback panel image relay", () => {
           : undefined,
       resolvePanelTab: () => "panel-tab",
       resolveCurrentTarget: () => ({ url: TARGET_URL, generation: TARGET_GENERATION }),
+      resolvePanelTarget: () => ({ url: TARGET_URL, generation: TARGET_GENERATION }),
       bridge: {
         canReach: () => true,
         send: async () => ({
@@ -989,6 +1114,7 @@ describe("authenticated loopback panel image relay", () => {
           : undefined,
       resolvePanelTab: () => "panel-tab",
       resolveCurrentTarget: () => ({ url: TARGET_URL, generation: TARGET_GENERATION }),
+      resolvePanelTarget: () => ({ url: TARGET_URL, generation: TARGET_GENERATION }),
       bridge: {
         canReach: () => true,
         send: productionShapedPanelDispatcher(body, (timeoutMs) => { bridgeTimeoutMs = timeoutMs; }),
@@ -1017,6 +1143,7 @@ describe("authenticated loopback panel image relay", () => {
           : undefined,
       resolvePanelTab: () => "panel-tab",
       resolveCurrentTarget: () => ({ url: TARGET_URL, generation: TARGET_GENERATION }),
+      resolvePanelTarget: () => ({ url: TARGET_URL, generation: TARGET_GENERATION }),
       bridge: {
         canReach: () => true,
         send: async () => ({ operation: "object_info", body, contentType: "application/json", bytes: body.length }),
@@ -1040,6 +1167,7 @@ describe("authenticated loopback panel image relay", () => {
           : undefined,
       resolvePanelTab: () => "panel-tab",
       resolveCurrentTarget: () => ({ url: TARGET_URL, generation: TARGET_GENERATION }),
+      resolvePanelTarget: () => ({ url: TARGET_URL, generation: TARGET_GENERATION }),
       bridge: {
         canReach: () => true,
         send: async (_command, options) => {
@@ -1077,6 +1205,7 @@ describe("authenticated loopback panel image relay", () => {
           : undefined,
       resolvePanelTab: () => "panel-tab",
       resolveCurrentTarget: () => ({ url: TARGET_URL, generation: TARGET_GENERATION }),
+      resolvePanelTarget: () => ({ url: TARGET_URL, generation: TARGET_GENERATION }),
       bridge: {
         canReach: () => true,
         send: async () => {
@@ -1106,6 +1235,7 @@ describe("authenticated loopback panel image relay", () => {
       resolvePanelAgent: () => ({ agentKey: "orchestrator::claude", secret: SECRET }),
       resolvePanelTab: () => "panel-tab",
       resolveCurrentTarget: () => ({ url: TARGET_URL, generation: TARGET_GENERATION }),
+      resolvePanelTarget: () => ({ url: TARGET_URL, generation: TARGET_GENERATION }),
       bridge: { canReach: () => true, send: vi.fn() },
     });
     try {

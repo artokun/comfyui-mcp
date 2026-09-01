@@ -304,6 +304,34 @@ function currentRelayTarget(options: PanelImageRelayServerOptions): PanelImageRe
   }
 }
 
+function currentPanelRelayTarget(
+  options: PanelImageRelayServerOptions,
+  tabId: string,
+): PanelImageRelayTarget | undefined {
+  try {
+    const target = options.resolvePanelTarget(tabId);
+    if (
+      !target ||
+      typeof target.url !== "string" ||
+      !Number.isSafeInteger(target.generation) ||
+      target.generation < 0 ||
+      !canonicalRelayTargetUrl(target.url)
+    ) return undefined;
+    return target;
+  } catch {
+    return undefined;
+  }
+}
+
+function relayTargetsMatch(
+  options: PanelImageRelayServerOptions,
+  request: PanelRelayRequest,
+  panelTab: string,
+): boolean {
+  return relayTargetMatches(request, currentRelayTarget(options)) &&
+    relayTargetMatches(request, currentPanelRelayTarget(options, panelTab));
+}
+
 function relayAuthPayload(input: PanelImageRelayAuthInput): string {
   return JSON.stringify([
     input.requestId,
@@ -961,6 +989,8 @@ export interface PanelImageRelayServerOptions {
   resolvePanelTab: (agentKey: string) => string | undefined;
   /** The orchestrator's authoritative target and monotonic generation. */
   resolveCurrentTarget: () => PanelImageRelayTarget;
+  /** The exact target identity currently proven for the selected live panel tab. */
+  resolvePanelTarget: (tabId: string) => PanelImageRelayTarget | undefined;
 }
 
 export interface PanelImageRelayServer {
@@ -1042,11 +1072,16 @@ export async function startPanelImageRelayServer(
               request.requestId,
               options.bridge.resolveFailure?.(auth.agentKey) === "ambiguous" ? "AMBIGUOUS_REQUESTER" : "NO_LIVE_PANEL",
             );
+          } else if (!relayTargetsMatch(options, request, panelTab)) {
+            // The global target fence does not prove that this particular tab
+            // fronts the child target. Missing, stale, or ambiguous tab proof
+            // must refuse before the targetless bridge command is dispatched.
+            response = failureResponse(request.requestId, "STALE_TARGET");
           } else {
             const remainingMs = requestDeadline(request) - Date.now();
             if (remainingMs <= 0) {
               response = failureResponse(request.requestId, "TIMEOUT", requestDeadline(request));
-            } else if (!relayTargetMatches(request, currentRelayTarget(options))) {
+            } else if (!relayTargetsMatch(options, request, panelTab)) {
               response = failureResponse(request.requestId, "STALE_TARGET");
             } else {
               try {
@@ -1063,7 +1098,7 @@ export async function startPanelImageRelayServer(
                 const imagePayload = !isReadRelayRequest(request) && replyRecord
                   ? validateImagePayload({ base64: replyRecord.base64, mimeType: replyRecord.mimeType, bytes: replyRecord.bytes })
                   : undefined;
-                if (!relayTargetMatches(request, currentRelayTarget(options))) {
+                if (!relayTargetsMatch(options, request, panelTab)) {
                   response = failureResponse(request.requestId, "STALE_TARGET");
                 } else if (Date.now() >= requestDeadline(request)) {
                   response = failureResponse(request.requestId, "TIMEOUT", requestDeadline(request));
