@@ -912,7 +912,9 @@ describe("nodePackGit", () => {
           { pack: "Pack", action: "diff", paths: ["Pack/preset_core.py"] },
           deps,
         ),
-      ).toThrow(/Drop the "Pack\/" prefix and pass "preset_core\.py"/);
+      ).toThrow(
+        /names custom_nodes\/Pack\/Pack\/preset_core\.py, which does not exist.+drop the "Pack\/" prefix and pass "preset_core\.py"/s,
+      );
       expect(gitCalls.length).toBe(0);
     });
 

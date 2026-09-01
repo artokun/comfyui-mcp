@@ -1498,9 +1498,10 @@ function assertNotPackPrefixed(
   const stripped = segs.slice(1);
   if (!deps.existsSync(join(packDir, ...stripped))) return;
   throw new NodeDevError(
-    `Path "${original}" is resolved relative to the pack root, so it names ` +
-      `"${rel}", which does not exist. Drop the "${segs[0]}/" prefix and pass ` +
-      `"${stripped.join("/")}".`,
+    `Path "${original}" is resolved relative to the pack, so it names ` +
+      `custom_nodes/${basename(packDir)}/${rel}, which does not exist. ` +
+      `\`paths\` entries are pack-relative: drop the "${segs[0]}/" prefix and ` +
+      `pass "${stripped.join("/")}".`,
   );
 }
 
