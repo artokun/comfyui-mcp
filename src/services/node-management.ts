@@ -3659,6 +3659,12 @@ async function cloneCustomNodeFallback(
     /** Do not re-read the shared saved-default resolver when the caller's
      *  call-scoped target was deliberately unavailable. */
     allowSharedWorkspaceFallback?: boolean;
+    /**
+     * #2523 — Manager listed this pack under a different owner/repo than the
+     * requested git URL (bare-name aliasing). The existing checkout must be
+     * replaced with a clone of `gitId` rather than left in place.
+     */
+    replaceOrigin?: string;
   },
 ): Promise<NodeOpResult> {
   const because =
@@ -3709,7 +3715,7 @@ async function cloneCustomNodeFallback(
   }
 
   const warnings: string[] = [];
-  const alreadyPresent = existsSync(nodeDir);
+  let alreadyPresent = existsSync(nodeDir);
 
   // A directory that is already there but holds nothing but git metadata is NOT
   // a pack — it is the husk an earlier failed install left behind (#900). Without
@@ -3723,6 +3729,39 @@ async function cloneCustomNodeFallback(
         `git metadata — the husk of an install that did not complete, which ComfyUI ` +
         `cannot import and logs an error for on every start. This call did not create ` +
         `it, so it was left untouched. Delete ${nodeDir} by hand and retry the install.`,
+    );
+  }
+
+  // #2523 — Manager v4 resolves a from-source install by BARE REPO NAME and
+  // clones the channel/registry URL, so artokun/comfyui-teskors-utils can land
+  // as teskor-hub/comfyui-teskors-utils in the same folder. A name hit is not
+  // the requested origin. A verified disk remote is authoritative: stale
+  // Manager metadata must never delete a checkout that already has the right
+  // origin (or any local changes in it). If the disk remote is wrong, replace
+  // it; if the disk remote cannot answer, the Manager aux_id may still prove an
+  // alias replacement is needed.
+  const diskOrigin = alreadyPresent ? readGitRemoteOrigin(nodeDir) : undefined;
+  const diskOriginDiffers = gitOriginsDiffer(gitId, diskOrigin);
+  const managerOriginDiffers = gitOriginsDiffer(gitId, opts?.replaceOrigin);
+  if (
+    alreadyPresent &&
+    (diskOriginDiffers || (!diskOrigin && managerOriginDiffers))
+  ) {
+    const landed = opts?.replaceOrigin ?? diskOrigin ?? "a different origin";
+    try {
+      rmSync(nodeDir, { recursive: true, force: true });
+    } catch (err) {
+      throw new NodeManagementError(
+        `ComfyUI-Manager resolved "${landed}" instead of the requested "${gitId}", ` +
+          `but custom_nodes/${repoName} could not be replaced ` +
+          `(${err instanceof Error ? err.message : String(err)}). ` +
+          `Delete ${nodeDir} by hand and retry the install.`,
+      );
+    }
+    alreadyPresent = false;
+    warnings.push(
+      `ComfyUI-Manager resolved "${landed}" instead of the requested "${gitId}"; ` +
+        `replaced custom_nodes/${repoName} with a direct clone of the requested origin.`,
     );
   }
 
@@ -4388,9 +4427,16 @@ async function installCustomNodeImpl(
     );
     assertInstallTargetStable(targetGeneration, managerBase);
     const listedNode = findInstalledNode(gitId, installed);
+    // A registry/CNR identity can intentionally point at a differently named
+    // source checkout (the #2714 aux-id alias test); only a bare from-source
+    // Manager entry's aux_id is origin evidence for this pack alias case.
+    const originMismatch =
+      listedNode !== undefined &&
+      !listedNode.cnrId &&
+      !gitOriginMatchesRequested(gitId, listedNode.auxId);
     /** #2714 — why the Manager's own "installed" verdict was not taken. */
     let uncorroboratedNote: string | undefined;
-    if (listedNode) {
+    if (listedNode && !originMismatch) {
       // The disk is only consulted when it can answer ABOUT THIS SERVER: in
       // remote mode the tree we could read is not the host's, and with no local
       // root captured there is nothing to scan. In both cases the list is the
@@ -4437,6 +4483,8 @@ async function installCustomNodeImpl(
         });
       }
     }
+    const replaceOrigin =
+      originMismatch ? listedNode?.auxId : undefined;
     if (localWriteMismatch) {
       throw new ProcessControlError(
         wrongInstallRefusal(localWriteMismatch, 'install_custom_node (action:"install", git clone)', managerBase),
@@ -4447,10 +4495,20 @@ async function installCustomNodeImpl(
     const clone = () => cloneCustomNodeFallback(gitId, repoName, gitRef, status, cliWorkspace, {
       refFromVersion,
       allowSharedWorkspaceFallback: cliWorkspace !== undefined,
+      ...(replaceOrigin
+        ? {
+            replaceOrigin,
+            managerRefusalNote:
+              `ComfyUI-Manager installed "${replaceOrigin}" instead of the requested ` +
+              `origin ${gitOwnerRepo(gitId) ?? gitId}`,
+          }
+        : {}),
       // #2714 — the default reason ("not in the ComfyUI-Manager registry") is the
       // wrong explanation when Manager DID list the pack; state what was actually
       // observed instead, so a subsequent refusal from here is not misattributed.
-      ...(uncorroboratedNote ? { managerRefusalNote: uncorroboratedNote } : {}),
+      ...(uncorroboratedNote && !replaceOrigin
+        ? { managerRefusalNote: uncorroboratedNote }
+        : {}),
     });
     // An accepted remote Manager task that resolves no pack still reaches this
     // helper only for its authoritative remote-target refusal; it is not a
@@ -6221,6 +6279,54 @@ function gitInstallChannelNote(channel: string): string {
 function gitUrlOwnerRepo(url: string): string | undefined {
   const m = /[/:]([^/:]+)\/([^/]+?)(?:\.git)?\/*$/.exec(url.trim());
   return m ? `${m[1]}/${m[2]}` : undefined;
+}
+
+/**
+ * `owner/repo` from a git URL, an `aux_id`, or a shorthand `owner/repo` string.
+ * Manager reports git packs as `aux_id: "teskor-hub/comfyui-teskors-utils"` while
+ * a manifest names `https://github.com/artokun/comfyui-teskors-utils` — those must
+ * compare as different origins, not as the same bare repo name (#2523).
+ */
+function gitOwnerRepo(value: string | undefined): string | undefined {
+  if (!value) return undefined;
+  const trimmed = value.trim().replace(/\.git$/i, "").replace(/\/+$/, "");
+  if (!trimmed) return undefined;
+  const hosted = /(?:github\.com|gitlab\.com|bitbucket\.org)[/:]([^/]+)\/([^/#?]+)/i.exec(
+    trimmed,
+  );
+  if (hosted) return `${hosted[1]}/${hosted[2]}`.toLowerCase();
+  const short = /^([^/]+)\/([^/]+)$/.exec(trimmed);
+  return short ? `${short[1]}/${short[2]}`.toLowerCase() : undefined;
+}
+
+/** True when both values name an owner/repo and those identities differ. */
+function gitOriginsDiffer(wanted: string, other: string | undefined): boolean {
+  const a = gitOwnerRepo(wanted);
+  const b = gitOwnerRepo(other);
+  return Boolean(a && b && a !== b);
+}
+
+/**
+ * A Manager installed-list hit for a git URL is only the requested origin when
+ * `aux_id` names the same owner/repo. Missing aux_id cannot prove a mismatch,
+ * so it is treated as a match (the clone fallback still checks `git remote`).
+ */
+function gitOriginMatchesRequested(gitId: string, auxId: string | undefined): boolean {
+  return !gitOriginsDiffer(gitId, auxId);
+}
+
+function readGitRemoteOrigin(nodeDir: string): string | undefined {
+  try {
+    const out = execFileSync("git", ["-C", nodeDir, "remote", "get-url", "origin"], {
+      encoding: "utf-8",
+      timeout: GIT_CLONE_TIMEOUT,
+      env: nonInteractiveGitEnv(),
+    });
+    const origin = typeof out === "string" ? out.trim() : String(out).trim();
+    return origin || undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 /**

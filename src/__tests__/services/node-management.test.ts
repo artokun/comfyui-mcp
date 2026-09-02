@@ -859,6 +859,176 @@ describe("node-management service", () => {
       expect(cloneEnv?.GIT_ASKPASS).toBe("echo");
     });
 
+    it("replaces a Manager-aliased teskor-hub checkout with the requested artokun origin (#2523)", async () => {
+      // Manager v4 keys from-source installs by bare repo name, so requesting
+      // artokun/comfyui-teskors-utils still clones teskor-hub's repository into
+      // the same folder and reports success. The pack's TS nodes then come from
+      // the wrong fork.
+      stubFetch({
+        installedBody: {
+          "comfyui-teskors-utils": {
+            ver: "nightly",
+            aux_id: "teskor-hub/comfyui-teskors-utils",
+            enabled: true,
+          },
+        },
+      });
+      let cloned = false;
+      mockedExists.mockImplementation((p: unknown) => {
+        const s = String(p);
+        if (s.includes("requirements.txt") || s.includes("install.py")) return false;
+        if (s.includes(".venv") || s.includes("cm-cli.py")) return false;
+        if (s.includes(NODE_DIR_UTILS) || s.endsWith("comfyui-teskors-utils")) {
+          if (cloned) return true;
+          return !fsCtl.removed.includes(NODE_DIR_UTILS);
+        }
+        return false;
+      });
+      fsCtl.readdirSync = (p) => {
+        const norm = p.replace(/\\/g, "/");
+        return norm.endsWith("/comfyui-teskors-utils") ? ["__init__.py", ".git"] : [];
+      };
+      mockedExec.mockImplementation(((bin: string, args: string[]) => {
+        const argv = args as string[];
+        if (bin === "git" && argv[0] === "clone") {
+          cloned = true;
+          return "";
+        }
+        if (bin === "git" && argv.includes("get-url")) {
+          return "https://github.com/teskor-hub/comfyui-teskors-utils.git";
+        }
+        return "";
+      }) as never);
+
+      const res = await installCustomNode({
+        id: "https://github.com/artokun/comfyui-teskors-utils",
+      });
+
+      expect(res.mechanism).toBe("git-clone");
+      expect(res.message).toMatch(/artokun\/comfyui-teskors-utils/);
+      expect(res.message).toMatch(/teskor-hub\/comfyui-teskors-utils/);
+      expect(fsCtl.removed).toContain(NODE_DIR_UTILS);
+      const cloneCall = mockedExec.mock.calls.find(
+        (c) => c[0] === "git" && (c[1] as string[])[0] === "clone",
+      );
+      expect(cloneCall).toBeDefined();
+      expect(cloneCall![1]).toEqual([
+        "clone",
+        "--depth",
+        "1",
+        "--end-of-options",
+        "https://github.com/artokun/comfyui-teskors-utils",
+        NODE_DIR_UTILS,
+      ]);
+    });
+
+    it("keeps a correct disk origin when Manager aux_id is stale (#2523)", async () => {
+      // Manager can retain the old alias after the local checkout was corrected.
+      // The disk remote is the stronger witness and must protect the checkout,
+      // including files the user changed locally, from replacement.
+      stubFetch({
+        installedBody: {
+          "comfyui-teskors-utils": {
+            ver: "nightly",
+            aux_id: "teskor-hub/comfyui-teskors-utils",
+            enabled: true,
+          },
+        },
+      });
+      let cloned = false;
+      mockedExists.mockImplementation((p: unknown) => {
+        const s = String(p);
+        if (s.includes("requirements.txt") || s.includes("install.py")) return false;
+        if (s.includes(".venv") || s.includes("cm-cli.py")) return false;
+        if (s.includes(NODE_DIR_UTILS) || s.endsWith("comfyui-teskors-utils")) {
+          return cloned || !fsCtl.removed.includes(NODE_DIR_UTILS);
+        }
+        return false;
+      });
+      fsCtl.readdirSync = (p) => {
+        const norm = p.replace(/\\/g, "/");
+        return norm.endsWith("/comfyui-teskors-utils")
+          ? ["__init__.py", ".git", "local-change.py"]
+          : [];
+      };
+      mockedExec.mockImplementation(((bin: string, args: string[]) => {
+        const argv = args as string[];
+        if (bin === "git" && argv[0] === "clone") {
+          cloned = true;
+          return "";
+        }
+        if (bin === "git" && argv.includes("get-url")) {
+          return "https://github.com/artokun/comfyui-teskors-utils.git";
+        }
+        return "";
+      }) as never);
+
+      const res = await installCustomNode({
+        id: "https://github.com/artokun/comfyui-teskors-utils",
+      });
+
+      expect(res.mechanism).toBe("git-clone");
+      expect(res.message).toMatch(/already exists in custom_nodes/);
+      expect(fsCtl.removed).not.toContain(NODE_DIR_UTILS);
+      expect(
+        mockedExec.mock.calls.find(
+          (c) => c[0] === "git" && (c[1] as string[])[0] === "clone",
+        ),
+      ).toBeUndefined();
+    });
+
+    it("does not treat a Manager listing of teskor-hub as the requested artokun origin (#2523)", async () => {
+      // Same substitution, but the on-disk remote cannot be read — aux_id is
+      // still enough proof to refuse the Manager hit and clone the URL passed.
+      stubFetch({
+        installedBody: {
+          "comfyui-teskors-utils": {
+            ver: "nightly",
+            aux_id: "teskor-hub/comfyui-teskors-utils",
+            enabled: true,
+          },
+        },
+      });
+      let cloned = false;
+      mockedExists.mockImplementation((p: unknown) => {
+        const s = String(p);
+        if (s.includes("requirements.txt") || s.includes("install.py")) return false;
+        if (s.includes(".venv") || s.includes("cm-cli.py")) return false;
+        if (s.includes(NODE_DIR_UTILS) || s.endsWith("comfyui-teskors-utils")) {
+          return cloned || !fsCtl.removed.includes(NODE_DIR_UTILS);
+        }
+        return false;
+      });
+      fsCtl.readdirSync = (p) => {
+        const norm = p.replace(/\\/g, "/");
+        return norm.endsWith("/comfyui-teskors-utils") ? ["__init__.py", ".git"] : [];
+      };
+      mockedExec.mockImplementation(((bin: string, args: string[]) => {
+        const argv = args as string[];
+        if (bin === "git" && argv[0] === "clone") {
+          cloned = true;
+          return "";
+        }
+        if (bin === "git" && argv.includes("get-url")) {
+          throw Object.assign(new Error("not a git repository"), { status: 128 });
+        }
+        return "";
+      }) as never);
+
+      const res = await installCustomNode({
+        id: "https://github.com/artokun/comfyui-teskors-utils",
+      });
+
+      expect(res.mechanism).toBe("git-clone");
+      expect(fsCtl.removed).toContain(NODE_DIR_UTILS);
+      const cloneCall = mockedExec.mock.calls.find(
+        (c) => c[0] === "git" && (c[1] as string[])[0] === "clone",
+      );
+      expect((cloneCall![1] as string[]).includes("https://github.com/artokun/comfyui-teskors-utils")).toBe(
+        true,
+      );
+    });
+
     // #463 — a detection failure is allowed to reach a direct clone only after
     // the connected ComfyUI proves that BOTH Manager queue/status dialects are
     // absent. This is distinct from a queue operation's own route-level 404,

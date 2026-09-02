@@ -653,9 +653,27 @@ function maybeGitModuleName(value: string): string | undefined {
   return basename(pathPart).replace(/\.git$/i, "").toLowerCase();
 }
 
+/**
+ * `owner/repo` from a git URL or an aux_id (`teskor-hub/comfyui-teskors-utils`).
+ * Used so a Manager listing of a different author is not treated as the
+ * requested origin (#2523).
+ */
+function gitOwnerRepo(value: string | undefined): string | undefined {
+  if (!value) return undefined;
+  const trimmed = value.trim().replace(/\.git$/i, "").replace(/\/+$/, "");
+  if (!trimmed) return undefined;
+  const hosted = /(?:github\.com|gitlab\.com|bitbucket\.org)[/:]([^/]+)\/([^/#?]+)/i.exec(
+    trimmed,
+  );
+  if (hosted) return `${hosted[1]}/${hosted[2]}`.toLowerCase();
+  const short = /^([^/]+)\/([^/]+)$/.exec(trimmed);
+  return short ? `${short[1]}/${short[2]}`.toLowerCase() : undefined;
+}
+
 function nodeAlreadyInstalled(id: string, installed: InstalledNode[]): boolean {
   const wanted = normalizeId(id);
   const gitModule = maybeGitModuleName(id);
+  const wantedOrigin = gitOwnerRepo(id);
   return installed.some((node) => {
     const candidates = [
       node.module,
@@ -664,7 +682,18 @@ function nodeAlreadyInstalled(id: string, installed: InstalledNode[]): boolean {
     ]
       .filter((v): v is string => Boolean(v))
       .map(normalizeId);
-    return candidates.includes(wanted) || (gitModule ? candidates.includes(gitModule) : false);
+    const nameMatch = candidates.includes(wanted) || (gitModule ? candidates.includes(gitModule) : false);
+    if (!nameMatch) return false;
+    // A git URL that names an owner is not "already installed" when Manager
+    // listed a different author's repository under the same bare name.
+    // A registry/CNR identity can intentionally point at a differently named
+    // source checkout; only a bare from-source Manager entry's aux_id is the
+    // origin evidence relevant to this pack alias case (#2523).
+    if (wantedOrigin && !node.cnrId) {
+      const installedOrigin = gitOwnerRepo(node.auxId);
+      if (installedOrigin && installedOrigin !== wantedOrigin) return false;
+    }
+    return true;
   });
 }
 
