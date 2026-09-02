@@ -18,7 +18,10 @@ sources:
 notes:
   - Run the generated installer from your ComfyUI root.
   - Needs kijai's ComfyUI-WanVideoWrapper (all WanVideo*/MultiTalk* nodes), KJNodes
-    (ImageResizeKJv2) and VideoHelperSuite (VHS_VideoCombine).
+    (ImageResizeKJv2), VideoHelperSuite (VHS_VideoCombine), and
+    christian-byrne's audio-separation-nodes-comfyui (AudioSeparation + AudioCrop).
+  - Uses umt5_xxl_fp16.safetensors because the bundled WanVideoWrapper loader
+    rejects the scaled_fp8 UMT5 checkpoint; do not substitute generic t5xxl weights.
   - Wav2Vec is auto-downloaded on first run by DownloadAndLoadWav2VecModel — no
     manual model needed for it.
   - VERIFY the model URLs against your setup before a clean install — the GGUF and

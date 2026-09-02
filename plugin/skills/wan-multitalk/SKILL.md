@@ -42,8 +42,8 @@ Key nodes (all kijai WanVideoWrapper unless noted):
   embeddings that steer the mouth and expression.
 - **MultiTalkModelLoader** + **WanVideoImageToVideoMultiTalk.** The MultiTalk head
   on top of the WAN I2V model.
-- **AudioSeparation.** Isolate the voice from music/noise before embedding (cleaner
-  lip-sync). **AudioCrop.** Trim to the segment you want to animate.
+- **AudioSeparation** and **AudioCrop** (audio-separation-nodes-comfyui). Isolate the
+  voice from music/noise before embedding and trim the segment you want to animate.
 - **ImageResizeKJv2** (KJNodes), **VHS_VideoCombine** (VideoHelperSuite). Resize and
   mux to mp4.
 
@@ -52,15 +52,17 @@ Key nodes (all kijai WanVideoWrapper unless noted):
 | File | Loader | Folder |
 |------|--------|--------|
 | `Wan2.1_14b_Image_to_Video_480p_GGUF_Q8.gguf` | WanVideoModelLoader | `diffusion_models/` |
-| `WanVideo_2_1_Multitalk_14B_fp32.safetensors` | MultiTalkModelLoader | `diffusion_models/` |
-| `umt5_xxl_fp8_e4m3fn_scaled.safetensors` | LoadWanVideoT5TextEncoder | `text_encoders/` |
+| `WanVideo_2_1_Multitalk_14B_fp8_e4m3fn.safetensors` | MultiTalkModelLoader | `diffusion_models/` |
+| `umt5_xxl_fp16.safetensors` | LoadWanVideoT5TextEncoder | `text_encoders/` |
 | `Wan2_1_VAE_bf16.safetensors` | WanVideoVAELoader | `vae/` |
 | `clip_vision_h.safetensors` | CLIPVisionLoader | `clip_vision/` |
-| `Wan21_I2V_14B_lightx2v_cfg_step_distill_lora_rank64_fixed.safetensors` | WanVideoLoraSelect | `loras/` |
+| `Wan21_I2V_14B_lightx2v_cfg_step_distill_lora_rank64.safetensors` | WanVideoLoraSelect | `loras/` |
 
 Sources: kijai `Kijai/WanVideo_comfy`, MeiGen-AI `MeiGen-AI/MeiGen-MultiTalk`, GGUF
-`city96/Wan2.1-I2V-14B-480P-gguf`. See `packs/wan-multitalk/manifest.yaml` (some URLs
-are best-effort; verify per mirror). Wav2Vec auto-downloads.
+`city96/Wan2.1-I2V-14B-480P-gguf`, and Comfy-Org's repackaged UMT5. See
+`packs/wan-multitalk/manifest.yaml` (some URLs are best-effort; verify per mirror).
+Wav2Vec auto-downloads. The bundled WanVideoWrapper loader rejects the scaled_fp8
+UMT5 checkpoint; use the UMT5 fp16 file above, not generic `t5xxl_fp16` weights.
 
 ## Inputs & key parameters
 

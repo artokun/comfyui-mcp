@@ -417,7 +417,7 @@
         "ver": "058286fc0f3b0651a2f6b68309df3f06e8332cc0"
       },
       "widgets_values": [
-        "umt5_xxl_fp8_e4m3fn_scaled.safetensors",
+        "umt5_xxl_fp16.safetensors",
         "bf16",
         "offload_device",
         "disabled"
