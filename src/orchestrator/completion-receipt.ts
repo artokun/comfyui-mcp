@@ -16,14 +16,21 @@ export type CompletionReceipt = {
   reason?: "uncorrelated";
 };
 
+/** The prompt-id spelling shared by journal correlation and Panel map keys. */
+export function canonicalPromptId(promptId: unknown): string | undefined {
+  if (typeof promptId !== "string") return undefined;
+  const canonical = promptId.trim();
+  return canonical || undefined;
+}
+
 export function buildCompletionReceipt(
   promptId: unknown,
   completionKey: unknown,
   accepted: boolean,
 ): CompletionReceipt | undefined {
+  const canonicalId = canonicalPromptId(promptId);
   if (
-    typeof promptId !== "string" ||
-    promptId.length === 0 ||
+    canonicalId === undefined ||
     typeof completionKey !== "string" ||
     completionKey.length === 0 ||
     completionKey.length > 512
@@ -35,7 +42,7 @@ export function buildCompletionReceipt(
     type: "ack",
     ok: accepted,
     kind: "completion",
-    prompt_id: promptId,
+    prompt_id: canonicalId,
     completion_key: completionKey,
     ...(accepted ? {} : { reason: "uncorrelated" as const }),
   };

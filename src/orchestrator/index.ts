@@ -281,7 +281,7 @@ import {
   describe as describeCorrelation,
   type CompletionPayload,
 } from "./run-completion-journal.js";
-import { buildCompletionReceipt } from "./completion-receipt.js";
+import { buildCompletionReceipt, canonicalPromptId } from "./completion-receipt.js";
 import {
   RunCompletionIdempotencyFence,
   scheduleRunCompletion,
@@ -5586,17 +5586,32 @@ export async function runPanelOrchestrator(): Promise<void> {
           ev.completion_key.length <= 512
             ? ev.completion_key
             : null;
+        const promptId = canonicalPromptId(ev.prompt_id);
+        // Correlation and Panel removal both use the trimmed spelling. Keep the
+        // journal payload on that same representation so a lost-ack replay can
+        // hit the duplicate fence instead of creating a second agent turn.
+        const completionPayload =
+          promptId !== undefined
+            ? ev.prompt_id === promptId
+              ? evForTab
+              : { ...evForTab, prompt_id: promptId }
+            : typeof ev.prompt_id === "string"
+              ? (() => {
+                  const { prompt_id: _whitespaceOnlyPromptId, ...withoutPromptId } = evForTab;
+                  return withoutPromptId;
+                })()
+              : evForTab;
         const alreadyKnown =
           completionKey !== null &&
-          typeof ev.prompt_id === "string" &&
+          promptId !== undefined &&
           RunCompletions.hasCompletionReceipt(completionKey, {
-            promptId: ev.prompt_id,
+            promptId,
             key: event.tab_id,
             conversation: agentKeyFor(event.tab_id),
           });
         const entry = alreadyKnown
           ? null
-          : RunCompletions.record(event.tab_id, evForTab as CompletionPayload, {
+          : RunCompletions.record(event.tab_id, completionPayload as CompletionPayload, {
               conversation: agentKeyFor(event.tab_id),
             });
         // #2591 — `completion_key` is unavailable on older/replayed panel
@@ -5610,11 +5625,10 @@ export async function runPanelOrchestrator(): Promise<void> {
         }
         const receiptAccepted =
           completionKey !== null &&
-          typeof ev.prompt_id === "string" &&
-          ev.prompt_id.length > 0 &&
+          promptId !== undefined &&
           RunCompletions.acceptsCompletionReceipt(
             completionKey,
-            ev.prompt_id,
+            promptId,
             event.tab_id,
             agentKeyFor(event.tab_id),
           );
@@ -5623,7 +5637,7 @@ export async function runPanelOrchestrator(): Promise<void> {
         // that explicitly so it retires the transport retry instead of
         // spending its bounded replay budget on a frame we already hold.
         const completionReceipt = buildCompletionReceipt(
-          ev.prompt_id,
+          promptId,
           completionKey,
           receiptAccepted,
         );
