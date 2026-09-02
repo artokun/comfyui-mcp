@@ -2,6 +2,7 @@ import { getComfyUIAuthHeaders } from "../config.js";
 import { describeFetchFailure, isBareFetchFailure } from "../utils/errors.js";
 import { sameOrigin } from "../utils/origin.js";
 import { readPublishedPanelOrigins } from "../services/panel-origin-channel.js";
+import { formatComfyUIUrl } from "../transport/comfyui-url.js";
 
 /** The request target, for the diagnostic. Never throws on an odd input. */
 export function targetOf(input: string | URL | Request): string {
@@ -687,19 +688,70 @@ export async function comfyuiFetch(
   // and it always wins — this only covers the ones that passed none, which
   // otherwise wait forever.
   const signal = init.signal ?? defaultComfyTimeoutSignal();
-  let request: Promise<Response>;
-  if (Object.keys(auth).length === 0) {
-    request = fetch(input, { ...init, signal });
-  } else {
-    const headers = new Headers(init.headers);
+  // Keep a pristine body for a Request input. A failed network fetch may have
+  // disturbed the original Request body before the refusal is surfaced, while
+  // ECONNREFUSED still permits the one safe retry.
+  let retrySource: Request | undefined;
+  if (input instanceof Request) {
+    try {
+      retrySource = input.clone();
+    } catch {
+      // A caller may pass an already-disturbed Request. The literal attempt
+      // still runs; without a replayable body there is no safe retry.
+    }
+  }
+  let firstInit: RequestInit = { ...init, signal };
+  let retryInit: RequestInit = firstInit;
+  if (typeof ReadableStream !== "undefined" && init.body instanceof ReadableStream) {
+    const [firstBody, retryBody] = init.body.tee();
+    firstInit = { ...firstInit, body: firstBody };
+    retryInit = { ...firstInit, body: retryBody };
+  }
+  const request = (
+    target: string | URL | Request,
+    requestInit: RequestInit,
+  ): Promise<Response> => {
+    if (Object.keys(auth).length === 0) return fetch(target, requestInit);
+    const headers = new Headers(requestInit.headers);
     for (const [name, value] of Object.entries(auth)) {
       if (!headers.has(name)) headers.set(name, value);
     }
-    request = fetch(input, { ...init, headers, signal });
-  }
+    return fetch(target, { ...requestInit, headers });
+  };
   try {
-    return await request;
+    return await request(input, firstInit);
   } catch (err) {
+    // Preserve the configured literal as the primary target. Only a refused
+    // exact IPv4 loopback connection is safe to retry: ECONNREFUSED proves no
+    // request reached the server, while reset/timeout errors can follow a
+    // delivered mutation. `localhost` lets Node select an IPv6-only listener
+    // without changing the configured target or any identity comparison.
+    const inputUrl =
+      typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+    const retryUrl =
+      typeof input === "string"
+        ? formatComfyUIUrl(input)
+        : input instanceof URL
+          ? new URL(formatComfyUIUrl(input.href))
+          : input instanceof Request
+            ? formatComfyUIUrl(input.url)
+            : undefined;
+    const retryInput =
+      input instanceof Request && retryUrl && retrySource
+        ? new Request(retryUrl, retrySource)
+        : retryUrl;
+    if (
+      retryInput &&
+      String(retryUrl) !== inputUrl &&
+      isBareFetchFailure(err) &&
+      describeFetchFailure(err).code === "ECONNREFUSED"
+    ) {
+      try {
+        return await request(retryInput, retryInit);
+      } catch (retryError) {
+        err = retryError;
+      }
+    }
     // Our own ceiling firing is not the same event as a caller's abort, and it
     // must not be reported as one. Only rewrite when WE supplied the signal.
     if (init.signal === undefined && isTimeoutAbort(err)) {

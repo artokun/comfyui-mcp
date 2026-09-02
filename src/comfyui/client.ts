@@ -1,4 +1,5 @@
 import { Client } from "@stable-canvas/comfyui-client";
+import { LoopbackWebSocket } from "../transport/loopback-websocket.js";
 import {
   config,
   getComfyUIApiHost,
@@ -25,6 +26,7 @@ import {
   raceAbort,
 } from "./fetch.js";
 import { isKnownLoaderInput } from "./loader-asset-inputs.js";
+import { sameOrigin } from "../utils/origin.js";
 import {
   choosePanelFallbackOrigin,
   describeDeclinedPanelFallback,
@@ -109,15 +111,24 @@ function requireLocalComfyUI(op: string): void {
 
 let clientInstance: Client | null = null;
 
+/** Keep the SDK's configured URL literal until a refused loopback dial proves
+ * that Node should retry through its IPv6-capable localhost resolver. */
+function connectionWebSocket(): typeof WebSocket | undefined {
+  // oxlint-disable-next-line anti-slop/no-chained-type-assertions -- the SDK's DOM WebSocket type is wider than this Node adapter's runtime-compatible surface
+  return LoopbackWebSocket as unknown as typeof WebSocket;
+}
+
 export function getClient(): Client {
   requireLocalMode("getClient");
   if (!clientInstance) {
+    const ws = connectionWebSocket();
     clientInstance = new Client({
       api_host: getComfyUIApiHost(),
       // Path prefix for reverse-proxied / gateway'd ComfyUI (e.g. "/comfyapi").
       api_base: getComfyUIBasePath(),
       ssl: config.comfyuiSsl,
       clientId: "comfyui-mcp",
+      ...(ws ? { WebSocket: ws } : {}),
       // Inject generic auth headers (COMFYUI_AUTH_*) on the library's own HTTP
       // calls; a no-op when unset. Node 22+ provides global WebSocket.
       //
@@ -1552,7 +1563,10 @@ export const MAX_VIEW_RESPONSE_BYTES = SHARED_MAX_VIEW_RESPONSE_BYTES;
 function validateViewResponseOrigin(res: Response, expectedOrigin: string, label: string): void {
   if (res.url) {
     const actualOrigin = httpOriginOf(res.url);
-    if (actualOrigin !== expectedOrigin) {
+    // The transport may retry exact 127.0.0.1 at localhost for an IPv6-only
+    // loopback listener. The comparator folds only those known loopback aliases;
+    // remote origins remain an exact scheme/host/port match.
+    if (!sameOrigin(actualOrigin, expectedOrigin)) {
       throw new ComfyUIError(
         `ComfyUI /view response from ${label} changed origin unexpectedly; the response was refused.`,
         "VIEW_RESPONSE_ORIGIN",

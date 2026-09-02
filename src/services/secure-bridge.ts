@@ -27,7 +27,7 @@ import { existsSync } from "node:fs";
 import { startQuickTunnel, type QuickTunnel } from "./tunnel.js";
 import { RelayClient } from "./relay-client.js";
 import { logger } from "../utils/logger.js";
-import { getComfyUIAuthHeaders } from "../config.js";
+import { comfyuiFetch } from "../comfyui/fetch.js";
 import type { UiBridge } from "./ui-bridge.js";
 
 export interface SecureBridge {
@@ -82,9 +82,9 @@ export async function advertiseBridge(
     // — a stale pod must never receive the bridge URL (codex finding).
     if (shouldAdvertise && !shouldAdvertise(comfyuiUrl)) return false;
     try {
-      const res = await fetch(endpoint, {
+      const res = await comfyuiFetch(endpoint, {
         method: "POST",
-        headers: { "Content-Type": "application/json", ...getComfyUIAuthHeaders() },
+        headers: { "Content-Type": "application/json" },
         body: JSON.stringify(body),
         // Without this the retry loop could not retry: a pod behind a proxy that
         // accepts the connection and then answers nothing (the characteristic
@@ -134,8 +134,7 @@ export async function fetchPanelBasePath(
     return undefined;
   }
   try {
-    const res = await fetch(endpoint, {
-      headers: { ...getComfyUIAuthHeaders() },
+    const res = await comfyuiFetch(endpoint, {
       signal: AbortSignal.timeout(timeoutMs),
     });
     if (!res.ok) return undefined;

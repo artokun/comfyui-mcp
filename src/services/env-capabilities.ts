@@ -339,7 +339,7 @@ async function detectAttentionFromComfyLog(
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   timer.unref?.();
   try {
-    const res = await fetch(`${base}/internal/logs`, { signal: controller.signal });
+    const res = await comfyuiFetch(`${base}/internal/logs`, { signal: controller.signal });
     if (!res.ok) return {};
     const data = (await res.json()) as unknown;
     // /internal/logs returns { entries: [{ t, m }] } (m = message) on recent

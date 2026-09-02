@@ -1,8 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync, readFileSync } from "node:fs";
+import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DEFAULT_PANEL_BRIDGE_PORT } from "../services/bridge-ports.js";
+import { comfyuiFetch } from "../comfyui/fetch.js";
 
 // config.ts has top-level await (port auto-detect). Use vi.resetModules() so
 // each test re-evaluates it with a fresh process.env.
@@ -129,6 +131,67 @@ describe("config mode detection", () => {
     process.env.COMFYUI_PORT = "8188";
     const mod = await import("../config.js");
     expect(mod.getInstanceSlug()).toBe("comfy-cloud");
+  });
+});
+
+describe("IPv6 loopback ComfyUI targets (#2719)", () => {
+  const OLD_ENV = process.env;
+  const OLD_ARGV = process.argv;
+
+  beforeEach(() => {
+    vi.resetModules();
+    process.env = { ...OLD_ENV };
+    process.argv = [...OLD_ARGV];
+    process.env.COMFYUI_API_KEY = "";
+    process.env.COMFYUI_PATH = "";
+    process.env.COMFYUI_CODE_PATH = "";
+    process.env.COMFYUI_HOST = "";
+    process.env.COMFYUI_MCP_FORCE_REMOTE = "";
+  });
+
+  afterEach(() => {
+    process.env = OLD_ENV;
+    process.argv = OLD_ARGV;
+    vi.restoreAllMocks();
+  });
+
+  async function listenIPv6Only(): Promise<{ server: ReturnType<typeof createServer>; port: number }> {
+    const server = createServer((_req, res) => res.end("ipv6-only-ok"));
+    await new Promise<void>((resolve, reject) => {
+      server.once("error", reject);
+      server.listen(0, "::1", () => resolve());
+    });
+    const address = server.address();
+    if (!address || typeof address === "string") throw new Error("IPv6 server did not expose an address");
+    return { server, port: address.port };
+  }
+
+  it("uses a dual-family localhost connection for a legacy IPv4 loopback URL", async () => {
+    const { server, port } = await listenIPv6Only();
+    try {
+      process.env.COMFYUI_URL = `http://127.0.0.1:${port}`;
+      const mod = await import("../config.js");
+
+      expect(mod.getComfyUIApiHost()).toBe(`127.0.0.1:${port}`);
+      expect(mod.getComfyUIBaseUrl()).toBe(`http://127.0.0.1:${port}`);
+      await expect(comfyuiFetch(`${mod.getComfyUIBaseUrl()}/system_stats`)).resolves.toMatchObject({ status: 200 });
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  });
+
+  it("keeps an explicit IPv6 loopback target valid for URL consumers", async () => {
+    const { server, port } = await listenIPv6Only();
+    try {
+      process.env.COMFYUI_URL = `http://[::1]:${port}`;
+      const mod = await import("../config.js");
+
+      expect(mod.getComfyUIApiHost()).toBe(`[::1]:${port}`);
+      expect(mod.getComfyUIBaseUrl()).toBe(`http://[::1]:${port}`);
+      await expect(fetch(`${mod.getComfyUIBaseUrl()}/system_stats`)).resolves.toMatchObject({ status: 200 });
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
   });
 });
 
@@ -471,7 +534,7 @@ describe("getLocalComfyuiUrl (#269 LAN fallback)", () => {
     expect(mod.setComfyuiTarget("http://192.168.1.50:8188")).toBe(true);
     expect(mod.setComfyuiTarget("http://127.0.0.1:8188")).toBe(true);
     expect(mod.getComfyuiTargetGeneration()).toBe(g0 + 2);
-    expect(mod.getComfyUIBaseUrl()).toBe("http://127.0.0.1:8188"); // base looks "unchanged"
+    expect(mod.getComfyUIBaseUrl()).toBe("http://127.0.0.1:8188"); // base keeps configured identity
     // A rejected (malformed) retarget does NOT bump.
     expect(mod.setComfyuiTarget("not a url")).toBe(false);
     expect(mod.getComfyuiTargetGeneration()).toBe(g0 + 2);
@@ -535,7 +598,7 @@ describe("rescopeLocalTargetFile (#1909 non-default loopback port)", () => {
     expect(mod.getLocalComfyuiUrl()).toBe(configured);
     // Restart identity reads these — they must name the configured instance
     // or panel_restart_comfyui still refuses a panel that is on that port.
-    expect(mod.getBootLocalComfyUIBaseUrl()).toBe(configured);
+    expect(mod.getBootLocalComfyUIBaseUrl()).toBe("http://127.0.0.1:18188");
     expect(mod.getComfyUIBaseUrl()).toBe(configured);
   });
 
@@ -556,7 +619,7 @@ describe("rescopeLocalTargetFile (#1909 non-default loopback port)", () => {
     const scoped = join(fakeHome, `local-target-${DEFAULT_PANEL_BRIDGE_PORT}.json`);
     mod.rescopeLocalTargetFile(scoped);
     expect(writtenUrl(scoped)).toBe(configured);
-    expect(mod.getBootLocalComfyUIBaseUrl()).toBe(configured);
+    expect(mod.getBootLocalComfyUIBaseUrl()).toBe("http://127.0.0.1:18188");
   });
 
   it("keeps :8188 when that is the configured loopback URL", async () => {
