@@ -636,11 +636,13 @@ export const PANEL_OUTER_TRANSPORT_RETRY_SAFE_TOOLS = new Set([
   "panel_get_errors",
 ]);
 
-// Completing these can leave the Codex HTTP MCP client in a racy state.
+// Completing these can leave the Codex HTTP MCP client in a racy state (notably
+// the read immediately following a successful panel_open_workflow).
 // Arm a one-shot window for the immediate next allowlisted read. The tools
-// themselves stay off the retry allowlist so a failed enter or run is fenced.
+// themselves stay off the retry allowlist so a failed arm operation is fenced.
 export const PANEL_OUTER_TRANSPORT_RETRY_ARM_TOOLS = new Set([
   "panel_enter_subgraph",
+  "panel_open_workflow",
   "panel_run",
 ]);
 
@@ -1755,11 +1757,12 @@ export class CodexBackend implements AgentBackend {
     let immediatePanelReadAfterArm: string | null = null;
 
     // Retry contract: only the next panel request after a successful
-    // panel_enter_subgraph or panel_run completion can be an eligible graph
-    // read. The one-shot sequence is consumed at request start; a mutation or
-    // unrelated panel request therefore invalidates it before a later read can
-    // qualify. Correlation must resolve the transport error to that request;
-    // ambiguity is fail-closed. Mutations and unrelated reads use normal fencing.
+    // panel_enter_subgraph, panel_open_workflow, or panel_run completion can be
+    // an eligible graph read. The one-shot sequence is consumed at request
+    // start; a mutation or unrelated panel request therefore invalidates it
+    // before a later read can qualify. Correlation must resolve the transport
+    // error to that request; ambiguity is fail-closed. Mutations and unrelated
+    // reads use normal fencing.
 
     // LIVENESS (watchdog re-arm): re-arm PanelAgent's idle watchdog ONLY for
     // notifications that represent work or an outcome for THIS active turn. A
