@@ -32,6 +32,12 @@ type GraphCall = (
   timeoutMs?: number,
 ) => Promise<ToolResultLike>;
 
+type ScopedEnqueueResult = {
+  prompt_id: string;
+  queue_remaining?: number;
+  rejectedOutputs?: string;
+};
+
 let objectInfoOverride: ObjectInfo | null | undefined;
 let enqueueScopedOutputNodeOverride:
   | ((
@@ -228,7 +234,7 @@ async function enqueueConvertedScopedRun(
   classType: string,
   objectInfo: ObjectInfo,
   call: GraphCall,
-): Promise<{ prompt_id: string } | null> {
+): Promise<ScopedEnqueueResult | null> {
   const targetId = String(toNodeId);
   const targets = [targetId];
   if (enqueueScopedOutputNodeOverride) {
@@ -249,7 +255,7 @@ async function enqueueConvertedScopedRun(
 }
 
 function queuedToolResult(
-  promptId: string,
+  enqueued: ScopedEnqueueResult,
   toNodeId: number,
   classType: string,
 ): ToolResultLike {
@@ -260,11 +266,17 @@ function queuedToolResult(
         text: JSON.stringify(
           {
             queued: true,
-            prompt_id: promptId,
+            prompt_id: enqueued.prompt_id,
             to_node_id: toNodeId,
             ran_to_node: toNodeId,
             output_node_source: "object_info",
             output_node_class: classType,
+            ...(enqueued.queue_remaining === undefined
+              ? {}
+              : { queue_remaining: enqueued.queue_remaining }),
+            ...(enqueued.rejectedOutputs
+              ? { rejected_outputs: enqueued.rejectedOutputs }
+              : {}),
           },
           null,
           2,
@@ -295,15 +307,33 @@ export async function recoverOutputNodeScopedRun(opts: {
   const objectInfo = await fetchPanelObjectInfo(opts.call);
   if (!isOutputNodeType(parsed.classType, objectInfo) || !objectInfo) return null;
 
-  const retry = await opts.call(
-    {
-      cmd: "graph_run",
-      batch_count: opts.batchCount,
-      to_node_id: opts.toNodeId,
-      output_node: true,
-    },
-    20_000,
-  );
+  let retry: ToolResultLike;
+  try {
+    retry = await opts.call(
+      {
+        cmd: "graph_run",
+        batch_count: opts.batchCount,
+        to_node_id: opts.toNodeId,
+        output_node: true,
+      },
+      20_000,
+    );
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    return {
+      content: [
+        {
+          type: "text",
+          text:
+            `Error: panel_run's OUTPUT_NODE recovery retry for ${parsed.classType} ` +
+            `failed before a reply could be read; its outcome is UNKNOWN and it may ` +
+            `have queued a render. Check queue (action:"list") or get_history before ` +
+            `re-submitting. (${message})`,
+        },
+      ],
+      isError: true,
+    };
+  }
   const retryParsed = parseToolResultJson(retry);
   if (
     !retry.isError &&
@@ -326,8 +356,20 @@ export async function recoverOutputNodeScopedRun(opts: {
       opts.call,
     );
     if (!enqueued?.prompt_id) return null;
-    return queuedToolResult(enqueued.prompt_id, opts.toNodeId, parsed.classType);
-  } catch {
-    return null;
+    return queuedToolResult(enqueued, opts.toNodeId, parsed.classType);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    return {
+      content: [
+        {
+          type: "text",
+          text:
+            `Error: panel_run recovered ${parsed.classType} as an OUTPUT_NODE from ` +
+            `the connected panel's object_info, but the direct /prompt fallback failed: ` +
+            `${message}`,
+        },
+      ],
+      isError: true,
+    };
   }
 }

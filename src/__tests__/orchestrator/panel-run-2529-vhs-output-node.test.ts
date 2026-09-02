@@ -168,6 +168,37 @@ describe("panel_run accepts VHS_VideoCombine as to_node_id from object_info (#25
     expect(RunCompletions.ticketFor("p-vhs-http")).toBeDefined();
   });
 
+  it("surfaces a direct fallback enqueue error instead of restoring the original refusal", async () => {
+    setEnqueueScopedOutputNodeForTests(async () => {
+      throw new Error(
+        "OUTCOME UNDETERMINED: the POST to /prompt was accepted and may already be queued",
+      );
+    });
+    const { ctx } = runCtx({
+      graphRun: () => ({ queued: false, error: VHS_REFUSAL }),
+    });
+    const res = await panelRun().handler({ to_node_id: 380 }, ctx);
+
+    expect(res.isError).toBe(true);
+    expect(textOf(res)).toMatch(/direct \/prompt fallback failed/);
+    expect(textOf(res)).toMatch(/OUTCOME UNDETERMINED/);
+    expect(textOf(res)).not.toMatch(/nothing was queued/i);
+  });
+
+  it("surfaces an unknown outcome when the recovery graph_run retry throws", async () => {
+    const { ctx } = runCtx({
+      graphRun: (_cmd, attempt) => {
+        if (attempt === 1) return { queued: false, error: VHS_REFUSAL };
+        throw new Error("socket closed after dispatch");
+      },
+    });
+    const res = await panelRun().handler({ to_node_id: 380 }, ctx);
+
+    expect(res.isError).toBe(true);
+    expect(textOf(res)).toMatch(/outcome is UNKNOWN/);
+    expect(textOf(res)).toMatch(/socket closed after dispatch/);
+  });
+
   it("does not recover a non-output class (KSampler) even if the refusal shape matches", async () => {
     const samplerRefusal =
       `node 12 (KSampler) is not an output node — "run to node" can ` +
