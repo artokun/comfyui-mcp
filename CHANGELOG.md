@@ -6,17 +6,17 @@ All notable changes to this project are documented here. This project adheres to
 
 ## Unreleased
 
+### MCP
+
+#### Fixed
+- **`apply_manifest` now tracks Manager v4 custom-node enqueues that return an empty success body (#2725, #2749).** Already-enabled packs are satisfied without a duplicate enqueue, and an unverified empty-ack outcome remains pending instead of authorizing a speculative fallback.
+
 ## [0.52.178] - 2026-09-02
 
 ### MCP
 
 #### Fixed
 - support IPv6-only ComfyUI loopback targets when `COMFYUI_URL` uses `127.0.0.1`, for issue #2719 (#2747)
-
-### MCP
-
-#### Fixed
-- **`apply_manifest` now tracks Manager v4 custom-node enqueues that return an empty success body (#2725).** Already-enabled packs are satisfied without a duplicate enqueue, and an unverified empty-ack outcome remains pending instead of authorizing a speculative fallback.
 
 ## [0.52.177] - 2026-09-02
 
