@@ -76,6 +76,9 @@ const MODELS_ROOT = resolve("/comfy", "models");
 const EXTRA_LORAS = "E:/extra-drive/loras";
 const LIVE_SHARED_MODELS_ROOT = resolve("/ComfyUI-Shared/models");
 
+const resolveForRemoval = (path: string) =>
+  resolveExistingModelFile(path, { mode: "remove" });
+
 /** stat() resolves to a file for paths in `files`, a dir for `dirs`, else ENOENT. */
 function fsFixture(files: string[], dirs: string[] = []) {
   const fileSet = new Set(files.map((p) => resolve(p)));
@@ -137,6 +140,27 @@ describe("resolveExistingModelFile — multi-root resolution", () => {
     expect(getExtraModelRootsMock).toHaveBeenCalledTimes(1);
   });
 
+  it("keeps read-only lookup on configured roots when a reachable seam has no launch evidence", async () => {
+    const sharedRoot = resolve("/ComfyUI-Shared/models/diffusion_models");
+    resolveModelsDirWithBasesMock.mockResolvedValueOnce({
+      modelsDir: MODELS_ROOT,
+      baseDirs: [],
+      snapshot: { reachable: true },
+      source: "configured-base",
+    });
+    getExtraModelRootsMock.mockResolvedValueOnce([
+      { category: "diffusion_models", dir: sharedRoot, group: "current-config" },
+    ]);
+    fsFixture([resolve(sharedRoot, "Chroma/chroma.safetensors")]);
+
+    const res = await resolveExistingModelFile("diffusion_models/Chroma/chroma.safetensors");
+
+    expect(res.path).toBe(resolve(sharedRoot, "Chroma/chroma.safetensors"));
+    expect(getExtraModelRootsMock).toHaveBeenCalledTimes(1);
+    expect(resolveModelsDirWithBasesMock).not.toHaveBeenCalled();
+    expect(getLaunchStateExtraModelRootsMock).not.toHaveBeenCalled();
+  });
+
   it("prefers a connected live primary root over a stale local primary root", async () => {
     const snapshot = {
       reachable: true,
@@ -158,7 +182,7 @@ describe("resolveExistingModelFile — multi-root resolution", () => {
     });
     fsFixture([liveModel, staleModel]);
 
-    const res = await resolveExistingModelFile("diffusion_models/Chroma/chroma.safetensors");
+    const res = await resolveForRemoval("diffusion_models/Chroma/chroma.safetensors");
 
     expect(res.path).toBe(liveModel);
     expect(res.root).toBe(LIVE_SHARED_MODELS_ROOT);
@@ -192,7 +216,7 @@ describe("resolveExistingModelFile — multi-root resolution", () => {
     });
     fsFixture([resolve(sharedRoot, "Chroma/chroma.safetensors")]);
 
-    const res = await resolveExistingModelFile("diffusion_models/Chroma/chroma.safetensors");
+    const res = await resolveForRemoval("diffusion_models/Chroma/chroma.safetensors");
 
     expect(res.path).toBe(resolve(sharedRoot, "Chroma/chroma.safetensors"));
     expect(res.root).toBe(sharedRoot);
@@ -224,7 +248,7 @@ describe("resolveExistingModelFile — multi-root resolution", () => {
     ]);
 
     await expect(
-      resolveExistingModelFile("diffusion_models/Chroma/chroma.safetensors"),
+      resolveForRemoval("diffusion_models/Chroma/chroma.safetensors"),
     ).rejects.toThrow(/Searched 0 root\(s\)/);
     expect(getLaunchStateExtraModelRootsMock).toHaveBeenCalledWith(snapshot);
     expect(getExtraModelRootsMock).not.toHaveBeenCalled();
@@ -249,7 +273,7 @@ describe("resolveExistingModelFile — multi-root resolution", () => {
     fsFixture([observedRootModel]);
 
     await expect(
-      resolveExistingModelFile("diffusion_models/Chroma/chroma.safetensors"),
+      resolveForRemoval("diffusion_models/Chroma/chroma.safetensors"),
     ).rejects.toThrow(/Searched 0 root\(s\)/);
     expect(statMock).not.toHaveBeenCalledWith(observedRootModel);
     expect(getLaunchStateExtraModelRootsMock).toHaveBeenCalledWith(snapshot);

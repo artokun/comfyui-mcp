@@ -3160,6 +3160,11 @@ export interface ResolvedModelFile {
   info: Stats;
 }
 
+export interface ResolveExistingModelFileOptions {
+  /** `remove` enables the stricter live launch-state deletion authorization. */
+  mode?: "read" | "remove";
+}
+
 async function getAuthorizedModelRootsForRemoval(configuredModelsRoot: string) {
   if (isRemoteMode()) {
     return { primaryRoots: [configuredModelsRoot], extraRoots: [] };
@@ -3203,10 +3208,10 @@ async function getAuthorizedModelRootsForRemoval(configuredModelsRoot: string) {
 
 /**
  * Locate an existing model file given a path relative to ComfyUI's models/
- * directory, searching a connected server-named primary models directory and
- * launch-state-proven extra roots, plus configured roots only while offline.
- * A reachable server's configured or OS-observed roots are never used as
- * deletion authority without the corresponding proof.
+ * directory. Read-only callers retain the configured primary and extra-root
+ * lookup. The explicit `mode:"remove"` path instead searches only connected
+ * server-named/launch-state-proven roots, so deletion cannot inherit read-only
+ * visibility from mutable local configuration.
  *
  * Resolution rules:
  *  - The primary root is searched with the full relative path.
@@ -3222,6 +3227,7 @@ async function getAuthorizedModelRootsForRemoval(configuredModelsRoot: string) {
  */
 export async function resolveExistingModelFile(
   relativePath: string,
+  options: ResolveExistingModelFileOptions = {},
 ): Promise<ResolvedModelFile> {
   if (!resolveComfyUIBase()) {
     throw new ModelError(
@@ -3250,7 +3256,9 @@ export async function resolveExistingModelFile(
   let dirHit: ResolvedModelFile | undefined;
 
   const configuredModelsRoot = resolve(getModelsRoot());
-  const rootResolution = await getAuthorizedModelRootsForRemoval(configuredModelsRoot);
+  const rootResolution = options.mode === "remove"
+    ? await getAuthorizedModelRootsForRemoval(configuredModelsRoot)
+    : { primaryRoots: [configuredModelsRoot], extraRoots: undefined };
 
   // Primary roots are searched in authority order. Each candidate remains
   // containment-checked, preserving the absolute/traversal guard.
@@ -3297,12 +3305,10 @@ export async function resolveExistingModelFile(
 
   if (dirHit) return dirHit;
 
-  // #1474 — say WHY only these roots were searched. `list_paths` may display roots
-  // this resolver refused to enumerate (it backs DELETION, so a reachable server
-  // contributes only roots with launch-state proof), and the caller was left
-  // holding two tools that disagreed with nothing to reconcile them.
+  // #1474 — removal says WHY only its authorized roots were searched. Read-only
+  // callers use the normal configured-root lookup and do not inherit this policy.
   throw new ModelError(
-    modelNotFoundMessage({ relativePath, searched }),
+    modelNotFoundMessage({ relativePath, searched, deletion: options.mode === "remove" }),
     { path: relativePath, searched },
   );
 }
