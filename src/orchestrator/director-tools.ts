@@ -74,20 +74,74 @@ const pick = (args: A, keys: string[]): Record<string, unknown> => {
 
 const ACTIVE_JOB = /^(queued|pending|running|in_progress|processing)$/i;
 
+/** The `cal-sc-<id>` node ids the editor mints for Calliope scenes — the one bridge from a graph node back to its row. */
+const CAL_SCENE_PREFIX = "cal-sc-";
+
+/** The raw text half of a panel reply, for quoting an error back to the caller. */
+function textOf(res: ToolResult): string {
+  const first = res.content[0];
+  return first && first.type === "text" ? first.text : "";
+}
+
+/** The text half of a panel reply, parsed when it is JSON and left as text when it is not. */
+function bodyOfReply(res: ToolResult): unknown {
+  const raw = textOf(res);
+  if (!raw) return null;
+  try {
+    return JSON.parse(raw);
+  } catch {
+    return raw;
+  }
+}
+
 /** ctx.call wraps the panel's reply as text; the job list is inside it, bare or under `result`/`jobs`. */
 function jobsFromReply(res: ToolResult): Array<Record<string, unknown>> {
-  const first = res.content[0];
-  if (!first || first.type !== "text") return [];
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(first.text);
-  } catch {
-    return [];
-  }
+  const parsed = bodyOfReply(res);
   const unwrap = (v: unknown): unknown => (v && typeof v === "object" && !Array.isArray(v) ? ((v as Record<string, unknown>).result ?? (v as Record<string, unknown>).jobs ?? v) : v);
   let v = unwrap(parsed);
   if (!Array.isArray(v)) v = unwrap(v);
   return Array.isArray(v) ? (v as Array<Record<string, unknown>>) : [];
+}
+
+/** The nodes array out of an `outline` reply, however the pane wrapped it. */
+function nodesFromOutline(res: ToolResult): Array<Record<string, unknown>> {
+  let v = bodyOfReply(res);
+  for (let hop = 0; hop < 3; hop += 1) {
+    if (Array.isArray(v)) return v as Array<Record<string, unknown>>;
+    if (!v || typeof v !== "object") return [];
+    const o = v as Record<string, unknown>;
+    if (Array.isArray(o.nodes)) return o.nodes as Array<Record<string, unknown>>;
+    v = o.result ?? o.outline ?? null;
+  }
+  return [];
+}
+
+/**
+ * The Calliope scene ids whose Director node is BYPASSED.
+ *
+ * Bypass is a graph-side fact — the editor mutes a node, nothing in Calliope knows — so the only
+ * way a render tool can honour it is to read the outline and map `cal-sc-12` back to scene 12.
+ */
+function bypassedSceneIds(outline: ToolResult): Set<number> {
+  const out = new Set<number>();
+  for (const n of nodesFromOutline(outline)) {
+    if (n.kind !== "scene" || n.bypassed !== true) continue;
+    const raw = typeof n.id === "string" && n.id.startsWith(CAL_SCENE_PREFIX) ? Number(n.id.slice(CAL_SCENE_PREFIX.length)) : Number.NaN;
+    if (Number.isInteger(raw)) out.add(raw);
+  }
+  return out;
+}
+
+/** The row id in a create reply, however the pane wrapped it. Null when the reply carried none. */
+function rowIdFromReply(res: ToolResult): number | null {
+  let v = bodyOfReply(res);
+  for (let hop = 0; hop < 3; hop += 1) {
+    if (!v || typeof v !== "object" || Array.isArray(v)) return null;
+    const o = v as Record<string, unknown>;
+    if (typeof o.id === "number" && Number.isInteger(o.id)) return o.id;
+    v = o.result ?? null;
+  }
+  return null;
 }
 
 /**
@@ -107,6 +161,47 @@ async function waitForJobs(ctx: PanelToolCtx, projectId: number, timeoutS: numbe
     if (Date.now() - started > budget) return { settled: false, waited_ms: Date.now() - started, active: active.length, jobs };
     await new Promise((r) => setTimeout(r, 2000));
   }
+}
+
+/**
+ * Enqueue a project's videos, honouring the graph's bypass flags.
+ *
+ * A bypassed node is the user saying "not this shot" on the surface they are looking at, and
+ * Calliope cannot see it — the flag lives on the Director's node, not on the scene row. So the
+ * skip is done HERE, against the outline read at dispatch time, and the reply says which ids
+ * were dropped: a scene that silently did not render is indistinguishable from a queue failure.
+ */
+async function renderVideos(ctx: PanelToolCtx, args: A): Promise<ToolResult> {
+  const pid = args.project_id;
+  const requested = (args.scene_ids as number[]) ?? [];
+  const body = pick(args, ["scene_ids", "workflow_id", "input_values", "prompts"]);
+  if (args.skip_bypassed === false) return calliope(ctx, "jobs", "generateVideos", [pid, body]);
+
+  const outline = await forward(ctx, "director_outline", {}, DIRECTOR_READ_MS);
+  if (outline.isError) {
+    // Unreadable outline: render what was asked for rather than refuse, and SAY the check
+    // did not run — a silent fallback would look exactly like "nothing was bypassed".
+    const res = await calliope(ctx, "jobs", "generateVideos", [pid, body]);
+    return annotate(res, { bypass_check: "skipped — the outline could not be read", scene_ids: requested });
+  }
+  const bypassed = bypassedSceneIds(outline);
+  const skipped = requested.filter((id) => bypassed.has(id));
+  if (!skipped.length) return calliope(ctx, "jobs", "generateVideos", [pid, body]);
+
+  const keep = requested.filter((id) => !bypassed.has(id));
+  if (!keep.length) return refuse(`every scene requested is bypassed on the graph (${skipped.join(", ")}) — un-bypass one with panel_director_graph set_bypassed, or pass skip_bypassed false`);
+  const res = await calliope(ctx, "jobs", "generateVideos", [pid, { ...body, scene_ids: keep }]);
+  return annotate(res, { skipped_bypassed: skipped, scene_ids: keep });
+}
+
+/** Wrap a reply with what the tool decided before sending it, keeping the reply's own body intact. */
+function annotate(res: ToolResult, note: Record<string, unknown>): ToolResult {
+  // A fresh result rather than a spread: rewriting `content` while carrying the original
+  // `structuredContent` would leave a machine half that describes the UN-annotated reply.
+  return {
+    content: [{ type: "text" as const, text: JSON.stringify({ ...note, result: bodyOfReply(res) }, null, 2) }],
+    ...(res.isError ? { isError: true } : {}),
+  };
 }
 
 /** Where Calliope answers — the same default the pane uses; override with CALLIOPE_BASE_URL. */
@@ -222,40 +317,100 @@ export function buildDirectorToolDefs(): Array<PanelToolDef & { mountGroup?: Mou
       mountGroup: "director",
       description:
         "The Director's scene graph — nodes. `outline` returns every node (Scenes, assets, Beats with their rails) and every wire; read it first, ids come from here. " +
-        "`read_node` one node in full. `add_node` places a Scene / Character / Location / Item at Director graph x,y (dropping inside a Beat joins it) and returns the id the EDITOR minted. " +
-        "`remove_node`, `move_node`, `set_title`, `set_color` (hex, Beats only), `set_collapsed` (subgraphs only), " +
-        "`set_parent` (move a node into a Beat, or out with parent_id null), `set_pin` (show a node on its subgraph's collapsed face — only meaningful inside a subgraph). " +
+        "`read_node` one node in full; `inspect` opens the editor's inspector on it for the user. `add_node` places a Scene / Character / Location / Item at Director graph x,y (dropping inside a Beat joins it) and returns the id the EDITOR minted. " +
+        "`remove_node`, `move_node`, `duplicate` (ids → the new ids), `select` (ids, empty clears), `fit_view` (frame ids, or everything), `set_title`, `set_color` (hex, Beats only), " +
+        "`set_node_color` (one leaf's tint; null clears it), `set_collapsed` (any Beat — a plain group collapses to a header card with proxy handles), `set_node_collapsed` (collapse a leaf to its header), `set_bypassed` (mute a node: drawn faded and skipped by renders), " +
+        "`set_parent` (move a node into a Beat, or out with parent_id null), `set_pin` (show a node on its subgraph's collapsed face — only meaningful inside a subgraph), " +
+        "`add_note` / `set_note` (a sticky note at x,y), `reroute` (drop a pass-through dot on a wire at x,y). " +
+        "Whole-graph persistence: `export_graph` / `import_graph` (json), `save_named` / `load_named` / `list_saves` / `delete_save` (name), `clear` (empty it), `reset_demo` (back to the demo project). " +
         "The user can be editing the same graph by hand at the same time; re-read the outline rather than assuming your last write is the whole story.",
       schema: {
-        action: z.enum(["outline", "read_node", "add_node", "remove_node", "move_node", "set_title", "set_color", "set_collapsed", "set_parent", "set_pin"]).describe("What to do."),
-        id: z.string().optional().describe("Node id (from outline). Required for everything but outline/add_node."),
+        action: z
+          .enum([
+            "outline",
+            "read_node",
+            "inspect",
+            "add_node",
+            "remove_node",
+            "move_node",
+            "duplicate",
+            "select",
+            "fit_view",
+            "set_title",
+            "set_color",
+            "set_node_color",
+            "set_collapsed",
+            "set_node_collapsed",
+            "set_bypassed",
+            "set_parent",
+            "set_pin",
+            "add_note",
+            "set_note",
+            "reroute",
+            "export_graph",
+            "import_graph",
+            "save_named",
+            "load_named",
+            "list_saves",
+            "delete_save",
+            "clear",
+            "reset_demo",
+          ])
+          .describe("What to do."),
+        id: z.string().optional().describe("Node id (from outline). Required for read_node/inspect/remove_node/move_node/set_note and every set_*."),
+        ids: z.array(z.string()).optional().describe("duplicate/select/fit_view: node ids. select with [] clears the selection; fit_view without ids frames the whole graph."),
         kind: z.enum(["scene", "character", "location", "item"]).optional().describe("add_node: what to add."),
-        x: z.number().optional().describe("add_node/move_node: Director graph x."),
-        y: z.number().optional().describe("add_node/move_node: Director graph y."),
+        x: z.number().optional().describe("add_node/move_node/add_note/reroute: Director graph x."),
+        y: z.number().optional().describe("add_node/move_node/add_note/reroute: Director graph y."),
         label: z.string().optional().describe("add_node/set_title: title text."),
-        color: z.string().optional().describe("set_color: hex like #34d399."),
-        collapsed: z.boolean().optional().describe("set_collapsed."),
+        color: z.string().nullable().optional().describe("set_color: hex like #34d399. set_node_color: the same, or null to clear the tint."),
+        collapsed: z.boolean().optional().describe("set_collapsed (a Beat) / set_node_collapsed (a leaf)."),
+        bypassed: z.boolean().optional().describe("set_bypassed: muted or not."),
         parent_id: z.string().nullable().optional().describe("set_parent: Beat id, or null to move to the top level."),
         promoted: z.boolean().optional().describe("set_pin: pinned or not."),
+        text: z.string().optional().describe("add_note/set_note: the note's text (markdown)."),
+        edge_id: z.string().optional().describe("reroute: the wire to drop the dot onto (from outline)."),
+        json: z.string().optional().describe("import_graph: a graph as export_graph returned it."),
+        name: z.string().optional().describe("save_named/load_named/delete_save: the save's name."),
       },
       handler: async (args: A, ctx) => {
         const action = args.action as string;
         const required: Record<string, string[]> = {
           outline: [],
           read_node: ["id"],
+          inspect: ["id"],
           add_node: ["kind", "x", "y"],
           remove_node: ["id"],
           move_node: ["id", "x", "y"],
+          duplicate: ["ids"],
+          select: ["ids"],
+          fit_view: [],
           set_title: ["id", "label"],
           set_color: ["id", "color"],
+          set_node_color: ["id", "color"],
           set_collapsed: ["id", "collapsed"],
+          set_node_collapsed: ["id", "collapsed"],
+          set_bypassed: ["id", "bypassed"],
           set_parent: ["id", "parent_id"],
           set_pin: ["id", "promoted"],
+          add_note: ["x", "y", "text"],
+          set_note: ["id", "text"],
+          reroute: ["edge_id", "x", "y"],
+          export_graph: [],
+          import_graph: ["json"],
+          save_named: ["name"],
+          load_named: ["name"],
+          list_saves: [],
+          delete_save: ["name"],
+          clear: [],
+          reset_demo: [],
         };
         const miss = need(args, action, ...(required[action] ?? []));
         if (miss) return miss;
         const { action: _a, ...rest } = args;
-        return forward(ctx, `director_${action}`, rest, action === "outline" || action === "read_node" ? DIRECTOR_READ_MS : DIRECTOR_WRITE_MS);
+        // Reads are cheap and must not sit on the write budget; everything else can redraw the graph.
+        const READS = new Set(["outline", "read_node", "export_graph", "list_saves"]);
+        return forward(ctx, `director_${action}`, rest, READS.has(action) ? DIRECTOR_READ_MS : DIRECTOR_WRITE_MS);
       },
     },
     {
@@ -289,18 +444,35 @@ export function buildDirectorToolDefs(): Array<PanelToolDef & { mountGroup?: Mou
       description:
         "The Director's Beats. A Beat is a container: `group` wraps node_ids in a new Beat; `promote` turns a Beat into a SUBGRAPH, which exposes every wire crossing its boundary as a named rail; " +
         "`dissolve` turns it back into a plain group; `reconcile` re-derives one Beat's rails. Rails are user-labelled: `set_rail_label` and `reorder_rail` (side in/out, from → to index). " +
-        "Blueprints are reusable Beats: `save_blueprint` a subgraph under a name, `list_blueprints`, `apply_blueprint` to stamp a copy at x,y.",
+        "`delete_container` removes a Beat: mode `all` takes everything inside with it, mode `shell` keeps the children and lifts them out. " +
+        "Blueprints are reusable Beats: `save_blueprint` a subgraph under a name, `list_blueprints`, `apply_blueprint` to stamp a copy at x,y, `update_blueprint` to re-save one from a Beat (id), `delete_blueprint` to drop it.",
       schema: {
-        action: z.enum(["group", "promote", "dissolve", "reconcile", "set_rail_label", "reorder_rail", "save_blueprint", "list_blueprints", "apply_blueprint"]).describe("What to do."),
-        id: z.string().optional().describe("Beat id. Required for promote/dissolve/reconcile/set_rail_label/reorder_rail/save_blueprint."),
+        action: z
+          .enum([
+            "group",
+            "promote",
+            "dissolve",
+            "reconcile",
+            "delete_container",
+            "set_rail_label",
+            "reorder_rail",
+            "save_blueprint",
+            "list_blueprints",
+            "apply_blueprint",
+            "update_blueprint",
+            "delete_blueprint",
+          ])
+          .describe("What to do."),
+        id: z.string().optional().describe("Beat id. Required for promote/dissolve/reconcile/delete_container/set_rail_label/reorder_rail/save_blueprint; optional for update_blueprint (the Beat to re-save from)."),
         node_ids: z.array(z.string()).optional().describe("group: nodes to wrap."),
         label: z.string().optional().describe("group: the new Beat's title; set_rail_label: the new label."),
         port_id: z.string().optional().describe("set_rail_label: the rail's id (from outline)."),
         side: z.enum(["in", "out"]).optional().describe("reorder_rail: which rail."),
         from: z.number().int().optional().describe("reorder_rail: current index."),
         to: z.number().int().optional().describe("reorder_rail: new index."),
+        mode: z.enum(["all", "shell"]).optional().describe("delete_container: `all` deletes the children too, `shell` keeps them."),
         name: z.string().optional().describe("save_blueprint: blueprint name."),
-        blueprint_id: z.string().optional().describe("apply_blueprint: id from list_blueprints."),
+        blueprint_id: z.string().optional().describe("apply_blueprint/update_blueprint/delete_blueprint: id from list_blueprints."),
         x: z.number().optional().describe("apply_blueprint: Director graph x."),
         y: z.number().optional().describe("apply_blueprint: Director graph y."),
       },
@@ -311,11 +483,14 @@ export function buildDirectorToolDefs(): Array<PanelToolDef & { mountGroup?: Mou
           promote: ["id"],
           dissolve: ["id"],
           reconcile: ["id"],
+          delete_container: ["id", "mode"],
           set_rail_label: ["id", "port_id", "label"],
           reorder_rail: ["id", "side", "from", "to"],
           save_blueprint: ["id", "name"],
           list_blueprints: [],
           apply_blueprint: ["blueprint_id", "x", "y"],
+          update_blueprint: ["blueprint_id"],
+          delete_blueprint: ["blueprint_id"],
         };
         const miss = need(args, action, ...(required[action] ?? []));
         if (miss) return miss;
@@ -334,21 +509,32 @@ export function buildDirectorToolDefs(): Array<PanelToolDef & { mountGroup?: Mou
       description:
         "Calliope projects behind the Director. `list` them; `create` one (title, optional idea/genre/tone/target_duration) — then `open` it so the Director's graph shows it; " +
         "`current` says which project the Director's graph has loaded and whether Calliope is reachable; `refresh` re-reads it; `patch` edits title/idea/genre/tone/target_duration/status; `delete` removes a project and everything in it. " +
+        "`set_cover` sets the project's poster image to a produced file's cover_path, or clears it with an explicit null. " +
         "`settings_get` / `settings_set` read and write Calliope's own settings (its ComfyUI URL, queue concurrency, dry_run) — its LLM settings are dead config here: this agent is the only model in the loop.",
       schema: {
-        action: z.enum(["list", "create", "open", "current", "refresh", "patch", "delete", "settings_get", "settings_set"]).describe("What to do."),
-        project_id: z.number().int().optional().describe("open/patch/delete: which project."),
+        action: z.enum(["list", "create", "open", "current", "refresh", "patch", "set_cover", "delete", "settings_get", "settings_set"]).describe("What to do."),
+        project_id: z.number().int().optional().describe("open/patch/set_cover/delete: which project."),
         title: z.string().optional(),
         idea: z.string().optional().describe("The premise, in a sentence or a paragraph."),
         genre: z.string().optional(),
         tone: z.string().optional(),
         target_duration: z.string().optional().describe("e.g. '2 min'."),
         status: z.string().optional().describe("patch: project status."),
+        cover_path: z.string().nullable().optional().describe("set_cover: the poster image's path, or null to clear it."),
         settings: z.record(z.string(), z.unknown()).optional().describe("settings_set: the keys to change."),
       },
       handler: async (args: A, ctx) => {
         const action = args.action as string;
-        const required: Record<string, string[]> = { create: ["title"], open: ["project_id"], patch: ["project_id"], delete: ["project_id"], settings_set: ["settings"] };
+        const required: Record<string, string[]> = {
+          create: ["title"],
+          open: ["project_id"],
+          patch: ["project_id"],
+          // cover_path is required so CLEARING is something the caller said, not something an
+          // omitted field did: `null` is the clear, and there is no way to reach it by accident.
+          set_cover: ["project_id", "cover_path"],
+          delete: ["project_id"],
+          settings_set: ["settings"],
+        };
         const miss = need(args, action, ...(required[action] ?? []));
         if (miss) return miss;
         const body = pick(args, ["title", "idea", "genre", "tone", "target_duration", "status"]);
@@ -365,6 +551,9 @@ export function buildDirectorToolDefs(): Array<PanelToolDef & { mountGroup?: Mou
             return forward(ctx, "director_project_refresh", {}, DIRECTOR_WRITE_MS);
           case "patch":
             return calliope(ctx, "projects", "patch", [args.project_id, body]);
+          case "set_cover":
+            // Explicitly `cover_path`, never `pick`: an omitted key does not clear a column, a null does.
+            return calliope(ctx, "projects", "patch", [args.project_id, { cover_path: args.cover_path ?? null }]);
           case "delete":
             return calliope(ctx, "projects", "delete", [args.project_id]);
           case "settings_get":
@@ -421,7 +610,7 @@ export function buildDirectorToolDefs(): Array<PanelToolDef & { mountGroup?: Mou
       name: "panel_director_scene",
       mountGroup: "director",
       description:
-        "Scenes — the shots. `list` them (with the estimated total duration); `add` one (heading, action, dialog, duration_sec, beat_id, location_id, character_ids, workflow_id, chain_from_prev); `patch` any of those by scene_id; `delete`; " +
+        "Scenes — the shots. `list` them (with the estimated total duration); `add` one (heading, action, dialog, duration_sec, beat_id, location_id, character_ids, workflow_id, chain_from_prev — the create endpoint has no continuity field, so `add` sets it with a follow-up patch and reports the new scene_id); `patch` any of those by scene_id; `delete`; " +
         "`reorder` with the full scene_ids list — order_index IS the timeline, so this is the cut order. `set_prompt` stores the exact video prompt a scene will render with (this agent authors prompts; the draft is stamped against the scene's current text so Calliope honours it — edit the scene text and you must set the prompt again).",
       schema: {
         action: z.enum(["list", "add", "patch", "delete", "reorder", "set_prompt"]).describe("What to do."),
@@ -446,15 +635,35 @@ export function buildDirectorToolDefs(): Array<PanelToolDef & { mountGroup?: Mou
         const required: Record<string, string[]> = { add: ["heading"], patch: ["scene_id"], delete: ["scene_id"], reorder: ["scene_ids"], set_prompt: ["scene_id", "prompt"] };
         const miss = need(args, action, ...(required[action] ?? []));
         if (miss) return miss;
-        const body = pick(args, ["heading", "dialog", "duration_sec", "beat_id", "location_id", "character_ids", "workflow_id", "chain_from_prev", "order_index"]);
+        // `chain_from_prev` is deliberately NOT in this list: Calliope's SceneCreate has no such
+        // field (only SceneUpdate does), so sending it on create is silently dropped by the
+        // endpoint — the continuity flag would read as set and never be.
+        const body = pick(args, ["heading", "dialog", "duration_sec", "beat_id", "location_id", "character_ids", "workflow_id", "order_index"]);
         if (args.action_text !== undefined) body.action = args.action_text;
         switch (action) {
           case "list":
             return calliope(ctx, "scenes", "list", [pid], DIRECTOR_READ_MS);
-          case "add":
-            return calliope(ctx, "scenes", "create", [pid, body]);
+          case "add": {
+            const created = await calliope(ctx, "scenes", "create", [pid, body]);
+            if (created.isError || args.chain_from_prev === undefined) return created;
+            // Two frames, on purpose: create, then patch the one field create cannot carry.
+            const newId = rowIdFromReply(created);
+            if (newId === null) {
+              return {
+                ...created,
+                content: [
+                  ...created.content,
+                  { type: "text" as const, text: 'note: chain_from_prev was NOT applied — the create reply carried no scene id. Set it with action "patch" once you know the id.' },
+                ],
+              };
+            }
+            const chained = await calliope(ctx, "scenes", "patch", [pid, newId, { chain_from_prev: args.chain_from_prev }]);
+            // The scene EXISTS either way — say so, or the agent retries `add` and gets a duplicate.
+            if (chained.isError) return refuse(`scene ${newId} was created, but chain_from_prev could not be set: ${textOf(chained)}`);
+            return text({ scene_id: newId, created: bodyOfReply(created), chain_from_prev: args.chain_from_prev, chained: bodyOfReply(chained) });
+          }
           case "patch":
-            return calliope(ctx, "scenes", "patch", [pid, args.scene_id, body]);
+            return calliope(ctx, "scenes", "patch", [pid, args.scene_id, { ...body, ...pick(args, ["chain_from_prev"]) }]);
           case "delete":
             return calliope(ctx, "scenes", "delete", [pid, args.scene_id]);
           case "reorder":
@@ -505,11 +714,30 @@ export function buildDirectorToolDefs(): Array<PanelToolDef & { mountGroup?: Mou
       name: "panel_director_render",
       mountGroup: "director",
       description:
-        "Rendering through Calliope's queue. `videos_generate` enqueues scene_ids (optionally a workflow_id, input_values, and `prompts` keyed by scene id — the surest way to render exactly the text you wrote); `preview_prompt` shows what a scene would send; `assets_generate` renders portraits and environment images for character_ids/location_ids/item_ids (missing_only by default). " +
-        "`jobs_list` (filter by project_id/status), `job_get`, `job_retry`, `job_cancel`; `queue_status`, `queue_pause`, `queue_resume`. `wait` blocks until the project's jobs settle or timeout_s passes and returns them. `export` concatenates the finished clips into the film. `attach` puts a produced file (path) on a scene, character, location or item.",
+        "Rendering through Calliope's queue. `videos_generate` enqueues scene_ids (optionally a workflow_id, input_values, and `prompts` keyed by scene id — the surest way to render exactly the text you wrote), skipping any scene whose node the user has bypassed unless you pass skip_bypassed false; " +
+        "`render_scene` opens the editor's composer on one scene instead of enqueuing it; `preview_prompt` shows what a scene would send; `assets_generate` renders portraits and environment images for character_ids/location_ids/item_ids (missing_only by default). " +
+        "`jobs_list` (filter by project_id/status), `job_get`, `job_retry`, `job_cancel`; `queue_status`, `queue_pause`, `queue_resume`. `wait` blocks until the project's jobs settle or timeout_s passes and returns them. `export` concatenates the finished clips into the film. " +
+        "`attach` puts a produced file (path) on a scene, character, location or item — it needs the project_id. `playground_jobs` lists the playground's own renders and `playground_delete` removes one with its files.",
       schema: {
         action: z
-          .enum(["videos_generate", "preview_prompt", "assets_generate", "jobs_list", "job_get", "job_retry", "job_cancel", "queue_status", "queue_pause", "queue_resume", "wait", "export", "attach"])
+          .enum([
+            "videos_generate",
+            "render_scene",
+            "preview_prompt",
+            "assets_generate",
+            "jobs_list",
+            "job_get",
+            "job_retry",
+            "job_cancel",
+            "queue_status",
+            "queue_pause",
+            "queue_resume",
+            "wait",
+            "export",
+            "attach",
+            "playground_jobs",
+            "playground_delete",
+          ])
           .describe("What to do."),
         project_id: z.number().int().optional().describe("Required for videos_generate/preview_prompt/assets_generate/wait/export; filters jobs_list."),
         scene_ids: z.array(z.number().int()).optional(),
@@ -527,8 +755,9 @@ export function buildDirectorToolDefs(): Array<PanelToolDef & { mountGroup?: Mou
         status: z.string().optional().describe("jobs_list: filter."),
         limit: z.number().int().optional(),
         timeout_s: z.number().optional().describe("wait: how long to block (default 120, max 600)."),
+        skip_bypassed: z.boolean().optional().describe("videos_generate: leave out scenes whose Director node is bypassed (default true)."),
         path: z.string().optional().describe("attach: the produced file."),
-        target: z.string().optional().describe("attach: scene | character | location | item."),
+        target: z.string().optional().describe("attach: the endpoint's own names — character_sheet | location | item | scene."),
         character_id: z.number().int().optional(),
         location_id: z.number().int().optional(),
         item_id: z.number().int().optional(),
@@ -538,6 +767,7 @@ export function buildDirectorToolDefs(): Array<PanelToolDef & { mountGroup?: Mou
         const action = args.action as string;
         const required: Record<string, string[]> = {
           videos_generate: ["project_id", "scene_ids"],
+          render_scene: ["scene_id"],
           preview_prompt: ["project_id", "scene_id"],
           assets_generate: ["project_id"],
           job_get: ["job_id"],
@@ -545,14 +775,18 @@ export function buildDirectorToolDefs(): Array<PanelToolDef & { mountGroup?: Mou
           job_cancel: ["job_id"],
           wait: ["project_id"],
           export: ["project_id"],
-          attach: ["path", "target"],
+          // PlaygroundAttach declares project_id REQUIRED; omitting it is a 422, not a default.
+          attach: ["path", "target", "project_id"],
+          playground_delete: ["job_id"],
         };
         const miss = need(args, action, ...(required[action] ?? []));
         if (miss) return miss;
         const pid = args.project_id;
         switch (action) {
           case "videos_generate":
-            return calliope(ctx, "jobs", "generateVideos", [pid, pick(args, ["scene_ids", "workflow_id", "input_values", "prompts"])]);
+            return renderVideos(ctx, args);
+          case "render_scene":
+            return forward(ctx, "director_render_scene", { scene_id: args.scene_id }, DIRECTOR_WRITE_MS);
           case "preview_prompt":
             return calliope(ctx, "jobs", "previewPrompt", [pid, pick(args, ["scene_id", "workflow_id"])], DIRECTOR_READ_MS);
           case "assets_generate":
@@ -575,6 +809,12 @@ export function buildDirectorToolDefs(): Array<PanelToolDef & { mountGroup?: Mou
             return calliope(ctx, "jobs", "exportFilm", [pid]);
           case "attach":
             return calliope(ctx, "playground", "attach", [pick(args, ["path", "project_id", "target", "character_id", "location_id", "item_id", "scene_id", "name"])]);
+          case "playground_jobs":
+            // `jobs(limit = 50)` takes a POSITIONAL scalar, not a query object — an omitted
+            // limit must be an absent argument so the client's own default applies.
+            return calliope(ctx, "playground", "jobs", args.limit === undefined ? [] : [args.limit], DIRECTOR_READ_MS);
+          case "playground_delete":
+            return calliope(ctx, "playground", "deleteJob", [args.job_id]);
           default:
             return text(await waitForJobs(ctx, pid as number, typeof args.timeout_s === "number" ? args.timeout_s : 120));
         }
