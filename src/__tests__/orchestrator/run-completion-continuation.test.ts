@@ -30,6 +30,7 @@ import {
   describe as describeCorrelation,
   type CompletionPayload,
 } from "../../orchestrator/run-completion-journal.js";
+import { buildCompletionReceipt, canonicalPromptId } from "../../orchestrator/completion-receipt.js";
 import { AskAnswerJournalImpl } from "../../orchestrator/ask-answer-journal.js";
 
 let PanelAgentManager: typeof import("../../orchestrator/panel-agent.js").PanelAgentManager;
@@ -195,7 +196,18 @@ function makeHarness(backend: AgentBackend) {
       typeof payload.completion_key === "string" && payload.completion_key.length > 0
         ? payload.completion_key
         : null;
-    const promptId = typeof payload.prompt_id === "string" ? payload.prompt_id : null;
+    const promptId = canonicalPromptId(payload.prompt_id) ?? null;
+    const canonicalPayload =
+      promptId !== null
+        ? payload.prompt_id === promptId
+          ? payload
+          : { ...payload, prompt_id: promptId }
+        : typeof payload.prompt_id === "string"
+          ? (() => {
+              const { prompt_id: _whitespaceOnlyPromptId, ...withoutPromptId } = payload;
+              return withoutPromptId;
+            })()
+          : payload;
     const alreadyKnown =
       completionKey !== null &&
       promptId !== null &&
@@ -204,20 +216,70 @@ function makeHarness(backend: AgentBackend) {
       alreadyKnown || promptId === null
         ? alreadyKnown
           ? null
-          : journal.record(tab, payload, { conversation })
-        : journal.record(tab, payload, { conversation });
+          : journal.record(tab, canonicalPayload, { conversation })
+        : journal.record(tab, canonicalPayload, { conversation });
     if (entry?.alreadyDelivered) journal.suppressAlreadyDelivered(entry.token);
     const acked =
       completionKey !== null &&
       promptId !== null &&
       journal.acceptsCompletionReceipt(completionKey, promptId, tab, conversation);
+    const receipt = buildCompletionReceipt(promptId, completionKey, acked);
     flush(tab);
-    return { entry, acked };
+    return { entry, acked, receipt };
   };
   return { journal, manager, flush, arrive, arriveProduction };
 }
 
 describe("#1824 production keyed completion ingress", () => {
+  it("canonicalizes padded ingress IDs for journal dedupe and Panel receipt removal", () => {
+    const backend = new ContinuationBackend();
+    const { journal, arriveProduction } = makeHarness(backend);
+    const tab = "tab-padded-1824";
+    const conversation = "orchestrator::claude";
+    const key = JSON.stringify([tab, conversation, PROMPT_A, "generation-padded"]);
+
+    journal.openRun(PROMPT_A, { tabId: tab, conversation, completionKey: key });
+    const first = arriveProduction(
+      tab,
+      { kind: "executed", prompt_id: ` \t${PROMPT_A}\n`, completion_key: key },
+      conversation,
+    );
+    expect(first.acked).toBe(true);
+    expect(first.receipt?.prompt_id).toBe(PROMPT_A);
+    expect(first.entry?.payload.prompt_id).toBe(PROMPT_A);
+    expect(first.entry).toBeDefined();
+    journal.ack(first.entry!.token);
+
+    // The same completion replay must hit the acknowledged-key fence rather than
+    // create a second journal entry or require an untrimmed Panel map key.
+    const replay = arriveProduction(
+      tab,
+      { kind: "executed", prompt_id: ` ${PROMPT_A} `, completion_key: key },
+      conversation,
+    );
+    expect(replay.entry).toBeNull();
+    expect(replay.receipt?.prompt_id).toBe(PROMPT_A);
+    expect(journal.allOutstanding()).toHaveLength(0);
+  });
+
+  it("rejects a whitespace-only ingress ID without emitting a receipt", () => {
+    const backend = new ContinuationBackend();
+    const { journal, arriveProduction } = makeHarness(backend);
+    const tab = "tab-whitespace-1824";
+    const conversation = "orchestrator::claude";
+    const key = JSON.stringify([tab, conversation, PROMPT_A, "generation-whitespace"]);
+
+    const result = arriveProduction(
+      tab,
+      { kind: "executed", prompt_id: " \t\n ", completion_key: key },
+      conversation,
+    );
+    expect(result.acked).toBe(false);
+    expect(result.receipt).toBeUndefined();
+    expect(result.entry?.correlation.status).toBe("unidentified");
+    expect(journal.allOutstanding()).toHaveLength(1);
+  });
+
   it("ACKs a keyed completion only for the current ticket generation", () => {
     const backend = new ContinuationBackend();
     const { journal, arriveProduction } = makeHarness(backend);
@@ -246,6 +308,14 @@ describe("#1824 production keyed completion ingress", () => {
       conversation,
     );
     expect(stale.acked).toBe(false);
+    expect(stale.receipt).toEqual({
+      type: "ack",
+      ok: false,
+      kind: "completion",
+      prompt_id: PROMPT_A,
+      completion_key: keyA,
+      reason: "uncorrelated",
+    });
     expect(stale.entry?.correlation.status).toBe("foreign");
     expect(journal.outstanding(tab)).toHaveLength(1);
   });
