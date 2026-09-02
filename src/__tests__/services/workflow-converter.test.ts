@@ -3922,6 +3922,38 @@ describe("convertUiToApi — forceInput-only scalar input (issue #2753)", () => 
     expect(inputs.first_frame).toBe(12);
   });
 
+  // The accepted limitation must be AUDIBLE. A pre-unification row keeps a
+  // placeholder slot for the socket-only input, so it is one longer than the widget
+  // layout and every widget reads one position early. Which reading is right cannot
+  // be decided from the row, so nothing is changed — but it must not pass silently.
+  it("a leftover value on a forceInput node is reported, not swallowed", () => {
+    const { workflow, warnings } = convertUiToApi(
+      animaGraph([null, ...SAVED_ROW]),
+      ANIMA_INFO,
+    );
+    // values are NOT guessed at — the row is mapped exactly as saved
+    const inputs = (workflow["7"] as { inputs: Record<string, unknown> }).inputs;
+    expect(inputs.unet_name).toBe(null);
+    // …but the leftover, and why it matters, are named
+    const w = warnings.join(" ");
+    expect(w).toContain("remain unmapped");
+    expect(w).toContain("forceInput");
+    expect(w).toContain('"default"'); // the value left over
+  });
+
+  it("stays quiet when the row maps exactly (no false leftover warning)", () => {
+    const { warnings } = convertUiToApi(animaGraph(SAVED_ROW), ANIMA_INFO);
+    expect(warnings.join(" ")).not.toContain("remain unmapped");
+  });
+
+  it("stays quiet when the extras pass already accounted for the row", () => {
+    const { warnings } = convertUiToApi(
+      amVideoGraph(["D:/input.mov", "detect_range", 12]),
+      AMVIDEO_INFO,
+    );
+    expect(warnings.join(" ")).not.toContain("remain unmapped");
+  });
+
   it("an INT forceInput input is socket-only too (not just STRING)", () => {
     const INFO = {
       N: {

@@ -3303,6 +3303,36 @@ export function convertUiToApi(
         } are left to their defaults rather than risk a silently shifted value on a later widget (such as a seed) or nested leaf.`,
       );
     }
+
+    // #2753 — the accepted limitation, made AUDIBLE. A row saved before ComfyUI's
+    // widget/input unification carries a placeholder slot for each `forceInput`
+    // input, so it is longer than the layout mapped here and every widget reads one
+    // position early. Which reading is right cannot be decided from the row (see
+    // the note at the mapping site), so nothing is changed — but a leftover on a
+    // node that HAS such an input is the signature, and it must not pass in
+    // silence. Scoped to those nodes so it cannot become noise elsewhere, and
+    // suppressed after a refusal or a dynamic combo, whose leftovers are already
+    // explained above.
+    if (
+      !sawDynamicCombo &&
+      !refusalOccurred &&
+      widgetIdx < widgetValues.length &&
+      orderedNames.some((n) => {
+        const sp =
+          (def.input?.required as Record<string, unknown> | undefined)?.[n] ??
+          (def.input?.optional as Record<string, unknown> | undefined)?.[n];
+        return isForceInputSpec(sp) && isPositionalWidgetType(sp);
+      })
+    ) {
+      warnings.push(
+        `Node ${nodeId} (${classType}): ${
+          widgetValues.length - widgetIdx
+        } saved widget value(s) remain unmapped (${widgetValues
+          .slice(widgetIdx)
+          .map((v) => JSON.stringify(v))
+          .join(", ")}), and this node has a forceInput-only input. That is the signature of a workflow saved before ComfyUI's widget/input unification, whose widgets_values kept a placeholder slot for such an input — in which case EVERY widget on this node is reading one position early. A saved row cannot distinguish that from a node that simply serializes an extra value, so the values above are reported rather than guessed at. Open and re-save this workflow in ComfyUI to normalize it, then check this node's values.`,
+      );
+    }
     }
 
     // Nodes with a CUSTOM serialized-widget layout (properties.has_serialized_properties
