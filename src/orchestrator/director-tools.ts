@@ -74,22 +74,6 @@ const pick = (args: A, keys: string[]): Record<string, unknown> => {
 
 const ACTIVE_JOB = /^(queued|pending|running|in_progress|processing)$/i;
 
-/** ctx.call wraps the panel's reply as text; the job list is inside it, bare or under `result`/`jobs`. */
-function jobsFromReply(res: ToolResult): Array<Record<string, unknown>> {
-  const first = res.content[0];
-  if (!first || first.type !== "text") return [];
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(first.text);
-  } catch {
-    return [];
-  }
-  const unwrap = (v: unknown): unknown => (v && typeof v === "object" && !Array.isArray(v) ? ((v as Record<string, unknown>).result ?? (v as Record<string, unknown>).jobs ?? v) : v);
-  let v = unwrap(parsed);
-  if (!Array.isArray(v)) v = unwrap(v);
-  return Array.isArray(v) ? (v as Array<Record<string, unknown>>) : [];
-}
-
 /** The `cal-sc-<id>` node ids the editor mints for Calliope scenes — the one bridge from a graph node back to its row. */
 const CAL_SCENE_PREFIX = "cal-sc-";
 
@@ -108,6 +92,15 @@ function bodyOfReply(res: ToolResult): unknown {
   } catch {
     return raw;
   }
+}
+
+/** ctx.call wraps the panel's reply as text; the job list is inside it, bare or under `result`/`jobs`. */
+function jobsFromReply(res: ToolResult): Array<Record<string, unknown>> {
+  const parsed = bodyOfReply(res);
+  const unwrap = (v: unknown): unknown => (v && typeof v === "object" && !Array.isArray(v) ? ((v as Record<string, unknown>).result ?? (v as Record<string, unknown>).jobs ?? v) : v);
+  let v = unwrap(parsed);
+  if (!Array.isArray(v)) v = unwrap(v);
+  return Array.isArray(v) ? (v as Array<Record<string, unknown>>) : [];
 }
 
 /** The nodes array out of an `outline` reply, however the pane wrapped it. */
@@ -326,7 +319,7 @@ export function buildDirectorToolDefs(): Array<PanelToolDef & { mountGroup?: Mou
         "The Director's scene graph — nodes. `outline` returns every node (Scenes, assets, Beats with their rails) and every wire; read it first, ids come from here. " +
         "`read_node` one node in full; `inspect` opens the editor's inspector on it for the user. `add_node` places a Scene / Character / Location / Item at Director graph x,y (dropping inside a Beat joins it) and returns the id the EDITOR minted. " +
         "`remove_node`, `move_node`, `duplicate` (ids → the new ids), `select` (ids, empty clears), `fit_view` (frame ids, or everything), `set_title`, `set_color` (hex, Beats only), " +
-        "`set_node_color` (one leaf's tint; null clears it), `set_collapsed` (subgraphs only), `set_node_collapsed` (collapse a leaf to its header), `set_bypassed` (mute a node: drawn faded and skipped by renders), " +
+        "`set_node_color` (one leaf's tint; null clears it), `set_collapsed` (any Beat — a plain group collapses to a header card with proxy handles), `set_node_collapsed` (collapse a leaf to its header), `set_bypassed` (mute a node: drawn faded and skipped by renders), " +
         "`set_parent` (move a node into a Beat, or out with parent_id null), `set_pin` (show a node on its subgraph's collapsed face — only meaningful inside a subgraph), " +
         "`add_note` / `set_note` (a sticky note at x,y), `reroute` (drop a pass-through dot on a wire at x,y). " +
         "Whole-graph persistence: `export_graph` / `import_graph` (json), `save_named` / `load_named` / `list_saves` / `delete_save` (name), `clear` (empty it), `reset_demo` (back to the demo project). " +
@@ -371,7 +364,7 @@ export function buildDirectorToolDefs(): Array<PanelToolDef & { mountGroup?: Mou
         y: z.number().optional().describe("add_node/move_node/add_note/reroute: Director graph y."),
         label: z.string().optional().describe("add_node/set_title: title text."),
         color: z.string().nullable().optional().describe("set_color: hex like #34d399. set_node_color: the same, or null to clear the tint."),
-        collapsed: z.boolean().optional().describe("set_collapsed / set_node_collapsed."),
+        collapsed: z.boolean().optional().describe("set_collapsed (a Beat) / set_node_collapsed (a leaf)."),
         bypassed: z.boolean().optional().describe("set_bypassed: muted or not."),
         parent_id: z.string().nullable().optional().describe("set_parent: Beat id, or null to move to the top level."),
         promoted: z.boolean().optional().describe("set_pin: pinned or not."),
