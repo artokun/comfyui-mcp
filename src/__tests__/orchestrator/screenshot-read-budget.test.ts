@@ -38,6 +38,8 @@ type HandlerCtx = Parameters<Handler>[1];
 type Observed = {
   /** `ctx.bridge.send(cmd, { timeoutMs })` — panel_screenshot's door. */
   sendTimeouts: Map<string, number | undefined>;
+  /** The full send options, so a claim about retries is read from the same call. */
+  sendOpts: Map<string, { timeoutMs?: number; maxReconnectRetries?: number } | undefined>;
   /** `ctx.call(cmd, timeoutMs)` — panel_get_errors' door (positional). */
   callTimeouts: Map<string, number | undefined>;
 };
@@ -54,7 +56,7 @@ async function driveTool(name: string, args: Record<string, unknown> = {}): Prom
   // Guard the guard: a typo'd tool name would make every assertion below vacuous.
   expect(def, `${name} must be a registered tool`).toBeTruthy();
 
-  const observed: Observed = { sendTimeouts: new Map(), callTimeouts: new Map() };
+  const observed: Observed = { sendTimeouts: new Map(), sendOpts: new Map(), callTimeouts: new Map() };
   const nameOf = (cmd: unknown): string | undefined => {
     const c = (cmd as { cmd?: unknown } | undefined)?.cmd;
     return typeof c === "string" ? c : undefined;
@@ -68,9 +70,12 @@ async function driveTool(name: string, args: Record<string, unknown> = {}): Prom
     },
     confirm: async () => "yes" as const,
     bridge: {
-      send: async (cmd: unknown, opts?: { timeoutMs?: number }) => {
+      send: async (cmd: unknown, opts?: { timeoutMs?: number; maxReconnectRetries?: number }) => {
         const c = nameOf(cmd);
-        if (c) observed.sendTimeouts.set(c, opts?.timeoutMs);
+        if (c) {
+          observed.sendTimeouts.set(c, opts?.timeoutMs);
+          observed.sendOpts.set(c, opts);
+        }
         // A 1x1 transparent PNG, so panel_screenshot gets past `if (!res?.image)`
         // and the rest of its body runs the way production's would.
         return {
@@ -134,5 +139,28 @@ describe("panel#2191 — panel_screenshot dispatches with the bounded read budge
 
     expect(errs, "panel_get_errors must have dispatched graph_get_errors").toBeTypeOf("number");
     expect(shot).toBe(errs);
+  });
+
+  // The half of the read classification this call site deliberately DECLINES.
+  //
+  // Admitting graph_screenshot to BRIDGE_READONLY_CMDS also makes it eligible
+  // for the bridge park-and-resume, which re-dispatches on `tabId` alone. A
+  // `wf:` route key recurs — the hello handler fires onTabTakenOver on exactly
+  // that (#486, "same key is not the same tab") — so a parked capture could be
+  // resumed onto a different browser tab and answer this caller with a picture
+  // of a canvas they never asked about. maxReconnectRetries:0 keeps it out of
+  // that branch (handleMidCommandDisconnect gates the park on
+  // `reconnectRetriesRemaining > 0`).
+  //
+  // Pinned because it is a SILENT property: drop the option and every other
+  // test in this file still passes, the tool still works, and the exposure
+  // comes back with nothing to show for it.
+  it("stays one-shot across reconnects, so a parked capture cannot resume onto another tab", async () => {
+    const { sendOpts } = await driveTool("panel_screenshot", { padding: 50 });
+
+    const opts = sendOpts.get("graph_screenshot");
+    // Guard the guard: no dispatch would make the assertion below vacuous.
+    expect(opts, "panel_screenshot must have dispatched graph_screenshot").toBeTruthy();
+    expect(opts?.maxReconnectRetries).toBe(0);
   });
 });

@@ -1226,25 +1226,35 @@ export const BRIDGE_READONLY_CMDS: ReadonlySet<string> = new Set<string>([
   // and the panel's own READ_ONLY_GRAPH_COMMANDS already classifies as a read.
   // Two ledgers said read; the one that writes the message said mutation.
   //
-  // THE CONSEQUENCE A REVIEWER WILL ASK ABOUT, written down so the next one does
-  // not have to reconstruct it: membership here is what lets
-  // handleMidCommandDisconnect park an un-acked frame and resume it when the tab
-  // re-hellos, keyed on ctx.tabId. "Could a DIFFERENT tab claim that id and be
-  // handed the parked capture?" is answered upstream, twice over:
+  // THE CONSEQUENCE, written down because it is NOT free and a reviewer should
+  // not have to reconstruct it. Membership here also makes a command eligible
+  // for handleMidCommandDisconnect's park-and-resume, and that resume keys on
+  // `ctx.tabId` ALONE: `resumeAwaitingReconnect` looks up `conns.get(tabId)` and
+  // re-dispatches, without consulting the connection's incarnation.
   //
-  //  - The panel's bridge ROUTE identity is minted per page load, persisted
-  //    nowhere, and taken under an origin-wide exclusive Web Lock, precisely so
-  //    a duplicated tab cannot inherit one (panel #640/#709 — a duplicated
-  //    sessionStorage candidate ROTATES before its hello, and a tab that cannot
-  //    establish uniqueness omits the identity rather than guessing). Two tabs
-  //    sharing a route id is the collision that fix exists to make unreachable.
-  //  - And the exposure is the SET'S, not this entry's: the resume branch is
-  //    gated on `!ctx.mutating`, so graph_serialize, graph_outline, graph_query,
-  //    graph_get_errors and graph_view_selected have all parked and resumed on
-  //    ctx.tabId for as long as they have been listed. A wrong-tab SERIALIZE is
-  //    strictly worse than a wrong-tab picture — it drives edits. Adding a read
-  //    to the set does not author the set's identity model, and this change does
-  //    not touch it.
+  // A route key RECURS. The hello handler says so itself (#486): "a `wf:` route
+  // key recurs, so a DIFFERENT tab opening the same saved workflow takes it
+  // over … Same key is not the same tab; only the same incarnation coming back
+  // is a proven return." It fires `onTabTakenOver` on exactly that, so the
+  // bridge already knows how to tell an occupant change from a reconnect — the
+  // resume path just does not ask. A parked read can therefore be handed to the
+  // stranger and its reply resolve the departed caller's promise.
+  //
+  // That hole is the SET'S and predates this entry: the park branch is gated on
+  // `!ctx.mutating`, so graph_serialize, graph_outline, graph_query,
+  // graph_get_errors and graph_view_selected have all resumed this way for as
+  // long as they have been listed — and a wrong-tab SERIALIZE is worse than a
+  // wrong-tab picture, because it drives edits. Fixing it means teaching the
+  // resume the incarnation rule without breaking panels that legitimately have
+  // no proven identity (#2104: a refused or unreadable lock manager omits
+  // `tab_session_id`, so every reconnect looks like a new occupant). That is its
+  // own change, with its own blast radius, and is tracked separately.
+  //
+  // So this entry takes the half it needs and declines the half it does not: the
+  // panel_screenshot call site passes `maxReconnectRetries: 0`, which keeps the
+  // command out of the park branch entirely. A screenshot that drops mid-capture
+  // fails honestly and is free to re-ask; it is never answered with a picture of
+  // someone else's canvas.
   "graph_screenshot",
   "graph_prompt_director_audit",
   "graph_query",
