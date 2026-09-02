@@ -6,6 +6,18 @@ All notable changes to this project are documented here. This project adheres to
 
 ## Unreleased
 
+## [0.52.168] - 2026-09-01
+
+### MCP
+
+#### Fixed
+- resolve train refs from one live snapshot (#2720)
+- a git install must be corroborated on disk, not by ComfyUI-Manager's own list (#2715)
+- settle an unacked workflow_new against the panel's own rid-correlated receipt (#2710)
+- prove a VRAM release landed before reporting the reading as settled (#2708)
+- a PANEL_FETCH_FAILED panel read now names its cause (#2706)
+
+
 ## [0.52.167] - 2026-09-01
 
 ### MCP
