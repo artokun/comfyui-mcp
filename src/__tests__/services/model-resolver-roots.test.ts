@@ -279,6 +279,35 @@ describe("resolveExistingModelFile — multi-root resolution", () => {
     expect(getLaunchStateExtraModelRootsMock).toHaveBeenCalledWith(snapshot);
   });
 
+  it("refuses removal when the server is unreachable, even if configured roots contain the file", async () => {
+    const staleExtraRoot = resolve("/stale/current/diffusion_models");
+    const stalePrimaryModel = resolve(
+      MODELS_ROOT,
+      "diffusion_models/Chroma/chroma.safetensors",
+    );
+    const staleExtraModel = resolve(
+      staleExtraRoot,
+      "Chroma/chroma.safetensors",
+    );
+    resolveModelsDirWithBasesMock.mockResolvedValueOnce({
+      modelsDir: MODELS_ROOT,
+      baseDirs: [],
+      snapshot: { reachable: false },
+      source: "configured-base",
+    });
+    getExtraModelRootsMock.mockResolvedValueOnce([
+      { category: "diffusion_models", dir: staleExtraRoot, group: "current-config" },
+    ]);
+    fsFixture([stalePrimaryModel, staleExtraModel]);
+
+    await expect(
+      resolveForRemoval("diffusion_models/Chroma/chroma.safetensors"),
+    ).rejects.toThrow(/Searched 0 root\(s\)/);
+    expect(statMock).not.toHaveBeenCalled();
+    expect(getExtraModelRootsMock).not.toHaveBeenCalled();
+    expect(getLaunchStateExtraModelRootsMock).not.toHaveBeenCalled();
+  });
+
   it("ignores extra roots for a different category", async () => {
     getExtraModelRootsMock.mockResolvedValue([
       { category: "checkpoints", dir: "E:/extra-drive/checkpoints", group: "comfyui" },

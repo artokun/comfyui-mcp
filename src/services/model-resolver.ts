@@ -3199,11 +3199,11 @@ async function getAuthorizedModelRootsForRemoval(configuredModelsRoot: string) {
     };
   }
 
-  // With no connected server, preserve the existing local configuration path;
-  // getExtraModelRoots() itself is fail-closed for deletion authorization.
-  // Leave offline extras lazy so a primary hit keeps the resolver's existing
-  // short-circuit and does not read configuration unnecessarily.
-  return { primaryRoots: [configuredModelsRoot], extraRoots: undefined };
+  // Removal has no safe offline fallback: the configured path may belong to a
+  // stale install, and current extra-path config is not proof of what a server
+  // loaded. Refuse before stat() so an unreachable target cannot authorize a
+  // local deletion by accident.
+  return { primaryRoots: [], extraRoots: [] };
 }
 
 /**
