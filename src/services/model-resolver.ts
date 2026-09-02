@@ -3156,14 +3156,32 @@ export interface ResolvedModelFile {
   info: Stats;
 }
 
+async function getAuthorizedExtraModelRootsForRemoval() {
+  if (isRemoteMode()) return [];
+
+  try {
+    const resolved = await resolveModelsDirWithBases();
+    if (resolved.snapshot.reachable) {
+      const liveRoots = await getLiveExtraModelRoots(resolved.snapshot);
+      // The live result authorizes only the roots it names; it is not a complete
+      // inventory of roots the already-running server may still have loaded.
+      return liveRoots.authoritative ? liveRoots.roots : [];
+    }
+    return await getExtraModelRoots();
+  } catch {
+    // A mutation must not fall back to display-only or stale root discovery.
+    return [];
+  }
+}
+
 /**
  * Locate an existing model file given a path relative to ComfyUI's models/
- * directory, searching ACROSS every configured root: the primary
- * `<COMFYUI_PATH>/models` AND every directory declared in
- * extra_model_paths.yaml / extra_models_config.yaml (e.g. models stored on
- * another drive such as E:\). This mirrors the set of roots ComfyUI itself
- * loads from, so a model installed under an extra root can be found (and
- * removed) the same way as one under the primary install.
+ * directory, searching the primary `<COMFYUI_PATH>/models` and every extra
+ * root authorized by the current ComfyUI launch configuration. While a local
+ * server is reachable, authorization comes from its live launch arguments;
+ * when it is unavailable, the existing fail-closed local configuration path
+ * is used. This keeps a model installed under a trusted extra root removable
+ * without treating display-only or stale roots as deletion authority.
  *
  * Resolution rules:
  *  - The primary root is searched with the full relative path.
@@ -3225,7 +3243,7 @@ export async function resolveExistingModelFile(
   const category = segments[0];
   const remainder = segments.slice(1).join("/");
   if (category && remainder) {
-    const extraRoots = await getExtraModelRoots();
+    const extraRoots = await getAuthorizedExtraModelRootsForRemoval();
     for (const er of extraRoots) {
       if (er.category !== category) continue;
       const rootDir = resolve(er.dir);
