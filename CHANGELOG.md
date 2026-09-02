@@ -6,6 +6,11 @@ All notable changes to this project are documented here. This project adheres to
 
 ## Unreleased
 
+### MCP
+
+#### Fixed
+- support IPv6-only loopback ComfyUI listeners when `COMFYUI_URL` uses `127.0.0.1` (#2719)
+
 ## [0.52.177] - 2026-09-02
 
 ### MCP

@@ -28,6 +28,7 @@ import { startQuickTunnel, type QuickTunnel } from "./tunnel.js";
 import { RelayClient } from "./relay-client.js";
 import { logger } from "../utils/logger.js";
 import { getComfyUIAuthHeaders } from "../config.js";
+import { formatComfyUIUrl } from "../transport/comfyui-url.js";
 import type { UiBridge } from "./ui-bridge.js";
 
 export interface SecureBridge {
@@ -71,7 +72,7 @@ export async function advertiseBridge(
 ): Promise<boolean> {
   let endpoint: string;
   try {
-    endpoint = new URL("/comfyui_mcp_panel/advertise_bridge", comfyuiUrl).toString();
+    endpoint = new URL("/comfyui_mcp_panel/advertise_bridge", formatComfyUIUrl(comfyuiUrl)).toString();
   } catch {
     return false;
   }

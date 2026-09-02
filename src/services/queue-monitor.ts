@@ -31,6 +31,7 @@
 import WebSocket from "ws";
 import { logger } from "../utils/logger.js";
 import { getComfyUIAuthHeaders } from "../config.js";
+import { formatComfyUIUrl } from "../transport/comfyui-url.js";
 import { comfyuiFetch } from "../comfyui/fetch.js";
 import { sameOrigin } from "../utils/origin.js";
 
@@ -516,7 +517,7 @@ class QueueMonitorImpl {
 
   private wsUrl(): string {
     // http(s)://host:port  →  ws(s)://host:port/ws?clientId=...
-    const base = (this.url ?? "http://127.0.0.1:8188").replace(/^http/, "ws").replace(/\/+$/, "");
+    const base = formatComfyUIUrl(this.url ?? "http://127.0.0.1:8188").replace(/^http/, "ws").replace(/\/+$/, "");
     return `${base}/ws?clientId=comfyui-mcp-watchdog`;
   }
 

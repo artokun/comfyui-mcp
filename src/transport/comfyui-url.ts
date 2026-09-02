@@ -12,6 +12,41 @@ export interface ComfyUITarget {
 }
 
 /**
+ * Format a parsed ComfyUI host for an authority in a connection URL.
+ *
+ * IPv6 literals must be bracketed when followed by a port. The configured
+ * host remains unchanged here; connection-only callers can use
+ * formatComfyUIConnectionHost when they need Node to select either loopback
+ * family for a legacy 127.0.0.1 target.
+ */
+export function formatComfyUIHost(host: string): string {
+  const bare = host.replace(/^\[|\]$/g, "");
+  return bare.includes(":") ? `[${bare}]` : bare;
+}
+
+/** Format a host for a network connection without changing remote identity. */
+export function formatComfyUIConnectionHost(host: string): string {
+  const bare = host.replace(/^\[|\]$/g, "");
+  return bare === "127.0.0.1" ? "localhost" : formatComfyUIHost(bare);
+}
+
+/** Apply the connection-only host formatting to a complete ComfyUI URL. */
+export function formatComfyUIUrl(url: string): string {
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    return url;
+  }
+  if (parsed.hostname.replace(/^\[|\]$/g, "") !== "127.0.0.1") return url;
+
+  const hadBareRoot = parsed.pathname === "/" && !parsed.search && !parsed.hash && !/\/$/.test(url.trim());
+  parsed.hostname = "localhost";
+  const formatted = parsed.href;
+  return hadBareRoot ? formatted.slice(0, -1) : formatted;
+}
+
+/**
  * Trim a URL pathname into a base prefix: no trailing slash, and "" for the
  * root ("" or "/"). "/comfyapi/" → "/comfyapi".
  */

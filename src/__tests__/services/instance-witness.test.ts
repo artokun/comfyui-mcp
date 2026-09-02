@@ -22,13 +22,13 @@ afterEach(async () => {
   );
 });
 
-async function startServer(): Promise<{ wss: WebSocketServer; base: string }> {
-  const wss = new WebSocketServer({ port: 0, host: "127.0.0.1" });
+async function startServer(host = "127.0.0.1"): Promise<{ wss: WebSocketServer; base: string; port: number }> {
+  const wss = new WebSocketServer({ port: 0, host });
   servers.push(wss);
   await new Promise<void>((resolve) => wss.on("listening", resolve));
   const address = wss.address();
   if (typeof address === "string" || !address) throw new Error("no address");
-  return { wss, base: `http://127.0.0.1:${address.port}` };
+  return { wss, base: `http://${host === "::1" ? "[::1]" : host}:${address.port}`, port: address.port };
 }
 
 describe("acquireInstanceWitness", () => {
@@ -40,6 +40,17 @@ describe("acquireInstanceWitness", () => {
     expect(witness).toBeDefined();
     expect(witness?.alive()).toBe(true);
     expect(witness?.closedAt()).toBeUndefined();
+    witness?.close();
+  });
+
+  it("connects a legacy IPv4 loopback URL to an IPv6-only listener", async () => {
+    const { port } = await startServer("::1");
+
+    const witness = await acquireInstanceWitness(`http://127.0.0.1:${port}`);
+
+    expect(witness).toBeDefined();
+    expect(witness?.url.startsWith(`ws://localhost:${port}/ws?clientId=`)).toBe(true);
+    expect(witness?.alive()).toBe(true);
     witness?.close();
   });
 

@@ -5,7 +5,12 @@ import { chmodSync, copyFileSync, existsSync, mkdirSync, readdirSync, readFileSy
 import { homedir, networkInterfaces } from "node:os";
 import { isIP } from "node:net";
 import { normalizeInstallPathEnv } from "./utils/install-path-env.js";
-import { parseComfyUIUrl, type ComfyUITarget } from "./transport/comfyui-url.js";
+import {
+  formatComfyUIConnectionHost,
+  formatComfyUIHost,
+  parseComfyUIUrl,
+  type ComfyUITarget,
+} from "./transport/comfyui-url.js";
 import { resetManagerApiCache } from "./services/manager-api-cache.js";
 import { comfyuiEnvFilePath, freshSecretValue, loadEnvFileIntoProcess } from "./env-file.js";
 import { localComfyuiPort } from "./services/advertised-origin.js";
@@ -415,7 +420,7 @@ async function detectComfyUIPort(host: string): Promise<number> {
       const controller = new AbortController();
       const timeout = setTimeout(() => controller.abort(), 1000);
       const protocol = parsedConfig.comfyuiSsl ? "https" : "http";
-      const res = await fetch(`${protocol}://${host}:${port}/system_stats`, {
+      const res = await fetch(`${protocol}://${formatComfyUIConnectionHost(host)}:${port}/system_stats`, {
         signal: controller.signal,
       });
       clearTimeout(timeout);
@@ -1033,7 +1038,7 @@ export function setComfyuiTarget(url: string): boolean {
 }
 
 export function getComfyUIApiHost(): string {
-  return `${config.comfyuiHost}:${config.resolvedPort}`;
+  return `${formatComfyUIHost(config.comfyuiHost)}:${config.resolvedPort}`;
 }
 
 export function getComfyUIProtocol(): "http" | "https" {
@@ -1051,7 +1056,7 @@ export function getComfyUIBasePath(): string {
  * this so reverse-proxied / path-prefixed instances route correctly.
  */
 export function getComfyUIBaseUrl(): string {
-  return `${getComfyUIProtocol()}://${getComfyUIApiHost()}${config.comfyuiBasePath}`;
+  return `${getComfyUIProtocol()}://${formatComfyUIHost(config.comfyuiHost)}:${config.resolvedPort}${config.comfyuiBasePath}`;
 }
 
 /**

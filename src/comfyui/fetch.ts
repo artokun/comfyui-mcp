@@ -2,6 +2,7 @@ import { getComfyUIAuthHeaders } from "../config.js";
 import { describeFetchFailure, isBareFetchFailure } from "../utils/errors.js";
 import { sameOrigin } from "../utils/origin.js";
 import { readPublishedPanelOrigins } from "../services/panel-origin-channel.js";
+import { formatComfyUIUrl } from "../transport/comfyui-url.js";
 
 /** The request target, for the diagnostic. Never throws on an odd input. */
 export function targetOf(input: string | URL | Request): string {
@@ -687,19 +688,44 @@ export async function comfyuiFetch(
   // and it always wins — this only covers the ones that passed none, which
   // otherwise wait forever.
   const signal = init.signal ?? defaultComfyTimeoutSignal();
-  let request: Promise<Response>;
-  if (Object.keys(auth).length === 0) {
-    request = fetch(input, { ...init, signal });
-  } else {
+  const request = (target: string | URL | Request): Promise<Response> => {
+    if (Object.keys(auth).length === 0) return fetch(target, { ...init, signal });
     const headers = new Headers(init.headers);
     for (const [name, value] of Object.entries(auth)) {
       if (!headers.has(name)) headers.set(name, value);
     }
-    request = fetch(input, { ...init, headers, signal });
-  }
+    return fetch(target, { ...init, headers, signal });
+  };
   try {
-    return await request;
+    return await request(input);
   } catch (err) {
+    // Preserve the configured literal as the primary target. Only a refused
+    // exact IPv4 loopback connection is safe to retry: ECONNREFUSED proves no
+    // request reached the server, while reset/timeout errors can follow a
+    // delivered mutation. `localhost` lets Node select an IPv6-only listener
+    // without changing the configured target or any identity comparison.
+    const retryUrl =
+      typeof input === "string"
+        ? formatComfyUIUrl(input)
+        : input instanceof URL
+          ? new URL(formatComfyUIUrl(input.href))
+          : undefined;
+    if (
+      // /view uses its own authenticated/validated panel-origin fallback.
+      // Retrying a loopback alias first would change that fail-closed choice
+      // and make the panel transport tests observe an extra target.
+      init.redirect !== "manual" &&
+      retryUrl &&
+      String(retryUrl) !== String(input) &&
+      isBareFetchFailure(err) &&
+      describeFetchFailure(err).code === "ECONNREFUSED"
+    ) {
+      try {
+        return await request(retryUrl);
+      } catch (retryError) {
+        err = retryError;
+      }
+    }
     // Our own ceiling firing is not the same event as a caller's abort, and it
     // must not be reported as one. Only rewrite when WE supplied the signal.
     if (init.signal === undefined && isTimeoutAbort(err)) {

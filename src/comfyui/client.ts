@@ -1,4 +1,5 @@
 import { Client } from "@stable-canvas/comfyui-client";
+import { formatComfyUIUrl } from "../transport/comfyui-url.js";
 import {
   config,
   getComfyUIApiHost,
@@ -109,15 +110,29 @@ function requireLocalComfyUI(op: string): void {
 
 let clientInstance: Client | null = null;
 
+/** Keep the SDK's HTTP URL/diagnostic target literal while making its WS dial
+ * follow the same IPv6-only loopback fallback as the direct WS clients. */
+function connectionWebSocket(): typeof WebSocket | undefined {
+  const NativeWebSocket = globalThis.WebSocket;
+  if (!NativeWebSocket) return undefined;
+  return class ComfyUIConnectionWebSocket extends NativeWebSocket {
+    constructor(url: string | URL, protocols?: string | string[] | WebSocketInit) {
+      super(formatComfyUIUrl(String(url)), protocols);
+    }
+  };
+}
+
 export function getClient(): Client {
   requireLocalMode("getClient");
   if (!clientInstance) {
+    const ws = connectionWebSocket();
     clientInstance = new Client({
       api_host: getComfyUIApiHost(),
       // Path prefix for reverse-proxied / gateway'd ComfyUI (e.g. "/comfyapi").
       api_base: getComfyUIBasePath(),
       ssl: config.comfyuiSsl,
       clientId: "comfyui-mcp",
+      ...(ws ? { WebSocket: ws } : {}),
       // Inject generic auth headers (COMFYUI_AUTH_*) on the library's own HTTP
       // calls; a no-op when unset. Node 22+ provides global WebSocket.
       //

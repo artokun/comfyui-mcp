@@ -4,6 +4,7 @@ import { fileURLToPath } from "node:url";
 import { probeOk } from "../../orchestrator/probe-ok.js";
 import { judgeHelloRetarget } from "../../services/hello-retarget.js";
 import * as cfg from "../../config.js";
+import { formatComfyUIUrl } from "../../transport/comfyui-url.js";
 
 const INDEX = readFileSync(
   fileURLToPath(new URL("../../orchestrator/index.ts", import.meta.url)),
@@ -58,6 +59,7 @@ function asJsDeclaration(tsFn: string): string {
 type HelloOrdering = (
   fetchImpl: typeof fetch,
   headers: () => Record<string, string>,
+  formatUrl: (url: string) => string,
 ) => Promise<boolean>;
 
 function helloOrdering(declarationJs: string): HelloOrdering {
@@ -66,6 +68,7 @@ function helloOrdering(declarationJs: string): HelloOrdering {
   return new Function(
     "fetch",
     "getComfyUIAuthHeaders",
+    "formatComfyUIUrl",
     `"use strict";
      const probe = (u) => probeOk(u, 3_000);
      const pending = probe("http://example.test/system_stats");
@@ -146,7 +149,7 @@ describe("probeOk hoisting (#2425)", () => {
     const okFetch = (async () => ({ ok: true })) as typeof fetch;
     const headers = () => ({});
 
-    await expect(helloOrdering(fnJs)(okFetch, headers)).resolves.toBe(true);
+    await expect(helloOrdering(fnJs)(okFetch, headers, formatComfyUIUrl)).resolves.toBe(true);
 
     const constJs = fnJs.replace(
       /^async function probeOk\s*\(([^)]*)\)\s*/,

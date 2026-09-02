@@ -27,6 +27,7 @@ import WebSocket from "ws";
 import { randomUUID } from "node:crypto";
 import { getComfyUIAuthHeaders } from "../config.js";
 import { logger } from "../utils/logger.js";
+import { formatComfyUIUrl } from "../transport/comfyui-url.js";
 
 export interface InstanceWitness {
   /** The WS URL the witness is connected to (diagnostics only). */
@@ -63,7 +64,7 @@ export async function acquireInstanceWitness(
   timeoutMs = 3000,
 ): Promise<InstanceWitness | undefined> {
   const url =
-    `${baseUrl.replace(/^http/, "ws").replace(/\/+$/, "")}` +
+    `${formatComfyUIUrl(baseUrl).replace(/^http/, "ws").replace(/\/+$/, "")}` +
     `/ws?clientId=comfyui-mcp-instance-witness-${randomUUID()}`;
   let ws: WebSocket;
   try {
