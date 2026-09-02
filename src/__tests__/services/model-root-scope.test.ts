@@ -71,7 +71,7 @@ describe("#1474 WIRING: the resolver throws through it", () => {
 
   it("the not-found throw uses the shared message", () => {
     expect(src).toMatch(/import \{ modelNotFoundMessage \} from "\.\/model-root-scope\.js";/);
-    expect(src).toMatch(/modelNotFoundMessage\(\{ relativePath, searched \}\)/);
+    expect(src).toMatch(/modelNotFoundMessage\(\{ relativePath, searched, deletion:/);
   });
 
   it("the old bare sentence is gone from the throw", () => {

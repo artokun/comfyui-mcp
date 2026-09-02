@@ -59,6 +59,12 @@ export interface LiveServerSnapshot {
    *  or they miss the relative-`main.py` shape entirely (codex gate, round 12).
    *  LOCAL mode only. */
   liveRoot?: string;
+  /** Provenance of liveRoot. An observed-process root is an inference, not a
+   * deletion authority; it is retained for callers that need to explain it. */
+  liveRootSource?: "argv" | "observed-process";
+  /** Normalized OS process start time captured with the live server observation.
+   * Deletion may use launch-named config only when this proof is present. */
+  processStartedAtMs?: number;
 }
 
 /**
@@ -952,7 +958,10 @@ export async function resolveModelsDirWithBases(opts?: {
     // Desktop and the Windows portable bundle both report. Computed ONCE here and
     // used for BOTH the code-root bases and the models dir, so the two can never
     // be derived from different notions of "live".
-    live = resolveLiveServerRoot(argv, cwd, { remote: isRemoteMode() });
+    live = resolveLiveServerRoot(argv, cwd, {
+      remote: isRemoteMode(),
+      includeProcessStart: true,
+    });
     // Collect base-install dirs (LOCAL only) from the SAME call, regardless of how
     // the models dir resolves, so the code-root veto always has the real
     // --base-directory / live-root even when --models-directory diverges.
@@ -965,6 +974,10 @@ export async function resolveModelsDirWithBases(opts?: {
         // authorizer) use the SAME established root instead of re-deriving a weaker
         // one from argv.
         snapshot.liveRoot = resolve(live.root);
+        snapshot.liveRootSource = live.source === "argv" ? "argv" : "observed-process";
+      }
+      if (live.observedStartedAtMs !== undefined) {
+        snapshot.processStartedAtMs = live.observedStartedAtMs;
       }
     }
     const fromArgv = parseModelsDirFromArgv(argv, cwd);
