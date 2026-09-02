@@ -308,6 +308,14 @@ describe("#1824 production keyed completion ingress", () => {
       conversation,
     );
     expect(stale.acked).toBe(false);
+    expect(stale.receipt).toEqual({
+      type: "ack",
+      ok: false,
+      kind: "completion",
+      prompt_id: PROMPT_A,
+      completion_key: keyA,
+      reason: "uncorrelated",
+    });
     expect(stale.entry?.correlation.status).toBe("foreign");
     expect(journal.outstanding(tab)).toHaveLength(1);
   });

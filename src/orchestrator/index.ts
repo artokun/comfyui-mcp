@@ -5611,7 +5611,7 @@ export async function runPanelOrchestrator(): Promise<void> {
           });
         const entry = alreadyKnown
           ? null
-          : RunCompletions.record(event.tab_id, completionPayload as CompletionPayload, {
+          : RunCompletions.record(event.tab_id, blindStrippedCompletion(completionPayload as CompletionPayload), {
               conversation: agentKeyFor(event.tab_id),
             });
         // #2591 — `completion_key` is unavailable on older/replayed panel
