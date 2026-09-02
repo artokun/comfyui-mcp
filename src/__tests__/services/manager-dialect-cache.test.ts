@@ -339,11 +339,13 @@ describe("#646 Manager API dialect cache invalidation", () => {
     // …but it now states the second observation that makes it more than a guess.
     expect(error.message).toMatch(/neither \/v2\/manager\/version nor \/manager\/version/i);
     expect((error.details as { managerVersionMajor?: number }).managerVersionMajor).toBeUndefined();
-    // Silence, NOT refusal — the two carry different messages and this is the
-    // only one entitled to the strong "nothing is serving Manager routes" claim.
+    // A clean 404 on every probe, NOT a refusal and NOT an unreadable response —
+    // this is the only state entitled to the strong "nothing is serving Manager
+    // routes at all" claim, and the message says every probe 404'd.
     expect((error.details as { managerVersionEvidence?: string }).managerVersionEvidence).toBe(
-      "none",
+      "absent",
     );
+    expect(error.message).toMatch(/every probe 404'd/);
     // The version routes were actually consulted — the claim is not asserted for free.
     expect(calls.map((c) => c.path)).toEqual(
       expect.arrayContaining(["/v2/manager/version", "/manager/version"]),
@@ -366,6 +368,31 @@ describe("#646 Manager API dialect cache invalidation", () => {
     expect(error.message).not.toMatch(/ComfyUI-Manager IS answering/i);
     expect(error.message).toMatch(/queue API is not reachable/i);
     expect((error.details as { managerVersionMajor?: number }).managerVersionMajor).toBeUndefined();
+    // A 200 page of HTML is a route we could not READ, not a server saying the
+    // route is absent — so it lands in `unreadable`, and the strong absence
+    // wording (with its migrate/--enable-manager advice) is withheld.
+    expect((error.details as { managerVersionEvidence?: string }).managerVersionEvidence).toBe(
+      "unreadable",
+    );
+    expect(error.message).toMatch(/NOT evidence that ComfyUI-Manager is absent/i);
+    expect(error.message).not.toMatch(/every probe 404'd/);
+    expect(error.message).not.toMatch(/only activates when ComfyUI is started with/i);
+  });
+
+  it("will not call a 5xx on the version route absence (#2754, gate round 2)", async () => {
+    // Both queue routes 404 and the version routes 503. The old single-arm message
+    // recommended --enable-manager here — a Manager migration prescribed to a
+    // ComfyUI that was merely sick for a moment.
+    stubQueuelessManager({ path: "/manager/version", body: "upstream down", status: 503 });
+
+    const error = await detectionError();
+    expect((error.details as { managerVersionEvidence?: string }).managerVersionEvidence).toBe(
+      "unreadable",
+    );
+    expect(error.message).toMatch(/could not be established/i);
+    expect(error.message).toMatch(/server-error/);
+    expect(error.message).toMatch(/do not reinstall or migrate Manager/i);
+    expect(error.message).not.toMatch(/only activates when ComfyUI is started with/i);
   });
 
   it("does not spend a REFUSED version route as absence evidence (#2754)", async () => {

@@ -720,25 +720,50 @@ async function probeManagerMajor(base: string): Promise<number | undefined> {
  *     point: a credential rejection tells us nothing about whether Manager is
  *     installed, so it must not be spent as absence evidence — which is exactly
  *     what a bare `catch → undefined` here would do (codex gate, #2754).
- *   • `none` — every route answered, and none of them was Manager.
+ *   • `absent` — BOTH routes answered HTTP 404. Deliberately narrow, and narrow for
+ *     the same reason `probeManagerQueueAvailability` is: only a 404 is a server
+ *     saying "no such route".
+ *   • `unreadable` — anything else. A 5xx, a 403, a proxy error page, a timeout or
+ *     an HTML catchall is a route we could not READ, and reading nothing is not the
+ *     same as being told nothing is there (codex gate round 2, #2754). Collapsing
+ *     these into absence is how a momentarily sick ComfyUI gets a Manager migration
+ *     recommended to it.
  */
 type ManagerVersionEvidence =
   | { kind: "version"; major: number }
   | { kind: "refused"; status: number | undefined }
-  | { kind: "none" };
+  | { kind: "absent" }
+  | { kind: "unreadable"; kinds: ManagerQueueStatusKind[] };
 
 async function probeManagerVersionEvidence(base: string): Promise<ManagerVersionEvidence> {
   let refusedStatus: number | undefined;
   let refused = false;
+  // Same response vocabulary the queue probes use — these two surfaces answer the
+  // same question about the same host, and a second private taxonomy is how the
+  // two drift into disagreeing about what "absent" means.
+  const kinds: ManagerQueueStatusKind[] = [];
   for (const path of MANAGER_VERSION_ROUTES) {
-    let status: number | undefined;
+    let kind: ManagerQueueStatusKind = "hard-error";
+    // This route's own status. Recorded per-iteration, and promoted to
+    // `refusedStatus` ONLY from the catch below: a 404 on the first route must not
+    // be mistaken for the status that refused us on the second.
+    let statusSeen: number | undefined;
     try {
       const major = parseManagerMajor(
         await managerFetch<string>(path, {
           base,
           soft: true,
-          onSoftFailure: (s) => {
-            status = s;
+          onSoftFailure: (status) => {
+            statusSeen = status;
+            kind = status === undefined ? "transport" : managerQueueStatusKind(status);
+          },
+          onSoftTransportFailure: () => {
+            kind = "transport";
+          },
+          // A 2xx that is not a version string — ComfyUI's SPA catchall, most of
+          // all — is malformed, never absence.
+          onSoftResponse: (body) => {
+            kind = body === undefined || body === null ? "empty" : "malformed";
           },
         }),
       );
@@ -749,10 +774,89 @@ async function probeManagerVersionEvidence(base: string): Promise<ManagerVersion
       // queue-detection error with a secondary probe's — but REMEMBER that this
       // route was refused rather than silent.
       refused = true;
-      refusedStatus ??= status;
+      refusedStatus ??= statusSeen;
     }
+    kinds.push(kind);
   }
-  return refused ? { kind: "refused", status: refusedStatus } : { kind: "none" };
+  if (refused) return { kind: "refused", status: refusedStatus };
+  return kinds.every((k) => k === "not-found") ? { kind: "absent" } : { kind: "unreadable", kinds };
+}
+
+/** The one sentence in this failure that is allowed to speak with certainty. */
+const MANAGER_QUEUE_UNREACHABLE_LEDE =
+  "ComfyUI-Manager's queue API is not reachable (neither /v2/manager/queue/status nor " +
+  "/manager/queue/status answered with a queue status)";
+
+/**
+ * Choose the diagnosis the observations actually support (#2754).
+ *
+ * The old message had one arm and made the strongest available claim from the
+ * weakest available evidence. There are four states here because the host really
+ * can be in four of them, and three of them have fixes that the fourth's advice
+ * would send the reader away from.
+ */
+function managerQueueDetectionMessage(
+  base: string,
+  queueStatusKinds: ManagerQueueStatusKind[],
+  version: ManagerVersionEvidence,
+): string {
+  if (version.kind === "version") {
+    return (
+      `ComfyUI-Manager IS answering on ${base} — its version route reports generation ` +
+      `${version.major}.x — but it serves NO queue API: neither /v2/manager/queue/status ` +
+      "nor /manager/queue/status answered with a queue status. So this is NOT a missing or " +
+      "disabled Manager, and neither installing the pip comfyui_manager package nor adding " +
+      "--enable-manager will fix it. What fits the evidence is a Manager whose queue routes " +
+      "specifically are absent: a partial or older Manager server build, a Manager whose " +
+      "queue module failed to register, or a proxy in front of ComfyUI that forwards only " +
+      "some /manager routes. Check the ComfyUI log around Manager's startup, and retry once " +
+      "it serves a queue surface."
+    );
+  }
+  if (version.kind === "refused") {
+    return (
+      `${MANAGER_QUEUE_UNREACHABLE_LEDE}, and the version routes that would establish ` +
+      "whether Manager is present at all were REJECTED" +
+      (version.status !== undefined
+        ? explainManagerAuthenticationRequired(version.status)
+        : " — an authentication failure, not evidence that ComfyUI-Manager is missing.") +
+      ` Whether ComfyUI-Manager is installed on ${base} is therefore UNKNOWN from here; ` +
+      "clear the credential/proxy rejection and retry before concluding anything about " +
+      "Manager itself."
+    );
+  }
+  // Absence is claimable only when all four probes were TOLD there is no such
+  // route. A 404 is a server answering; a 503, a proxy error page, a timeout or an
+  // HTML catchall is a route we could not read, and this branch used to spend
+  // those as absence too (codex gate round 2).
+  const provenAbsent =
+    version.kind === "absent" && queueStatusKinds.every((kind) => kind === "not-found");
+  if (!provenAbsent) {
+    const seen =
+      version.kind === "unreadable"
+        ? version.kinds.join(", ")
+        : queueStatusKinds.join(", ");
+    return (
+      `${MANAGER_QUEUE_UNREACHABLE_LEDE}, and whether ComfyUI-Manager is present could not ` +
+      `be established either: the probes came back "${seen}" rather than a clean 404. An ` +
+      "unreadable response — a 5xx, a proxy or gateway error page, a timeout, an HTML " +
+      "catchall — is NOT evidence that ComfyUI-Manager is absent, so do not reinstall or " +
+      "migrate Manager on the strength of this message. Check that the ComfyUI at " +
+      `${base} is healthy and reachable, then retry.`
+    );
+  }
+  return (
+    `${MANAGER_QUEUE_UNREACHABLE_LEDE}, and neither /v2/manager/version nor /manager/version ` +
+    `answered with a version either — every probe 404'd, so nothing at ${base} is serving ` +
+    "ComfyUI-Manager routes at all. Is ComfyUI-Manager installed and enabled on the " +
+    "connected ComfyUI? The pip comfyui_manager package only activates when ComfyUI is " +
+    "started with --enable-manager. NOTE: a custom_nodes/ComfyUI-Manager clone can import " +
+    "cleanly and still register no routes — ComfyUI logs `Blocked by policy: <path>` and " +
+    "skips the clone entirely when --enable-manager is set and the pip package shadows it " +
+    "(with --disable-manager-ui on top, that leaves no Manager routes at all), and the " +
+    "clone starts in CLI-only mode, serving nothing, when its .enable-cli-only-mode marker " +
+    "file is present."
+  );
 }
 
 /**
@@ -925,39 +1029,7 @@ async function probeManagerApi(base: string): Promise<ManagerApi> {
   const managerVersionMajor =
     versionEvidence.kind === "version" ? versionEvidence.major : undefined;
   throw new NodeManagementError(
-    versionEvidence.kind === "version"
-      ? `ComfyUI-Manager IS answering on ${base} — its version route reports generation ` +
-          `${versionEvidence.major}.x — but it serves NO queue API: neither ` +
-          "/v2/manager/queue/status nor /manager/queue/status answered with a queue " +
-          "status. So this is NOT a missing or disabled Manager, and neither installing " +
-          "the pip comfyui_manager package nor adding --enable-manager will fix it. What " +
-          "fits the evidence is a Manager whose queue routes specifically are absent: a " +
-          "partial or older Manager server build, a Manager whose queue module failed to " +
-          "register, or a proxy in front of ComfyUI that forwards only some /manager " +
-          "routes. Check the ComfyUI log around Manager's startup, and retry once it " +
-          "serves a queue surface."
-      : versionEvidence.kind === "refused"
-        ? "ComfyUI-Manager's queue API is not reachable (neither /v2/manager/queue/status " +
-          "nor /manager/queue/status answered with a queue status), and the version routes " +
-          "that would establish whether Manager is present at all were REJECTED" +
-          (versionEvidence.status !== undefined
-            ? explainManagerAuthenticationRequired(versionEvidence.status)
-            : " — an authentication failure, not evidence that ComfyUI-Manager is missing.") +
-          ` Whether ComfyUI-Manager is installed on ${base} is therefore UNKNOWN from here; ` +
-          "clear the credential/proxy rejection and retry before concluding anything about " +
-          "Manager itself."
-        : "ComfyUI-Manager's queue API is not reachable (neither /v2/manager/queue/status " +
-          "nor /manager/queue/status answered with a queue status), and neither " +
-          "/v2/manager/version nor /manager/version answered with a version either — so " +
-          `nothing at ${base} is serving ComfyUI-Manager routes at all. Is ComfyUI-Manager ` +
-          "installed and enabled on the connected ComfyUI? The pip comfyui_manager " +
-          "package only activates when ComfyUI is started with --enable-manager. NOTE: a " +
-          "custom_nodes/ComfyUI-Manager clone can import cleanly and still register no " +
-          "routes — ComfyUI logs `Blocked by policy: <path>` and skips the clone entirely " +
-          "when --enable-manager is set and the pip package shadows it (with " +
-          "--disable-manager-ui on top, that leaves no Manager routes at all), and the " +
-          "clone starts in CLI-only mode, serving nothing, when its .enable-cli-only-mode " +
-          "marker file is present.",
+    managerQueueDetectionMessage(base, queueStatusKinds, versionEvidence),
     {
       kind: MANAGER_QUEUE_DETECTION_FAILURE,
       base,
