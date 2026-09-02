@@ -60,7 +60,7 @@ async function driveTool(name: string, args: Record<string, unknown> = {}): Prom
     return typeof c === "string" ? c : undefined;
   };
 
-  const ctx = {
+  const stub = {
     call: async (cmd: Record<string, unknown>, timeoutMs?: number) => {
       const c = nameOf(cmd);
       if (c) observed.callTimeouts.set(c, timeoutMs);
@@ -87,10 +87,12 @@ async function driveTool(name: string, args: Record<string, unknown> = {}): Prom
     },
     tabId: "tab-1",
     ensureReachable: () => {},
-  } as unknown as HandlerCtx;
+  };
 
   try {
-    await def!.handler(args, ctx);
+    /* PanelToolCtx is a large orchestrator interface and this probe implements only the five members the two driven tools touch (call, bridge.send, tabId, ensureReachable, confirm) — a structurally complete ctx would be a fake of the thing under observation, and the sibling probe in graph-command-effect.test.ts narrows the same way. */
+    // oxlint-disable-next-line anti-slop/no-chained-type-assertions -- test probe implements only the ctx members the driven tools touch; see the note above
+    await def!.handler(args, stub as unknown as HandlerCtx);
   } catch {
     /* dispatch already recorded; a synthetic ctx cannot satisfy every reply path */
   }
