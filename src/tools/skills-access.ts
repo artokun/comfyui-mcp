@@ -162,6 +162,41 @@ function enumerateSkills(): Array<{ name: string; description: string }> {
   return out;
 }
 
+/** The workflow filename a pack.yaml resolves to — the SINGLE derivation shared
+ *  by action:"list" (has_workflow), resolvePackWorkflowFile() (which backs
+ *  read_workflow, check_runtime and run_template), and read_workflow's own
+ *  message.
+ *
+ *  This existed three times and one copy was different: action:"list" took
+ *  `meta.workflow` verbatim while the resolver rejected any value that is not a
+ *  single safe path segment and fell back to workflow.json. A pack declaring
+ *  `workflow: "sub/graph.json"` therefore reported has_workflow: true from a file
+ *  the resolver would never open, and read_workflow answered "workflow.json not
+ *  found" — the catalog disagreeing with the filesystem (#2748). Deriving it once
+ *  makes that divergence unrepresentable rather than merely absent from today's
+ *  bundled packs. */
+/** Parse `packs/<name>/pack.yaml`, or null when absent/unreadable/malformed. */
+function readPackMeta(packDir: string): Record<string, unknown> | null {
+  const metaFile = join(packDir, "pack.yaml");
+  if (!existsSync(metaFile)) return null;
+  try {
+    const parsed = parseYaml(readFileSync(metaFile, "utf8"));
+    return parsed && typeof parsed === "object" ? (parsed as Record<string, unknown>) : null;
+  } catch {
+    return null;
+  }
+}
+
+export function resolveWorkflowFileName(meta: unknown): string {
+  const fallback = "workflow.json";
+  if (!meta || typeof meta !== "object") return fallback;
+  const declared = (meta as Record<string, unknown>).workflow;
+  if (typeof declared !== "string") return fallback;
+  // A traversal, a separator or an empty value is not a usable filename.
+  if (!SAFE_NAME.test(declared)) return fallback;
+  return declared;
+}
+
 /** Enumerate installer packs as { name, family, kind, description, workflow,
  *  has_workflow, has_manifest }. Reads each packs/<name>/pack.yaml. */
 export function enumeratePacks(): Array<Record<string, unknown>> {
@@ -187,7 +222,7 @@ export function enumeratePacks(): Array<Record<string, unknown>> {
     } catch {
       // malformed pack.yaml — still report the pack with just its dir name
     }
-    const workflowName = typeof meta.workflow === "string" ? meta.workflow : "workflow.json";
+    const workflowName = resolveWorkflowFileName(meta);
     out.push({
       name: entry,
       family: meta.family ?? null,
@@ -211,6 +246,62 @@ export function enumeratePacks(): Array<Record<string, unknown>> {
   return out;
 }
 
+/** Pack names that actually HAVE a ready workflow — the only names worth
+ *  suggesting after a workflow lookup fails.
+ *
+ *  Not every bundled pack ships a graph: a pack may be installer-only, declaring
+ *  `workflow: null` in pack.yaml because the upstream installer never shipped one
+ *  (qwen-image, ltx-2.3). Suggesting those after a workflow miss advertises the
+ *  very pack that was just refused, and re-calling with a name copied out of the
+ *  list fails identically — which reads as the catalog disagreeing with the
+ *  filesystem (#2748). `has_workflow` is the same existsSync the resolver uses,
+ *  so this list and resolvePackWorkflowFile() cannot disagree.
+ *
+ *  enqueue_workflow (action:"run_template") already filters its suggestions this
+ *  way; this is the shared version of that filter. */
+function packsWithReadyWorkflow(): string[] {
+  return enumeratePacks()
+    .filter((p) => p.has_workflow)
+    .map((p) => String(p.name));
+}
+
+/** True when `packs/<name>/` exists as a directory, regardless of whether it
+ *  ships a workflow. Lets a workflow miss say "this pack ships no workflow"
+ *  instead of the false "no pack named <name>". */
+function packDirExists(name: string): boolean {
+  if (!SAFE_NAME.test(name)) return false;
+  const packDir = join(packsDir(), name);
+  if (!packDir.startsWith(packsDir())) return false;
+  try {
+    return statSync(packDir).isDirectory();
+  } catch {
+    return false;
+  }
+}
+
+/** Render a suggestion list, or a clear note when nothing qualifies. */
+function suggest(names: string[]): string {
+  return names.length
+    ? `Packs with a ready workflow: ${names.join(", ")}.`
+    : "No bundled pack ships a ready workflow.";
+}
+
+/** The whole "this pack exists but has no graph" sentence, for a pack that IS
+ *  bundled. Distinguishes an installer-only pack (pack.yaml `workflow: null`,
+ *  working as intended) from a pack that DECLARES a filename which is then
+ *  absent (a broken bundle) — so the message never asserts a cause it did not
+ *  check. read_workflow and check_runtime share this one builder; deriving it
+ *  twice is the defect class this whole change is about. Error path only. */
+function noWorkflowSentence(name: string): string {
+  const packDir = join(packsDir(), name);
+  const meta = readPackMeta(packDir);
+  const why =
+    typeof meta?.workflow === "string"
+      ? `its declared workflow file (${resolveWorkflowFileName(meta)}) is missing from the pack`
+      : "pack.yaml declares no workflow, so it is installer-only";
+  return `Pack "${name}" ships no workflow — ${why}. action:"list" reports has_workflow: false for it.`;
+}
+
 /** Locate a pack's workflow.json file path (name-guarded, must exist). Returns
  *  null when the pack or its workflow is missing. Shared by action:"read_workflow"
  *  and action:"check_runtime" so they resolve the file identically. Also
@@ -223,19 +314,7 @@ export function resolvePackWorkflowFile(packName: string): string | null {
   if (!packDir.startsWith(packsDir()) || !existsSync(packDir) || !statSync(packDir).isDirectory()) {
     return null;
   }
-  let workflowName = "workflow.json";
-  const metaFile = join(packDir, "pack.yaml");
-  if (existsSync(metaFile)) {
-    try {
-      const meta = parseYaml(readFileSync(metaFile, "utf8")) as Record<string, unknown>;
-      if (meta && typeof meta.workflow === "string") workflowName = meta.workflow;
-    } catch {
-      // keep default
-    }
-  }
-  if (!SAFE_NAME.test(workflowName) && workflowName !== "workflow.json") {
-    workflowName = "workflow.json";
-  }
+  const workflowName = resolveWorkflowFileName(readPackMeta(packDir));
   const wfFile = join(packDir, workflowName);
   if (!wfFile.startsWith(packDir) || !existsSync(wfFile)) return null;
   return wfFile;
@@ -486,32 +565,20 @@ function readPackWorkflowAction(rawName: string): ToolText {
   }
   const packDir = join(packsDir(), name);
   if (!packDir.startsWith(packsDir()) || !existsSync(packDir) || !statSync(packDir).isDirectory()) {
-    const known = enumeratePacks().map((p) => p.name);
     return {
       isError: true,
       content: [
         {
           type: "text" as const,
-          text: `No pack named "${name}". Available packs: ${known.join(", ") || "(none bundled)"}.`,
+          text: `No pack named "${name}". ${suggest(packsWithReadyWorkflow())}`,
         },
       ],
     };
   }
-  // Resolve the workflow filename from pack.yaml (default workflow.json).
-  let workflowName = "workflow.json";
-  const metaFile = join(packDir, "pack.yaml");
-  if (existsSync(metaFile)) {
-    try {
-      const meta = parseYaml(readFileSync(metaFile, "utf8")) as Record<string, unknown>;
-      if (meta && typeof meta.workflow === "string") workflowName = meta.workflow;
-    } catch {
-      // keep default
-    }
-  }
-  if (!SAFE_NAME.test(workflowName) && workflowName !== "workflow.json") {
-    // pack.yaml controls this, but stay defensive against odd values.
-    workflowName = "workflow.json";
-  }
+  // Same single derivation action:"list" and resolvePackWorkflowFile() use, so
+  // the filename this message names is the filename that was actually looked for.
+  const meta = readPackMeta(packDir);
+  const workflowName = resolveWorkflowFileName(meta);
   const wfFile = join(packDir, workflowName);
   if (!wfFile.startsWith(packDir) || !existsSync(wfFile)) {
     return {
@@ -519,7 +586,7 @@ function readPackWorkflowAction(rawName: string): ToolText {
       content: [
         {
           type: "text" as const,
-          text: `Pack "${name}" has no ready workflow (${workflowName} not found).`,
+          text: `${noWorkflowSentence(name)} ${suggest(packsWithReadyWorkflow())}`,
         },
       ],
     };
@@ -690,13 +757,20 @@ async function checkRuntimeAction(args: {
   if (args.pack) {
     const wfFile = resolvePackWorkflowFile(args.pack);
     if (!wfFile) {
-      const known = enumeratePacks().map((p) => p.name);
+      // TWO different failures shared one message: a pack that does not exist,
+      // and a pack that exists but is installer-only. Saying `No pack named
+      // "qwen-image"` for a pack action:"list" plainly lists reads as the
+      // catalog contradicting itself (#2748) — name which one it actually is.
+      const packName = args.pack.trim();
+      const head = packDirExists(packName)
+        ? `${noWorkflowSentence(packName)} There is no graph to runtime-check.`
+        : `No pack named "${args.pack}".`;
       return {
         isError: true,
         content: [
           {
             type: "text" as const,
-            text: `No pack named "${args.pack}" with a ready workflow. Available packs: ${known.join(", ") || "(none bundled)"}.`,
+            text: `${head} ${suggest(packsWithReadyWorkflow())}`,
           },
         ],
       };

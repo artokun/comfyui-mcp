@@ -60,7 +60,12 @@ vi.mock("../../services/panel-template-relay.js", () => ({
   requestPanelTemplateIndex: (...args: unknown[]) => mocks.requestPanelTemplateIndex(...args),
 }));
 
-import { registerSkillsAccessTools, enumeratePacks } from "../../tools/skills-access.js";
+import {
+  registerSkillsAccessTools,
+  enumeratePacks,
+  resolvePackWorkflowFile,
+  resolveWorkflowFileName,
+} from "../../tools/skills-access.js";
 
 type Handler = (args: Record<string, any>) => Promise<{
   isError?: boolean;
@@ -586,5 +591,153 @@ describe("the eight knowledge names are retired", () => {
   it("no action is spelled the same as any retired name", () => {
     const dead = new Set(DEAD_NAMES.map((d) => d.name));
     for (const action of ACTIONS) expect(dead.has(action)).toBe(false);
+  });
+});
+
+/**
+ * #2748 — a workflow miss must not advertise the pack it just refused.
+ *
+ * Not every bundled pack ships a graph: an installer-only pack declares
+ * `workflow: null` in pack.yaml (qwen-image, ltx-2.3 at time of writing), and
+ * action:"list" correctly reports has_workflow: false for it. But both workflow
+ * exits built their suggestion list as `enumeratePacks().map(p => p.name)` with
+ * NO has_workflow filter, under a sentence promising "with a ready workflow" —
+ * so check_runtime refused qwen-image and then listed qwen-image as an
+ * available pack. Copying a name out of that list reproduced the same refusal,
+ * which reads as the catalog disagreeing with the filesystem.
+ *
+ * These drive the REAL handler over the REAL bundled packs/ dir, so they fail
+ * if the filter is removed or if a future pack breaks the invariant.
+ */
+describe("list_packs — workflow-miss suggestions (#2748)", () => {
+  /** Parse the suggestion sentence into EXACT names.
+   *
+   *  Two parsing traps, both of which silently pass a broken assertion:
+   *  - Substring matching is wrong — "qwen-image" is a prefix of
+   *    "qwen-image-edit", so `toContain("qwen-image")` matches the wrong pack.
+   *  - Pack names CONTAIN dots (ltx-2.3, ltx-2.3-flf, ...), so stopping the
+   *    capture at the first "." truncates the list to a name that does not
+   *    exist ("ltx-2"). The suggestion is the last sentence, so take the rest
+   *    of the message and strip only the trailing period. */
+  function suggestedNames(message: string): string[] {
+    const m = /Packs with a ready workflow: (.*)$/.exec(message);
+    if (!m) return [];
+    return m[1]
+      .replace(/\.\s*$/, "")
+      .split(",")
+      .map((s) => s.trim())
+      .filter(Boolean);
+  }
+
+  /** A really-bundled pack that ships NO workflow — the #2748 shape. */
+  function installerOnlyPack(): string {
+    const pack = enumeratePacks().find((p) => p.has_workflow === false);
+    // Premise check: if every bundled pack ever gains a workflow this whole
+    // describe block is vacuous, so fail loudly rather than pass silently.
+    expect(pack, "expected at least one bundled installer-only pack").toBeDefined();
+    return String(pack!.name);
+  }
+
+  it('action:"check_runtime" on an installer-only pack does not deny the pack exists', async () => {
+    const name = installerOnlyPack();
+    const res = await handler()({ action: "check_runtime", pack: name });
+    expect(res.isError).toBe(true);
+    // It DOES exist and action:"list" lists it — claiming otherwise is the bug.
+    expect(text(res)).not.toContain(`No pack named "${name}"`);
+    expect(text(res)).toContain("ships no workflow");
+  });
+
+  it('action:"check_runtime" never suggests a pack that has no ready workflow', async () => {
+    const name = installerOnlyPack();
+    const res = await handler()({ action: "check_runtime", pack: name });
+    const suggested = suggestedNames(text(res));
+    expect(suggested.length).toBeGreaterThan(0);
+    expect(suggested).not.toContain(name);
+    // Every suggestion must survive the resolver the action itself uses.
+    const ready = new Set(
+      enumeratePacks()
+        .filter((p) => p.has_workflow)
+        .map((p) => String(p.name)),
+    );
+    for (const s of suggested) expect(ready.has(s)).toBe(true);
+  });
+
+  it('action:"read_workflow" on an installer-only pack explains it and suggests only ready packs', async () => {
+    const name = installerOnlyPack();
+    const res = await handler()({ action: "read_workflow", name });
+    expect(res.isError).toBe(true);
+    expect(text(res)).toContain("ships no workflow");
+    expect(suggestedNames(text(res))).not.toContain(name);
+  });
+
+  it('action:"read_workflow" on an unknown pack suggests only packs with a ready workflow', async () => {
+    const res = await handler()({ action: "read_workflow", name: "definitely-not-a-pack" });
+    expect(res.isError).toBe(true);
+    expect(text(res)).toContain('No pack named "definitely-not-a-pack"');
+    expect(suggestedNames(text(res))).not.toContain(installerOnlyPack());
+  });
+
+  it('action:"read_manifest" still suggests ALL packs — an installer-only pack HAS a manifest', async () => {
+    // Deliberately NOT filtered by has_workflow: read_manifest answers a
+    // different question, and hiding installer-only packs here would break the
+    // one action they exist for.
+    const name = installerOnlyPack();
+    const res = await handler()({ action: "read_manifest", name });
+    expect(res.isError).toBeUndefined();
+    expect(text(res)).toMatch(/custom_nodes|models/);
+  });
+});
+
+/**
+ * #2748 — action:"list" must derive has_workflow from the SAME filename the
+ * resolver opens.
+ *
+ * The reported symptom (has_workflow: true alongside "workflow.json not found")
+ * was reachable through a real divergence: enumeratePacks() took `meta.workflow`
+ * verbatim, while resolvePackWorkflowFile() rejected any value that is not a
+ * single safe path segment and silently fell back to workflow.json. A pack
+ * declaring `workflow: "sub/graph.json"` would therefore advertise a graph the
+ * resolver would never open. Today's bundled packs happen not to declare such a
+ * value, so a corpus test alone cannot see it — the shared derivation is pinned
+ * directly instead.
+ */
+describe("pack workflow filename — one derivation (#2748)", () => {
+  it("falls back to workflow.json for every value the resolver would reject", () => {
+    for (const declared of [
+      "sub/graph.json", // separator — resolver falls back, list must too
+      "../escape.json", // traversal
+      "..",
+      "sub\\graph.json", // Windows separator
+      "", // empty
+      ".hidden.json", // SAFE_NAME requires an alphanumeric first char
+    ]) {
+      expect(resolveWorkflowFileName({ workflow: declared })).toBe("workflow.json");
+    }
+  });
+
+  it("keeps a safe declared filename, and defaults when none is declared", () => {
+    expect(resolveWorkflowFileName({ workflow: "graph.json" })).toBe("graph.json");
+    expect(resolveWorkflowFileName({ workflow: "workflow.json" })).toBe("workflow.json");
+    // `workflow: null` (installer-only), absent, and non-string all default.
+    expect(resolveWorkflowFileName({ workflow: null })).toBe("workflow.json");
+    expect(resolveWorkflowFileName({})).toBe("workflow.json");
+    expect(resolveWorkflowFileName({ workflow: 42 })).toBe("workflow.json");
+    expect(resolveWorkflowFileName(null)).toBe("workflow.json");
+    expect(resolveWorkflowFileName(undefined)).toBe("workflow.json");
+  });
+
+  /** The invariant the issue actually reports, over the REAL bundled corpus:
+   *  action:"list" and the resolver must agree for every pack, always. */
+  it("has_workflow agrees with resolvePackWorkflowFile for every bundled pack", () => {
+    const packs = enumeratePacks();
+    expect(packs.length).toBeGreaterThan(0);
+    const disagreements = packs
+      .map((p) => ({
+        name: String(p.name),
+        listed: p.has_workflow === true,
+        resolved: resolvePackWorkflowFile(String(p.name)) !== null,
+      }))
+      .filter((r) => r.listed !== r.resolved);
+    expect(disagreements).toEqual([]);
   });
 });
