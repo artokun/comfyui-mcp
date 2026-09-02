@@ -1225,6 +1225,26 @@ export const BRIDGE_READONLY_CMDS: ReadonlySet<string> = new Set<string>([
   // command GRAPH_CMD_EFFECT (thirty lines below) already classifies as `inert`
   // and the panel's own READ_ONLY_GRAPH_COMMANDS already classifies as a read.
   // Two ledgers said read; the one that writes the message said mutation.
+  //
+  // THE CONSEQUENCE A REVIEWER WILL ASK ABOUT, written down so the next one does
+  // not have to reconstruct it: membership here is what lets
+  // handleMidCommandDisconnect park an un-acked frame and resume it when the tab
+  // re-hellos, keyed on ctx.tabId. "Could a DIFFERENT tab claim that id and be
+  // handed the parked capture?" is answered upstream, twice over:
+  //
+  //  - The panel's bridge ROUTE identity is minted per page load, persisted
+  //    nowhere, and taken under an origin-wide exclusive Web Lock, precisely so
+  //    a duplicated tab cannot inherit one (panel #640/#709 — a duplicated
+  //    sessionStorage candidate ROTATES before its hello, and a tab that cannot
+  //    establish uniqueness omits the identity rather than guessing). Two tabs
+  //    sharing a route id is the collision that fix exists to make unreachable.
+  //  - And the exposure is the SET'S, not this entry's: the resume branch is
+  //    gated on `!ctx.mutating`, so graph_serialize, graph_outline, graph_query,
+  //    graph_get_errors and graph_view_selected have all parked and resumed on
+  //    ctx.tabId for as long as they have been listed. A wrong-tab SERIALIZE is
+  //    strictly worse than a wrong-tab picture — it drives edits. Adding a read
+  //    to the set does not author the set's identity model, and this change does
+  //    not touch it.
   "graph_screenshot",
   "graph_prompt_director_audit",
   "graph_query",
