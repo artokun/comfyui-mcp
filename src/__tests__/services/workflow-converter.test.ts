@@ -4031,6 +4031,59 @@ describe("convertUiToApi — forceInput-only scalar input (issue #2753)", () => 
     expect(inputs.label).toBe("my label");
   });
 
+  // The socket-only rule is TOP-LEVEL ONLY, and that is not an omission.
+  // `_migrateDefaultInput` walks the node's own input.required/input.optional in
+  // two flat loops and does NOT recurse into a dynamic combo option's inputs, and
+  // the widget factory that honours forceInput runs on the node's own inputs. A
+  // nested leaf therefore keeps its widget and its slot whatever it declares —
+  // dropping it here would remove a slot the frontend does write, which is the same
+  // shift in the other direction.
+  it("a NESTED combo leaf keeps its slot whatever it declares", () => {
+    const INFO = {
+      N: {
+        input: {
+          required: {
+            combo: [
+              "COMFY_DYNAMICCOMBO_V3",
+              {
+                options: [
+                  {
+                    key: "a",
+                    inputs: {
+                      optional: { hook: ["STRING", { defaultInput: true }] },
+                    },
+                  },
+                ],
+              },
+            ],
+            tail: ["INT", { default: 0 }],
+          },
+        },
+        input_order: { required: ["combo", "tail"] },
+        output: [],
+      },
+    } as never;
+    const { workflow } = convertUiToApi(
+      {
+        nodes: [
+          {
+            id: 1,
+            type: "N",
+            mode: 0,
+            inputs: [],
+            outputs: [],
+            widgets_values: ["a", "hooked", 7],
+          },
+        ],
+        links: [],
+      } as never,
+      INFO,
+    );
+    const inputs = (workflow["1"] as { inputs: Record<string, unknown> }).inputs;
+    expect(inputs["combo.hook"]).toBe("hooked");
+    expect(inputs.tail).toBe(7); // NOT stolen by the nested leaf
+  });
+
   it("an INT forceInput input is socket-only too (not just STRING)", () => {
     const INFO = {
       N: {

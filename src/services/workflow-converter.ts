@@ -230,18 +230,22 @@ function resolveLinkedNestedArity(opts: {
   return fitsRetained ? retained : omitted;
 }
 
-function isPositionalWidgetType(spec: unknown): boolean {
+/**
+ * NOTE (#2753): deliberately does NOT exclude `forceInput`/`defaultInput`. This
+ * predicate is used for a dynamic combo option's NESTED leaves, and the frontend's
+ * socket-only handling is TOP-LEVEL only — `_migrateDefaultInput` walks the node's
+ * own `input.required`/`input.optional` and does not recurse into an option's
+ * inputs. Excluding them here would drop a slot the frontend does write. The
+ * top-level rule lives in `isSocketOnlyInput`, which has the required/optional
+ * context this spec-only predicate cannot see.
+ */
+function isPositionalWidgetSpec(spec: unknown): boolean {
   if (!Array.isArray(spec)) return false;
   const type = spec[0];
   if (Array.isArray(type)) return true; // inline combo options
   const cfg = spec[1] as { options?: unknown } | undefined;
   if (Array.isArray(cfg?.options)) return true; // dynamic combo (options-carrying)
   return isScalarWidgetType(type, cfg);
-}
-
-function isPositionalWidgetSpec(spec: unknown): boolean {
-  // forceInput is socket-only, so it is never serialized positionally (#2753).
-  return !isForceInputSpec(spec) && isPositionalWidgetType(spec);
 }
 
 /**
@@ -3342,7 +3346,7 @@ export function convertUiToApi(
         const sp =
           (def.input?.required as Record<string, unknown> | undefined)?.[n] ??
           (def.input?.optional as Record<string, unknown> | undefined)?.[n];
-        return isSocketOnlyInput(n, def) && isPositionalWidgetType(sp);
+        return isSocketOnlyInput(n, def) && isPositionalWidgetSpec(sp);
       })
     ) {
       warnings.push(
