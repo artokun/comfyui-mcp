@@ -913,7 +913,7 @@ describe("nodePackGit", () => {
           deps,
         ),
       ).toThrow(
-        /names custom_nodes\/Pack\/Pack\/preset_core\.py, which does not exist.+drop the "Pack\/" prefix and pass "preset_core\.py"/s,
+        /names custom_nodes\/Pack\/Pack\/preset_core\.py .+ custom_nodes\/Pack\/Pack does not exist, so it would match nothing.+drop the "Pack\/" prefix and pass "preset_core\.py"/s,
       );
       expect(gitCalls.length).toBe(0);
     });
@@ -966,29 +966,45 @@ describe("nodePackGit", () => {
       expect(gitCalls[0].args).toEqual(["diff", "--", "preset_core.py"]);
     });
 
-    it("passes a wildcard pathspec through instead of existence-checking it", () => {
-      // A glob is a legitimate git pathspec that neither existence probe can decide, so
-      // the prefix guard must not touch it — including the prefixed spelling.
+    it("passes an unprefixed wildcard pathspec straight through", () => {
       mkPackFiles();
       const { deps, gitCalls } = makeDeps();
       nodePackGit({ pack: "Pack", action: "diff", paths: ["*.py", "tests/**"] }, deps);
       expect(gitCalls[0].args).toEqual(["diff", "--", "*.py", "tests/**"]);
-      const second = makeDeps();
-      nodePackGit({ pack: "Pack", action: "diff", paths: ["Pack/*.py"] }, second.deps);
-      expect(second.gitCalls[0].args).toEqual(["diff", "--", "Pack/*.py"]);
     });
 
-    it("leaves a wildcard alone even when a literal file of that name exists", () => {
-      // POSIX allows a file literally named "*.py", and that is the one case where the
-      // prefix guard's existence probes would mistake a legitimate glob for the prefixed
-      // spelling. Simulated through the fs seam, since Windows cannot create that name.
+    it("names the correction for a prefixed WILDCARD too", () => {
+      // The refusal rests on one fact — the pack has no child named "Pack" — which decides
+      // a wildcard exactly as well as a literal path: it can match nothing either way.
       mkPackFiles();
-      const literal = join(realpathSync(join(customNodes, "Pack")), "*.py");
-      const { deps, gitCalls } = makeDeps({
-        existsSync: (p: string) => p === literal || existsSync(p),
-      });
+      const { deps, gitCalls } = makeDeps();
+      expect(() =>
+        nodePackGit({ pack: "Pack", action: "diff", paths: ["Pack/*.py"] }, deps),
+      ).toThrow(/drop the "Pack\/" prefix and pass "\*\.py"/);
+      expect(gitCalls.length).toBe(0);
+    });
+
+    it("honours a prefixed wildcard when the pack really has a same-named subdir", () => {
+      mkPackFiles();
+      mkdirSync(join(customNodes, "Pack", "Pack"), { recursive: true });
+      const { deps, gitCalls } = makeDeps();
       nodePackGit({ pack: "Pack", action: "diff", paths: ["Pack/*.py"] }, deps);
       expect(gitCalls[0].args).toEqual(["diff", "--", "Pack/*.py"]);
+    });
+
+    it("scopes a path that no longer exists — a deletion is a legitimate pathspec", () => {
+      // `git diff`/`git add` are how a DELETED file is inspected and staged, so the guard
+      // must not probe the de-prefixed path for existence. Here the pack HAS a same-named
+      // subdir and the file inside it is gone; the literal reading must survive.
+      mkPackFiles();
+      mkdirSync(join(customNodes, "Pack", "Pack"), { recursive: true });
+      const { deps, gitCalls } = makeDeps();
+      nodePackGit({ pack: "Pack", action: "diff", paths: ["Pack/gone.py"] }, deps);
+      expect(gitCalls[0].args).toEqual(["diff", "--", "Pack/gone.py"]);
+      // …and an unprefixed deleted file is untouched by any of this.
+      const second = makeDeps();
+      nodePackGit({ pack: "Pack", action: "diff", paths: ["gone.py"] }, second.deps);
+      expect(second.gitCalls[0].args).toEqual(["diff", "--", "gone.py"]);
     });
 
     it("normalises an interior climb that stays inside the pack", () => {

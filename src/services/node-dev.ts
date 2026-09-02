@@ -1476,18 +1476,19 @@ export function gitWritesEnabled(): boolean {
   return v === "1" || v === "true";
 }
 
-/** A git pathspec with wildcards cannot be existence-checked, so the guard below skips it. */
-const GLOB_META = /[*?[\]]/;
-
 /**
- * #2716: before this fix, the pack-name-prefixed spelling was the ONLY one that
- * reached git, so callers learned it. Anchored at the pack root it now names
- * `MyPack/MyPack/nodes.py` — and git answers a pathspec that matches nothing with an
- * EMPTY diff, not an error, so the workaround would fail silently. Refuse it instead,
- * naming the correction — but only where the disk PROVES the caller cannot have meant it
- * literally: the prefixed target is absent AND the de-prefixed one exists. A pack that
- * really does contain a same-named subdirectory keeps the literal reading, and a wildcard
- * pathspec is left alone because neither probe can decide it.
+ * #2716: before this fix, the pack-name-prefixed spelling was the ONLY one that reached
+ * git, so callers learned it. Anchored at the pack it now names `MyPack/MyPack/nodes.py`
+ * — and git answers a pathspec that matches nothing with an EMPTY result, not an error,
+ * so the workaround would fail silently. Refuse it instead, naming the correction.
+ *
+ * The refusal rests on ONE disk fact: whether the pack contains a child named like the
+ * pack. If it does not, the prefixed pathspec cannot match anything, whatever the rest of
+ * it says — so this holds for a wildcard (`MyPack/*.py`) as much as a literal one, and
+ * needs no probe of the de-prefixed path. That last part matters: `git diff`/`git add`
+ * are exactly how a DELETED file is inspected and staged, and a path that no longer
+ * exists in the worktree is a legitimate pathspec. Probing it would refuse the deletion.
+ * A pack that really does contain a same-named child keeps the literal reading.
  *
  * `pack` reaches here two ways — the caller's spelling and the real directory name — and
  * they differ when custom_nodes/<name> is a symlink or junction to a differently-named
@@ -1501,27 +1502,23 @@ function assertNotPackPrefixed(
   rel: string,
   deps: NodeDevDeps,
 ): void {
-  if (GLOB_META.test(rel)) return;
   const segs = rel.split("/");
-  const head = segs[0].toLowerCase();
-  if (head !== basename(packDir).toLowerCase() && head !== packName.toLowerCase()) return;
-  if (deps.existsSync(join(packDir, ...segs))) return;
-  const stripped = segs.slice(1);
-  // Bare "<pack>" is the same mistake with nothing left after the prefix: it used to mean
-  // the pack root and now matches nothing, so it gets its own correction.
-  if (!stripped.length) {
-    throw new NodeDevError(
-      `Path "${original}" is resolved relative to the pack, so it names ` +
-        `custom_nodes/${basename(packDir)}/${rel}, which does not exist. \`paths\` ` +
-        `entries are pack-relative: omit \`paths\` to scope the whole pack, or pass "." .`,
-    );
-  }
-  if (!deps.existsSync(join(packDir, ...stripped))) return;
+  const head = segs[0];
+  const lower = head.toLowerCase();
+  if (lower !== basename(packDir).toLowerCase() && lower !== packName.toLowerCase()) return;
+  // A deeper entry needs the head to be a traversable DIRECTORY; a bare "<pack>" only
+  // needs something of that name to exist, since it names the match itself.
+  const headPath = join(packDir, head);
+  if (segs.length > 1 ? deps.isDirectory(headPath) : deps.existsSync(headPath)) return;
+  const stripped = segs.slice(1).join("/");
   throw new NodeDevError(
     `Path "${original}" is resolved relative to the pack, so it names ` +
-      `custom_nodes/${basename(packDir)}/${rel}, which does not exist. ` +
-      `\`paths\` entries are pack-relative: drop the "${segs[0]}/" prefix and ` +
-      `pass "${stripped.join("/")}".`,
+      `custom_nodes/${basename(packDir)}/${rel} — and ` +
+      `custom_nodes/${basename(packDir)}/${head} does not exist, so it would match ` +
+      `nothing. \`paths\` entries are pack-relative: ` +
+      (stripped
+        ? `drop the "${head}/" prefix and pass "${stripped}".`
+        : `omit \`paths\` to scope the whole pack, or pass "." .`),
   );
 }
 
