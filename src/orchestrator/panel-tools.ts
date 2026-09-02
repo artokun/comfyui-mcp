@@ -19026,9 +19026,11 @@ function runLateAckGraceMs(): number {
  *
  * Returns null when there is nothing to reconcile. The negatives are deliberate:
  *
- *  - NOT an unacked post-write (timeout or disconnect), or the Panel's explicit
- *    id-less queued_unknown receipt (#1728) ⇒ nothing to wait for.
- *    Gated on the bridge's own typed marks, never on message text: an acked
+ *  - A `queued_unknown` with no exact receipt and no scoped queue-attribution
+ *    contract ⇒ nothing to claim. Full-graph uncertainty waits only for the
+ *    bridge's rid-correlated `run_receipt`; scoped uncertainty may additionally
+ *    use its existing bounded queue observation. Gated on the bridge's own typed
+ *    marks, never on message text: an acked
  *    panel error can quote our timeout/OUTCOME UNKNOWN sentence verbatim
  *    (#1468 round 2), and the difference is whether the tab answered, which
  *    only the bridge knows.
@@ -19076,9 +19078,10 @@ async function reconcileLateRunAck(
   res: ToolResult,
   rid: string | undefined,
   preRunningPromptId?: string | null,
-  allowPanelQueueUnknown = false,
+  allowPanelQueueUnknownReceipt = false,
   expectedTabId?: string,
   expectedPromptCount = 1,
+  allowQueueUnknownInference = false,
 ): Promise<{
   result: unknown;
   lateByMs: number;
@@ -19094,10 +19097,15 @@ async function reconcileLateRunAck(
   // id-less-only below.
   const receiptEligible =
     Boolean(rid) &&
-    ((allowPanelQueueUnknown && isPanelQueueUncertainty(parsed)) ||
+    ((allowPanelQueueUnknownReceipt && isPanelQueueUncertainty(parsed)) ||
       isReplyTimeoutResult(res) ||
       isMidCommandDisconnectResult(res));
-  const queueEligible = isUnackedGraphRunResult(res, allowPanelQueueUnknown);
+  // A run_receipt is exact Panel evidence for BOTH full and scoped runs. Queue
+  // observation is weaker: only the scoped Panel contract makes a new queue id
+  // attributable to this dispatch. Keep those authorities separate so enabling
+  // full-graph receipt recovery cannot turn a foreign back-to-back render into
+  // this run's prompt id.
+  const queueEligible = isUnackedGraphRunResult(res, allowQueueUnknownInference);
   if (!receiptEligible && !queueEligible) return null;
   const fromQueue = (): {
     result: unknown;
@@ -23280,11 +23288,15 @@ export function buildPanelToolDefs(): PanelToolDef[] {
             res,
             runRid,
             pre.runningPromptId,
-            typeof args.to_node_id === "number",
+            // #2143 — queued_unknown is receipt-recoverable for full graph runs
+            // too. Only exact run_receipt evidence is allowed there; the weaker
+            // QueueMonitor inference remains scoped-run-only below.
+            true,
             runTicketTab,
             typeof args.batch_count === "number"
               ? Math.max(1, Math.min(64, Math.floor(args.batch_count)))
               : 1,
+            typeof args.to_node_id === "number",
           );
           if (!recovered) return;
           for (const entry of recovered.completionKeys ?? []) {
