@@ -700,16 +700,26 @@ export async function comfyuiFetch(
       // still runs; without a replayable body there is no safe retry.
     }
   }
-  const request = (target: string | URL | Request): Promise<Response> => {
-    if (Object.keys(auth).length === 0) return fetch(target, { ...init, signal });
-    const headers = new Headers(init.headers);
+  let firstInit: RequestInit = { ...init, signal };
+  let retryInit: RequestInit = firstInit;
+  if (typeof ReadableStream !== "undefined" && init.body instanceof ReadableStream) {
+    const [firstBody, retryBody] = init.body.tee();
+    firstInit = { ...firstInit, body: firstBody };
+    retryInit = { ...firstInit, body: retryBody };
+  }
+  const request = (
+    target: string | URL | Request,
+    requestInit: RequestInit,
+  ): Promise<Response> => {
+    if (Object.keys(auth).length === 0) return fetch(target, requestInit);
+    const headers = new Headers(requestInit.headers);
     for (const [name, value] of Object.entries(auth)) {
       if (!headers.has(name)) headers.set(name, value);
     }
-    return fetch(target, { ...init, headers, signal });
+    return fetch(target, { ...requestInit, headers });
   };
   try {
-    return await request(input);
+    return await request(input, firstInit);
   } catch (err) {
     // Preserve the configured literal as the primary target. Only a refused
     // exact IPv4 loopback connection is safe to retry: ECONNREFUSED proves no
@@ -737,7 +747,7 @@ export async function comfyuiFetch(
       describeFetchFailure(err).code === "ECONNREFUSED"
     ) {
       try {
-        return await request(retryInput);
+        return await request(retryInput, retryInit);
       } catch (retryError) {
         err = retryError;
       }

@@ -85,6 +85,22 @@ export class LoopbackWebSocket extends EventEmitter {
     return this.socket.binaryType;
   }
 
+  get CONNECTING(): number {
+    return WebSocket.CONNECTING;
+  }
+
+  get OPEN(): number {
+    return WebSocket.OPEN;
+  }
+
+  get CLOSING(): number {
+    return WebSocket.CLOSING;
+  }
+
+  get CLOSED(): number {
+    return WebSocket.CLOSED;
+  }
+
   set binaryType(value: "nodebuffer" | "arraybuffer" | "fragments") {
     this.socket.binaryType = value;
   }
