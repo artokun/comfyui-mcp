@@ -72,7 +72,7 @@ import { ModelError, ValidationError } from "../../utils/errors.js";
 
 const MODELS_ROOT = resolve("/comfy", "models");
 const EXTRA_LORAS = "E:/extra-drive/loras";
-const LIVE_SHARED_DIFFUSION_MODELS = resolve("/ComfyUI-Shared/models/diffusion_models");
+const LIVE_SHARED_MODELS_ROOT = resolve("/ComfyUI-Shared/models");
 
 /** stat() resolves to a file for paths in `files`, a dir for `dirs`, else ENOENT. */
 function fsFixture(files: string[], dirs: string[] = []) {
@@ -133,10 +133,41 @@ describe("resolveExistingModelFile — multi-root resolution", () => {
     expect(getExtraModelRootsMock).toHaveBeenCalledTimes(1);
   });
 
-  it("finds a category-relative Chroma model in a live Desktop shared root", async () => {
+  it("prefers a connected live primary root over a stale local primary root", async () => {
     const snapshot = {
       reachable: true,
-      argv: ["python", "ComfyUI/main.py", "--extra-model-paths-config", "/live/shared_model_paths.yaml"],
+      argv: ["python", "ComfyUI/main.py"],
+    };
+    const liveModel = resolve(
+      LIVE_SHARED_MODELS_ROOT,
+      "diffusion_models/Chroma/chroma.safetensors",
+    );
+    const staleModel = resolve(
+      MODELS_ROOT,
+      "diffusion_models/Chroma/chroma.safetensors",
+    );
+    resolveModelsDirWithBasesMock.mockResolvedValueOnce({
+      modelsDir: LIVE_SHARED_MODELS_ROOT,
+      baseDirs: [],
+      snapshot,
+      source: "observed-root",
+    });
+    fsFixture([liveModel, staleModel]);
+
+    const res = await resolveExistingModelFile("diffusion_models/Chroma/chroma.safetensors");
+
+    expect(res.path).toBe(liveModel);
+    expect(res.root).toBe(LIVE_SHARED_MODELS_ROOT);
+    expect(statMock).toHaveBeenCalledWith(liveModel);
+    expect(getLiveExtraModelRootsMock).not.toHaveBeenCalled();
+    expect(getExtraModelRootsMock).not.toHaveBeenCalled();
+  });
+
+  it("does not authorize a mutable current extra root for reachable-server deletion", async () => {
+    const mutableRoot = resolve("/mutable/current/diffusion_models");
+    const snapshot = {
+      reachable: true,
+      argv: ["python", "ComfyUI/main.py", "--extra-model-paths-config", "/live/launch.yaml"],
     };
     resolveModelsDirWithBasesMock.mockResolvedValueOnce({
       modelsDir: MODELS_ROOT,
@@ -146,42 +177,14 @@ describe("resolveExistingModelFile — multi-root resolution", () => {
     });
     getLiveExtraModelRootsMock.mockResolvedValueOnce({
       authoritative: true,
-      roots: [{ category: "diffusion_models", dir: LIVE_SHARED_DIFFUSION_MODELS, group: "comfyui" }],
+      roots: [{ category: "diffusion_models", dir: mutableRoot, group: "mutable-current-config" }],
     });
-    const model = resolve(LIVE_SHARED_DIFFUSION_MODELS, "Chroma/chroma.safetensors");
-    fsFixture([model]);
-
-    const res = await resolveExistingModelFile("diffusion_models/Chroma/chroma.safetensors");
-
-    expect(res.path).toBe(model);
-    expect(res.root).toBe(LIVE_SHARED_DIFFUSION_MODELS);
-    expect(getLiveExtraModelRootsMock).toHaveBeenCalledWith(snapshot);
-    expect(getExtraModelRootsMock).not.toHaveBeenCalled();
-  });
-
-  it("does not use a stale local root when the live authorized list is empty", async () => {
-    const staleRoot = resolve("/stale/models/diffusion_models");
-    const snapshot = {
-      reachable: true,
-      argv: ["python", "ComfyUI/main.py", "--extra-model-paths-config", "/missing.yaml"],
-    };
-    resolveModelsDirWithBasesMock.mockResolvedValueOnce({
-      modelsDir: MODELS_ROOT,
-      baseDirs: [],
-      snapshot,
-      source: "configured-base",
-    });
-    getExtraModelRootsMock.mockResolvedValueOnce([
-      { category: "diffusion_models", dir: staleRoot, group: "stale" },
-    ]);
-    // `authoritative` means the returned roots are safe to use, not that the
-    // already-running server has no additional roots it cannot prove now.
-    getLiveExtraModelRootsMock.mockResolvedValueOnce({ authoritative: true, roots: [] });
-    fsFixture([resolve(staleRoot, "Chroma/chroma.safetensors")]);
+    fsFixture([resolve(mutableRoot, "Chroma/chroma.safetensors")]);
 
     await expect(
       resolveExistingModelFile("diffusion_models/Chroma/chroma.safetensors"),
     ).rejects.toThrow(/Searched 1 root\(s\)/);
+    expect(getLiveExtraModelRootsMock).not.toHaveBeenCalled();
     expect(getExtraModelRootsMock).not.toHaveBeenCalled();
   });
 

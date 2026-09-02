@@ -3156,32 +3156,38 @@ export interface ResolvedModelFile {
   info: Stats;
 }
 
-async function getAuthorizedExtraModelRootsForRemoval() {
-  if (isRemoteMode()) return [];
-
-  try {
-    const resolved = await resolveModelsDirWithBases();
-    if (resolved.snapshot.reachable) {
-      const liveRoots = await getLiveExtraModelRoots(resolved.snapshot);
-      // The live result authorizes only the roots it names; it is not a complete
-      // inventory of roots the already-running server may still have loaded.
-      return liveRoots.authoritative ? liveRoots.roots : [];
-    }
-    return await getExtraModelRoots();
-  } catch {
-    // A mutation must not fall back to display-only or stale root discovery.
-    return [];
+async function getAuthorizedModelRootsForRemoval(configuredModelsRoot: string) {
+  if (isRemoteMode()) {
+    return { primaryRoots: [configuredModelsRoot], allowConfiguredExtraRoots: false };
   }
+
+  // This is the same live resolution used by download destinations. A reachable
+  // server's current extra-path config is not deletion authority: it can have
+  // changed after launch, while the process is still using its launch-time roots.
+  // The connected primary models directory is safe to use when its provenance is
+  // live or OS-observed; otherwise, fail closed for all unproven extra roots.
+  const resolved = await resolveModelsDirWithBases();
+  if (resolved.snapshot.reachable) {
+    const liveModelsRoot = isLiveAuthoritativeModelsDir(resolved.source)
+      ? resolve(resolved.modelsDir)
+      : undefined;
+    const primaryRoots = liveModelsRoot && liveModelsRoot !== configuredModelsRoot
+      ? [liveModelsRoot, configuredModelsRoot]
+      : [configuredModelsRoot];
+    return { primaryRoots, allowConfiguredExtraRoots: false };
+  }
+
+  // With no connected server, preserve the existing local configuration path;
+  // getExtraModelRoots() itself is fail-closed for deletion authorization.
+  return { primaryRoots: [configuredModelsRoot], allowConfiguredExtraRoots: true };
 }
 
 /**
  * Locate an existing model file given a path relative to ComfyUI's models/
- * directory, searching the primary `<COMFYUI_PATH>/models` and every extra
- * root authorized by the current ComfyUI launch configuration. While a local
- * server is reachable, authorization comes from its live launch arguments;
- * when it is unavailable, the existing fail-closed local configuration path
- * is used. This keeps a model installed under a trusted extra root removable
- * without treating display-only or stale roots as deletion authority.
+ * directory, searching a connected live primary models directory before the
+ * configured `<COMFYUI_PATH>/models`, plus offline-configured extra roots.
+ * A reachable server's mutable extra-path config is never used as deletion
+ * authority; only the live/observed primary root is eligible in that case.
  *
  * Resolution rules:
  *  - The primary root is searched with the full relative path.
@@ -3224,17 +3230,21 @@ export async function resolveExistingModelFile(
   const searched: string[] = [];
   let dirHit: ResolvedModelFile | undefined;
 
-  // Primary root: <COMFYUI_PATH>/models/<relativePath>. containWithinRoot throws
-  // on traversal/escape, preserving the existing security behavior.
-  const modelsRoot = resolve(getModelsRoot());
-  const primaryTarget = containWithinRoot(modelsRoot, raw);
-  searched.push(modelsRoot);
-  try {
-    const info = await stat(primaryTarget);
-    if (info.isFile()) return { path: primaryTarget, root: modelsRoot, info };
-    dirHit = { path: primaryTarget, root: modelsRoot, info };
-  } catch {
-    // Not present under the primary root; fall through to extra roots.
+  const configuredModelsRoot = resolve(getModelsRoot());
+  const rootResolution = await getAuthorizedModelRootsForRemoval(configuredModelsRoot);
+
+  // Primary roots are searched in authority order. Each candidate remains
+  // containment-checked, preserving the absolute/traversal guard.
+  for (const modelsRoot of rootResolution.primaryRoots) {
+    const primaryTarget = containWithinRoot(modelsRoot, raw);
+    searched.push(modelsRoot);
+    try {
+      const info = await stat(primaryTarget);
+      if (info.isFile()) return { path: primaryTarget, root: modelsRoot, info };
+      if (!dirHit) dirHit = { path: primaryTarget, root: modelsRoot, info };
+    } catch {
+      // Not present under this primary root; keep searching authorized roots.
+    }
   }
 
   // Extra roots are declared per category, so peel off the first path segment
@@ -3243,7 +3253,9 @@ export async function resolveExistingModelFile(
   const category = segments[0];
   const remainder = segments.slice(1).join("/");
   if (category && remainder) {
-    const extraRoots = await getAuthorizedExtraModelRootsForRemoval();
+    const extraRoots = rootResolution.allowConfiguredExtraRoots
+      ? await getExtraModelRoots()
+      : [];
     for (const er of extraRoots) {
       if (er.category !== category) continue;
       const rootDir = resolve(er.dir);
@@ -3269,8 +3281,8 @@ export async function resolveExistingModelFile(
   if (dirHit) return dirHit;
 
   // #1474 — say WHY only these roots were searched. `list_paths` may display roots
-  // this resolver refused to enumerate (it backs DELETION, so it uses only roots
-  // provable from the running server's launch arguments), and the caller was left
+  // this resolver refused to enumerate (it backs DELETION, so a reachable server
+  // contributes only its live/observed primary root), and the caller was left
   // holding two tools that disagreed with nothing to reconcile them.
   throw new ModelError(
     modelNotFoundMessage({ relativePath, searched }),
