@@ -165,18 +165,9 @@ vi.mock("../../services/workspace-env.js", async () => {
     // live-root rung is exercised end to end rather than stubbed away. This is
     // deliberately one snapshot: explicit I/O flags and the inferred live root
     // must describe the same server instance.
-    getLiveServerSnapshot: async () => {
-      try {
-        const stats = await getSystemStats();
-        return {
-          reachable: true,
-          argv: stats?.system?.argv,
-          cwd: stats?.system?.cwd,
-        };
-      } catch {
-        return { reachable: false };
-      }
-    },
+    // Use the real snapshot boundary so a production-shaped malformed response
+    // cannot bypass its runtime argv/cwd validation in this resolver suite.
+    getLiveServerSnapshot: () => actual.getLiveServerSnapshot(),
     liveRootFromArgv: actual.liveRootFromArgv,
     hasComfyUIEntrypoint: (dir: string) =>
       hasEntrypointFor ? hasEntrypointFor(dir) : baseHasEntrypoint,
@@ -1366,6 +1357,12 @@ describe("#1052: I/O dirs follow the CONNECTED server, not a second install", ()
   it("falls back when the live argv identifies no root", async () => {
     getSystemStats.mockResolvedValue({ system: { argv: ["python"] } });
     expect(await resolveOutputDir()).toBe(resolve(DESKTOP, "output"));
+  });
+
+  it("fails closed on a production-shaped malformed argv response", async () => {
+    getSystemStats.mockResolvedValue({ system: { argv: [1] } });
+    await expect(resolveOutputDir()).resolves.toBe(resolve(DESKTOP, "output"));
+    expect(getSystemStats).toHaveBeenCalledTimes(1);
   });
 
   // #2539 — ComfyUI Desktop / Windows portable report a RELATIVE

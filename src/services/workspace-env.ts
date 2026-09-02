@@ -614,6 +614,22 @@ export async function resolveLiveComfyUIBase(): Promise<string | undefined> {
 }
 
 /**
+ * Keep values from the server's JSON response at the runtime boundary. The
+ * SystemStats TypeScript type describes the normal ComfyUI response, but the
+ * response is still untrusted JSON at runtime; a shape such as `argv: [1]`
+ * must not reach the string-only launch-argv parsers.
+ */
+function validatedLaunchArgv(value: unknown): string[] | undefined {
+  return Array.isArray(value) && value.every((token): token is string => typeof token === "string")
+    ? value
+    : undefined;
+}
+
+function validatedServerCwd(value: unknown): string | undefined {
+  return typeof value === "string" ? value : undefined;
+}
+
+/**
  * ONE `/system_stats` snapshot for callers that need to derive several things from the
  * SAME server state (the launch flags AND the install root), rather than issuing two
  * calls that could straddle a restart — the same invariant `resolveModelsDirWithBases`
@@ -628,10 +644,14 @@ export async function getLiveServerSnapshot(): Promise<{
   if (isRemoteMode()) return { reachable: false };
   try {
     const stats = await getSystemStats();
+    const system =
+      stats && typeof stats === "object" && stats.system && typeof stats.system === "object"
+        ? (stats.system as Record<string, unknown>)
+        : undefined;
     return {
       reachable: true,
-      argv: stats.system?.argv,
-      cwd: (stats.system as { cwd?: string })?.cwd,
+      argv: validatedLaunchArgv(system?.argv),
+      cwd: validatedServerCwd(system?.cwd),
     };
   } catch {
     return { reachable: false };
