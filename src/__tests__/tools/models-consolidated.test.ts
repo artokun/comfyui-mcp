@@ -564,7 +564,10 @@ describe("list_local_models dispatch", () => {
 
   it('action:"remove" resolves the path across roots and unlinks exactly that file', async () => {
     const res = await inventory()({ action: "remove", path: "loras/x.safetensors" });
-    expect(mocks.resolveExistingModelFile).toHaveBeenCalledWith("loras/x.safetensors");
+    expect(mocks.resolveExistingModelFile).toHaveBeenCalledWith(
+      "loras/x.safetensors",
+      { mode: "remove" },
+    );
     expect(mocks.unlink).toHaveBeenCalledWith("/comfy/models/loras/x.safetensors");
     expect(text(res)).toContain("Removed model:");
   });
