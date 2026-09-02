@@ -1,6 +1,6 @@
 import { z } from "zod";
 import { readFile, realpath } from "node:fs/promises";
-import { isAbsolute, relative, resolve as pathResolve, sep } from "node:path";
+import { isAbsolute, parse as pathParse, relative, resolve as pathResolve } from "node:path";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { UiWorkflow, WorkflowJSON } from "../comfyui/types.js";
 import { getObjectInfo, backfillObjectInfo, comfyApiFetch } from "../comfyui/client.js";
@@ -99,20 +99,18 @@ function isEnoent(err: unknown): boolean {
  * filename is copied segment-for-segment so an em-dash is not rewritten to
  * ASCII `-` or `?`.
  */
-function restoreDroppedWorkflowsSegment(absPath: string): string | undefined {
+export function restoreDroppedWorkflowsSegment(absPath: string): string | undefined {
   if (!isAbsolute(absPath)) return undefined;
   const resolved = pathResolve(absPath);
-  const segs = resolved.split(/[\\/]+/).filter((s) => s !== "");
+  const root = pathParse(resolved).root;
+  const segs = resolved.slice(root.length).split(/[\\/]+/).filter((s) => s !== "");
   const insertAfter = (anchor: readonly string[]): string | undefined => {
     for (let i = 0; i <= segs.length - anchor.length; i++) {
       if (!anchor.every((part, j) => segs[i + j] === part)) continue;
       const after = i + anchor.length;
       if (segs[after] === "workflows" || after >= segs.length) return undefined;
       const next = [...segs.slice(0, after), "workflows", ...segs.slice(after)];
-      if (/^[A-Za-z]:$/.test(next[0] ?? "")) {
-        return pathResolve(`${next[0]}${sep}`, ...next.slice(1));
-      }
-      return pathResolve(sep, ...next);
+      return pathResolve(root, ...next);
     }
     return undefined;
   };

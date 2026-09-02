@@ -66,7 +66,10 @@ vi.mock("../../services/frontend-virtual-types.js", () => ({
   frontendVirtualTypesFor: () => new Set<string>(),
 }));
 
-import { registerWorkflowLibraryTools } from "../../tools/workflow-library.js";
+import {
+  registerWorkflowLibraryTools,
+  restoreDroppedWorkflowsSegment,
+} from "../../tools/workflow-library.js";
 
 type Handler = (args: Record<string, unknown>) => Promise<{
   isError?: boolean;
@@ -173,3 +176,28 @@ describe("#2528 get_workflow strip keeps the userdata workflows segment", () => 
     expect(mocks.fetchApi).not.toHaveBeenCalled();
   });
 });
+
+describe.runIf(process.platform === "win32")(
+  "#2528 restores Windows roots without changing them",
+  () => {
+    it.each([
+      [
+        "a UNC root",
+        String.raw`\\server\share\user\default\artokun_lab\workflow.json`,
+        String.raw`\\server\share\user\default\workflows\artokun_lab\workflow.json`,
+      ],
+      [
+        "an extended-length drive root",
+        String.raw`\\?\C:\ComfyUI\user\default\artokun_lab\workflow.json`,
+        String.raw`\\?\C:\ComfyUI\user\default\workflows\artokun_lab\workflow.json`,
+      ],
+      [
+        "an extended-length UNC root",
+        String.raw`\\?\UNC\server\share\user\default\artokun_lab\workflow.json`,
+        String.raw`\\?\UNC\server\share\user\default\workflows\artokun_lab\workflow.json`,
+      ],
+    ])("preserves %s", (_label, dropped, expected) => {
+      expect(restoreDroppedWorkflowsSegment(dropped)).toBe(expected);
+    });
+  },
+);
