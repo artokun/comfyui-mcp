@@ -6,6 +6,16 @@ All notable changes to this project are documented here. This project adheres to
 
 ## Unreleased
 
+## [0.52.177] - 2026-09-02
+
+### MCP
+
+#### Fixed
+- **`node_pack` accepts documented pack-relative paths for git operations (#2716).**
+  Paths are now resolved against the selected pack before the existing jail
+  containment checks, so entries such as `preset_core.py` no longer resolve
+  from `custom_nodes/` and get rejected as outside the pack.
+
 ## [0.52.176] - 2026-09-02
 
 ### MCP
