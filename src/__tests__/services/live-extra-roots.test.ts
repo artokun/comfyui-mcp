@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, rm, stat as statFile, utimes, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
@@ -16,7 +16,10 @@ vi.mock("../../config.js", () => ({
   isRemoteMode: () => false,
 }));
 
-import { getLiveExtraModelRoots } from "../../services/extra-paths.js";
+import {
+  getLaunchStateExtraModelRoots,
+  getLiveExtraModelRoots,
+} from "../../services/extra-paths.js";
 import type { LiveServerSnapshot } from "../../services/output-dir.js";
 import {
   markLocalComfyUILaunched,
@@ -62,6 +65,63 @@ describe("getLiveExtraModelRoots — fail-closed authorization", () => {
     );
     expect(res.authoritative).toBe(true);
     expect(res.roots).toContainEqual({ category: "unet", dir: external, group: "comfyui" });
+  });
+
+  it("reads a launch-named config for deletion only when its launch state is provable", async () => {
+    const cfgDir = await trackTmp();
+    const cfgPath = join(cfgDir, "shared_model_paths.yaml");
+    const external = resolve("/Volumes/Render/00_AI/models/diffusion_models");
+    await writeFile(cfgPath, ["comfyui:", `  diffusion_models: ${external}`].join("\n"), "utf-8");
+    const created = await statFile(cfgPath);
+    const processStartedAtMs = Math.max(created.mtimeMs, created.ctimeMs) + 1;
+
+    const res = await getLaunchStateExtraModelRoots({
+      ...reachable(["python", "main.py", "--extra-model-paths-config", cfgPath]),
+      processStartedAtMs,
+    });
+
+    expect(res.authoritative).toBe(true);
+    expect(res.roots).toContainEqual({
+      category: "diffusion_models",
+      dir: external,
+      group: "comfyui",
+    });
+  });
+
+  it("rejects a current config changed after launch instead of authorizing its new root", async () => {
+    const cfgDir = await trackTmp();
+    const cfgPath = join(cfgDir, "shared_model_paths.yaml");
+    await writeFile(cfgPath, ["comfyui:", "  diffusion_models: /launch/root"].join("\n"), "utf-8");
+    const initial = await statFile(cfgPath);
+    const processStartedAtMs = Math.max(initial.mtimeMs, initial.ctimeMs) + 1;
+    await writeFile(cfgPath, ["comfyui:", "  diffusion_models: /mutable/root"].join("\n"), "utf-8");
+    const changedAt = processStartedAtMs + 2_000;
+    await utimes(cfgPath, new Date(changedAt), new Date(changedAt));
+
+    const res = await getLaunchStateExtraModelRoots({
+      ...reachable(["python", "main.py", "--extra-model-paths-config", cfgPath]),
+      processStartedAtMs,
+    });
+
+    expect(res.authoritative).toBe(false);
+    expect(res.roots).toEqual([]);
+  });
+
+  it("does not authorize an implicit config beside an OS-observed root", async () => {
+    const liveRoot = await trackTmp();
+    const cfgPath = join(liveRoot, "extra_model_paths.yaml");
+    await writeFile(cfgPath, ["comfyui:", "  diffusion_models: /observed/root"].join("\n"), "utf-8");
+    const created = await statFile(cfgPath);
+
+    const res = await getLaunchStateExtraModelRoots({
+      ...reachable(["python", "ComfyUI/main.py"]),
+      liveRoot,
+      liveRootSource: "observed-process",
+      processStartedAtMs: Math.max(created.mtimeMs, created.ctimeMs) + 1,
+    });
+
+    expect(res.authoritative).toBe(false);
+    expect(res.roots).toEqual([]);
   });
 
   it("SKIPS a RELATIVE --extra-model-paths-config value (can't anchor to the live server → fail closed)", async () => {

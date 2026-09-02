@@ -9,7 +9,7 @@ All notable changes to this project are documented here. This project adheres to
 ### MCP
 
 #### Fixed
-- list_local_models removal resolves category-relative models from authorized live ComfyUI Desktop shared roots (#1474)
+- list_local_models removal resolves category-relative models from launch-state-proven ComfyUI Desktop shared roots without falling back to stale local roots (#1474)
 
 ## [0.52.168] - 2026-09-01
 
