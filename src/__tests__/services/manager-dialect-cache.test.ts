@@ -379,6 +379,37 @@ describe("#646 Manager API dialect cache invalidation", () => {
     expect(error.message).not.toMatch(/only activates when ComfyUI is started with/i);
   });
 
+  it("does not call a BODY-read failure an authentication refusal (#2754, gate round 3)", async () => {
+    // managerFetch's `await res.text()` is unguarded, so a 2xx whose body rejects
+    // throws from the same place a 401 does. Classifying every throw as "refused"
+    // would answer a broken pipe with "configure your gateway credentials".
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string): Promise<Response> => {
+        const path = new URL(url).pathname;
+        if (path === "/manager/version") {
+          return new Response(
+            new ReadableStream({
+              start(controller) {
+                controller.error(new Error("aborted"));
+              },
+            }),
+            { status: 200 },
+          );
+        }
+        return new Response("404: Not Found", { status: 404 });
+      }),
+    );
+
+    const error = await detectionError();
+    expect((error.details as { managerVersionEvidence?: string }).managerVersionEvidence).toBe(
+      "unreadable",
+    );
+    expect(error.message).not.toMatch(/authentication failure/i);
+    expect(error.message).not.toMatch(/credentials/i);
+    expect(error.message).toMatch(/could not be established/i);
+  });
+
   it("will not call a 5xx on the version route absence (#2754, gate round 2)", async () => {
     // Both queue routes 404 and the version routes 503. The old single-arm message
     // recommended --enable-manager here — a Manager migration prescribed to a

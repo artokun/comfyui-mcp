@@ -769,12 +769,22 @@ async function probeManagerVersionEvidence(base: string): Promise<ManagerVersion
       );
       if (major !== undefined) return { kind: "version", major };
     } catch {
-      // managerFetch ran onSoftFailure BEFORE throwing, so the status is already
-      // captured. Swallow the throw itself — it must not replace the reader's
-      // queue-detection error with a secondary probe's — but REMEMBER that this
-      // route was refused rather than silent.
-      refused = true;
-      refusedStatus ??= statusSeen;
+      // Swallow the throw — it must not replace the reader's queue-detection
+      // error with a secondary probe's — but classify it before moving on.
+      //
+      // NOT every throw here is an authentication refusal (codex gate round 3).
+      // Soft mode throws for 401/407, and it also lets a body-read rejection
+      // escape: `await res.text()` on a 2xx that stalls or resets is unguarded, so
+      // a `refused = true` in every catch would answer a broken pipe with
+      // "configure your gateway credentials". managerFetch runs onSoftFailure
+      // BEFORE the auth throw, and never runs it on a 2xx — so a status is here
+      // exactly when the response was a real, non-ok answer we can classify.
+      if (statusSeen !== undefined && explainManagerAuthenticationRequired(statusSeen) !== "") {
+        refused = true;
+        refusedStatus ??= statusSeen;
+      }
+      // Anything else keeps `kind` at its "hard-error" seed and lands in
+      // `unreadable`, which claims nothing about whether Manager is there.
     }
     kinds.push(kind);
   }
