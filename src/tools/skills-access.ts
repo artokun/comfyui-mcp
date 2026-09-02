@@ -286,20 +286,54 @@ function suggest(names: string[]): string {
     : "No bundled pack ships a ready workflow.";
 }
 
-/** The whole "this pack exists but has no graph" sentence, for a pack that IS
- *  bundled. Distinguishes an installer-only pack (pack.yaml `workflow: null`,
- *  working as intended) from a pack that DECLARES a filename which is then
- *  absent (a broken bundle) — so the message never asserts a cause it did not
- *  check. read_workflow and check_runtime share this one builder; deriving it
- *  twice is the defect class this whole change is about. Error path only. */
+/** The "this directory exists but has no graph" sentence — the PURE half, so
+ *  every branch is testable without planting fixture directories in packs/.
+ *
+ *  FIVE distinct states share this exit, and collapsing them is the same defect
+ *  this PR is fixing one level up: a message that asserts a cause nobody checked.
+ *  "Installer-only" is a deliberate, working-as-intended state (pack.yaml
+ *  `workflow: null`) — reporting a malformed pack.yaml, an absent pack.yaml, or
+ *  `workflow: 42` as "installer-only" hides a broken bundle behind a reassuring
+ *  explanation, and the has_workflow footnote is itself false when action:"list"
+ *  does not list the directory at all (it requires a pack.yaml to consider one a
+ *  pack). */
+export function describeMissingWorkflow(
+  name: string,
+  state: { hasPackYaml: boolean; meta: Record<string, unknown> | null },
+): string {
+  // No pack.yaml → action:"list" does not consider this a pack at all, so the
+  // "has_workflow: false" footnote below would be a claim about a row that
+  // does not exist.
+  if (!state.hasPackYaml) {
+    return `"${name}" is a directory under packs/ with no pack.yaml, so it is not a bundled pack and action:"list" does not report it.`;
+  }
+  // Covers unreadable, malformed, empty, and "parsed to something that is not a
+  // mapping" alike — in none of them did anyone verify an installer-only intent.
+  if (state.meta === null) {
+    return `Pack "${name}" has a pack.yaml that did not parse to a YAML mapping, so no workflow filename could be resolved.`;
+  }
+  const declared = state.meta.workflow;
+  const footnote = ` action:"list" reports has_workflow: false for it.`;
+  if (typeof declared === "string") {
+    // Declared a name; the file is absent — a broken bundle, NOT installer-only.
+    return `Pack "${name}" ships no workflow — its declared workflow file (${resolveWorkflowFileName(state.meta)}) is missing from the pack.${footnote}`;
+  }
+  if (declared != null) {
+    return `Pack "${name}" ships no workflow — its pack.yaml sets \`workflow\` to a ${typeof declared} rather than a filename.${footnote}`;
+  }
+  // `workflow: null` or absent, in a pack.yaml that parsed — the intended
+  // installer-only shape (qwen-image, ltx-2.3).
+  return `Pack "${name}" ships no workflow — pack.yaml declares no workflow, so it is installer-only.${footnote}`;
+}
+
+/** I/O half: read the pack's metadata state, then describe it. read_workflow and
+ *  check_runtime share this one builder. Error path only. */
 function noWorkflowSentence(name: string): string {
   const packDir = join(packsDir(), name);
-  const meta = readPackMeta(packDir);
-  const why =
-    typeof meta?.workflow === "string"
-      ? `its declared workflow file (${resolveWorkflowFileName(meta)}) is missing from the pack`
-      : "pack.yaml declares no workflow, so it is installer-only";
-  return `Pack "${name}" ships no workflow — ${why}. action:"list" reports has_workflow: false for it.`;
+  return describeMissingWorkflow(name, {
+    hasPackYaml: existsSync(join(packDir, "pack.yaml")),
+    meta: readPackMeta(packDir),
+  });
 }
 
 /** Locate a pack's workflow.json file path (name-guarded, must exist). Returns

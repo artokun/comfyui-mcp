@@ -65,6 +65,7 @@ import {
   enumeratePacks,
   resolvePackWorkflowFile,
   resolveWorkflowFileName,
+  describeMissingWorkflow,
 } from "../../tools/skills-access.js";
 
 type Handler = (args: Record<string, any>) => Promise<{
@@ -739,5 +740,78 @@ describe("pack workflow filename — one derivation (#2748)", () => {
       }))
       .filter((r) => r.listed !== r.resolved);
     expect(disagreements).toEqual([]);
+  });
+});
+
+/**
+ * #2748 (gate round 2) — the workflow-miss message must not explain a state it
+ * never checked.
+ *
+ * "Installer-only" is a deliberate, working-as-intended state. The first draft
+ * of this fix returned that sentence for EVERY non-string `workflow` value, so a
+ * malformed pack.yaml, a missing pack.yaml, or `workflow: 42` — all broken
+ * bundles — were reported as intentional, hiding the breakage behind a
+ * reassuring explanation. That is the same defect (a message asserting an
+ * unverified cause) the rest of this change removes.
+ *
+ * The classifier is pure so every branch is reachable without planting fixture
+ * directories in the real packs/ tree.
+ */
+describe("describeMissingWorkflow — states are not collapsed (#2748)", () => {
+  const INSTALLER_ONLY = /installer-only/;
+
+  it("calls a pack.yaml-less directory what it is, and does not claim list reports it", () => {
+    const msg = describeMissingWorkflow("stray-dir", { hasPackYaml: false, meta: null });
+    expect(msg).toMatch(/no pack\.yaml/);
+    expect(msg).not.toMatch(INSTALLER_ONLY);
+    // action:"list" requires a pack.yaml to treat a directory as a pack, so a
+    // has_workflow footnote here would describe a row that does not exist.
+    expect(msg).not.toMatch(/has_workflow/);
+  });
+
+  it("reports unparseable pack.yaml as unparseable, not as installer-only", () => {
+    const msg = describeMissingWorkflow("broken", { hasPackYaml: true, meta: null });
+    expect(msg).toMatch(/did not parse to a YAML mapping/);
+    expect(msg).not.toMatch(INSTALLER_ONLY);
+  });
+
+  it("reports a non-string `workflow` as a bad declaration, not as installer-only", () => {
+    for (const declared of [42, true, [], {}]) {
+      const msg = describeMissingWorkflow("odd", {
+        hasPackYaml: true,
+        meta: { workflow: declared },
+      });
+      expect(msg).toMatch(/rather than a filename/);
+      expect(msg).not.toMatch(INSTALLER_ONLY);
+    }
+  });
+
+  it("reports a declared-but-absent workflow file as a broken bundle, naming the file", () => {
+    const msg = describeMissingWorkflow("broken-bundle", {
+      hasPackYaml: true,
+      meta: { workflow: "graph.json" },
+    });
+    expect(msg).toMatch(/declared workflow file \(graph\.json\) is missing/);
+    expect(msg).not.toMatch(INSTALLER_ONLY);
+  });
+
+  it("names the SANITIZED filename it actually looked for, not the raw declaration", () => {
+    // An unsafe declaration falls back to workflow.json in the resolver, so the
+    // message must name workflow.json — quoting "sub/graph.json" would send the
+    // reader hunting for a file the code never opened.
+    const msg = describeMissingWorkflow("unsafe", {
+      hasPackYaml: true,
+      meta: { workflow: "sub/graph.json" },
+    });
+    expect(msg).toMatch(/\(workflow\.json\) is missing/);
+    expect(msg).not.toContain("sub/graph.json");
+  });
+
+  it("ONLY a parsed pack.yaml with workflow null/absent is called installer-only", () => {
+    for (const meta of [{ workflow: null }, {}, { workflow: undefined }]) {
+      const msg = describeMissingWorkflow("qwen-image", { hasPackYaml: true, meta });
+      expect(msg).toMatch(INSTALLER_ONLY);
+      expect(msg).toMatch(/has_workflow: false/);
+    }
   });
 });
