@@ -808,12 +808,23 @@ describe("describeMissingWorkflow — states are not collapsed (#2748)", () => {
     expect(msg).not.toContain("sub/graph.json");
   });
 
-  it("ONLY a parsed pack.yaml with workflow null/absent is called installer-only", () => {
-    for (const meta of [{ workflow: null }, {}, { workflow: undefined }]) {
-      const msg = describeMissingWorkflow("qwen-image", { hasPackYaml: true, meta });
-      expect(msg).toMatch(INSTALLER_ONLY);
-      expect(msg).toMatch(/has_workflow: false/);
-    }
+  it("ONLY an EXPLICIT `workflow: null` is called installer-only", () => {
+    const msg = describeMissingWorkflow("qwen-image", {
+      hasPackYaml: true,
+      meta: { workflow: null },
+    });
+    expect(msg).toMatch(INSTALLER_ONLY);
+    expect(msg).toMatch(/has_workflow: false/);
+  });
+
+  it("an OMITTED workflow key is not treated as a declaration of installer-only", () => {
+    // All 56 bundled packs write `workflow:` explicitly, so an absent key
+    // expresses no intent — the author may equally have meant workflow.json to
+    // be present. Blessing it as installer-only would hide a broken pack.
+    const msg = describeMissingWorkflow("no-key", { hasPackYaml: true, meta: {} });
+    expect(msg).not.toMatch(INSTALLER_ONLY);
+    expect(msg).toMatch(/no `workflow` key/);
+    expect(msg).toMatch(/default workflow\.json is not in the pack/);
   });
 });
 

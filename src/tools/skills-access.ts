@@ -331,9 +331,16 @@ export function describeMissingWorkflow(
   if (declared != null) {
     return `Pack "${name}" ships no workflow — its pack.yaml sets \`workflow\` to a ${typeof declared} rather than a filename.${footnote}`;
   }
-  // `workflow: null` or absent, in a pack.yaml that parsed — the intended
-  // installer-only shape (qwen-image, ltx-2.3).
-  return `Pack "${name}" ships no workflow — pack.yaml declares no workflow, so it is installer-only.${footnote}`;
+  // An OMITTED key is not a declaration. All 56 bundled packs write `workflow:`
+  // explicitly, so an absent key expresses no intent — the author may equally
+  // have meant workflow.json to be there. Report only what was checked and let
+  // the reader judge, rather than blessing a possibly-broken pack.
+  if (!("workflow" in state.meta)) {
+    return `Pack "${name}" ships no workflow — its pack.yaml has no \`workflow\` key, and the default workflow.json is not in the pack.${footnote}`;
+  }
+  // An EXPLICIT `workflow: null` — the declared installer-only shape
+  // (qwen-image, ltx-2.3).
+  return `Pack "${name}" ships no workflow — pack.yaml declares \`workflow: null\`, so it is installer-only.${footnote}`;
 }
 
 /** I/O half: read the pack's metadata state, then describe it. read_workflow and
