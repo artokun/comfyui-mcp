@@ -415,6 +415,11 @@ let objectInfoInflight: Promise<ObjectInfo> | null = null;
 // stale value (codex WS-3 finding #1).
 let objectInfoEpoch = 0;
 
+/** Fresh `/object_info` snapshot, or null when the cache is empty or expired. */
+export function peekObjectInfoCache(): ObjectInfo | null {
+  return objectInfoCacheFresh() ? objectInfoCache : null;
+}
+
 function objectInfoCacheFresh(): boolean {
   if (objectInfoCache === null) return false;
   const age = Date.now() - objectInfoCachedAt;
@@ -778,9 +783,9 @@ function describeRejectedOutputs(nodeErrors: unknown): string | undefined {
 export async function enqueuePrompt(
   workflow: Record<string, unknown>,
   extraData?: Record<string, unknown>,
-  opts?: { front?: boolean },
+  opts?: { front?: boolean; partialExecutionTargets?: readonly string[] },
 ): Promise<{ prompt_id: string; queue_remaining?: number; rejectedOutputs?: string }> {
-  if (isCloudMode()) return cloudClient.enqueuePrompt(workflow, extraData);
+  if (isCloudMode()) return cloudClient.enqueuePrompt(workflow, extraData, opts);
 
   // POST /prompt directly (rather than the SDK's _enqueue_prompt) for two
   // reasons: (1) the SDK does not forward `extra_data` — how comfy.org API-node
@@ -799,6 +804,9 @@ export async function enqueuePrompt(
       client_id: "comfyui-mcp",
       ...(extraData ? { extra_data: extraData } : {}),
       ...(opts?.front ? { front: true } : {}),
+      ...(opts?.partialExecutionTargets?.length
+        ? { partial_execution_targets: [...opts.partialExecutionTargets] }
+        : {}),
     }),
   });
   if (!res.ok) {

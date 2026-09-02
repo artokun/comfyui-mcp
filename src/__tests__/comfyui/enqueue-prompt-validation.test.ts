@@ -119,6 +119,23 @@ describe("enqueuePrompt — surfaces ComfyUI 400 validation details (#485)", () 
     expect(out.queue_remaining).toBe(1); // real depth, not -17
   });
 
+  it("forwards partial execution targets to the direct /prompt fallback", async () => {
+    comfyuiFetch
+      .mockResolvedValueOnce(res(200, { prompt_id: "scoped", number: 1 }, "OK"))
+      .mockResolvedValueOnce(res(200, { queue_running: [], queue_pending: [] }, "OK"));
+
+    await enqueuePrompt(
+      { "380": { class_type: "VHS_VideoCombine", inputs: {} } },
+      undefined,
+      { partialExecutionTargets: ["380"] },
+    );
+
+    const request = comfyuiFetch.mock.calls[0]?.[1] as RequestInit | undefined;
+    expect(JSON.parse(String(request?.body))).toMatchObject({
+      partial_execution_targets: ["380"],
+    });
+  });
+
   it("falls back to undefined queue_remaining when /queue can't be read", async () => {
     comfyuiFetch
       .mockResolvedValueOnce(res(200, { prompt_id: "abc", number: 5 }, "OK"))
