@@ -78,3 +78,15 @@ orch.err.log
 # Local Discord watchdog/notifier toolkit (token read from ~/.claude.json at runtime; not committed)
 /.discord/
 codex-kp-smoke-orch.log
+
+# Agent scratch at the repo root. A stray `git add -A` once swept 291 of these
+# into a single commit (3ef895f, local-only — never reached any pushed ref).
+# Ignore them so a wide `add` can't sweep them in again.
+/.tmp-*
+/.playwright-mcp/
+
+# Third-party custom-node packs unpacked into the repo root for inspection.
+# They ship their own licenses (Impact Pack is GPL-3.0) and must never land in
+# this MIT-licensed repo. Clone them under the ComfyUI install, not here.
+/ComfyUI-Impact-Pack-Main/
+/ComfyUI-*-Main/
