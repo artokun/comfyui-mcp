@@ -120,6 +120,7 @@ interface Drive {
       | "scrubbed-transport"
       | "event-notification-transport"
       | "unrelated-transport"
+      | "panel-read-retry-after-open-workflow-success"
       | "panel-read-retry-outline-success"
       | "panel-read-retry-query-success"
       | "panel-read-retry-find-success"
@@ -271,14 +272,25 @@ function startDrive(opts: {
         const notify = (method: string, params: Record<string, unknown>) =>
           client.notificationHandler?.({ method, params: { threadId: "thread-1", turnId, ...params } });
         const enter = { type: "mcpToolCall", id: "enter-1", server: "panel", tool: "panel_enter_subgraph" };
+        const openWorkflow = {
+          type: "mcpToolCall",
+          id: "open-workflow-1",
+          server: "panel",
+          tool: "panel_open_workflow",
+        };
         if (
           kind !== "panel-read-no-enter-no-retry" &&
+          kind !== "panel-read-retry-after-open-workflow-success" &&
           kind !== "panel-read-retry-after-run-find-success" &&
           kind !== "panel-run-no-retry" &&
           kind !== "panel-run-worker-transport-no-retry"
         ) {
           notify("item/started", { item: enter });
           notify("item/completed", { item: { ...enter, status: "completed" } });
+        }
+        if (kind === "panel-read-retry-after-open-workflow-success") {
+          notify("item/started", { item: openWorkflow });
+          notify("item/completed", { item: { ...openWorkflow, status: "completed" } });
         }
         if (kind === "panel-mutation-no-retry") {
           const mutation = { type: "mcpToolCall", id: "mutation-1", server: "panel", tool: "panel_set_property" };
@@ -389,6 +401,7 @@ function startDrive(opts: {
               willRetry: true,
             });
             if (
+              kind === "panel-read-retry-after-open-workflow-success" ||
               kind === "panel-read-retry-outline-success" ||
               kind === "panel-read-retry-query-success" ||
               kind === "panel-read-retry-find-success"
@@ -493,8 +506,25 @@ describe("Codex mid-session MCP drop reconnects panel tools (#1524)", () => {
     );
     expect([...PANEL_OUTER_TRANSPORT_RETRY_ARM_TOOLS]).toEqual([
       "panel_enter_subgraph",
+      "panel_open_workflow",
       "panel_run",
     ]);
+  });
+
+  it("retries a live panel_graph_outline once after panel_open_workflow (#2286)", async () => {
+    const drive = startDrive({ listings: [PANEL_UP] });
+    await drive.endTurn("panel-read-retry-after-open-workflow-success");
+
+    expect(drive.reloadCalls).toBe(0);
+    expect(drive.interruptCalls).toBe(0);
+    expect(drive.events.filter((e) => e.type === "result")).toHaveLength(1);
+    expect(
+      drive.events.filter(
+        (e) => e.type === "error" && !(e as { sessionNotice?: boolean }).sessionNotice,
+      ),
+    ).toHaveLength(0);
+
+    await drive.finish();
   });
 
   it("retries a live panel_graph_outline once after panel_enter_subgraph (#2395)", async () => {
