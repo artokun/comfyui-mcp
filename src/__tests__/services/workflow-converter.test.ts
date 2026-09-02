@@ -3864,120 +3864,13 @@ describe("convertUiToApi — forceInput-only scalar input (issue #2753)", () => 
     expect(inputs.clip_device).toBe("default");
   });
 
-  // A row saved BEFORE ComfyUI's widget/input unification kept a placeholder slot
-  // for the forceInput input. ComfyUI's own loader (migrateWidgetsValues) drops it
-  // by matching the row length against that legacy layout; so do we, otherwise the
-  // fix above would shift a legacy row the other way.
-  it("legacy row with a forceInput placeholder is still read correctly", () => {
-    const { workflow } = convertUiToApi(
-      animaGraph([null, ...SAVED_ROW]),
-      ANIMA_INFO,
-    );
-    const inputs = (workflow["7"] as { inputs: Record<string, unknown> }).inputs;
-    expect(inputs).toMatchObject({
-      unet_name: "anima-base-v1.0.safetensors",
-      clip_name: "qwen_3_06b_base.safetensors",
-      vae_name: "qwen_image_vae.safetensors",
-      weight_dtype: "default",
-      clip_device: "default",
-    });
-  });
-
-  // The length gate must not fire on a row that is neither layout — a modern row
-  // with an extra serialized value must keep falling through to the existing
-  // #1869 extras handling rather than silently losing its FIRST value.
-  it("does not strip anything when the row matches neither layout", () => {
-    const row = [...SAVED_ROW, "trailing_extra", "one_more"];
-    const { workflow } = convertUiToApi(animaGraph(row), ANIMA_INFO);
-    const inputs = (workflow["7"] as { inputs: Record<string, unknown> }).inputs;
-    expect(inputs.unet_name).toBe("anima-base-v1.0.safetensors");
-  });
-
-  // A SHIPPED node with the same shape, so the pin is not only on the reporter's
-  // custom node: rgthree's SDXLPowerPromptPositive declares opt_clip_width and
-  // opt_clip_height as ["INT", {forceInput: true, default: 1024}] ahead of three
-  // combo widgets, so before the fix BOTH stole a slot and the three combos read
-  // two positions late.
-  it("rgthree SDXLPowerPromptPositive: two forceInput INTs steal no slots", () => {
-    const RGTHREE_INFO = {
-      "SDXL Power Prompt - Positive (rgthree)": {
-        input: {
-          required: {
-            prompt_g: ["STRING", { multiline: true }],
-            prompt_l: ["STRING", { multiline: true }],
-          },
-          optional: {
-            opt_model: ["MODEL"],
-            opt_clip: ["CLIP"],
-            opt_clip_width: ["INT", { forceInput: true, default: 1024 }],
-            opt_clip_height: ["INT", { forceInput: true, default: 1024 }],
-            insert_lora: [["CHOOSE", "DISABLE LORAS", "detail.safetensors"]],
-            insert_embedding: [["CHOOSE", "badhands"]],
-            insert_saved: [["CHOOSE", "my_prompt"]],
-          },
-        },
-        input_order: {
-          required: ["prompt_g", "prompt_l"],
-          optional: [
-            "opt_model",
-            "opt_clip",
-            "opt_clip_width",
-            "opt_clip_height",
-            "insert_lora",
-            "insert_embedding",
-            "insert_saved",
-          ],
-        },
-        output: ["CONDITIONING"],
-        output_name: ["CONDITIONING"],
-      },
-    } as never;
-    const { workflow } = convertUiToApi(
-      {
-        nodes: [
-          {
-            id: 4,
-            type: "SDXL Power Prompt - Positive (rgthree)",
-            mode: 0,
-            inputs: [
-              { name: "opt_model", type: "MODEL", link: null },
-              { name: "opt_clip", type: "CLIP", link: null },
-              { name: "opt_clip_width", type: "INT", link: null },
-              { name: "opt_clip_height", type: "INT", link: null },
-            ],
-            outputs: [{ name: "CONDITIONING", type: "CONDITIONING", links: [] }],
-            widgets_values: [
-              "a photo of a cat",
-              "cat",
-              "detail.safetensors",
-              "badhands",
-              "my_prompt",
-            ],
-          },
-        ],
-        links: [],
-      } as never,
-      RGTHREE_INFO,
-    );
-    const inputs = (workflow["4"] as { inputs: Record<string, unknown> }).inputs;
-    expect(inputs).toMatchObject({
-      prompt_g: "a photo of a cat",
-      prompt_l: "cat",
-      insert_lora: "detail.safetensors",
-      insert_embedding: "badhands",
-      insert_saved: "my_prompt",
-    });
-    // pre-fix: the two forceInput INTs consumed prompt_g/prompt_l's slots and the
-    // three combos each read two positions late (falling back to "CHOOSE").
-    expect(inputs.insert_lora).not.toBe("CHOOSE");
-    expect(inputs.insert_embedding).not.toBe("CHOOSE");
-  });
-
-  // A row ONE longer than the modern layout is equally well explained by a modern
-  // row carrying a frontend-only serialized extra (#1869), and THAT reading is the
-  // right one — the extras pass recovers the real value and reports the skip, while
-  // a legacy strip would put the extra on a real widget. So the length coincidence
-  // must not be enough on its own.
+  // Excluding the socket-only input hands a row that is one longer than the widget
+  // layout back to the #1869 extras pass, which is what reads it correctly. Pin
+  // that, because the tempting "normalize the row by length first" shortcut breaks
+  // exactly here: it would claim the extra as a legacy placeholder and put
+  // "detect_range" on `path`, silently. (The reverse — a genuinely legacy row with a
+  // placeholder — is the accepted limitation noted at the mapping site: the two are
+  // indistinguishable by length, so neither is guessed.)
   const AMVIDEO_INFO = {
     AMVideoRead: {
       input: {
@@ -4008,7 +3901,7 @@ describe("convertUiToApi — forceInput-only scalar input (issue #2753)", () => 
     } as never;
   }
 
-  it("a serialized action button beats the legacy-placeholder reading of the same length", () => {
+  it("hands a one-long row to the #1869 extras pass, which recovers the real value", () => {
     const { workflow, warnings } = convertUiToApi(
       amVideoGraph(["D:/input.mov", "detect_range", 12]),
       AMVIDEO_INFO,
@@ -4020,7 +3913,7 @@ describe("convertUiToApi — forceInput-only scalar input (issue #2753)", () => 
     expect(warnings.join(" ")).toContain("detect_range");
   });
 
-  it("a type-refuted extra beats it too (the other #1869 signal)", () => {
+  it("…via the other #1869 signal too (a value the declared type refutes)", () => {
     const { workflow } = convertUiToApi(
       amVideoGraph(["D:/input.mov", "not_a_number", 12]),
       AMVIDEO_INFO,

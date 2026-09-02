@@ -773,86 +773,6 @@ function skipSerializedActionWidgets(opts: {
   return widgetIdx;
 }
 
-/**
- * #2753 — a saved row from BEFORE ComfyUI's widget/input unification DID carry a
- * placeholder slot for every `forceInput` input; a row saved after it does not.
- * The two layouts are positionally indistinguishable from a single node, so
- * excluding forceInput from the widget list (which is correct for every current
- * frontend) would shift a legacy row the other way.
- *
- * ComfyUI's own loader settles it by LENGTH — `migrateWidgetsValues` builds the
- * legacy slot layout from the node def, and only when the saved row's length
- * matches it exactly does it drop the forceInput positions. Mirror that here so
- * the converter reads both eras the way the canvas would.
- *
- * Deliberately narrow. It is a no-op unless the node declares a forceInput
- * widget-typed input AND the row length matches the legacy layout exactly (a
- * modern row is strictly shorter, so it can never match), and it bails out on a
- * dynamic combo, whose nested arity makes any length argument meaningless.
- *
- * It also YIELDS to #1869. A row one longer than the modern layout is equally
- * well explained by a MODERN row carrying a frontend-only serialized extra, and
- * the extras pass reads that case CORRECTLY while a legacy strip here would
- * pre-empt it and put the extra on a real widget — `["D:/input.mov",
- * "detect_range", 12]` against {forceInput, path, first_frame} became
- * `path: "detect_range"`, silently, where the extras pass recovers
- * `path: "D:/input.mov"` and reports the skip. So the same skip decision is run
- * as a dry pass first: if it fires anywhere in this row, the length coincidence
- * settles nothing and the row is left exactly as saved.
- */
-function stripLegacyForceInputSlots<
-  T extends unknown[] | Record<string, unknown>,
->(
-  widgetValues: T,
-  def: ComfyUINodeDef,
-  orderedNames: string[],
-  widgetNames: string[],
-): T | unknown[] {
-  if (!Array.isArray(widgetValues)) return widgetValues;
-  const specFor = (name: string) =>
-    (def.input?.required as Record<string, unknown> | undefined)?.[name] ??
-    (def.input?.optional as Record<string, unknown> | undefined)?.[name];
-
-  const isWidget = new Set(widgetNames);
-  const placeholderAt: boolean[] = [];
-  let sawForceInput = false;
-  for (const name of orderedNames) {
-    const spec = specFor(name);
-    const forced = isForceInputSpec(spec) && isPositionalWidgetType(spec);
-    if (!forced && !isWidget.has(name)) continue;
-    if (Array.isArray(spec) && spec[0] === "COMFY_DYNAMICCOMBO_V3") return widgetValues;
-    if (forced) sawForceInput = true;
-    placeholderAt.push(forced);
-    // Mirrors the frontend: a control_after_generate input occupies a second
-    // slot, and that slot is never the forceInput placeholder.
-    if (hasControlAfterGenerate(name, def)) placeholderAt.push(false);
-  }
-  if (!sawForceInput || placeholderAt.length !== widgetValues.length) return widgetValues;
-
-  // Dry run of the #1869 extras pass over the row AS SAVED, against the MODERN
-  // widget layout. Any skip means that reading accounts for the extra value, so
-  // this one must not claim it.
-  let idx = 0;
-  for (let nameIdx = 0; nameIdx < widgetNames.length && idx < widgetValues.length; nameIdx++) {
-    const name = widgetNames[nameIdx];
-    const skipped: unknown[] = [];
-    idx = skipSerializedActionWidgets({
-      values: widgetValues,
-      widgetIdx: idx,
-      spec: specFor(name),
-      def,
-      widgetNames,
-      nameIdx,
-      skipped,
-    });
-    if (skipped.length > 0) return widgetValues;
-    idx++;
-    if (hasControlAfterGenerate(name, def) && nextValueIsControlMode(widgetValues, idx)) idx++;
-  }
-
-  return widgetValues.filter((_v, i) => !placeholderAt[i]);
-}
-
 // ── De-virtualization (Get/Set/Reroute) pre-pass ────────────────────────────
 
 /**
@@ -2852,14 +2772,18 @@ export function convertUiToApi(
     // string landing on `seed`, a LoRA name landing on a VAE). A name-keyed map has
     // no order to disagree about, so it routes into the object branch below, which
     // already fails CLOSED when a name is ambiguous.
-    // …and normalize a legacy forceInput layout first (#2753), so the positional
-    // mapping below sees the same row the current frontend would.
-    const widgetValues = stripLegacyForceInputSlots(
-      node.capturedWidgetValues ?? node.widgets_values ?? [],
-      def,
-      orderedNames,
-      widgetNames,
-    );
+    //
+    // ACCEPTED LIMITATION (#2753): a row saved BEFORE ComfyUI's widget/input
+    // unification carried a placeholder slot for each `forceInput` input, so it is
+    // one longer than the layout mapped here and reads shifted. That length is not
+    // enough to identify it — a MODERN row carrying a frontend-only serialized
+    // extra (#1869) has exactly the same length, and the two readings disagree
+    // about which value is real ([null, "D:/in.mov", 12] is either
+    // placeholder+path+frame or path+button+frame). Normalizing on length alone
+    // therefore breaks one case to fix the other, so neither is guessed: the
+    // extras pass handles the modern reading and reports what it discards, and a
+    // legacy row surfaces through that same warning or through combo validation.
+    const widgetValues = node.capturedWidgetValues ?? node.widgets_values ?? [];
 
     // Some nodes (e.g. VHS_VideoCombine) store widgets_values as a name->value
     // object instead of a positional array — as does the #384 live-canvas
