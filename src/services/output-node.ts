@@ -126,17 +126,16 @@ function stampNode(node: Record<string, unknown>, objectInfo: ObjectInfo): void 
   if (isOutputNodeType(classType, objectInfo)) node.is_output = true;
 }
 
-function stampValue(value: unknown, objectInfo: ObjectInfo, depth: number): unknown {
-  if (depth > 8 || value == null) return value;
+function stampValue(value: unknown, objectInfo: ObjectInfo, depth: number): void {
+  if (depth > 8 || value == null) return;
   if (Array.isArray(value)) {
     for (const item of value) stampValue(item, objectInfo, depth + 1);
-    return value;
+    return;
   }
   const rec = asRecord(value);
-  if (!rec) return value;
+  if (!rec) return;
   stampNode(rec, objectInfo);
   for (const nested of Object.values(rec)) stampValue(nested, objectInfo, depth + 1);
-  return rec;
 }
 
 function stampJsonLines(text: string, objectInfo: ObjectInfo): string {

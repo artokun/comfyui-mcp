@@ -20809,50 +20809,50 @@ export function buildPanelToolDefs(): PanelToolDef[] {
       async (args: A, ctx) =>
         stampOutputNodeFlagsOnToolResult(
           projectFindNodesReply(
-          withTruncationHints(
-            await ctx.call({
-              cmd: "graph_find_nodes",
-              query: args.query,
-              type: args.type,
-              title: args.title,
-              input: args.input,
-              output: args.output,
-              widget: args.widget,
-              widget_value: args.widget_value,
-              is_output: args.is_output,
-              is_subgraph: args.is_subgraph,
-              mode: args.mode,
-              limit: args.limit,
-            }),
-            [
-            {
-              flag: "truncated",
-              key: "truncation_hint",
-              // #809 (defect 2): the scan STOPS at the cap, so `count` is not a match
-              // total and the absent matches are not "no more matches".
-              //
-              // The wording is deliberately "may be incomplete", not "there ARE more"
-              // (codex gate): this orchestrator ships ahead of the panel, and a panel
-              // build older than the matching panel PR sets `truncated` on an EXACT-cap
-              // result that dropped nothing. Asserting more exist would manufacture the
-              // very false alarm this issue is removing. A current panel supplies its own
-              // precise hint and the rider defers to it.
-              text: (p) => {
-                const inForce =
-                  typeof args.limit === "number" ? args.limit : FIND_NODES_DEFAULT_LIMIT;
-                const raise =
-                  inForce >= FIND_NODES_LIMIT_CEILING
-                    ? `\`limit\` is already at its ceiling of ${FIND_NODES_LIMIT_CEILING}, so narrow with \`type\`/\`title\`/\`widget_value\` instead`
-                    : `Raise \`limit\` up to ${FIND_NODES_LIMIT_CEILING}, or narrow with \`type\`/\`title\`/\`widget_value\``;
-                return (
-                  `The scan reached \`limit\`=${inForce} at ${replyCount(p, "matches") ?? "the cap"} match(es), so this result MAY be incomplete — ` +
-                  `treat it as "not proof a node is absent" rather than as the full match set. ${raise}.`
-                );
-              },
-            },
-            ],
-          ),
-          args.fields,
+            withTruncationHints(
+              await ctx.call({
+                cmd: "graph_find_nodes",
+                query: args.query,
+                type: args.type,
+                title: args.title,
+                input: args.input,
+                output: args.output,
+                widget: args.widget,
+                widget_value: args.widget_value,
+                is_output: args.is_output,
+                is_subgraph: args.is_subgraph,
+                mode: args.mode,
+                limit: args.limit,
+              }),
+              [
+                {
+                  flag: "truncated",
+                  key: "truncation_hint",
+                  // #809 (defect 2): the scan STOPS at the cap, so `count` is not a match
+                  // total and the absent matches are not "no more matches".
+                  //
+                  // The wording is deliberately "may be incomplete", not "there ARE more"
+                  // (codex gate): this orchestrator ships ahead of the panel, and a panel
+                  // build older than the matching panel PR sets `truncated` on an EXACT-cap
+                  // result that dropped nothing. Asserting more exist would manufacture the
+                  // very false alarm this issue is removing. A current panel supplies its own
+                  // precise hint and the rider defers to it.
+                  text: (p) => {
+                    const inForce =
+                      typeof args.limit === "number" ? args.limit : FIND_NODES_DEFAULT_LIMIT;
+                    const raise =
+                      inForce >= FIND_NODES_LIMIT_CEILING
+                        ? `\`limit\` is already at its ceiling of ${FIND_NODES_LIMIT_CEILING}, so narrow with \`type\`/\`title\`/\`widget_value\` instead`
+                        : `Raise \`limit\` up to ${FIND_NODES_LIMIT_CEILING}, or narrow with \`type\`/\`title\`/\`widget_value\``;
+                    return (
+                      `The scan reached \`limit\`=${inForce} at ${replyCount(p, "matches") ?? "the cap"} match(es), so this result MAY be incomplete — ` +
+                      `treat it as "not proof a node is absent" rather than as the full match set. ${raise}.`
+                    );
+                  },
+                },
+              ],
+            ),
+            args.fields,
           ),
           outputNodeObjectInfoNow(),
         ),
