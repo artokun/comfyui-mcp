@@ -206,6 +206,7 @@ describe("node_pack registration", () => {
     const [{ description }] = registered();
     expect(description).toMatch(/LOCAL-ONLY/);
     expect(description).toMatch(/jailed to custom_nodes/);
+    expect(description).toMatch(/pack-relative paths to stage\/scope/);
     // scaffold's and publish's original warnings, both carried into the
     // per-action prose rather than lost in the merge.
     expect(description).toMatch(/IRREVERSIBLE, EXTERNAL action/);
@@ -377,7 +378,7 @@ describe("node_pack actions call the same services with the same arguments", () 
       pack: "MyPack",
       git_action: "commit",
       message: "fix: thing",
-      paths: ["MyPack/x.py"],
+      paths: ["x.py"],
       max_chars: 5000,
     });
     expect(mocks.nodePackGit).toHaveBeenCalledWith(
@@ -385,7 +386,7 @@ describe("node_pack actions call the same services with the same arguments", () 
         pack: "MyPack",
         action: "commit",
         message: "fix: thing",
-        paths: ["MyPack/x.py"],
+        paths: ["x.py"],
         maxChars: 5000,
       },
       undefined,

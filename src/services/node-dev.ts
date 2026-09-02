@@ -311,7 +311,9 @@ function assertNoWindowsHazards(raw: string): void {
         `Refusing reserved Windows device name "${seg}".`,
       );
     }
-    if (/[ .]$/.test(seg)) {
+    // `.` and `..` are traversal operators, not Windows filenames with a
+    // trailing dot. Containment checks below still decide whether they escape.
+    if (seg !== "." && seg !== ".." && /[ .]$/.test(seg)) {
       throw new NodeDevError(
         `Refusing path segment "${seg}": trailing dot or space is unsafe on Windows.`,
       );
@@ -1574,6 +1576,11 @@ function packRelativePath(
   if (!raw) throw new NodeDevError("A path is required (received an empty string).");
 
   const spelledOut = isAbsolute(raw);
+  // Check the caller's spelling before joining it to the pack name. In particular,
+  // path.join("Pack", "\\\\server\\share\\file.py") can erase the leading UNC marker
+  // on Windows (and POSIX does not consider it absolute), turning a Windows hazard
+  // into an apparently harmless pack-relative path.
+  assertNoWindowsHazards(raw);
   const { abs } = resolveInJail(spelledOut ? raw : join(packName, raw), deps, resolvedBase);
   const rel = relative(packDir, abs);
   if (rel.startsWith("..") || isAbsolute(rel)) {

@@ -767,6 +767,14 @@ describe("nodePackGit", () => {
     );
   });
 
+  it("refuses a missing pack before resolving paths or invoking git", () => {
+    const { deps, gitCalls } = makeDeps();
+    expect(() =>
+      nodePackGit({ pack: "Missing", action: "diff", paths: ["nodes.py"] }, deps),
+    ).toThrow(/does not exist under custom_nodes/);
+    expect(gitCalls.length).toBe(0);
+  });
+
   // -------------------------------------------------------------------------
   // #2716 — `paths` is documented as PACK-relative, and every documented spelling
   // was refused: relative entries were resolved against the custom_nodes/ ROOT, so
@@ -1085,6 +1093,17 @@ describe("nodePackGit", () => {
           deps,
         ),
       ).toThrow(NodeDevError);
+      expect(gitCalls.length).toBe(0);
+    });
+
+    it("rejects UNC spellings before the pack anchor can erase the marker", () => {
+      mkPackFiles();
+      const { deps, gitCalls } = makeDeps();
+      for (const unc of [String.raw`\\server\share\loot.py`, "//server/share/loot.py"]) {
+        expect(() =>
+          nodePackGit({ pack: "Pack", action: "diff", paths: [unc] }, deps),
+        ).toThrow(/UNC path/);
+      }
       expect(gitCalls.length).toBe(0);
     });
   });
