@@ -711,10 +711,6 @@ export async function comfyuiFetch(
           ? new URL(formatComfyUIUrl(input.href))
           : undefined;
     if (
-      // /view uses its own authenticated/validated panel-origin fallback.
-      // Retrying a loopback alias first would change that fail-closed choice
-      // and make the panel transport tests observe an extra target.
-      init.redirect !== "manual" &&
       retryUrl &&
       String(retryUrl) !== String(input) &&
       isBareFetchFailure(err) &&

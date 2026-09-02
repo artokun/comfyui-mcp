@@ -130,7 +130,10 @@ export async function fetchPanelBasePath(
 ): Promise<string | undefined> {
   let endpoint: string;
   try {
-    endpoint = new URL("/comfyui_mcp_panel/status", comfyuiUrl).toString();
+    endpoint = new URL(
+      "/comfyui_mcp_panel/status",
+      formatComfyUIUrl(comfyuiUrl),
+    ).toString();
   } catch {
     return undefined;
   }

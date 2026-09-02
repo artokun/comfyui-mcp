@@ -52,6 +52,7 @@ describe("fetchPanelBasePath (#296)", () => {
     expect(out).toBe("C:/Users/me/ComfyUI");
     const call = statusCall(fetchMock);
     expect(call, "status GET should have been made").toBeTruthy();
+    expect(String(call?.[0])).toBe("http://localhost:8188/comfyui_mcp_panel/status");
     // A GET (no explicit method / no POST body), not a mutation.
     const init = (call as [string, RequestInit | undefined])[1];
     expect(init?.method ?? "GET").toBe("GET");
