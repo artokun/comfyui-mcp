@@ -1211,6 +1211,21 @@ export const BRIDGE_READONLY_CMDS: ReadonlySet<string> = new Set<string>([
   "graph_get_subgraph",
   "graph_view_selected",
   "graph_view_nodes_in_viewport",
+  // panel#2191 — a capture, and nothing else. The frontend handler saves
+  // ds.scale / ds.offset, LiteGraph.vueNodesMode and the active (sub)graph, fits
+  // the whole graph, draws, encodes a PNG, and restores all four in a `finally`.
+  // Re-dispatching it after a reconnect re-takes the same picture; it is strictly
+  // SAFER to replay than the two entries above it, which move the user's viewport
+  // and do not put it back.
+  //
+  // Its absence here was not a judgement, it was an omission — and it was the
+  // whole of panel#2191. `ctx.mutating` is `!READONLY_CMDS.has(cmd)`, so a
+  // reply-timeout on a screenshot told the reporter their screenshot "MUTATES and
+  // was already delivered to the tab … a blind retry can apply it twice", about a
+  // command GRAPH_CMD_EFFECT (thirty lines below) already classifies as `inert`
+  // and the panel's own READ_ONLY_GRAPH_COMMANDS already classifies as a read.
+  // Two ledgers said read; the one that writes the message said mutation.
+  "graph_screenshot",
   "graph_prompt_director_audit",
   "graph_query",
   "civitai_results",
@@ -1247,7 +1262,10 @@ export const BRIDGE_READONLY_CMDS: ReadonlySet<string> = new Set<string>([
  * workflow content at all. `graph_find_nodes` (#778) was the reported instance;
  * `graph_list_subgraphs`, `graph_screenshot`, `graph_canvas`,
  * `graph_select_nodes`, `graph_enter_subgraph`, `graph_exit_subgraph` and
- * `graph_copy_nodes` were the same defect, unreported. The orchestrator already
+ * `graph_copy_nodes` were the same defect, unreported. (`graph_screenshot` was
+ * later reported on its own — panel#2191, where the mutation reading reached the
+ * user as "this command MUTATES … a blind retry can apply it twice" — and is now
+ * in BRIDGE_READONLY_CMDS as well as here.) The orchestrator already
  * knew they were reads — RETRY_TOKEN_CMD_BY_TOOL's doc names them one by one as
  * "view/read-only" and "reads in spirit" — but that knowledge lived in a third
  * list, so the gate could not see it.
@@ -5037,9 +5055,10 @@ export class UiBridge {
    * The bridge cannot answer this itself, and the first attempt at this proved
    * why. It gated on `ctx.mutating`, i.e. `!BRIDGE_READONLY_CMDS.has(cmd)` --
    * the discriminator this very file documents (see BRIDGE_READONLY_CMDS) as
-   * misclassifying graph_find_nodes, graph_list_subgraphs, graph_screenshot,
-   * graph_canvas, graph_select_nodes, graph_enter/exit_subgraph and
-   * graph_copy_nodes. That is #778, and re-asking it retained seven reads under
+   * misclassifying graph_find_nodes, graph_list_subgraphs, graph_canvas,
+   * graph_select_nodes, graph_enter/exit_subgraph and graph_copy_nodes
+   * (graph_screenshot was in that list too until panel#2191 admitted it to the
+   * set). That is #778, and re-asking it retained seven reads under
    * a comment claiming reads were excluded. The real question is not "does this
    * mutate" but "can this rid ever come back to us as a retry token", which only
    * the retry-token layer knows. So it tells us.

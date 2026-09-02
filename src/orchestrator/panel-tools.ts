@@ -1864,7 +1864,7 @@ function isWorkerTransportRetrySafeCmd(cmd: Record<string, unknown>): boolean {
 // This is an EXPLICIT ALLOWLIST, deliberately NOT "everything not read-only":
 // several genuine reads/probes/views that flow through ctx.call are absent from
 // BRIDGE_READONLY_CMDS (e.g. graph_list_subgraphs, training_get_state,
-// graph_canvas, graph_screenshot), so an exclusion rule would wrongly make THOSE
+// graph_canvas), so an exclusion rule would wrongly make THOSE
 // wait out the reconnect budget. Under-inclusion here is at worst an unfixed edge
 // (a command keeps today's behavior); over-inclusion would regress a read — so we
 // list only commands that unambiguously mutate the graph. Keep in sync when new
@@ -26186,8 +26186,28 @@ CHECKED FOR YOU: the graph read this message prescribes was just run, and it ` +
             { cmd: "graph_screenshot", padding: args.padding },
             target ?? { mode: "current" },
           );
+          // panel#2191 — the SAME bounded budget the sibling idempotent reads
+          // already take, for the same reason and against the same evidence.
+          //
+          // A screenshot's cost scales with the graph: the frontend handler forces
+          // one synchronous LiteGraph repaint of every node and group at the fitted
+          // transform, PNG-encodes the result, and repaints again on restore — all
+          // on the panel's single main thread. Dispatched with no `timeoutMs` it
+          // took the bare 20 000 ms default, and a reporter's 264-node / 63-group
+          // graph was declared "backgrounded or frozen" on a tab that, in the same
+          // session, answered panel_query_graph, panel_get_errors over all 264
+          // nodes, and panel_save_workflow. That is a busy-but-alive main thread,
+          // which is precisely what graph_get_errors' own budget comment describes
+          // — and graph_get_errors survived that graph because it already passes
+          // this constant while the screenshot alone was left on the default.
+          //
+          // Safe to widen because the read is idempotent (see the panel#2191 entry
+          // in BRIDGE_READONLY_CMDS): waiting longer costs a slow reply, never a
+          // double-applied write. Still BOUNDED, never Infinity, so a genuinely
+          // frozen tab fails — at 90 s instead of 20 s.
           const res = (await ctx.bridge.send(cmd as { cmd: string }, {
             tabId: ctx.tabId,
+            timeoutMs: OBJECT_INFO_REFRESH_ACK_TIMEOUT_MS,
           })) as {
             image?: string;
             mimeType?: string;
