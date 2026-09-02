@@ -785,7 +785,7 @@ export async function enqueuePrompt(
   extraData?: Record<string, unknown>,
   opts?: { front?: boolean; partialExecutionTargets?: readonly string[] },
 ): Promise<{ prompt_id: string; queue_remaining?: number; rejectedOutputs?: string }> {
-  if (isCloudMode()) return cloudClient.enqueuePrompt(workflow, extraData);
+  if (isCloudMode()) return cloudClient.enqueuePrompt(workflow, extraData, opts);
 
   // POST /prompt directly (rather than the SDK's _enqueue_prompt) for two
   // reasons: (1) the SDK does not forward `extra_data` — how comfy.org API-node

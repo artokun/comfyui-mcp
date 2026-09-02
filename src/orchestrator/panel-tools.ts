@@ -464,7 +464,7 @@ import {
 import { convertUiToApi, collectNodeTypes } from "../services/workflow-converter.js";
 import type { ObjectInfo } from "../comfyui/types.js";
 import {
-  outputNodeObjectInfoNow,
+  outputNodeObjectInfoForPanel,
   recoverOutputNodeScopedRun,
   stampOutputNodeFlagsOnToolResult,
 } from "../services/output-node.js";
@@ -20481,8 +20481,12 @@ export function buildPanelToolDefs(): PanelToolDef[] {
           return fail(contentOnlyRootShapeReadNote(toolResultText(panelReply)));
         }
         rememberLiveRootViewing(ctx, parseToolResultJson(panelReply)?.viewing);
+        const outputNodeObjectInfo = await outputNodeObjectInfoForPanel(
+          (cmd, timeoutMs) => ctx.call(cmd, timeoutMs),
+          panelReply,
+        );
         return fitQueryGraphReply(
-          stampOutputNodeFlagsOnToolResult(panelReply, outputNodeObjectInfoNow()),
+          stampOutputNodeFlagsOnToolResult(panelReply, outputNodeObjectInfo),
           args.max_chars,
           widgetMaxChars.note ?? legacyWidgetMaxCharsNote(panelReply, widgetMaxChars.value),
         );
@@ -20806,9 +20810,8 @@ export function buildPanelToolDefs(): PanelToolDef[] {
             `Projection: 'compact' (default) keeps id/type/title/mode/is_output/is_subgraph and the matched_on reasons; 'ids' returns bare ids; 'detail' is the full node summary with every widget, socket and the node description. The reply echoes the projection it applied.`,
           ),
       },
-      async (args: A, ctx) =>
-        stampOutputNodeFlagsOnToolResult(
-          projectFindNodesReply(
+      async (args: A, ctx) => {
+        const findReply = projectFindNodesReply(
             withTruncationHints(
               await ctx.call({
                 cmd: "graph_find_nodes",
@@ -20853,9 +20856,13 @@ export function buildPanelToolDefs(): PanelToolDef[] {
               ],
             ),
             args.fields,
-          ),
-          outputNodeObjectInfoNow(),
-        ),
+          );
+        const outputNodeObjectInfo = await outputNodeObjectInfoForPanel(
+          (cmd, timeoutMs) => ctx.call(cmd, timeoutMs),
+          findReply,
+        );
+        return stampOutputNodeFlagsOnToolResult(findReply, outputNodeObjectInfo);
+      },
     ),
     def(
       "panel_add_node",
@@ -23105,7 +23112,7 @@ export function buildPanelToolDefs(): PanelToolDef[] {
     ),
     def(
       "panel_run",
-      "Queue the workflow the user has OPEN — exactly like them pressing Queue Prompt (current widget values, the live graph they can see). On success it confirms the run was queued; if ComfyUI REFUSES the prompt (validation failure on either channel — per-node node_errors OR a top-level error like a missing node type) it returns a FAILURE with that rejection detail, never a false 'queued'. Pass to_node_id to RUN ONLY ONE BRANCH ('run to node'): ComfyUI renders just that output node plus everything upstream of it and SKIPS every other output branch — handy for previewing or debugging part of a big graph without rendering the whole thing. to_node_id MUST be an OUTPUT node (SaveImage, PreviewImage, SaveVideo, VHS_VideoCombine, or any class whose live /object_info has output_node:true) — pick the one at the END of the branch you want; nodes are tagged is_output:true in panel_query_graph's detail rows. The output node may be NESTED inside a subgraph — just pass its id (resolved in the scope you're currently viewing, then anywhere in the workflow); the tool builds the nested execution path for you. Omit it to run the whole graph. DUPLICATE FENCE (#862): if a render this session cannot account for is already in flight (after a reconnect this is usually YOUR earlier render still running — the queue record does not survive a restart), the run is REFUSED before anything is queued and the in-flight prompt is named; inspect queue (action:'list') first, then pass allow_duplicate:true once you have decided it is fine to run behind what is there — a scoped to_node_id preview after a reconnect is the ordinary case for it, a deliberate sweep/batch the other. Use this so the render runs on THEIR canvas and they see the result.",
+      "Queue the workflow the user has OPEN — exactly like them pressing Queue Prompt (current widget values, the live graph they can see). On success it confirms the run was queued; if ComfyUI REFUSES the prompt (validation failure on either channel — per-node node_errors OR a top-level error like a missing node type) it returns a FAILURE with that rejection detail, never a false 'queued'. Pass to_node_id to RUN ONLY ONE BRANCH ('run to node'): ComfyUI renders just that output node plus everything upstream of it and SKIPS every other output branch — handy for previewing or debugging part of a big graph without rendering the whole thing. to_node_id MUST be an OUTPUT node (SaveImage, PreviewImage, SaveVideo, VHS_VideoCombine, or any class whose live /object_info has output_node:true) — pick the one at the END of the branch you want; nodes are tagged is_output:true in panel_query_graph's detail rows. The output node may be NESTED inside a subgraph — just pass its id (resolved in the scope you're currently viewing, then anywhere in the workflow); the connected panel builds the exact nested execution path for you. If a legacy panel still refuses this class, recovery uses /prompt only for an identity-proven root target and FAILS CLOSED rather than guessing a numeric target for a nested execution path. Omit it to run the whole graph. DUPLICATE FENCE (#862): if a render this session cannot account for is already in flight (after a reconnect this is usually YOUR earlier render still running — the queue record does not survive a restart), the run is REFUSED before anything is queued and the in-flight prompt is named; inspect queue (action:'list') first, then pass allow_duplicate:true once you have decided it is fine to run behind what is there — a scoped to_node_id preview after a reconnect is the ordinary case for it, a deliberate sweep/batch the other. Use this so the render runs on THEIR canvas and they see the result.",
       {
         batch_count: z
           .number()
@@ -23519,6 +23526,15 @@ export function buildPanelToolDefs(): PanelToolDef[] {
                 cmd,
                 timeoutMs,
                 cmd.cmd === "graph_run" ? observeRunRid : undefined,
+              ),
+            // The direct fallback is allowed only when the panel's server-observed
+            // origin proves the configured headless target (cloud uses its scoped
+            // cloud payload instead). A missing or contradictory origin fails closed.
+            directFallbackAllowed:
+              isCloudMode() ||
+              sameHttpBase(
+                ctx.bridge?.tabServerOrigin?.(ctx.tabId),
+                getComfyUIBaseUrl(),
               ),
           });
           if (recovered) {

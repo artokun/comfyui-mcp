@@ -34,16 +34,25 @@ type GraphCall = (
 
 type ScopedEnqueueResult = {
   prompt_id: string;
+  prompt_ids?: string[];
   queue_remaining?: number;
   rejectedOutputs?: string;
 };
 
+type ScopedEnqueueOutcome =
+  | { result: ScopedEnqueueResult }
+  | { refusal: string }
+  | null;
+
+type ScopedEnqueueOverride = (
+  workflow: WorkflowJSON,
+  targets: string[],
+  batchCount: number,
+) => Promise<ScopedEnqueueResult>;
+
 let objectInfoOverride: ObjectInfo | null | undefined;
 let enqueueScopedOutputNodeOverride:
-  | ((
-      workflow: WorkflowJSON,
-      targets: string[],
-    ) => Promise<{ prompt_id: string }>)
+  | ScopedEnqueueOverride
   | null = null;
 
 /** Test seam: overlay / recovery object_info without a live ComfyUI. */
@@ -55,12 +64,7 @@ export function setOutputNodeObjectInfoForTests(
 
 /** Test seam: HTTP `/prompt` fallback without posting to a real ComfyUI. */
 export function setEnqueueScopedOutputNodeForTests(
-  fn:
-    | ((
-        workflow: WorkflowJSON,
-        targets: string[],
-      ) => Promise<{ prompt_id: string }>)
-    | null,
+  fn: ScopedEnqueueOverride | null,
 ): void {
   enqueueScopedOutputNodeOverride = fn;
 }
@@ -114,9 +118,11 @@ export function parseNotOutputNodeRefusal(
   return { nodeId, classType };
 }
 
-function nodeClassType(node: Record<string, unknown>): string | null {
-  if (typeof node.type === "string" && node.type) return node.type;
-  if (typeof node.class_type === "string" && node.class_type) return node.class_type;
+function nodeClassType(node: unknown): string | null {
+  const record = asRecord(node);
+  if (!record) return null;
+  if (typeof record.type === "string" && record.type) return record.type;
+  if (typeof record.class_type === "string" && record.class_type) return record.class_type;
   return null;
 }
 
@@ -222,10 +228,115 @@ async function fetchPanelObjectInfo(call: GraphCall): Promise<ObjectInfo | null>
   }
 }
 
+function containsUnstampedNode(value: unknown, depth = 0): boolean {
+  if (depth > 8 || value == null) return false;
+  if (Array.isArray(value)) return value.some((item) => containsUnstampedNode(item, depth + 1));
+  if (typeof value === "string") {
+    const trimmed = value.trim();
+    if (!trimmed.startsWith("{")) return false;
+    try {
+      return containsUnstampedNode(JSON.parse(trimmed) as unknown, depth + 1);
+    } catch {
+      return false;
+    }
+  }
+  const record = asRecord(value);
+  if (!record) return false;
+  if (nodeClassType(record) && !("is_output" in record)) return true;
+  return Object.values(record).some((nested) => containsUnstampedNode(nested, depth + 1));
+}
+
+/** Use the fresh headless cache, or refresh the panel only when its reply has
+ * node rows whose output classification is absent. */
+export async function outputNodeObjectInfoForPanel(
+  call: GraphCall,
+  source?: ToolResultLike,
+): Promise<ObjectInfo | null> {
+  if (!source || source.isError || !containsUnstampedNode(parseToolResultJson(source))) return null;
+  return outputNodeObjectInfoNow() ?? fetchPanelObjectInfo(call);
+}
+
 function uiWorkflowFromSerialize(payload: Record<string, unknown> | null): UiWorkflow | null {
   if (!payload) return null;
   const inner = payload.workflow ?? payload;
   return isUiFormat(inner) ? inner : null;
+}
+
+function workflowUuidFromUi(ui: UiWorkflow): string | null {
+  const extra = asRecord(ui.extra);
+  const metadata = asRecord(extra?.comfyui_mcp);
+  const uuid = metadata?.workflow_uuid;
+  return typeof uuid === "string" && uuid.length > 0 ? uuid : null;
+}
+
+function scopedFallbackRefusal(reason: string): { refusal: string } {
+  return { refusal: reason };
+}
+
+function rootScopedFallbackWitness(
+  payload: Record<string, unknown> | null,
+  ui: UiWorkflow,
+  toNodeId: number,
+  classType: string,
+): { targetId: string } | { refusal: string } {
+  const viewing = asRecord(payload?.viewing);
+  if (viewing?.scope === "subgraph") {
+    return scopedFallbackRefusal(
+      `the panel reports the target is in a subgraph, but its exact colon-qualified ` +
+        `NodeExecutionId is not exposed to MCP; the panel retry must perform this nested run`,
+    );
+  }
+  if (viewing?.scope !== "root") {
+    return scopedFallbackRefusal(
+      `the panel did not provide a root viewing-scope witness, so the workflow target is ` +
+        `unproven`,
+    );
+  }
+
+  const panelUuid = viewing.workflow_uuid;
+  const serializedUuid = workflowUuidFromUi(ui);
+  if (
+    typeof panelUuid !== "string" ||
+    panelUuid.length === 0 ||
+    serializedUuid === null ||
+    panelUuid !== serializedUuid
+  ) {
+    return scopedFallbackRefusal(
+      `the panel graph and serialized workflow did not carry the same workflow identity; ` +
+        `no fallback prompt was sent`,
+    );
+  }
+
+  const targetId = String(toNodeId);
+  const rootNode = ui.nodes.find(
+    (node) => String(node.id) === targetId && nodeClassType(node) === classType,
+  );
+  if (!rootNode) {
+    return scopedFallbackRefusal(
+      `node ${targetId} is not present as the requested class on the serialized root ` +
+        `graph; an exact scoped target could not be proven`,
+    );
+  }
+
+  const queriedNodes = payload?.nodes;
+  if (
+    !Array.isArray(queriedNodes) ||
+    !queriedNodes.some((raw) => {
+      const node = asRecord(raw);
+      return node !== null && String(node.id) === targetId && nodeClassType(node) === classType;
+    })
+  ) {
+    return scopedFallbackRefusal(
+      `the panel's current root query did not return node ${targetId} as ` +
+        `${classType}; the target may have moved or changed`,
+    );
+  }
+  return { targetId };
+}
+
+function normalizedBatchCount(batchCount: number | undefined): number {
+  if (typeof batchCount !== "number" || !Number.isFinite(batchCount)) return 1;
+  return Math.max(1, Math.min(100, Math.floor(batchCount)));
 }
 
 async function enqueueConvertedScopedRun(
@@ -233,24 +344,84 @@ async function enqueueConvertedScopedRun(
   classType: string,
   objectInfo: ObjectInfo,
   call: GraphCall,
-): Promise<ScopedEnqueueResult | null> {
-  const targetId = String(toNodeId);
-  const targets = [targetId];
-  if (enqueueScopedOutputNodeOverride) {
-    return enqueueScopedOutputNodeOverride(
-      { [targetId]: { class_type: classType, inputs: {} } },
-      targets,
+  batchCount: number | undefined,
+  directFallbackAllowed: boolean,
+): Promise<ScopedEnqueueOutcome> {
+  if (!directFallbackAllowed) {
+    return scopedFallbackRefusal(
+      `the panel's server-observed origin was not proven to be the configured ComfyUI ` +
+        `target; direct /prompt fallback is disabled to prevent cross-instance queueing`,
     );
   }
+
   const serialized = await call({ cmd: "graph_serialize" }, 8000);
   if (serialized.isError) return null;
   const ui = uiWorkflowFromSerialize(parseToolResultJson(serialized));
   if (!ui) return null;
+  const queried = await call(
+    { cmd: "graph_query", ids: [toNodeId], fields: "detail", limit: 1 },
+    8000,
+  );
+  if (queried.isError) return null;
+  const witness = rootScopedFallbackWitness(
+    parseToolResultJson(queried),
+    ui,
+    toNodeId,
+    classType,
+  );
+  if ("refusal" in witness) return witness;
+
+  const targets = [witness.targetId];
   const converted = convertUiToApi(ui, objectInfo);
-  if (!converted.workflow[targetId]) return null;
-  return enqueuePrompt(converted.workflow, undefined, {
-    partialExecutionTargets: targets,
-  });
+  if (!converted.workflow[witness.targetId]) {
+    return scopedFallbackRefusal(
+      `the converted workflow did not contain root target ${witness.targetId}; ` +
+        `no unscoped prompt was sent`,
+    );
+  }
+
+  const count = normalizedBatchCount(batchCount);
+  if (enqueueScopedOutputNodeOverride) {
+    return {
+      result: await enqueueScopedOutputNodeOverride(converted.workflow, targets, count),
+    };
+  }
+
+  const results: ScopedEnqueueResult[] = [];
+  try {
+    for (let i = 0; i < count; i += 1) {
+      results.push(
+        await enqueuePrompt(converted.workflow, undefined, {
+          partialExecutionTargets: targets,
+        }),
+      );
+    }
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    throw new Error(
+      `${message} Direct scoped fallback had already accepted ${results.length} of ` +
+        `${count} requested batch run(s); do not blindly re-submit before checking ` +
+        `queue/history.`,
+    );
+  }
+
+  return {
+    result: {
+      prompt_id: results[0].prompt_id,
+      ...(results.length > 1
+        ? { prompt_ids: results.map((entry) => entry.prompt_id) }
+        : {}),
+      queue_remaining: results.at(-1)?.queue_remaining,
+      ...(results.some((entry) => entry.rejectedOutputs)
+        ? {
+            rejectedOutputs: results
+              .map((entry) => entry.rejectedOutputs)
+              .filter((entry): entry is string => typeof entry === "string" && entry.length > 0)
+              .join("\n"),
+          }
+        : {}),
+    },
+  };
 }
 
 function queuedToolResult(
@@ -266,6 +437,9 @@ function queuedToolResult(
           {
             queued: true,
             prompt_id: enqueued.prompt_id,
+            ...(enqueued.prompt_ids && enqueued.prompt_ids.length > 1
+              ? { prompt_ids: enqueued.prompt_ids }
+              : {}),
             to_node_id: toNodeId,
             ran_to_node: toNodeId,
             output_node_source: "object_info",
@@ -297,6 +471,7 @@ export async function recoverOutputNodeScopedRun(opts: {
   rejection: ToolResultLike;
   batchCount?: number;
   call: GraphCall;
+  directFallbackAllowed?: boolean;
 }): Promise<ToolResultLike | null> {
   const parsed =
     parseNotOutputNodeRefusal(opts.rejection) ??
@@ -353,9 +528,26 @@ export async function recoverOutputNodeScopedRun(opts: {
       parsed.classType,
       objectInfo,
       opts.call,
+      opts.batchCount,
+      opts.directFallbackAllowed === true,
     );
-    if (!enqueued?.prompt_id) return null;
-    return queuedToolResult(enqueued, opts.toNodeId, parsed.classType);
+    if (!enqueued) return null;
+    if ("refusal" in enqueued) {
+      return {
+        content: [
+          {
+            type: "text",
+            text:
+              `Error: panel_run recognized ${parsed.classType} as an OUTPUT_NODE from ` +
+              `the connected panel's object_info, but refused the direct /prompt fallback: ` +
+              `${enqueued.refusal}. No fallback prompt was sent.`,
+          },
+        ],
+        isError: true,
+      };
+    }
+    if (!enqueued.result?.prompt_id) return null;
+    return queuedToolResult(enqueued.result, opts.toNodeId, parsed.classType);
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     return {

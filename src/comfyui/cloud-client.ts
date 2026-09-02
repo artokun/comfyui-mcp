@@ -118,11 +118,15 @@ export interface CloudJobStatus {
 export async function enqueuePrompt(
   workflow: Record<string, unknown>,
   extraData?: Record<string, unknown>,
+  opts?: { partialExecutionTargets?: readonly string[] },
 ): Promise<{ prompt_id: string; queue_remaining?: number }> {
   logger.info("Cloud: submitting workflow to Comfy Cloud");
   const body: Record<string, unknown> = { prompt: workflow };
   if (extraData && Object.keys(extraData).length > 0) {
     body.extra_data = extraData;
+  }
+  if (opts?.partialExecutionTargets?.length) {
+    body.partial_execution_targets = [...opts.partialExecutionTargets];
   }
   const res = await cloudFetch("/api/prompt", {
     method: "POST",

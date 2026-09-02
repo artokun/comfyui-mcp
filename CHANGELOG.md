@@ -10,7 +10,7 @@ All notable changes to this project are documented here. This project adheres to
 
 #### Fixed
 - get_workflow strip resolves an absolute path under the live ComfyUI userdata/workflows tree without dropping the workflows segment or mangling Unicode dashes (#2528)
-- panel_run accepts VHS_VideoCombine (and any class with live object_info output_node true) as a run-to-node target instead of refusing it as not an output node (#2529)
+- panel_run accepts VHS_VideoCombine (and any class with live object_info output_node true) as a run-to-node target instead of refusing it as not an output node (#2529); recovery preserves scoped batch and cloud targets, and refuses a nested fallback when the panel cannot provide its exact colon-qualified execution path
 
 ## [0.52.174] - 2026-09-02
 
