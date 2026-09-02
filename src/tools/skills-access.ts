@@ -163,9 +163,9 @@ function enumerateSkills(): Array<{ name: string; description: string }> {
 }
 
 /** The workflow filename a pack.yaml resolves to — the SINGLE derivation shared
- *  by action:"list" (has_workflow), resolvePackWorkflowFile() (which backs
- *  read_workflow, check_runtime and run_template), and read_workflow's own
- *  message.
+ *  by action:"list" (has_workflow), resolvePackWorkflowFile() — which backs
+ *  action:"read_workflow", action:"check_runtime" and also
+ *  enqueue_workflow (action:"run_template") — and read_workflow's own message.
  *
  *  This existed three times and one copy was different: action:"list" took
  *  `meta.workflow` verbatim while the resolver rejected any value that is not a
