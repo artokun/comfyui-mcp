@@ -1248,7 +1248,7 @@ export const BRIDGE_READONLY_CMDS: ReadonlySet<string> = new Set<string>([
   // resume the incarnation rule without breaking panels that legitimately have
   // no proven identity (#2104: a refused or unreadable lock manager omits
   // `tab_session_id`, so every reconnect looks like a new occupant). That is its
-  // own change, with its own blast radius, and is tracked separately.
+  // own change, with its own blast radius, and is tracked in #2761.
   //
   // So this entry takes the half it needs and declines the half it does not: the
   // panel_screenshot call site passes `maxReconnectRetries: 0`, which keeps the

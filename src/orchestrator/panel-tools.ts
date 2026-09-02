@@ -26215,7 +26215,7 @@ CHECKED FOR YOU: the graph read this message prescribes was just run, and it ` +
           // canvas they never asked about. `maxReconnectRetries: 0` keeps it out
           // of that branch: a mid-capture drop fails honestly, and re-asking for a
           // screenshot costs nothing. The general resume-vs-incarnation gap is
-          // real and older than this call site; it is tracked on its own.
+          // real and older than this call site; it is tracked in #2761.
           const res = (await ctx.bridge.send(cmd as { cmd: string }, {
             tabId: ctx.tabId,
             timeoutMs: OBJECT_INFO_REFRESH_ACK_TIMEOUT_MS,
