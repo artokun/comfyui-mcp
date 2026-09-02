@@ -6,6 +6,16 @@ All notable changes to this project are documented here. This project adheres to
 
 ## Unreleased
 
+## [0.52.170] - 2026-09-01
+
+### MCP
+
+#### Fixed
+- keep ingress completion blind-safe (#925)
+- canonicalize completion receipt prompt ids
+- acknowledge uncorrelatable completion frames
+
+
 ## [0.52.169] - 2026-09-01
 
 ### MCP
