@@ -686,7 +686,10 @@ function nodeAlreadyInstalled(id: string, installed: InstalledNode[]): boolean {
     if (!nameMatch) return false;
     // A git URL that names an owner is not "already installed" when Manager
     // listed a different author's repository under the same bare name.
-    if (wantedOrigin) {
+    // A registry/CNR identity can intentionally point at a differently named
+    // source checkout; only a bare from-source Manager entry's aux_id is the
+    // origin evidence relevant to this pack alias case (#2523).
+    if (wantedOrigin && !node.cnrId) {
       const installedOrigin = gitOwnerRepo(node.auxId);
       if (installedOrigin && installedOrigin !== wantedOrigin) return false;
     }

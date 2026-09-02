@@ -4422,8 +4422,13 @@ async function installCustomNodeImpl(
     );
     assertInstallTargetStable(targetGeneration, managerBase);
     const listedNode = findInstalledNode(gitId, installed);
+    // A registry/CNR identity can intentionally point at a differently named
+    // source checkout (the #2714 aux-id alias test); only a bare from-source
+    // Manager entry's aux_id is origin evidence for this pack alias case.
     const originMismatch =
-      listedNode !== undefined && !gitOriginMatchesRequested(gitId, listedNode.auxId);
+      listedNode !== undefined &&
+      !listedNode.cnrId &&
+      !gitOriginMatchesRequested(gitId, listedNode.auxId);
     /** #2714 — why the Manager's own "installed" verdict was not taken. */
     let uncorroboratedNote: string | undefined;
     if (listedNode && !originMismatch) {
