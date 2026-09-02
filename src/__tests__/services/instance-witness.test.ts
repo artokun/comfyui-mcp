@@ -49,7 +49,7 @@ describe("acquireInstanceWitness", () => {
     const witness = await acquireInstanceWitness(`http://127.0.0.1:${port}`);
 
     expect(witness).toBeDefined();
-    expect(witness?.url.startsWith(`ws://localhost:${port}/ws?clientId=`)).toBe(true);
+    expect(witness?.url.startsWith(`ws://127.0.0.1:${port}/ws?clientId=`)).toBe(true);
     expect(witness?.alive()).toBe(true);
     witness?.close();
   });

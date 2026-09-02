@@ -25,7 +25,7 @@ import { DEFAULT_PANEL_BRIDGE_PORT, LEGACY_PANEL_BRIDGE_PORT } from "./bridge-po
 import { detectInstallMode } from "./self-update.js";
 import { logger } from "../utils/logger.js";
 import type { UiBridge } from "./ui-bridge.js";
-import { formatComfyUIUrl } from "../transport/comfyui-url.js";
+import { comfyuiFetch } from "../comfyui/fetch.js";
 
 const PORT_PROBE_TIMEOUT_MS = 5000;
 
@@ -198,8 +198,8 @@ export async function probeComfyUi(url: string, timeoutMs = 3000): Promise<boole
   try {
     const ctl = new AbortController();
     const timer = setTimeout(() => ctl.abort(), timeoutMs);
-    const target = formatComfyUIUrl(url);
-    const res = await fetch(new URL("system_stats", target.endsWith("/") ? target : `${target}/`), {
+    const target = new URL("system_stats", url.endsWith("/") ? url : `${url}/`);
+    const res = await comfyuiFetch(target, {
       signal: ctl.signal,
     });
     clearTimeout(timer);

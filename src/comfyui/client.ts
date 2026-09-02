@@ -1,5 +1,5 @@
 import { Client } from "@stable-canvas/comfyui-client";
-import { formatComfyUIUrl } from "../transport/comfyui-url.js";
+import { LoopbackWebSocket } from "../transport/loopback-websocket.js";
 import {
   config,
   getComfyUIApiHost,
@@ -111,16 +111,11 @@ function requireLocalComfyUI(op: string): void {
 
 let clientInstance: Client | null = null;
 
-/** Keep the SDK's HTTP URL/diagnostic target literal while making its WS dial
- * follow the same IPv6-only loopback fallback as the direct WS clients. */
+/** Keep the SDK's configured URL literal until a refused loopback dial proves
+ * that Node should retry through its IPv6-capable localhost resolver. */
 function connectionWebSocket(): typeof WebSocket | undefined {
-  const NativeWebSocket = globalThis.WebSocket;
-  if (!NativeWebSocket) return undefined;
-  return class ComfyUIConnectionWebSocket extends NativeWebSocket {
-    constructor(url: string | URL, protocols?: string | string[] | WebSocketInit) {
-      super(formatComfyUIUrl(String(url)), protocols);
-    }
-  };
+  // oxlint-disable-next-line anti-slop/no-chained-type-assertions -- the SDK's DOM WebSocket type is wider than this Node adapter's runtime-compatible surface
+  return LoopbackWebSocket as unknown as typeof WebSocket;
 }
 
 export function getClient(): Client {

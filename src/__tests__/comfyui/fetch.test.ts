@@ -87,6 +87,26 @@ describe("comfyuiFetch", () => {
     expect((retryInit as RequestInit).signal).toBe((firstInit as RequestInit).signal);
   });
 
+  it("replays a Request body only after the literal target is refused", async () => {
+    authHeaders.mockReturnValue({});
+    const response = new Response("ok");
+    fetchMock.mockRejectedValueOnce(undiciFailure("ECONNREFUSED")).mockResolvedValueOnce(response);
+    const input = new Request("http://127.0.0.1:8188/prompt", {
+      method: "POST",
+      body: JSON.stringify({ prompt: "p" }),
+      headers: { "Content-Type": "application/json" },
+    });
+
+    await expect(comfyuiFetch(input)).resolves.toBe(response);
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    const first = fetchMock.mock.calls[0]?.[0] as Request;
+    const retry = fetchMock.mock.calls[1]?.[0] as Request;
+    expect(first.url).toBe("http://127.0.0.1:8188/prompt");
+    expect(retry.url).toBe("http://localhost:8188/prompt");
+    await expect(retry.text()).resolves.toBe(JSON.stringify({ prompt: "p" }));
+  });
+
   it.each([
     ["localhost", "http://localhost:8188/view", undiciFailure("ECONNREFUSED")],
     ["a different loopback address", "http://127.0.0.2:8188/view", undiciFailure("ECONNREFUSED")],

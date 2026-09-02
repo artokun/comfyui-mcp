@@ -688,6 +688,18 @@ export async function comfyuiFetch(
   // and it always wins — this only covers the ones that passed none, which
   // otherwise wait forever.
   const signal = init.signal ?? defaultComfyTimeoutSignal();
+  // Keep a pristine body for a Request input. A failed network fetch may have
+  // disturbed the original Request body before the refusal is surfaced, while
+  // ECONNREFUSED still permits the one safe retry.
+  let retrySource: Request | undefined;
+  if (input instanceof Request) {
+    try {
+      retrySource = input.clone();
+    } catch {
+      // A caller may pass an already-disturbed Request. The literal attempt
+      // still runs; without a replayable body there is no safe retry.
+    }
+  }
   const request = (target: string | URL | Request): Promise<Response> => {
     if (Object.keys(auth).length === 0) return fetch(target, { ...init, signal });
     const headers = new Headers(init.headers);
@@ -704,20 +716,28 @@ export async function comfyuiFetch(
     // request reached the server, while reset/timeout errors can follow a
     // delivered mutation. `localhost` lets Node select an IPv6-only listener
     // without changing the configured target or any identity comparison.
+    const inputUrl =
+      typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
     const retryUrl =
       typeof input === "string"
         ? formatComfyUIUrl(input)
         : input instanceof URL
           ? new URL(formatComfyUIUrl(input.href))
-          : undefined;
+          : input instanceof Request
+            ? formatComfyUIUrl(input.url)
+            : undefined;
+    const retryInput =
+      input instanceof Request && retryUrl && retrySource
+        ? new Request(retryUrl, retrySource)
+        : retryUrl;
     if (
-      retryUrl &&
-      String(retryUrl) !== String(input) &&
+      retryInput &&
+      String(retryUrl) !== inputUrl &&
       isBareFetchFailure(err) &&
       describeFetchFailure(err).code === "ECONNREFUSED"
     ) {
       try {
-        return await request(retryUrl);
+        return await request(retryInput);
       } catch (retryError) {
         err = retryError;
       }

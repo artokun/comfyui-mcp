@@ -52,7 +52,7 @@ describe("fetchPanelBasePath (#296)", () => {
     expect(out).toBe("C:/Users/me/ComfyUI");
     const call = statusCall(fetchMock);
     expect(call, "status GET should have been made").toBeTruthy();
-    expect(String(call?.[0])).toBe("http://localhost:8188/comfyui_mcp_panel/status");
+    expect(String(call?.[0])).toBe("http://127.0.0.1:8188/comfyui_mcp_panel/status");
     // A GET (no explicit method / no POST body), not a mutation.
     const init = (call as [string, RequestInit | undefined])[1];
     expect(init?.method ?? "GET").toBe("GET");
@@ -108,7 +108,7 @@ describe("fetchPanelBasePath (#296)", () => {
     await fetchPanelBasePath("http://127.0.0.1:8188");
 
     const init = (statusCall(fetchMock) as [string, RequestInit])[1];
-    expect(init.headers).toMatchObject({ Authorization: "Bearer abc123" });
+    expect(new Headers(init.headers).get("Authorization")).toBe("Bearer abc123");
   });
 
   it("returns undefined on a non-2xx status (no consumer error)", async () => {

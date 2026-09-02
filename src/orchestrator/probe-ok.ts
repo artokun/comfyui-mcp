@@ -1,5 +1,4 @@
-import { getComfyUIAuthHeaders } from "../config.js";
-import { formatComfyUIUrl } from "../transport/comfyui-url.js";
+import { comfyuiFetch } from "../comfyui/fetch.js";
 
 /**
  * Boolean URL probe with a timeout — hello-retarget and pending-pod connect.
@@ -16,10 +15,9 @@ export async function probeOk(url: string, timeoutMs = 8_000): Promise<boolean> 
   const ctl = new AbortController();
   const t = setTimeout(() => ctl.abort(), timeoutMs);
   try {
-    // Carry configured auth (COMFYUI_AUTH_TOKEN / custom header) — a
-    // protected pod's ComfyUI 401s otherwise and connect:true always times
-    // out (codex finding).
-    const res = await fetch(formatComfyUIUrl(url), { signal: ctl.signal, headers: getComfyUIAuthHeaders() });
+    // comfyuiFetch carries configured auth and the literal-first loopback
+    // fallback used by every ComfyUI HTTP caller.
+    const res = await comfyuiFetch(url, { signal: ctl.signal });
     return res.ok;
   } catch {
     return false;

@@ -6,11 +6,12 @@ import { homedir, networkInterfaces } from "node:os";
 import { isIP } from "node:net";
 import { normalizeInstallPathEnv } from "./utils/install-path-env.js";
 import {
-  formatComfyUIConnectionHost,
   formatComfyUIHost,
+  formatComfyUIUrl,
   parseComfyUIUrl,
   type ComfyUITarget,
 } from "./transport/comfyui-url.js";
+import { describeFetchFailure, isBareFetchFailure } from "./utils/errors.js";
 import { resetManagerApiCache } from "./services/manager-api-cache.js";
 import { comfyuiEnvFilePath, freshSecretValue, loadEnvFileIntoProcess } from "./env-file.js";
 import { localComfyuiPort } from "./services/advertised-origin.js";
@@ -416,20 +417,40 @@ async function detectComfyUIPort(host: string): Promise<number> {
   const ports = [...new Set([localComfyuiPort(), 8188, 8000])];
 
   for (const port of ports) {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 1000);
+    const protocol = parsedConfig.comfyuiSsl ? "https" : "http";
+    const target = `${protocol}://${formatComfyUIHost(host)}:${port}/system_stats`;
     try {
-      const controller = new AbortController();
-      const timeout = setTimeout(() => controller.abort(), 1000);
-      const protocol = parsedConfig.comfyuiSsl ? "https" : "http";
-      const res = await fetch(`${protocol}://${formatComfyUIConnectionHost(host)}:${port}/system_stats`, {
-        signal: controller.signal,
-      });
-      clearTimeout(timeout);
+      let res: Response;
+      try {
+        // Probe the configured literal first. Only a bare ECONNREFUSED proves
+        // that no HTTP request reached it and permits the IPv6-capable alias.
+        res = await fetch(target, {
+          signal: controller.signal,
+        });
+      } catch (err) {
+        const fallback = formatComfyUIUrl(target);
+        if (
+          fallback === target ||
+          !isBareFetchFailure(err) ||
+          describeFetchFailure(err).code !== "ECONNREFUSED"
+        ) {
+          throw err;
+        }
+        res = await fetch(fallback, {
+          signal: controller.signal,
+        });
+      }
       if (res.ok) {
+        clearTimeout(timeout);
         console.error(`[comfyui-mcp] Found ComfyUI on port ${port}`);
         return port;
       }
     } catch {
       // Port not responding, try next
+    } finally {
+      clearTimeout(timeout);
     }
   }
 

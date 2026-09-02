@@ -23,11 +23,10 @@
 // holds client connections alive while swapping backends would mask a
 // replacement, and no handshake this server can perform rules that out.
 
-import WebSocket from "ws";
 import { randomUUID } from "node:crypto";
 import { getComfyUIAuthHeaders } from "../config.js";
 import { logger } from "../utils/logger.js";
-import { formatComfyUIUrl } from "../transport/comfyui-url.js";
+import { LoopbackWebSocket } from "../transport/loopback-websocket.js";
 
 export interface InstanceWitness {
   /** The WS URL the witness is connected to (diagnostics only). */
@@ -64,16 +63,16 @@ export async function acquireInstanceWitness(
   timeoutMs = 3000,
 ): Promise<InstanceWitness | undefined> {
   const url =
-    `${formatComfyUIUrl(baseUrl).replace(/^http/, "ws").replace(/\/+$/, "")}` +
+    `${baseUrl.replace(/^http/, "ws").replace(/\/+$/, "")}` +
     `/ws?clientId=comfyui-mcp-instance-witness-${randomUUID()}`;
-  let ws: WebSocket;
+  let ws: LoopbackWebSocket;
   try {
     // Ride the same auth as HTTP (COMFYUI_AUTH_* + Cloudflare Access service
     // token) so the witness reaches a ComfyUI behind a gateway — the queue
     // monitor's established pattern. undefined when unauth'd → identical to
     // `new WebSocket(url)`.
     const authHeaders = getComfyUIAuthHeaders();
-    ws = new WebSocket(
+    ws = new LoopbackWebSocket(
       url,
       Object.keys(authHeaders).length ? { headers: authHeaders } : undefined,
     );
