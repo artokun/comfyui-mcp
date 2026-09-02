@@ -3429,6 +3429,30 @@ function proxyTargetBindsPanel(
   );
 }
 
+/**
+ * A live local Panel can safely own a Manager reboot even when the MCP process
+ * started before the Panel selected a different loopback port (for example,
+ * ComfyUI Desktop's dynamic port). This is a DISPATCH-ONLY binding:
+ *
+ *  - the target must be a concrete loopback URL;
+ *  - the socket must have arrived on the server-trusted local listener; and
+ *  - the server-observed WebSocket Origin must identify the current target.
+ *
+ * The result must never be used as the MCP health-probe or headless-restart
+ * target. Those paths still require the immutable boot target from
+ * captureRebootHealthBase/configuredBootRestartBase. The Panel's own
+ * authenticated relative Manager request is the only reboot authority this
+ * exception grants (#2068).
+ */
+function currentPanelRestartTarget(ctx: PanelToolCtx): string | null {
+  if (ctx.bridge?.tabIsLocal?.(ctx.tabId) !== true) return null;
+  const target = getComfyUIBaseUrl().replace(/\/+$/, "");
+  if (!target || !isLoopbackOrigin(target)) return null;
+  const observedOrigin = ctx.bridge?.tabServerOrigin?.(ctx.tabId);
+  if (!sameHttpBase(observedOrigin, target)) return null;
+  return target;
+}
+
 /** Test injection for the #742 decline-probe recheck window, so tests don't
  *  wait the real ~6s. null → the DECLINE_PROBE_* constants. */
 let declineProbeTimingOverride: {
@@ -26507,6 +26531,11 @@ CHECKED FOR YOU: the graph read this message prescribes was just run, and it ` +
         // awaits. The proxy is never treated as a ComfyUI process; it only lets
         // the tab-scoped Manager request be observed against the immutable backend.
         let proxyRestartTarget: VerifiedProxyRestartTarget | undefined;
+        // #2068: a Panel may front a concrete local Desktop port selected after
+        // this MCP process started. This binding authorizes only the Panel's
+        // authenticated relative Manager dispatch; it is never a health or
+        // headless-restart target.
+        let panelRestartTarget: string | undefined;
         // #1819: resolve instance identity BEFORE the confirmation card. Asking the
         // user to confirm a restart, then refusing because we cannot tell which
         // ComfyUI this tab fronts, is two contradictory outcomes (timeout vs refuse)
@@ -26526,11 +26555,14 @@ CHECKED FOR YOU: the graph read this message prescribes was just run, and it ` +
             if (proxyTargetBindsPanel(ctx, candidate)) {
               proxyRestartTarget = candidate;
             }
+            if (proxyRestartTarget == null) {
+              panelRestartTarget = currentPanelRestartTarget(ctx) ?? undefined;
+            }
             const tabStillHere =
               typeof ctx.bridge?.canReach === "function"
                 ? ctx.bridge.canReach(ctx.tabId) === true
                 : true;
-            if (tabStillHere && proxyRestartTarget == null) {
+            if (tabStillHere && proxyRestartTarget == null && panelRestartTarget == null) {
               return restartRefusedPreservingBinding(
                 ctx,
                 unboundLocalRestartRefusalNote(ctx, identityHealthBase, identityBinding.blocker),
@@ -27321,11 +27353,19 @@ CHECKED FOR YOU: the graph read this message prescribes was just run, and it ` +
             ? refreshedProxy
             : undefined;
         }
+        if (proxyRestartTarget == null && panelRestartTarget != null) {
+          const refreshedPanelTarget = currentPanelRestartTarget(ctx);
+          panelRestartTarget =
+            refreshedPanelTarget != null && sameHttpBase(refreshedPanelTarget, panelRestartTarget)
+              ? refreshedPanelTarget
+              : undefined;
+        }
         const preflightBinding = resolveRebootHealthBinding(ctx);
         const preflightHealthBase =
-          proxyRestartTarget?.backendBase ?? preflightBinding.base;
+          proxyRestartTarget?.backendBase ?? panelRestartTarget ?? preflightBinding.base;
         const preflightBound =
           proxyRestartTarget != null ||
+          panelRestartTarget != null ||
           (preflightHealthBase != null &&
             sameHttpBase(getComfyUIBaseUrl(), preflightHealthBase));
         // #848: what the instance was OBSERVED running with, taken from the preflight
@@ -27392,10 +27432,15 @@ CHECKED FOR YOU: the graph read this message prescribes was just run, and it ` +
           }
           ctx.ensureReachable?.();
           const postPreflightHealthBase = captureRebootHealthBase(ctx);
+          const postPreflightPanelTarget =
+            panelRestartTarget != null ? currentPanelRestartTarget(ctx) : null;
           const tabFrontsSameInstance =
             proxyRestartTarget != null ||
-            (postPreflightHealthBase != null &&
-              sameHttpBase(preflightHealthBase, postPreflightHealthBase));
+            (panelRestartTarget != null
+              ? postPreflightPanelTarget != null &&
+                sameHttpBase(preflightHealthBase, postPreflightPanelTarget)
+              : postPreflightHealthBase != null &&
+                sameHttpBase(preflightHealthBase, postPreflightHealthBase));
           const configStable =
             proxyRestartTarget != null
               ? getComfyuiTargetGeneration() === proxyRestartTarget.generation
@@ -27488,6 +27533,13 @@ CHECKED FOR YOU: the graph read this message prescribes was just run, and it ` +
             preflightArgvGeneration = proxyRestartTarget.generation;
           }
         }
+        if (proxyRestartTarget == null && panelRestartTarget != null) {
+          const dispatchPanelTarget = currentPanelRestartTarget(ctx);
+          panelRestartTarget =
+            dispatchPanelTarget != null && sameHttpBase(dispatchPanelTarget, panelRestartTarget)
+              ? dispatchPanelTarget
+              : undefined;
+        }
         const healthBase =
           proxyRestartTarget?.backendBase ?? captureRebootHealthBase(ctx);
         // THE BINDING RULE APPLIES AT THE DISPATCH POINT, NOT ONLY BEFORE THE AWAIT.
@@ -27504,7 +27556,9 @@ CHECKED FOR YOU: the graph read this message prescribes was just run, and it ` +
         // instance this server accounts for is refused.
         const dispatchBound =
           proxyRestartTarget != null ||
-          (healthBase != null && sameHttpBase(getComfyUIBaseUrl(), healthBase));
+          (healthBase != null && sameHttpBase(getComfyUIBaseUrl(), healthBase)) ||
+          (panelRestartTarget != null &&
+            sameHttpBase(getComfyUIBaseUrl(), panelRestartTarget));
         if (!dispatchBound && !isRemoteMode() && !isCloudMode()) {
           return restartRefusedPreservingBinding(
             ctx,
