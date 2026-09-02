@@ -339,6 +339,11 @@ describe("#646 Manager API dialect cache invalidation", () => {
     // …but it now states the second observation that makes it more than a guess.
     expect(error.message).toMatch(/neither \/v2\/manager\/version nor \/manager\/version/i);
     expect((error.details as { managerVersionMajor?: number }).managerVersionMajor).toBeUndefined();
+    // Silence, NOT refusal — the two carry different messages and this is the
+    // only one entitled to the strong "nothing is serving Manager routes" claim.
+    expect((error.details as { managerVersionEvidence?: string }).managerVersionEvidence).toBe(
+      "none",
+    );
     // The version routes were actually consulted — the claim is not asserted for free.
     expect(calls.map((c) => c.path)).toEqual(
       expect.arrayContaining(["/v2/manager/version", "/manager/version"]),
@@ -363,18 +368,30 @@ describe("#646 Manager API dialect cache invalidation", () => {
     expect((error.details as { managerVersionMajor?: number }).managerVersionMajor).toBeUndefined();
   });
 
-  it("keeps the queue-detection error when the version probe hard-fails (#2754)", async () => {
-    // managerFetch throws on 401/403 even in soft mode (#2085). A secondary probe
-    // that throws must not replace the reader's actual failure with its own.
+  it("does not spend a REFUSED version route as absence evidence (#2754)", async () => {
+    // managerFetch throws on 401/407 even in soft mode — deliberately, because
+    // #2085 is exactly the lesson that a credential rejection is not absence. A
+    // bare catch → "no version evidence" here would launder that 401 straight back
+    // into "nothing is serving Manager routes at all" (caught by the codex gate).
     const calls = stubQueuelessManager({ path: "/manager/version", body: "", status: 401 });
 
     const error = await detectionError();
     // The probe that throws is the one this branch added, so it must have run —
-    // otherwise this asserts nothing about swallowing anything.
+    // otherwise this asserts nothing about how its failure is handled.
     expect(calls.map((c) => c.path)).toContain("/manager/version");
+    // The reader's real failure survives: this is still queue detection, not the
+    // secondary probe's error wearing its name.
     expect(error.message).toMatch(/queue API is not reachable/i);
-    expect(error.message).not.toMatch(/HTTP 401/);
     expect((error.details as { kind?: string }).kind).toBe("manager-queue-detection");
+    // …and the 401 is reported as the unknown it is, never as absence.
+    expect(error.message).toMatch(/REJECTED/);
+    expect(error.message).toMatch(/not evidence that ComfyUI-Manager is missing/i);
+    expect(error.message).toMatch(/UNKNOWN from here/);
+    expect(error.message).not.toMatch(/is serving ComfyUI-Manager routes at all/i);
+    expect(error.message).not.toMatch(/installed and enabled/i);
+    expect((error.details as { managerVersionEvidence?: string }).managerVersionEvidence).toBe(
+      "refused",
+    );
   });
 
   it("re-detects after a restart at the SAME url (explicit invalidation)", async () => {

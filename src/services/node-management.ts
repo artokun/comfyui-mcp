@@ -58,7 +58,7 @@ import {
 import { ComfyUIError, ProcessControlError, ValidationError } from "../utils/errors.js";
 import { logger } from "../utils/logger.js";
 import { managerBodyClause } from "./manager-error-body.js";
-import { parseManagerMajor } from "./manager-version.js";
+import { MANAGER_VERSION_ROUTES, parseManagerMajor } from "./manager-version.js";
 
 // ---------------------------------------------------------------------------
 // Custom-node management — ports `comfy-cli node install|update|reinstall|fix|
@@ -711,18 +711,48 @@ async function probeManagerMajor(base: string): Promise<number | undefined> {
 }
 
 /**
- * `probeManagerMajor` for the FAILURE branch, where the answer only sharpens a
- * diagnosis we are already committed to. `managerFetch` still throws on hard
- * failures even in soft mode (an authenticating proxy, most of all), and letting
- * that replace the queue-detection error would swap the reader's real problem for
- * a secondary probe's. Absence of a version is simply "no version evidence".
+ * What the version routes established, for the queue-detection FAILURE branch.
+ *
+ *   • `version` — a route answered a parseable version string, so ComfyUI-Manager
+ *     is demonstrably serving HTTP on this base.
+ *   • `refused` — a route answered an AUTHENTICATION status. `managerFetch` throws
+ *     on 401/407 even in soft mode, deliberately (#2085), and that is the whole
+ *     point: a credential rejection tells us nothing about whether Manager is
+ *     installed, so it must not be spent as absence evidence — which is exactly
+ *     what a bare `catch → undefined` here would do (codex gate, #2754).
+ *   • `none` — every route answered, and none of them was Manager.
  */
-async function probeManagerMajorForDiagnosis(base: string): Promise<number | undefined> {
-  try {
-    return await probeManagerMajor(base);
-  } catch {
-    return undefined;
+type ManagerVersionEvidence =
+  | { kind: "version"; major: number }
+  | { kind: "refused"; status: number | undefined }
+  | { kind: "none" };
+
+async function probeManagerVersionEvidence(base: string): Promise<ManagerVersionEvidence> {
+  let refusedStatus: number | undefined;
+  let refused = false;
+  for (const path of MANAGER_VERSION_ROUTES) {
+    let status: number | undefined;
+    try {
+      const major = parseManagerMajor(
+        await managerFetch<string>(path, {
+          base,
+          soft: true,
+          onSoftFailure: (s) => {
+            status = s;
+          },
+        }),
+      );
+      if (major !== undefined) return { kind: "version", major };
+    } catch {
+      // managerFetch ran onSoftFailure BEFORE throwing, so the status is already
+      // captured. Swallow the throw itself — it must not replace the reader's
+      // queue-detection error with a secondary probe's — but REMEMBER that this
+      // route was refused rather than silent.
+      refused = true;
+      refusedStatus ??= status;
+    }
   }
+  return refused ? { kind: "refused", status: refusedStatus } : { kind: "none" };
 }
 
 /**
@@ -891,11 +921,13 @@ async function probeManagerApi(base: string): Promise<ManagerApi> {
   // because they are disjoint from the queue surface — /v2/manager/version is
   // registered only by v4 and /manager/version only by 3.x — so an answer on either
   // proves Manager is serving HTTP on this base even when its queue routes 404.
-  const managerVersionMajor = await probeManagerMajorForDiagnosis(base);
+  const versionEvidence = await probeManagerVersionEvidence(base);
+  const managerVersionMajor =
+    versionEvidence.kind === "version" ? versionEvidence.major : undefined;
   throw new NodeManagementError(
-    managerVersionMajor !== undefined
+    versionEvidence.kind === "version"
       ? `ComfyUI-Manager IS answering on ${base} — its version route reports generation ` +
-          `${managerVersionMajor}.x — but it serves NO queue API: neither ` +
+          `${versionEvidence.major}.x — but it serves NO queue API: neither ` +
           "/v2/manager/queue/status nor /manager/queue/status answered with a queue " +
           "status. So this is NOT a missing or disabled Manager, and neither installing " +
           "the pip comfyui_manager package nor adding --enable-manager will fix it. What " +
@@ -904,7 +936,17 @@ async function probeManagerApi(base: string): Promise<ManagerApi> {
           "register, or a proxy in front of ComfyUI that forwards only some /manager " +
           "routes. Check the ComfyUI log around Manager's startup, and retry once it " +
           "serves a queue surface."
-      : "ComfyUI-Manager's queue API is not reachable (neither /v2/manager/queue/status " +
+      : versionEvidence.kind === "refused"
+        ? "ComfyUI-Manager's queue API is not reachable (neither /v2/manager/queue/status " +
+          "nor /manager/queue/status answered with a queue status), and the version routes " +
+          "that would establish whether Manager is present at all were REJECTED" +
+          (versionEvidence.status !== undefined
+            ? explainManagerAuthenticationRequired(versionEvidence.status)
+            : " — an authentication failure, not evidence that ComfyUI-Manager is missing.") +
+          ` Whether ComfyUI-Manager is installed on ${base} is therefore UNKNOWN from here; ` +
+          "clear the credential/proxy rejection and retry before concluding anything about " +
+          "Manager itself."
+        : "ComfyUI-Manager's queue API is not reachable (neither /v2/manager/queue/status " +
           "nor /manager/queue/status answered with a queue status), and neither " +
           "/v2/manager/version nor /manager/version answered with a version either — so " +
           `nothing at ${base} is serving ComfyUI-Manager routes at all. Is ComfyUI-Manager ` +
@@ -921,9 +963,12 @@ async function probeManagerApi(base: string): Promise<ManagerApi> {
       base,
       queueStatusCodes,
       queueStatusKinds,
-      // Undefined when the version routes answered nothing either. Kept in the
-      // details so a report carries the evidence the message was earned on.
+      // The evidence the message was earned on, so a report carries it too.
+      // `managerVersionMajor` is undefined unless a version actually parsed;
+      // `managerVersionEvidence` is what distinguishes "the version routes said
+      // nothing" from "the version routes refused to answer".
       managerVersionMajor,
+      managerVersionEvidence: versionEvidence.kind,
     },
   );
 }
