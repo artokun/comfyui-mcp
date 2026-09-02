@@ -281,6 +281,7 @@ import {
   describe as describeCorrelation,
   type CompletionPayload,
 } from "./run-completion-journal.js";
+import { buildCompletionReceipt } from "./completion-receipt.js";
 import {
   RunCompletionIdempotencyFence,
   scheduleRunCompletion,
@@ -5617,17 +5618,17 @@ export async function runPanelOrchestrator(): Promise<void> {
             event.tab_id,
             agentKeyFor(event.tab_id),
           );
-        if (receiptAccepted) {
-          bridge.push(
-            {
-              type: "ack",
-              ok: true,
-              kind: "completion",
-              prompt_id: ev.prompt_id,
-              completion_key: completionKey,
-            },
-            event.tab_id,
-          );
+        // #2700 / Panel #925 recurrence — the frame has reached the journal
+        // even when the ownership gate refuses its receipt. Tell the panel
+        // that explicitly so it retires the transport retry instead of
+        // spending its bounded replay budget on a frame we already hold.
+        const completionReceipt = buildCompletionReceipt(
+          ev.prompt_id,
+          completionKey,
+          receiptAccepted,
+        );
+        if (completionReceipt) {
+          bridge.push(completionReceipt, event.tab_id);
         }
         logger.info(
           entry
