@@ -6,6 +6,11 @@ All notable changes to this project are documented here. This project adheres to
 
 ## Unreleased
 
+### MCP
+
+#### Fixed
+- get_workflow strip resolves an absolute path under the live ComfyUI userdata/workflows tree without dropping the workflows segment or mangling Unicode dashes (#2528)
+
 ## [0.52.174] - 2026-09-02
 
 ### MCP

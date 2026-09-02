@@ -1,6 +1,6 @@
 import { z } from "zod";
 import { readFile, realpath } from "node:fs/promises";
-import { isAbsolute, relative, resolve as pathResolve } from "node:path";
+import { isAbsolute, parse as pathParse, relative, resolve as pathResolve } from "node:path";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { UiWorkflow, WorkflowJSON } from "../comfyui/types.js";
 import { getObjectInfo, backfillObjectInfo, comfyApiFetch } from "../comfyui/client.js";
@@ -59,7 +59,11 @@ async function loadRawFromSource(
     throw new ValidationError("Provide exactly one of: path, filename, or graph.");
   }
   if (graph) return graph;
-  if (path) return JSON.parse(await readFile(path, "utf8"));
+  if (path) return JSON.parse(await readWorkflowFile(path));
+  if (filename && isAbsolute(filename)) {
+    const fromDisk = await tryReadWorkspaceWorkflow(filename);
+    if (fromDisk !== undefined) return fromDisk;
+  }
   const encoded = encodeURIComponent(`workflows/${filename}`);
   const res = await comfyApiFetch(`/api/userdata/${encoded}`);
   if (!res.ok) {
@@ -83,6 +87,55 @@ function isInsideRoot(root: string, candidate: string): boolean {
   return rel !== "" && !rel.startsWith("..") && !isAbsolute(rel);
 }
 
+function isEnoent(err: unknown): boolean {
+  return (err as NodeJS.ErrnoException)?.code === "ENOENT";
+}
+
+/**
+ * #2528 — an absolute path under the live ComfyUI userdata tree was opened as
+ * `{install}/user/default/{library-rel}` instead of
+ * `{install}/user/default/workflows/{library-rel}`. Re-insert the `workflows`
+ * segment after `user/default` (or after `user` for the legacy layout). The
+ * filename is copied segment-for-segment so an em-dash is not rewritten to
+ * ASCII `-` or `?`.
+ */
+export function restoreDroppedWorkflowsSegment(absPath: string): string | undefined {
+  if (!isAbsolute(absPath)) return undefined;
+  const resolved = pathResolve(absPath);
+  const root = pathParse(resolved).root;
+  const segs = resolved.slice(root.length).split(/[\\/]+/).filter((s) => s !== "");
+  const insertAfter = (anchor: readonly string[]): string | undefined => {
+    for (let i = 0; i <= segs.length - anchor.length; i++) {
+      if (!anchor.every((part, j) => segs[i + j] === part)) continue;
+      const after = i + anchor.length;
+      if (segs[after] === "workflows" || after >= segs.length) return undefined;
+      const next = [...segs.slice(0, after), "workflows", ...segs.slice(after)];
+      return pathResolve(root, ...next);
+    }
+    return undefined;
+  };
+  const underDefault = segs.some((s, i) => s === "user" && segs[i + 1] === "default");
+  return underDefault ? insertAfter(["user", "default"]) : insertAfter(["user"]);
+}
+
+/** Read a workflow JSON from disk, restoring a dropped userdata `workflows` segment. */
+async function readWorkflowFile(absPath: string): Promise<string> {
+  try {
+    return await readFile(absPath, "utf8");
+  } catch (err) {
+    if (!isEnoent(err)) throw err;
+    const restored = restoreDroppedWorkflowsSegment(absPath);
+    if (restored && restored !== absPath) {
+      try {
+        return await readFile(restored, "utf8");
+      } catch (restoredErr) {
+        if (!isEnoent(restoredErr)) throw restoredErr;
+      }
+    }
+    throw err;
+  }
+}
+
 /**
  * #2506 — get/analyze used to send every `filename` to /api/userdata/workflows/.
  * An absolute path under the live ComfyUI workspace (e.g. data/_downloads/*.json)
@@ -99,29 +152,33 @@ async function tryReadWorkspaceWorkflow(
   if (!workspace) return undefined;
 
   const resolvedRoot = pathResolve(workspace);
-  const resolvedFile = pathResolve(filename);
-  if (!isInsideRoot(resolvedRoot, resolvedFile)) return undefined;
+  const candidates = [pathResolve(filename)];
+  const restored = restoreDroppedWorkflowsSegment(filename);
+  if (restored && restored !== candidates[0]) candidates.push(pathResolve(restored));
 
-  let realRoot: string;
-  try {
-    realRoot = await realpath(resolvedRoot);
-  } catch {
+  let sawInsideRoot = false;
+  for (const resolvedFile of candidates) {
+    if (!isInsideRoot(resolvedRoot, resolvedFile)) continue;
+    sawInsideRoot = true;
+    let realRoot: string;
+    let realFile: string;
+    try {
+      realRoot = await realpath(resolvedRoot);
+      realFile = await realpath(resolvedFile);
+    } catch {
+      continue;
+    }
+    if (!isInsideRoot(realRoot, realFile)) continue;
+    const parsed: unknown = JSON.parse(await readFile(realFile, "utf8"));
+    if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+      throw new ValidationError(`Could NOT read path: ${filename} is not a workflow object.`);
+    }
+    return parsed as Record<string, unknown>;
+  }
+  if (sawInsideRoot) {
     throw new ValidationError(`Workflow not found: ${filename} (404)`);
   }
-  let realFile: string;
-  try {
-    realFile = await realpath(resolvedFile);
-  } catch {
-    throw new ValidationError(`Workflow not found: ${filename} (404)`);
-  }
-  if (!isInsideRoot(realRoot, realFile)) {
-    throw new ValidationError(`Workflow not found: ${filename} (404)`);
-  }
-  const parsed: unknown = JSON.parse(await readFile(realFile, "utf8"));
-  if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
-    throw new ValidationError(`Could NOT read path: ${filename} is not a workflow object.`);
-  }
-  return parsed as Record<string, unknown>;
+  return undefined;
 }
 
 /** Keep every saved-workflow UI conversion on the same schema-backed path. */
@@ -254,7 +311,7 @@ export function registerWorkflowLibraryTools(server: McpServer): void {
         .optional()
         .describe(
           'action:"strip" / "slice" / "query" — Absolute server-side path to a workflow .json on disk (e.g. ' +
-            "C:\\\\Users\\\\you\\\\ComfyUI\\\\user\\\\default\\\\workflows\\\\pusa_extend.json). Read directly from disk — no library lookup.",
+            "C:\\\\Users\\\\you\\\\ComfyUI\\\\user\\\\default\\\\workflows\\\\pusa_extend.json). Read directly from disk — no library lookup. If a userdata path is missing the `workflows` segment after `user/default`, it is retried with that segment restored, preserving the filename exactly.",
         ),
       graph: z
         .record(z.string(), z.any())
