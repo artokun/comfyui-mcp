@@ -17,6 +17,8 @@ All notable changes to this project are documented here. This project adheres to
   A workflow saved before ComfyUI's widget/input unification kept a placeholder slot for
   such an input; that row is indistinguishable from one carrying an extra serialized
   value, so it is no longer guessed at — it is reported, naming the unmapped values.
+  The deprecated `defaultInput` spelling is honoured the way the frontend migrates it:
+  socket-only on an OPTIONAL input, widget kept on a REQUIRED one.
 
 ## [0.52.178] - 2026-09-02
 

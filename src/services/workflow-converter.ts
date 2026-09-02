@@ -113,6 +113,27 @@ function isForceInputSpec(spec: unknown): boolean {
 }
 
 /**
+ * `defaultInput` is the deprecated spelling of the same idea, and the frontend
+ * migrates it ASYMMETRICALLY (`ComfyNodeDefImpl._migrateDefaultInput`):
+ *
+ *   - on an OPTIONAL input it sets `forceInput = true` — socket-only, so no
+ *     widget and no `widgets_values` slot;
+ *   - on a REQUIRED input it only warns ("please drop the defaultInput option")
+ *     and the widget is KEPT.
+ *
+ * So the two spellings cannot share one rule. Promoting a required
+ * `defaultInput` to socket-only would drop a slot the frontend does write,
+ * shifting the row in the opposite direction to the bug this fixes.
+ */
+function isSocketOnlyInput(inputName: string, def: ComfyUINodeDef): boolean {
+  const required = def.input.required?.[inputName];
+  const optional = def.input.optional?.[inputName];
+  if (isForceInputSpec(required ?? optional)) return true;
+  if (required !== undefined || !Array.isArray(optional)) return false;
+  return (optional[1] as { defaultInput?: unknown } | undefined)?.defaultInput === true;
+}
+
+/**
  * Check if an input spec represents a widget (value input) vs a link (connection input).
  * Widget inputs have an array type spec like ["INT", {...}] or ["STRING", {...}].
  * Link inputs have a plain string type like "MODEL" or "CLIP".
@@ -126,7 +147,7 @@ function isWidgetInput(
   if (!spec) return false;
   // Socket-only by declaration — checked BEFORE any type classification, because
   // the frontend checks it first too (it applies to inline combos as well).
-  if (isForceInputSpec(spec)) return false;
+  if (isSocketOnlyInput(inputName, def)) return false;
 
   const typeSpec = spec[0];
   // If the type is an array of choices like ["option1", "option2"], it's a widget
@@ -3321,7 +3342,7 @@ export function convertUiToApi(
         const sp =
           (def.input?.required as Record<string, unknown> | undefined)?.[n] ??
           (def.input?.optional as Record<string, unknown> | undefined)?.[n];
-        return isForceInputSpec(sp) && isPositionalWidgetType(sp);
+        return isSocketOnlyInput(n, def) && isPositionalWidgetType(sp);
       })
     ) {
       warnings.push(

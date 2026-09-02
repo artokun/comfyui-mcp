@@ -3954,6 +3954,83 @@ describe("convertUiToApi — forceInput-only scalar input (issue #2753)", () => 
     expect(warnings.join(" ")).not.toContain("remain unmapped");
   });
 
+  // `defaultInput` is the deprecated spelling, and the frontend migrates it
+  // ASYMMETRICALLY (ComfyNodeDefImpl._migrateDefaultInput): on an OPTIONAL input it
+  // becomes forceInput — socket-only, no slot — while on a REQUIRED input it only
+  // logs "please drop the defaultInput option" and the widget is KEPT. Both halves
+  // are pinned, because getting the required half wrong shifts the row in the
+  // opposite direction to the bug being fixed.
+  it("an OPTIONAL defaultInput input is socket-only, like forceInput", () => {
+    const INFO = {
+      N: {
+        input: {
+          required: { mode: [["a", "b"]] },
+          optional: {
+            hook: ["STRING", { defaultInput: true }],
+            label: ["STRING", {}],
+          },
+        },
+        input_order: { required: ["mode"], optional: ["hook", "label"] },
+        output: [],
+      },
+    } as never;
+    const { workflow } = convertUiToApi(
+      {
+        nodes: [
+          {
+            id: 1,
+            type: "N",
+            mode: 0,
+            inputs: [{ name: "hook", type: "STRING", link: null }],
+            outputs: [],
+            widgets_values: ["b", "my label"],
+          },
+        ],
+        links: [],
+      } as never,
+      INFO,
+    );
+    const inputs = (workflow["1"] as { inputs: Record<string, unknown> }).inputs;
+    expect(inputs.mode).toBe("b");
+    expect(inputs.label).toBe("my label");
+  });
+
+  it("a REQUIRED defaultInput input keeps its widget slot", () => {
+    const INFO = {
+      N: {
+        input: {
+          required: {
+            hook: ["STRING", { defaultInput: true }],
+            label: ["STRING", {}],
+          },
+        },
+        input_order: { required: ["hook", "label"] },
+        output: [],
+      },
+    } as never;
+    const { workflow } = convertUiToApi(
+      {
+        nodes: [
+          {
+            id: 1,
+            type: "N",
+            mode: 0,
+            inputs: [],
+            outputs: [],
+            widgets_values: ["hooked", "my label"],
+          },
+        ],
+        links: [],
+      } as never,
+      INFO,
+    );
+    const inputs = (workflow["1"] as { inputs: Record<string, unknown> }).inputs;
+    // the frontend keeps this widget, so its slot is real — dropping it would
+    // shift `label` onto `hook`
+    expect(inputs.hook).toBe("hooked");
+    expect(inputs.label).toBe("my label");
+  });
+
   it("an INT forceInput input is socket-only too (not just STRING)", () => {
     const INFO = {
       N: {
