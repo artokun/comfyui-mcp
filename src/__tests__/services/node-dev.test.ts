@@ -992,6 +992,22 @@ describe("nodePackGit", () => {
       expect(gitCalls[0].args).toEqual(["diff", "--", "Pack/*.py"]);
     });
 
+    it("still corrects a deep prefixed path when the same-named child is a FILE", () => {
+      // A file cannot have children, so "Pack/preset_core.py" matches nothing even though
+      // something named "Pack" exists inside the pack — but the bare name DOES name that
+      // file, so the two arms of the check are not interchangeable.
+      mkPackFiles();
+      writeFileSync(join(customNodes, "Pack", "Pack"), "not a directory\n");
+      const { deps, gitCalls } = makeDeps();
+      expect(() =>
+        nodePackGit({ pack: "Pack", action: "diff", paths: ["Pack/preset_core.py"] }, deps),
+      ).toThrow(/drop the "Pack\/" prefix/);
+      expect(gitCalls.length).toBe(0);
+      const second = makeDeps();
+      nodePackGit({ pack: "Pack", action: "diff", paths: ["Pack"] }, second.deps);
+      expect(second.gitCalls[0].args).toEqual(["diff", "--", "Pack"]);
+    });
+
     it("scopes a path that no longer exists — a deletion is a legitimate pathspec", () => {
       // `git diff`/`git add` are how a DELETED file is inspected and staged, so the guard
       // must not probe the de-prefixed path for existence. Here the pack HAS a same-named
