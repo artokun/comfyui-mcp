@@ -3796,24 +3796,23 @@ describe("convertUiToApi — forceInput-only scalar input (issue #2753)", () => 
     "default",
   ];
 
-  function animaGraph(row: unknown[], trainerLink: number | null = null) {
+  function animaNode(row: unknown[], trainerLink: number | null = null) {
     return {
-      nodes: [
-        {
-          id: 7,
-          type: "AnimaTrainerLoader",
-          mode: 0,
-          inputs: [{ name: "trainer_status", type: "STRING", link: trainerLink }],
-          outputs: [
-            { name: "MODEL", type: "MODEL", links: [] },
-            { name: "CLIP", type: "CLIP", links: [] },
-            { name: "VAE", type: "VAE", links: [] },
-          ],
-          widgets_values: row,
-        },
+      id: 7,
+      type: "AnimaTrainerLoader",
+      mode: 0,
+      inputs: [{ name: "trainer_status", type: "STRING", link: trainerLink }],
+      outputs: [
+        { name: "MODEL", type: "MODEL", links: [] },
+        { name: "CLIP", type: "CLIP", links: [] },
+        { name: "VAE", type: "VAE", links: [] },
       ],
-      links: [],
-    } as never;
+      widgets_values: row,
+    };
+  }
+
+  function animaGraph(row: unknown[]) {
+    return { nodes: [animaNode(row)], links: [] } as never;
   }
 
   it("exact reported symptom: every widget keeps its own saved value", () => {
@@ -3845,7 +3844,7 @@ describe("convertUiToApi — forceInput-only scalar input (issue #2753)", () => 
           outputs: [{ name: "MODEL", type: "MODEL", links: [1] }],
           widgets_values: ["x.safetensors"],
         },
-        (animaGraph(SAVED_ROW, 1) as unknown as { nodes: unknown[] }).nodes[0],
+        animaNode(SAVED_ROW, 1),
       ],
       links: [[1, 6, 0, 7, 0, "STRING"]],
     } as never;
