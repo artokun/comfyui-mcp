@@ -8,7 +8,7 @@ import {
   getComfyuiTargetGeneration,
   isRemoteMode,
 } from "../config.js";
-import { comfyuiFetch } from "../comfyui/fetch.js";
+import { comfyuiFetch, defaultComfyTimeoutSignal, raceAbort } from "../comfyui/fetch.js";
 import { resetObjectInfoCache } from "../comfyui/client.js";
 import { progressEnabled, reportDownloadProgress } from "./download-progress.js";
 import { parsePyproject } from "./node-authoring.js";
@@ -742,6 +742,20 @@ async function probeManagerVersionEvidence(base: string): Promise<ManagerVersion
   // same question about the same host, and a second private taxonomy is how the
   // two drift into disagreeing about what "absent" means.
   const kinds: ManagerQueueStatusKind[] = [];
+  // ONE budget for the whole diagnosis, not one per route.
+  //
+  // comfyuiFetch's default ceiling cancels the HTTP exchange but NOT the body
+  // read: once headers arrive, `await res.text()` inside managerFetch can stay
+  // pending for as long as the body takes, and the abort event fires without the
+  // read observing it. That is fetch.ts:575-584 (#1672), and raceAbort exists for
+  // exactly this. A ComfyUI mid-decode really does accept a request and then stall
+  // — and hanging HERE would be the worst place for it, because this is the
+  // diagnosis a caller reached after everything else had already failed.
+  //
+  // Scoped to the two probes this branch adds. managerFetch's unraced body read is
+  // pre-existing on every other call site in this file and is filed separately;
+  // fixing it there changes behaviour for every Manager operation.
+  const budget = defaultComfyTimeoutSignal();
   for (const path of MANAGER_VERSION_ROUTES) {
     let kind: ManagerQueueStatusKind = "hard-error";
     // This route's own status. Recorded per-iteration, and promoted to
@@ -750,22 +764,24 @@ async function probeManagerVersionEvidence(base: string): Promise<ManagerVersion
     let statusSeen: number | undefined;
     try {
       const major = parseManagerMajor(
-        await managerFetch<string>(path, {
-          base,
-          soft: true,
-          onSoftFailure: (status) => {
-            statusSeen = status;
-            kind = status === undefined ? "transport" : managerQueueStatusKind(status);
-          },
-          onSoftTransportFailure: () => {
-            kind = "transport";
-          },
-          // A 2xx that is not a version string — ComfyUI's SPA catchall, most of
-          // all — is malformed, never absence.
-          onSoftResponse: (body) => {
-            kind = body === undefined || body === null ? "empty" : "malformed";
-          },
-        }),
+        await raceAbort(budget, () =>
+          managerFetch<string>(path, {
+            base,
+            soft: true,
+            onSoftFailure: (status) => {
+              statusSeen = status;
+              kind = status === undefined ? "transport" : managerQueueStatusKind(status);
+            },
+            onSoftTransportFailure: () => {
+              kind = "transport";
+            },
+            // A 2xx that is not a version string — ComfyUI's SPA catchall, most of
+            // all — is malformed, never absence.
+            onSoftResponse: (body) => {
+              kind = body === undefined || body === null ? "empty" : "malformed";
+            },
+          }),
+        ),
       );
       if (major !== undefined) return { kind: "version", major };
     } catch {

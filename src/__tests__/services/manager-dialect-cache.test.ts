@@ -379,6 +379,49 @@ describe("#646 Manager API dialect cache invalidation", () => {
     expect(error.message).not.toMatch(/only activates when ComfyUI is started with/i);
   });
 
+  it("settles instead of hanging on a version body that never ends (#2754, gate round 4)", async () => {
+    // comfyuiFetch's ceiling cancels the exchange but not the body read (#1672,
+    // fetch.ts:575-584), so a 200 whose body never closes leaves managerFetch's
+    // `await res.text()` pending forever. Without raceAbort around these two
+    // probes this test does not fail — it HANGS, which is the point.
+    const previousTimeout = process.env.COMFYUI_MCP_HTTP_TIMEOUT_S;
+    process.env.COMFYUI_MCP_HTTP_TIMEOUT_S = "0.3";
+    try {
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(async (url: string): Promise<Response> => {
+          const path = new URL(url).pathname;
+          if (path === "/v2/manager/version") {
+            // Headers arrive; the body never does and is never closed.
+            return new Response(
+              new ReadableStream({
+                start() {
+                  /* deliberately never enqueues and never closes */
+                },
+              }),
+              { status: 200 },
+            );
+          }
+          return new Response("404: Not Found", { status: 404 });
+        }),
+      );
+
+      const started = Date.now();
+      const error = await detectionError();
+      // Bounded by ONE budget for the whole probe, not one per route.
+      expect(Date.now() - started).toBeLessThan(5_000);
+      expect((error.details as { kind?: string }).kind).toBe("manager-queue-detection");
+      // A stall is unreadable — it establishes nothing about whether Manager is there.
+      expect((error.details as { managerVersionEvidence?: string }).managerVersionEvidence).toBe(
+        "unreadable",
+      );
+      expect(error.message).not.toMatch(/every probe 404'd/);
+    } finally {
+      if (previousTimeout === undefined) delete process.env.COMFYUI_MCP_HTTP_TIMEOUT_S;
+      else process.env.COMFYUI_MCP_HTTP_TIMEOUT_S = previousTimeout;
+    }
+  }, 20_000);
+
   it("does not call a BODY-read failure an authentication refusal (#2754, gate round 3)", async () => {
     // managerFetch's `await res.text()` is unguarded, so a 2xx whose body rejects
     // throws from the same place a 401 does. Classifying every throw as "refused"
