@@ -332,6 +332,15 @@ describe("get_image: each action reaches exactly one service", () => {
     });
   });
 
+  it('action:"get" forwards a get_history subfolder-qualified filename for service normalization', async () => {
+    await getImage()({ action: "get", filename: "out_F/p.png" });
+    expect(getOutputImageMock).toHaveBeenCalledWith("out_F/p.png", "output", "", {
+      allowMedia: true,
+      allowAttachment: true,
+      allowJson: true,
+    });
+  });
+
   it('action:"get" still defaults type/subfolder in the handler, not the schema', async () => {
     // Dropping the schema-level .default() keeps `type`/`subfolder` undefined for
     // the OTHER actions that share them; the get branch supplies the same

@@ -589,8 +589,9 @@ import { fetchImage, uploadImageHttp } from "../comfyui/client.js";
 import { readFile as nodeReadFile } from "node:fs/promises";
 
 /**
- * Reject filename / subfolder values that could traverse out of ComfyUI's
- * output, input or temp directory when forwarded to the /view endpoint.
+ * Split and reject filename / subfolder values that could traverse out of
+ * ComfyUI's output, input or temp directory when forwarded to the /view
+ * endpoint.
  *
  * ComfyUI's /view handler joins the requested `subfolder` and `filename`
  * onto the configured base directory; the server has historically been
@@ -599,12 +600,16 @@ import { readFile as nodeReadFile } from "node:fs/promises";
  * MCP tool surface could otherwise pivot through get_image (action:"get"/"view") /
  * upload_image (action:"stage") to read arbitrary files from the ComfyUI host.
  *
- * Legitimate ComfyUI values are a single filename (no separators) and a
- * relative subfolder produced by listOutputImages (forward-slash joined,
- * no ".." segments). Anything outside that shape is refused here BEFORE
- * the request is forwarded.
+ * get_history (action:"list") prints media as `subfolder/filename`, so callers
+ * paste that combined string into get_image's `filename`. A relative prefix is
+ * the same thing as the `subfolder` argument and is adopted, not refused.
+ * Absolute paths, drive prefixes, and ".." still fail closed BEFORE the
+ * request is forwarded.
  */
-function assertSafeViewRef(filename: string, subfolder: string): void {
+function normalizeViewRef(
+  filename: string,
+  subfolder: string,
+): { filename: string; subfolder: string } {
   if (typeof filename !== "string" || filename.length === 0) {
     throw new ValidationError("filename is required");
   }
@@ -613,37 +618,62 @@ function assertSafeViewRef(filename: string, subfolder: string): void {
       "filename / subfolder must not contain NUL bytes",
     );
   }
-  // Filename must be a single path segment — no separators, no traversal.
+
+  const rejectFilename = (): never => {
+    throw new ValidationError(
+      `Invalid filename "${filename}": must be a filename or relative subfolder/filename reference without absolute paths, drive prefixes, or '..' segments`,
+    );
+  };
+
+  // Rooted / drive-prefixed FILENAME is not a relative output ref. Refuse
+  // rather than stripping the prefix into a quietly different destination.
   if (
-    filename.includes("/") ||
-    filename.includes("\\") ||
-    /^[A-Za-z]:/.test(filename) ||
-    filename === "." ||
-    filename === ".." ||
-    filename.split(/[\\/]/).some((s) => s === "..")
+    filename.startsWith("/") ||
+    filename.startsWith("\\") ||
+    /^[A-Za-z]:/.test(filename)
   ) {
-    throw new ValidationError(
-      `Invalid filename "${filename}": must be a single filename without path separators, drive prefixes, or '..' segments`,
-    );
+    rejectFilename();
   }
-  if (!subfolder) return;
-  // Subfolder must be a forward-slash-joined relative path with no ".."
-  // segments and no Windows-style drive / absolute prefix.
-  if (
-    subfolder.startsWith("/") ||
-    subfolder.startsWith("\\") ||
-    /^[A-Za-z]:/.test(subfolder)
-  ) {
-    throw new ValidationError(
-      `Invalid subfolder "${subfolder}": must be relative to the ComfyUI media directory`,
-    );
+
+  const endsInSeparator = /[/\\]\s*$/.test(filename);
+  const parts = filename.split(/[/\\]+/).filter((p) => p !== "" && p !== ".");
+  const name = endsInSeparator ? "" : (parts.pop() ?? "");
+  if (name === "" || name === "." || name === ".." || /^[A-Za-z]:/.test(name)) {
+    rejectFilename();
   }
-  const segments = subfolder.split(/[\\/]/);
-  if (segments.some((s) => s === "..")) {
-    throw new ValidationError(
-      `Invalid subfolder "${subfolder}": '..' segments are not allowed`,
-    );
+  if (parts.some((p) => p === "..")) {
+    rejectFilename();
   }
+  const prefix = parts.join("/");
+
+  let resolvedSubfolder = subfolder;
+  if (prefix) {
+    resolvedSubfolder = subfolder
+      ? `${subfolder.replace(/\\/g, "/").replace(/\/+$/, "")}/${prefix}`
+      : prefix;
+  }
+
+  if (resolvedSubfolder) {
+    // Subfolder must be a forward-slash-joined relative path with no ".."
+    // segments and no Windows-style drive / absolute prefix.
+    if (
+      resolvedSubfolder.startsWith("/") ||
+      resolvedSubfolder.startsWith("\\") ||
+      /^[A-Za-z]:/.test(resolvedSubfolder)
+    ) {
+      throw new ValidationError(
+        `Invalid subfolder "${subfolder || prefix}": must be relative to the ComfyUI media directory`,
+      );
+    }
+    const segments = resolvedSubfolder.split(/[\\/]/);
+    if (segments.some((s) => s === "..")) {
+      throw new ValidationError(
+        `Invalid subfolder "${subfolder || prefix}": '..' segments are not allowed`,
+      );
+    }
+  }
+
+  return { filename: name, subfolder: resolvedSubfolder };
 }
 
 /** Strict lexical containment for the local fallback below. */
@@ -1058,7 +1088,7 @@ export async function getOutputImage(
     signal?: AbortSignal;
   } = {},
 ): Promise<{ base64: string; mimeType: string; filename: string }> {
-  assertSafeViewRef(filename, subfolder);
+  ({ filename, subfolder } = normalizeViewRef(filename, subfolder));
   let result: { base64: string; mimeType: string };
   try {
     result = signal
@@ -1748,12 +1778,11 @@ export async function stageOutputAsInput(
   // Fetch the existing asset's bytes via the same /view mechanism the asset
   // tools use (fetchImage handles cloud vs local). Despite the name, /view
   // returns raw bytes for any media type, not just images.
-  const sourceSubfolder = args.subfolder ?? "";
-  assertSafeViewRef(args.filename, sourceSubfolder);
+  const source = normalizeViewRef(args.filename, args.subfolder ?? "");
   const { base64 } = await fetchImage(
-    args.filename,
+    source.filename,
     sourceType,
-    sourceSubfolder,
+    source.subfolder,
   );
   const data = Buffer.from(base64, "base64");
 

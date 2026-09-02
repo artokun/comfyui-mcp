@@ -6,6 +6,11 @@ All notable changes to this project are documented here. This project adheres to
 
 ## Unreleased
 
+### MCP
+
+#### Fixed
+- get_image accepts a get_history filename that includes a relative subfolder prefix (#2526)
+
 ## [0.52.173] - 2026-09-02
 
 ### MCP
