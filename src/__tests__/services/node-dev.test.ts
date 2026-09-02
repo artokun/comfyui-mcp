@@ -913,7 +913,7 @@ describe("nodePackGit", () => {
           deps,
         ),
       ).toThrow(
-        /names custom_nodes\/Pack\/Pack\/preset_core\.py .+ custom_nodes\/Pack\/Pack does not exist, so it would match nothing.+drop the "Pack\/" prefix and pass "preset_core\.py"/s,
+        /names custom_nodes\/Pack\/Pack\/preset_core\.py .+ custom_nodes\/Pack\/Pack is not in the working tree.+drop the "Pack\/" prefix and pass "preset_core\.py"/s,
       );
       expect(gitCalls.length).toBe(0);
     });
@@ -1006,6 +1006,38 @@ describe("nodePackGit", () => {
       const second = makeDeps();
       nodePackGit({ pack: "Pack", action: "diff", paths: ["Pack"] }, second.deps);
       expect(second.gitCalls[0].args).toEqual(["diff", "--", "Pack"]);
+    });
+
+    it("honours the ABSOLUTE spelling of a prefixed path — the guard's escape hatch", () => {
+      // The disk cannot settle one case: a same-named child that is TRACKED but deleted
+      // from the working tree, where git still matches "Pack/gone.py". An absolute entry
+      // spells the whole path out, so it cannot be the prefix mistake and is taken as
+      // written — which is what the refusal message tells the caller to do.
+      mkPackFiles();
+      const { deps, gitCalls } = makeDeps();
+      const abs = join(realpathSync(join(customNodes, "Pack")), "Pack", "gone.py");
+      nodePackGit({ pack: "Pack", action: "diff", paths: [abs] }, deps);
+      expect(gitCalls[0].args).toEqual(["diff", "--", "Pack/gone.py"]);
+      // …while the relative spelling of the same path is still corrected.
+      const second = makeDeps();
+      expect(() =>
+        nodePackGit({ pack: "Pack", action: "diff", paths: ["Pack/gone.py"] }, second.deps),
+      ).toThrow(/pass it as an absolute path/);
+    });
+
+    it("leaves a WILDCARD head alone even when it matches the pack's own name", () => {
+      // assertSafeRepoName allows "*" in a folder name, so a POSIX pack really can be
+      // called "Pack*" — and then "Pack*/foo.py" is a glob git resolves, not the prefix
+      // mistake. Simulated through the fs seam, since Windows cannot create that name.
+      const packDir = join(customNodes, "Pack*");
+      const seen = new Set([customNodes, packDir]);
+      const { deps, gitCalls } = makeDeps({
+        existsSync: (q: string) => seen.has(q),
+        realpath: (q: string) => q,
+        isDirectory: (q: string) => q === packDir || q === customNodes,
+      });
+      nodePackGit({ pack: "Pack*", action: "diff", paths: ["Pack*/foo.py"] }, deps);
+      expect(gitCalls[0].args).toEqual(["diff", "--", "Pack*/foo.py"]);
     });
 
     it("scopes a path that no longer exists — a deletion is a legitimate pathspec", () => {

@@ -1483,12 +1483,21 @@ export function gitWritesEnabled(): boolean {
  * so the workaround would fail silently. Refuse it instead, naming the correction.
  *
  * The refusal rests on ONE disk fact: whether the pack contains a child named like the
- * pack. If it does not, the prefixed pathspec cannot match anything, whatever the rest of
- * it says — so this holds for a wildcard (`MyPack/*.py`) as much as a literal one, and
- * needs no probe of the de-prefixed path. That last part matters: `git diff`/`git add`
- * are exactly how a DELETED file is inspected and staged, and a path that no longer
- * exists in the worktree is a legitimate pathspec. Probing it would refuse the deletion.
- * A pack that really does contain a same-named child keeps the literal reading.
+ * pack. If it does not, the prefixed reading names a directory that is not there — which
+ * decides a wildcard (`MyPack/*.py`) as well as a literal path, and needs no probe of the
+ * de-prefixed path. That last part matters: `git diff`/`git add` are exactly how a DELETED
+ * file is inspected and staged, so a path absent from the worktree is a legitimate
+ * pathspec, and probing it would refuse the deletion.
+ *
+ * Where the fact is not conclusive, the refusal must stay escapable, so it fires only on
+ * the AMBIGUOUS spelling:
+ *   • Only a RELATIVE entry can be the prefix mistake. An absolute entry spells the whole
+ *     path out, so it is honoured as written — and it is therefore the escape hatch for
+ *     the one shape the disk cannot settle: a same-named child that is TRACKED but deleted
+ *     from the worktree, where git can still match `MyPack/gone.py`. The message says so.
+ *   • A head carrying a wildcard is not a literal reference to the pack, even when it
+ *     matches the pack's own name — `assertSafeRepoName` allows `*` in a folder name, and
+ *     on a POSIX filesystem a pack really can be called `Pack*`.
  *
  * `pack` reaches here two ways — the caller's spelling and the real directory name — and
  * they differ when custom_nodes/<name> is a symlink or junction to a differently-named
@@ -1504,6 +1513,7 @@ function assertNotPackPrefixed(
 ): void {
   const segs = rel.split("/");
   const head = segs[0];
+  if (/[*?]/.test(head)) return;
   const lower = head.toLowerCase();
   if (lower !== basename(packDir).toLowerCase() && lower !== packName.toLowerCase()) return;
   // A deeper entry needs the head to be a traversable DIRECTORY; a bare "<pack>" only
@@ -1514,11 +1524,13 @@ function assertNotPackPrefixed(
   throw new NodeDevError(
     `Path "${original}" is resolved relative to the pack, so it names ` +
       `custom_nodes/${basename(packDir)}/${rel} — and ` +
-      `custom_nodes/${basename(packDir)}/${head} does not exist, so it would match ` +
-      `nothing. \`paths\` entries are pack-relative: ` +
+      `custom_nodes/${basename(packDir)}/${head} is not in the working tree. ` +
+      `\`paths\` entries are pack-relative: ` +
       (stripped
-        ? `drop the "${head}/" prefix and pass "${stripped}".`
-        : `omit \`paths\` to scope the whole pack, or pass "." .`),
+        ? `drop the "${head}/" prefix and pass "${stripped}"`
+        : `omit \`paths\` to scope the whole pack, or pass "."`) +
+      `. If you did mean that path — a tracked file whose directory was deleted, say — ` +
+      `pass it as an absolute path, which is taken as written.`,
   );
 }
 
@@ -1561,17 +1573,16 @@ function packRelativePath(
   // scope to every file in it, which is what omitting `paths` already means.
   if (!raw) throw new NodeDevError("A path is required (received an empty string).");
 
-  const { abs } = resolveInJail(
-    isAbsolute(raw) ? raw : join(packName, raw),
-    deps,
-    resolvedBase,
-  );
+  const spelledOut = isAbsolute(raw);
+  const { abs } = resolveInJail(spelledOut ? raw : join(packName, raw), deps, resolvedBase);
   const rel = relative(packDir, abs);
   if (rel.startsWith("..") || isAbsolute(rel)) {
     throw new NodeDevError(`Path "${p}" is outside the target pack.`);
   }
   const posix = rel.split(/[\\/]/).join("/") || ".";
-  assertNotPackPrefixed(packDir, packName, p, posix, deps);
+  // Only a relative entry can be the pack-name-prefix mistake; an absolute one already
+  // says exactly which file it means, so it is honoured as written.
+  if (!spelledOut) assertNotPackPrefixed(packDir, packName, p, posix, deps);
   return posix;
 }
 
