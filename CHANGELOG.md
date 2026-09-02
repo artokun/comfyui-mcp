@@ -6,6 +6,14 @@ All notable changes to this project are documented here. This project adheres to
 
 ## Unreleased
 
+## [0.52.171] - 2026-09-02
+
+### MCP
+
+#### Fixed
+- recover full-graph `panel_run` queued-unknown responses from an exact rid-correlated Panel receipt without inferring a foreign queue prompt (#2143, #2732)
+
+
 ## [0.52.170] - 2026-09-01
 
 ### MCP
