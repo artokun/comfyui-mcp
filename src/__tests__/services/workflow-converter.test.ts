@@ -3749,3 +3749,263 @@ describe("convertUiToApi — extras-skipping must never eat a legitimate value (
     expect(workflow["1"].inputs.count).toBe(7);
   });
 });
+
+// ─────────────────────────────────────────────────────────────────────────────
+// #2753 — a forceInput-only scalar input is a SOCKET, not a widget, so it has no
+// widgets_values slot. Classifying it as one consumed the first saved value and
+// shifted every real widget down the row.
+// ─────────────────────────────────────────────────────────────────────────────
+describe("convertUiToApi — forceInput-only scalar input (issue #2753)", () => {
+  // The reporter's node: trainer_status is declared ["STRING", {forceInput:true}]
+  // and rendered as an input socket only; the five widgets after it are the ones
+  // the frontend actually serializes.
+  const ANIMA_INFO = {
+    AnimaTrainerLoader: {
+      input: {
+        required: {
+          trainer_status: ["STRING", { forceInput: true }],
+          unet_name: [["anima-base-v1.0.safetensors", "qwen_3_06b_base.safetensors"]],
+          clip_name: [["qwen_3_06b_base.safetensors", "qwen_image_vae.safetensors"]],
+          vae_name: [["qwen_image_vae.safetensors", "other_vae.safetensors"]],
+          weight_dtype: [["default", "fp8_e4m3fn"]],
+          clip_device: [["default", "cpu"]],
+        },
+      },
+      input_order: {
+        required: [
+          "trainer_status",
+          "unet_name",
+          "clip_name",
+          "vae_name",
+          "weight_dtype",
+          "clip_device",
+        ],
+      },
+      output: ["MODEL", "CLIP", "VAE"],
+      output_name: ["MODEL", "CLIP", "VAE"],
+    },
+  } as never;
+
+  // Exactly the widgets_values the reporter's saved workflow carries: FIVE values
+  // for five widgets, with NO slot for the socket-only trainer_status.
+  const SAVED_ROW = [
+    "anima-base-v1.0.safetensors",
+    "qwen_3_06b_base.safetensors",
+    "qwen_image_vae.safetensors",
+    "default",
+    "default",
+  ];
+
+  function animaGraph(row: unknown[], trainerLink: number | null = null) {
+    return {
+      nodes: [
+        {
+          id: 7,
+          type: "AnimaTrainerLoader",
+          mode: 0,
+          inputs: [{ name: "trainer_status", type: "STRING", link: trainerLink }],
+          outputs: [
+            { name: "MODEL", type: "MODEL", links: [] },
+            { name: "CLIP", type: "CLIP", links: [] },
+            { name: "VAE", type: "VAE", links: [] },
+          ],
+          widgets_values: row,
+        },
+      ],
+      links: [],
+    } as never;
+  }
+
+  it("exact reported symptom: every widget keeps its own saved value", () => {
+    const { workflow, warnings } = convertUiToApi(animaGraph(SAVED_ROW), ANIMA_INFO);
+    const inputs = (workflow["7"] as { inputs: Record<string, unknown> }).inputs;
+    expect(inputs).toMatchObject({
+      unet_name: "anima-base-v1.0.safetensors",
+      clip_name: "qwen_3_06b_base.safetensors",
+      vae_name: "qwen_image_vae.safetensors",
+      weight_dtype: "default",
+      clip_device: "default",
+    });
+    // the pre-fix (shifted) reading must not reappear
+    expect(inputs.unet_name).not.toBe("qwen_3_06b_base.safetensors");
+    expect(inputs.clip_name).not.toBe("qwen_image_vae.safetensors");
+    expect(inputs.vae_name).not.toBe("default");
+    expect(warnings).toEqual([]);
+  });
+
+  it("the socket-only input never steals a widget slot, wired or not", () => {
+    // Wired: the value arrives over the link, and the widgets stay put.
+    const wired = {
+      nodes: [
+        {
+          id: 6,
+          type: "CheckpointLoaderSimple",
+          mode: 0,
+          inputs: [],
+          outputs: [{ name: "MODEL", type: "MODEL", links: [1] }],
+          widgets_values: ["x.safetensors"],
+        },
+        (animaGraph(SAVED_ROW, 1) as unknown as { nodes: unknown[] }).nodes[0],
+      ],
+      links: [[1, 6, 0, 7, 0, "STRING"]],
+    } as never;
+    const { workflow } = convertUiToApi(wired, {
+      ...(ANIMA_INFO as object),
+      CheckpointLoaderSimple: {
+        input: { required: { ckpt_name: [["x.safetensors"]] } },
+        input_order: { required: ["ckpt_name"] },
+        output: ["MODEL"],
+        output_name: ["MODEL"],
+      },
+    } as never);
+    const inputs = (workflow["7"] as { inputs: Record<string, unknown> }).inputs;
+    expect(inputs.trainer_status).toEqual(["6", 0]);
+    expect(inputs.unet_name).toBe("anima-base-v1.0.safetensors");
+    expect(inputs.clip_device).toBe("default");
+  });
+
+  // A row saved BEFORE ComfyUI's widget/input unification kept a placeholder slot
+  // for the forceInput input. ComfyUI's own loader (migrateWidgetsValues) drops it
+  // by matching the row length against that legacy layout; so do we, otherwise the
+  // fix above would shift a legacy row the other way.
+  it("legacy row with a forceInput placeholder is still read correctly", () => {
+    const { workflow } = convertUiToApi(
+      animaGraph([null, ...SAVED_ROW]),
+      ANIMA_INFO,
+    );
+    const inputs = (workflow["7"] as { inputs: Record<string, unknown> }).inputs;
+    expect(inputs).toMatchObject({
+      unet_name: "anima-base-v1.0.safetensors",
+      clip_name: "qwen_3_06b_base.safetensors",
+      vae_name: "qwen_image_vae.safetensors",
+      weight_dtype: "default",
+      clip_device: "default",
+    });
+  });
+
+  // The length gate must not fire on a row that is neither layout — a modern row
+  // with an extra serialized value must keep falling through to the existing
+  // #1869 extras handling rather than silently losing its FIRST value.
+  it("does not strip anything when the row matches neither layout", () => {
+    const row = [...SAVED_ROW, "trailing_extra", "one_more"];
+    const { workflow } = convertUiToApi(animaGraph(row), ANIMA_INFO);
+    const inputs = (workflow["7"] as { inputs: Record<string, unknown> }).inputs;
+    expect(inputs.unet_name).toBe("anima-base-v1.0.safetensors");
+  });
+
+  // A SHIPPED node with the same shape, so the pin is not only on the reporter's
+  // custom node: rgthree's SDXLPowerPromptPositive declares opt_clip_width and
+  // opt_clip_height as ["INT", {forceInput: true, default: 1024}] ahead of three
+  // combo widgets, so before the fix BOTH stole a slot and the three combos read
+  // two positions late.
+  it("rgthree SDXLPowerPromptPositive: two forceInput INTs steal no slots", () => {
+    const RGTHREE_INFO = {
+      "SDXL Power Prompt - Positive (rgthree)": {
+        input: {
+          required: {
+            prompt_g: ["STRING", { multiline: true }],
+            prompt_l: ["STRING", { multiline: true }],
+          },
+          optional: {
+            opt_model: ["MODEL"],
+            opt_clip: ["CLIP"],
+            opt_clip_width: ["INT", { forceInput: true, default: 1024 }],
+            opt_clip_height: ["INT", { forceInput: true, default: 1024 }],
+            insert_lora: [["CHOOSE", "DISABLE LORAS", "detail.safetensors"]],
+            insert_embedding: [["CHOOSE", "badhands"]],
+            insert_saved: [["CHOOSE", "my_prompt"]],
+          },
+        },
+        input_order: {
+          required: ["prompt_g", "prompt_l"],
+          optional: [
+            "opt_model",
+            "opt_clip",
+            "opt_clip_width",
+            "opt_clip_height",
+            "insert_lora",
+            "insert_embedding",
+            "insert_saved",
+          ],
+        },
+        output: ["CONDITIONING"],
+        output_name: ["CONDITIONING"],
+      },
+    } as never;
+    const { workflow } = convertUiToApi(
+      {
+        nodes: [
+          {
+            id: 4,
+            type: "SDXL Power Prompt - Positive (rgthree)",
+            mode: 0,
+            inputs: [
+              { name: "opt_model", type: "MODEL", link: null },
+              { name: "opt_clip", type: "CLIP", link: null },
+              { name: "opt_clip_width", type: "INT", link: null },
+              { name: "opt_clip_height", type: "INT", link: null },
+            ],
+            outputs: [{ name: "CONDITIONING", type: "CONDITIONING", links: [] }],
+            widgets_values: [
+              "a photo of a cat",
+              "cat",
+              "detail.safetensors",
+              "badhands",
+              "my_prompt",
+            ],
+          },
+        ],
+        links: [],
+      } as never,
+      RGTHREE_INFO,
+    );
+    const inputs = (workflow["4"] as { inputs: Record<string, unknown> }).inputs;
+    expect(inputs).toMatchObject({
+      prompt_g: "a photo of a cat",
+      prompt_l: "cat",
+      insert_lora: "detail.safetensors",
+      insert_embedding: "badhands",
+      insert_saved: "my_prompt",
+    });
+    // pre-fix: the two forceInput INTs consumed prompt_g/prompt_l's slots and the
+    // three combos each read two positions late (falling back to "CHOOSE").
+    expect(inputs.insert_lora).not.toBe("CHOOSE");
+    expect(inputs.insert_embedding).not.toBe("CHOOSE");
+  });
+
+  it("an INT forceInput input is socket-only too (not just STRING)", () => {
+    const INFO = {
+      N: {
+        input: {
+          required: {
+            steps: ["INT", { forceInput: true, default: 20 }],
+            cfg: ["FLOAT", { default: 8 }],
+            sampler: [["euler", "dpmpp_2m"]],
+          },
+        },
+        input_order: { required: ["steps", "cfg", "sampler"] },
+        output: [],
+      },
+    } as never;
+    const { workflow } = convertUiToApi(
+      {
+        nodes: [
+          {
+            id: 1,
+            type: "N",
+            mode: 0,
+            inputs: [{ name: "steps", type: "INT", link: null }],
+            outputs: [],
+            widgets_values: [7.5, "dpmpp_2m"],
+          },
+        ],
+        links: [],
+      } as never,
+      INFO,
+    );
+    const inputs = (workflow["1"] as { inputs: Record<string, unknown> }).inputs;
+    expect(inputs.cfg).toBe(7.5);
+    expect(inputs.sampler).toBe("dpmpp_2m");
+  });
+});
+

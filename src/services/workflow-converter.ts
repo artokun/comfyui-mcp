@@ -95,6 +95,24 @@ function isScalarWidgetType(type: unknown, cfg?: unknown): boolean {
 }
 
 /**
+ * `forceInput: true` on a widget-typed input means "render this as a SOCKET, never
+ * a widget" (#2753). ComfyUI's frontend honours it for EVERY type — its widget
+ * factory returns early on `forceInput` before it looks at the type at all — so a
+ * `["STRING", {forceInput: true}]` input has no widget, and therefore no
+ * `widgets_values` slot, even though its spec is otherwise indistinguishable from
+ * a real STRING widget.
+ *
+ * Classifying one as a widget consumes a positional slot that was never written,
+ * which shifts every REAL widget after it by one (the reported symptom: a node
+ * whose first input is a forceInput-only STRING reported `unet_name` with the
+ * value of `clip_name`, `clip_name` with `vae_name`'s, and so on down the row).
+ */
+function isForceInputSpec(spec: unknown): boolean {
+  if (!Array.isArray(spec)) return false;
+  return (spec[1] as { forceInput?: unknown } | undefined)?.forceInput === true;
+}
+
+/**
  * Check if an input spec represents a widget (value input) vs a link (connection input).
  * Widget inputs have an array type spec like ["INT", {...}] or ["STRING", {...}].
  * Link inputs have a plain string type like "MODEL" or "CLIP".
@@ -106,6 +124,9 @@ function isWidgetInput(
   const spec =
     def.input.required?.[inputName] ?? def.input.optional?.[inputName];
   if (!spec) return false;
+  // Socket-only by declaration — checked BEFORE any type classification, because
+  // the frontend checks it first too (it applies to inline combos as well).
+  if (isForceInputSpec(spec)) return false;
 
   const typeSpec = spec[0];
   // If the type is an array of choices like ["option1", "option2"], it's a widget
@@ -188,13 +209,18 @@ function resolveLinkedNestedArity(opts: {
   return fitsRetained ? retained : omitted;
 }
 
-function isPositionalWidgetSpec(spec: unknown): boolean {
+function isPositionalWidgetType(spec: unknown): boolean {
   if (!Array.isArray(spec)) return false;
   const type = spec[0];
   if (Array.isArray(type)) return true; // inline combo options
   const cfg = spec[1] as { options?: unknown } | undefined;
   if (Array.isArray(cfg?.options)) return true; // dynamic combo (options-carrying)
   return isScalarWidgetType(type, cfg);
+}
+
+function isPositionalWidgetSpec(spec: unknown): boolean {
+  // forceInput is socket-only, so it is never serialized positionally (#2753).
+  return !isForceInputSpec(spec) && isPositionalWidgetType(spec);
 }
 
 /**
@@ -674,6 +700,53 @@ function remainingPositionalSlots(
     if (hasControlAfterGenerate(widgetNames[i], def)) n += 1;
   }
   return n;
+}
+
+/**
+ * #2753 — a saved row from BEFORE ComfyUI's widget/input unification DID carry a
+ * placeholder slot for every `forceInput` input; a row saved after it does not.
+ * The two layouts are positionally indistinguishable from a single node, so
+ * excluding forceInput from the widget list (which is correct for every current
+ * frontend) would shift a legacy row the other way.
+ *
+ * ComfyUI's own loader settles it by LENGTH — `migrateWidgetsValues` builds the
+ * legacy slot layout from the node def, and only when the saved row's length
+ * matches it exactly does it drop the forceInput positions. Mirror that here so
+ * the converter reads both eras the way the canvas would.
+ *
+ * Deliberately narrow: it is a no-op unless the node actually declares a
+ * forceInput widget-typed input AND the row length matches the legacy layout
+ * exactly. A row already in the modern layout is shorter, so it can never match.
+ * A dynamic combo contributes an unknowable number of nested slots, so its
+ * presence makes the length argument meaningless and the row is left alone.
+ */
+function stripLegacyForceInputSlots<
+  T extends unknown[] | Record<string, unknown>,
+>(
+  widgetValues: T,
+  def: ComfyUINodeDef,
+  orderedNames: string[],
+  widgetNames: string[],
+): T | unknown[] {
+  if (!Array.isArray(widgetValues)) return widgetValues;
+  const isWidget = new Set(widgetNames);
+  const placeholderAt: boolean[] = [];
+  let sawForceInput = false;
+  for (const name of orderedNames) {
+    const spec =
+      (def.input?.required as Record<string, unknown> | undefined)?.[name] ??
+      (def.input?.optional as Record<string, unknown> | undefined)?.[name];
+    const forced = isForceInputSpec(spec) && isPositionalWidgetType(spec);
+    if (!forced && !isWidget.has(name)) continue;
+    if (Array.isArray(spec) && spec[0] === "COMFY_DYNAMICCOMBO_V3") return widgetValues;
+    if (forced) sawForceInput = true;
+    placeholderAt.push(forced);
+    // Mirrors the frontend: a control_after_generate input occupies a second
+    // slot, and that slot is never the forceInput placeholder.
+    if (hasControlAfterGenerate(name, def)) placeholderAt.push(false);
+  }
+  if (!sawForceInput || placeholderAt.length !== widgetValues.length) return widgetValues;
+  return widgetValues.filter((_v, i) => !placeholderAt[i]);
 }
 
 /**
@@ -2746,7 +2819,14 @@ export function convertUiToApi(
     // string landing on `seed`, a LoRA name landing on a VAE). A name-keyed map has
     // no order to disagree about, so it routes into the object branch below, which
     // already fails CLOSED when a name is ambiguous.
-    const widgetValues = node.capturedWidgetValues ?? node.widgets_values ?? [];
+    // …and normalize a legacy forceInput layout first (#2753), so the positional
+    // mapping below sees the same row the current frontend would.
+    const widgetValues = stripLegacyForceInputSlots(
+      node.capturedWidgetValues ?? node.widgets_values ?? [],
+      def,
+      orderedNames,
+      widgetNames,
+    );
 
     // Some nodes (e.g. VHS_VideoCombine) store widgets_values as a name->value
     // object instead of a positional array — as does the #384 live-canvas
