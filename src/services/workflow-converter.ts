@@ -95,6 +95,45 @@ function isScalarWidgetType(type: unknown, cfg?: unknown): boolean {
 }
 
 /**
+ * `forceInput: true` on a widget-typed input means "render this as a SOCKET, never
+ * a widget" (#2753). ComfyUI's frontend honours it for EVERY type — its widget
+ * factory returns early on `forceInput` before it looks at the type at all — so a
+ * `["STRING", {forceInput: true}]` input has no widget, and therefore no
+ * `widgets_values` slot, even though its spec is otherwise indistinguishable from
+ * a real STRING widget.
+ *
+ * Classifying one as a widget consumes a positional slot that was never written,
+ * which shifts every REAL widget after it by one (the reported symptom: a node
+ * whose first input is a forceInput-only STRING reported `unet_name` with the
+ * value of `clip_name`, `clip_name` with `vae_name`'s, and so on down the row).
+ */
+function isForceInputSpec(spec: unknown): boolean {
+  if (!Array.isArray(spec)) return false;
+  return (spec[1] as { forceInput?: unknown } | undefined)?.forceInput === true;
+}
+
+/**
+ * `defaultInput` is the deprecated spelling of the same idea, and the frontend
+ * migrates it ASYMMETRICALLY (`ComfyNodeDefImpl._migrateDefaultInput`):
+ *
+ *   - on an OPTIONAL input it sets `forceInput = true` — socket-only, so no
+ *     widget and no `widgets_values` slot;
+ *   - on a REQUIRED input it only warns ("please drop the defaultInput option")
+ *     and the widget is KEPT.
+ *
+ * So the two spellings cannot share one rule. Promoting a required
+ * `defaultInput` to socket-only would drop a slot the frontend does write,
+ * shifting the row in the opposite direction to the bug this fixes.
+ */
+function isSocketOnlyInput(inputName: string, def: ComfyUINodeDef): boolean {
+  const required = def.input.required?.[inputName];
+  const optional = def.input.optional?.[inputName];
+  if (isForceInputSpec(required ?? optional)) return true;
+  if (required !== undefined || !Array.isArray(optional)) return false;
+  return (optional[1] as { defaultInput?: unknown } | undefined)?.defaultInput === true;
+}
+
+/**
  * Check if an input spec represents a widget (value input) vs a link (connection input).
  * Widget inputs have an array type spec like ["INT", {...}] or ["STRING", {...}].
  * Link inputs have a plain string type like "MODEL" or "CLIP".
@@ -106,6 +145,9 @@ function isWidgetInput(
   const spec =
     def.input.required?.[inputName] ?? def.input.optional?.[inputName];
   if (!spec) return false;
+  // Socket-only by declaration — checked BEFORE any type classification, because
+  // the frontend checks it first too (it applies to inline combos as well).
+  if (isSocketOnlyInput(inputName, def)) return false;
 
   const typeSpec = spec[0];
   // If the type is an array of choices like ["option1", "option2"], it's a widget
@@ -188,6 +230,15 @@ function resolveLinkedNestedArity(opts: {
   return fitsRetained ? retained : omitted;
 }
 
+/**
+ * NOTE (#2753): deliberately does NOT exclude `forceInput`/`defaultInput`. This
+ * predicate is used for a dynamic combo option's NESTED leaves, and the frontend's
+ * socket-only handling is TOP-LEVEL only — `_migrateDefaultInput` walks the node's
+ * own `input.required`/`input.optional` and does not recurse into an option's
+ * inputs. Excluding them here would drop a slot the frontend does write. The
+ * top-level rule lives in `isSocketOnlyInput`, which has the required/optional
+ * context this spec-only predicate cannot see.
+ */
 function isPositionalWidgetSpec(spec: unknown): boolean {
   if (!Array.isArray(spec)) return false;
   const type = spec[0];
@@ -2746,6 +2797,17 @@ export function convertUiToApi(
     // string landing on `seed`, a LoRA name landing on a VAE). A name-keyed map has
     // no order to disagree about, so it routes into the object branch below, which
     // already fails CLOSED when a name is ambiguous.
+    //
+    // ACCEPTED LIMITATION (#2753): a row saved BEFORE ComfyUI's widget/input
+    // unification carried a placeholder slot for each `forceInput` input, so it is
+    // one longer than the layout mapped here and reads shifted. That length is not
+    // enough to identify it — a MODERN row carrying a frontend-only serialized
+    // extra (#1869) has exactly the same length, and the two readings disagree
+    // about which value is real ([null, "D:/in.mov", 12] is either
+    // placeholder+path+frame or path+button+frame). Normalizing on length alone
+    // therefore breaks one case to fix the other, so neither is guessed: the
+    // extras pass handles the modern reading and reports what it discards, and a
+    // legacy row surfaces through that same warning or through combo validation.
     const widgetValues = node.capturedWidgetValues ?? node.widgets_values ?? [];
 
     // Some nodes (e.g. VHS_VideoCombine) store widgets_values as a name->value
@@ -3264,6 +3326,36 @@ export function convertUiToApi(
         } saved widget value(s) remain unmapped), so its nested leaves and the widget(s) positioned after it${
           defaulted.length ? ` (${defaulted.join(", ")})` : ""
         } are left to their defaults rather than risk a silently shifted value on a later widget (such as a seed) or nested leaf.`,
+      );
+    }
+
+    // #2753 — the accepted limitation, made AUDIBLE. A row saved before ComfyUI's
+    // widget/input unification carries a placeholder slot for each `forceInput`
+    // input, so it is longer than the layout mapped here and every widget reads one
+    // position early. Which reading is right cannot be decided from the row (see
+    // the note at the mapping site), so nothing is changed — but a leftover on a
+    // node that HAS such an input is the signature, and it must not pass in
+    // silence. Scoped to those nodes so it cannot become noise elsewhere, and
+    // suppressed after a refusal or a dynamic combo, whose leftovers are already
+    // explained above.
+    if (
+      !sawDynamicCombo &&
+      !refusalOccurred &&
+      widgetIdx < widgetValues.length &&
+      orderedNames.some((n) => {
+        const sp =
+          (def.input?.required as Record<string, unknown> | undefined)?.[n] ??
+          (def.input?.optional as Record<string, unknown> | undefined)?.[n];
+        return isSocketOnlyInput(n, def) && isPositionalWidgetSpec(sp);
+      })
+    ) {
+      warnings.push(
+        `Node ${nodeId} (${classType}): ${
+          widgetValues.length - widgetIdx
+        } saved widget value(s) remain unmapped (${widgetValues
+          .slice(widgetIdx)
+          .map((v) => JSON.stringify(v))
+          .join(", ")}), and this node has a forceInput-only input. That is the signature of a workflow saved before ComfyUI's widget/input unification, whose widgets_values kept a placeholder slot for such an input — in which case EVERY widget on this node is reading one position early. A saved row cannot distinguish that from a node that simply serializes an extra value, so the values above are reported rather than guessed at. Open and re-save this workflow in ComfyUI to normalize it, then check this node's values.`,
       );
     }
     }
