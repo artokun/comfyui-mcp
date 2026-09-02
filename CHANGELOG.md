@@ -6,6 +6,14 @@ All notable changes to this project are documented here. This project adheres to
 
 ## Unreleased
 
+## [0.52.172] - 2026-09-02
+
+### MCP
+
+#### Fixed
+- retry graph reads after `panel_open_workflow` when the initial panel response is incomplete (#2286, #2734)
+
+
 ## [0.52.171] - 2026-09-02
 
 ### MCP
