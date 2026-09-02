@@ -6,6 +6,14 @@ All notable changes to this project are documented here. This project adheres to
 
 ## Unreleased
 
+## [0.52.176] - 2026-09-02
+
+### MCP
+
+#### Fixed
+- make wan-multitalk workflow runnable (#2702)
+
+
 ## [0.52.175] - 2026-09-02
 
 ### MCP
