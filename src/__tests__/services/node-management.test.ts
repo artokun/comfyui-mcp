@@ -823,6 +823,60 @@ describe("node-management service", () => {
         .toBeUndefined();
     });
 
+    it("#2725 does not clone when an empty-ack Manager record is absent on disk", async () => {
+      let installedListReads = 0;
+      fsCtl.readdirSync = () => [];
+      const { calls } = stubFetch({
+        queueOpEmpty: true,
+        installedBody: () =>
+          installedListReads++ === 0
+            ? {}
+            : { "rgthree-comfy": { cnr_id: "rgthree-comfy", enabled: true } },
+      });
+
+      const result = await applyManifest({
+        manifest: {
+          custom_nodes: ["https://github.com/rgthree/rgthree-comfy"],
+        },
+      });
+
+      expect(result.success).toBe(false);
+      expect(result.summary).toMatchObject({ applied: 0, failed: 0, pending: 1 });
+      expect(result.results[0]).toMatchObject({ status: "pending" });
+      expect(result.results[0].message).toMatch(/UNKNOWN/i);
+      expect(result.results[0].message).toMatch(/no local fallback is authorized/i);
+      expect(calls.some((c) => c.url.endsWith("/v2/manager/queue/task"))).toBe(true);
+      expect(
+        mockedExec.mock.calls.find((c) => c[0] === "git" && (c[1] as string[])[0] === "clone"),
+      ).toBeUndefined();
+    });
+
+    it("#2725 keeps an empty-ack install UNKNOWN when its installed list is unreadable", async () => {
+      let installedListReads = 0;
+      const { calls } = stubFetch({
+        queueOpEmpty: true,
+        installedBody: () =>
+          installedListReads++ === 0 ? {} : { error: {} },
+      });
+
+      const result = await applyManifest({
+        manifest: {
+          custom_nodes: ["https://github.com/rgthree/rgthree-comfy"],
+        },
+      });
+
+      expect(result.success).toBe(false);
+      expect(result.summary).toMatchObject({ applied: 0, failed: 0, pending: 1 });
+      expect(result.results[0]).toMatchObject({ status: "pending" });
+      expect(result.results[0].message).toMatch(/installed-pack list could not be read/i);
+      expect(result.results[0].message).toMatch(/UNKNOWN/i);
+      expect(result.results[0].message).toMatch(/no local fallback is authorized/i);
+      expect(calls.some((c) => c.url.endsWith("/v2/manager/queue/task"))).toBe(true);
+      expect(
+        mockedExec.mock.calls.find((c) => c[0] === "git" && (c[1] as string[])[0] === "clone"),
+      ).toBeUndefined();
+    });
+
     it("throws when a registry id is queued but never lands (silent no-op)", async () => {
       // The Manager drains "done" without installing an unknown CNR id; a non-URL
       // id can't be cloned, so this must be a hard error — not a false success.
