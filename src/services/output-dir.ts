@@ -4,7 +4,7 @@ import { config, isRemoteMode } from "../config.js";
 import { getSystemStats, comfyApiFetch } from "../comfyui/client.js";
 import {
   resolveEffectiveComfyUIBase,
-  resolveLiveComfyUIBase,
+  getLiveServerSnapshot,
   resolveLiveServerRoot,
   hasComfyUIEntrypoint,
 } from "./workspace-env.js";
@@ -1341,49 +1341,41 @@ export function localTempDirFallback(): string {
  * An explicit --output-directory still wins above, and the configured install
  * still catches everything below.
  */
-async function liveIoDirFallback(kind: "input" | "output" | "temp"): Promise<string | undefined> {
-  try {
-    // #2194 — get_image action:get type:input when no --input-directory is set.
-    const fromArgv = await resolveLiveComfyUIBase();
-    if (fromArgv) return join(fromArgv, kind);
+function liveIoDirFromSnapshot(
+  kind: "input" | "output" | "temp",
+  snapshot: { reachable: boolean; argv?: string[]; cwd?: string },
+): string | undefined {
+  if (!snapshot.reachable) return undefined;
 
-    // #2539 — relative ComfyUI/main.py with no cwd cannot be derived from argv.
-    const stats = await getSystemStats();
-    const live = resolveLiveServerRoot(
-      stats.system?.argv,
-      (stats.system as { cwd?: string } | undefined)?.cwd,
-      { remote: isRemoteMode() },
-    );
-    // A Docker/forwarded server reports a container-side path that is not
-    // host-local. Same gate resolveModelsDir uses for this root.
-    if (!live.root || !existsSync(live.root)) return undefined;
-    return join(live.root, kind);
-  } catch {
-    return undefined; // never let a probe failure outrank the configured install
-  }
+  // #2539 — relative ComfyUI/main.py with no cwd cannot be derived from argv;
+  // resolveLiveServerRoot may use the correlated local process observation for
+  // that shape. The snapshot is passed through unchanged so the explicit-dir
+  // and live-root answers can never describe different server instances.
+  const live = resolveLiveServerRoot(snapshot.argv, snapshot.cwd, { remote: false });
+  if (!live.root) return undefined;
+  // A Docker/forwarded server reports a container-side path that is not
+  // host-local. Same gate resolveModelsDir uses for an observed root. An argv
+  // root remains the server's direct claim, preserving the existing not-found
+  // behavior when that claimed path is unavailable locally.
+  if (live.source !== "argv" && !existsSync(live.root)) return undefined;
+  return join(live.root, kind);
 }
 
 export async function resolveInputDir(): Promise<string> {
-  try {
-    const stats = await getSystemStats();
-    const serverCwd = (stats.system as { cwd?: string } | undefined)?.cwd;
-    const fromArgv = parseInputDirFromArgv(stats.system?.argv, serverCwd);
+  const snapshot = await getLiveServerSnapshot();
+  if (snapshot.reachable) {
+    const fromArgv = parseInputDirFromArgv(snapshot.argv, snapshot.cwd);
     if (fromArgv) {
       logger.debug("Resolved ComfyUI input directory from launch argv", {
         inputDir: fromArgv,
       });
       return fromArgv;
     }
-  } catch (err) {
-    logger.debug(
-      "Could not resolve input dir from /system_stats; using COMFYUI_PATH/input",
-      { error: err instanceof Error ? err.message : String(err) },
-    );
   }
   // #1052 — before the CONFIGURED install, try the one that is actually
   // running. With two ComfyUIs on a machine these differ, and the connected
   // server is the one whose files the caller means.
-  const live = await liveIoDirFallback("input");
+  const live = liveIoDirFromSnapshot("input", snapshot);
   if (live) {
     logger.debug("Resolved ComfyUI input directory from the LIVE server's install root", {
       dir: live,
@@ -1398,25 +1390,20 @@ export async function resolveInputDir(): Promise<string> {
  * ComfyUI (/system_stats argv) first; falls back to <COMFYUI_PATH>/output.
  */
 export async function resolveOutputDir(): Promise<string> {
-  try {
-    const stats = await getSystemStats();
-    const fromArgv = parseOutputDirFromArgv(stats.system?.argv);
+  const snapshot = await getLiveServerSnapshot();
+  if (snapshot.reachable) {
+    const fromArgv = parseOutputDirFromArgv(snapshot.argv);
     if (fromArgv) {
       logger.debug("Resolved ComfyUI output directory from launch argv", {
         outputDir: fromArgv,
       });
       return fromArgv;
     }
-  } catch (err) {
-    logger.debug(
-      "Could not resolve output dir from /system_stats; using COMFYUI_PATH/output",
-      { error: err instanceof Error ? err.message : String(err) },
-    );
   }
   // #1052 — before the CONFIGURED install, try the one that is actually
   // running. With two ComfyUIs on a machine these differ, and the connected
   // server is the one whose files the caller means.
-  const live = await liveIoDirFallback("output");
+  const live = liveIoDirFromSnapshot("output", snapshot);
   if (live) {
     logger.debug("Resolved ComfyUI output directory from the LIVE server's install root", {
       dir: live,
@@ -1431,23 +1418,17 @@ export async function resolveOutputDir(): Promise<string> {
  * running ComfyUI (/system_stats argv) first; falls back to <COMFYUI_PATH>/temp.
  */
 export async function resolveTempDir(): Promise<string> {
-  try {
-    const stats = await getSystemStats();
-    const serverCwd = (stats.system as { cwd?: string } | undefined)?.cwd;
-    const fromArgv = parseTempDirFromArgv(stats.system?.argv, serverCwd);
+  const snapshot = await getLiveServerSnapshot();
+  if (snapshot.reachable) {
+    const fromArgv = parseTempDirFromArgv(snapshot.argv, snapshot.cwd);
     if (fromArgv) {
       logger.debug("Resolved ComfyUI temp directory from launch argv", {
         tempDir: fromArgv,
       });
       return fromArgv;
     }
-  } catch (err) {
-    logger.debug(
-      "Could not resolve temp dir from /system_stats; using COMFYUI_PATH/temp",
-      { error: err instanceof Error ? err.message : String(err) },
-    );
   }
-  const live = await liveIoDirFallback("temp");
+  const live = liveIoDirFromSnapshot("temp", snapshot);
   if (live) {
     logger.debug("Resolved ComfyUI temp directory from the LIVE server's install root", {
       dir: live,

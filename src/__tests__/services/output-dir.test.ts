@@ -162,13 +162,19 @@ vi.mock("../../services/workspace-env.js", async () => {
   return {
     resolveEffectiveComfyUIBase: () => config.comfyuiPath ?? savedDefaultWorkspace,
     // #1052 — backed by the REAL argv parsing, like the resolvers above, so the
-    // live-root rung is exercised end to end rather than stubbed away.
-    resolveLiveComfyUIBase: async () => {
+    // live-root rung is exercised end to end rather than stubbed away. This is
+    // deliberately one snapshot: explicit I/O flags and the inferred live root
+    // must describe the same server instance.
+    getLiveServerSnapshot: async () => {
       try {
         const stats = await getSystemStats();
-        return actual.liveRootFromArgv(stats?.system?.argv, stats?.system?.cwd);
+        return {
+          reachable: true,
+          argv: stats?.system?.argv,
+          cwd: stats?.system?.cwd,
+        };
       } catch {
-        return undefined;
+        return { reachable: false };
       }
     },
     liveRootFromArgv: actual.liveRootFromArgv,
@@ -1328,11 +1334,13 @@ describe("#1052: I/O dirs follow the CONNECTED server, not a second install", ()
     const got = await resolveOutputDir();
     expect(got).toBe(join(CONNECTED, "output"));
     expect(got).not.toBe(resolve(DESKTOP, "output")); // the reported failure
+    expect(getSystemStats).toHaveBeenCalledTimes(1);
   });
 
   it("resolves the INPUT dir the same way", async () => {
     connectedServerNoExplicitDirs();
     expect(await resolveInputDir()).toBe(join(CONNECTED, "input"));
+    expect(getSystemStats).toHaveBeenCalledTimes(1);
   });
 
   // An EXPLICIT --output-directory is the server telling us outright; it must
