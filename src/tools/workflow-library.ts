@@ -313,7 +313,7 @@ export function registerWorkflowLibraryTools(server: McpServer): void {
         .optional()
         .describe(
           'action:"strip" / "slice" / "query" — Absolute server-side path to a workflow .json on disk (e.g. ' +
-            "C:\\\\Users\\\\you\\\\ComfyUI\\\\user\\\\default\\\\workflows\\\\pusa_extend.json). Read directly from disk — no library lookup.",
+            "C:\\\\Users\\\\you\\\\ComfyUI\\\\user\\\\default\\\\workflows\\\\pusa_extend.json). Read directly from disk — no library lookup. If a userdata path is missing the `workflows` segment after `user/default`, it is retried with that segment restored, preserving the filename exactly.",
         ),
       graph: z
         .record(z.string(), z.any())

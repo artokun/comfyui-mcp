@@ -148,6 +148,15 @@ describe("#2528 get_workflow strip keeps the userdata workflows segment", () => 
     expect(mocks.fetchApi).not.toHaveBeenCalled();
   });
 
+  it('action:"strip" also repairs an absolute `filename` from the same userdata tree', async () => {
+    const res = await getHandler()({ action: "strip", filename: droppedFile, format: "raw" });
+
+    expect(res.isError).toBeUndefined();
+    expect(text(res)).not.toMatch(/ENOENT/);
+    expect(JSON.parse(res.content[0]!.text)).toEqual(GRAPH);
+    expect(mocks.fetchApi).not.toHaveBeenCalled();
+  });
+
   it("does not find a hyphen-mangled stand-in when only the em-dash file exists", async () => {
     const mangled = join(
       workspace,
