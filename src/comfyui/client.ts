@@ -26,6 +26,7 @@ import {
   raceAbort,
 } from "./fetch.js";
 import { isKnownLoaderInput } from "./loader-asset-inputs.js";
+import { sameOrigin } from "../utils/origin.js";
 import {
   choosePanelFallbackOrigin,
   describeDeclinedPanelFallback,
@@ -1567,7 +1568,10 @@ export const MAX_VIEW_RESPONSE_BYTES = SHARED_MAX_VIEW_RESPONSE_BYTES;
 function validateViewResponseOrigin(res: Response, expectedOrigin: string, label: string): void {
   if (res.url) {
     const actualOrigin = httpOriginOf(res.url);
-    if (actualOrigin !== expectedOrigin) {
+    // The transport may retry exact 127.0.0.1 at localhost for an IPv6-only
+    // loopback listener. The comparator folds only those known loopback aliases;
+    // remote origins remain an exact scheme/host/port match.
+    if (!sameOrigin(actualOrigin, expectedOrigin)) {
       throw new ComfyUIError(
         `ComfyUI /view response from ${label} changed origin unexpectedly; the response was refused.`,
         "VIEW_RESPONSE_ORIGIN",

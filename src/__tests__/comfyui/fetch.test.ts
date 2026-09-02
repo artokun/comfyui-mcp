@@ -8,6 +8,12 @@ vi.mock("../../config.js", () => ({
 
 import { comfyuiFetch } from "../../comfyui/fetch.js";
 
+function undiciFailure(code: string): TypeError {
+  return new TypeError("fetch failed", {
+    cause: Object.assign(new Error(`connect ${code}`), { code }),
+  });
+}
+
 describe("comfyuiFetch", () => {
   const fetchMock = vi.fn(async () => new Response("ok"));
 
@@ -60,5 +66,39 @@ describe("comfyuiFetch", () => {
     });
     const [, init] = fetchMock.mock.calls[0];
     expect(new Headers((init as RequestInit).headers).get("Authorization")).toBe("Bearer explicit");
+  });
+
+  it("retries a manual redirect request through localhost after a bare IPv4 refusal", async () => {
+    authHeaders.mockReturnValue({});
+    const response = new Response("ok");
+    fetchMock.mockRejectedValueOnce(undiciFailure("ECONNREFUSED")).mockResolvedValueOnce(response);
+
+    await expect(
+      comfyuiFetch("http://127.0.0.1:8188/view?filename=out.png", { redirect: "manual" }),
+    ).resolves.toBe(response);
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    const [firstUrl, firstInit] = fetchMock.mock.calls[0];
+    const [retryUrl, retryInit] = fetchMock.mock.calls[1];
+    expect(firstUrl).toBe("http://127.0.0.1:8188/view?filename=out.png");
+    expect(retryUrl).toBe("http://localhost:8188/view?filename=out.png");
+    expect((firstInit as RequestInit).redirect).toBe("manual");
+    expect((retryInit as RequestInit).redirect).toBe("manual");
+    expect((retryInit as RequestInit).signal).toBe((firstInit as RequestInit).signal);
+  });
+
+  it.each([
+    ["localhost", "http://localhost:8188/view", undiciFailure("ECONNREFUSED")],
+    ["a different loopback address", "http://127.0.0.2:8188/view", undiciFailure("ECONNREFUSED")],
+    ["a remote target", "https://comfy.example/view", undiciFailure("ECONNREFUSED")],
+    ["a non-refused transport error", "http://127.0.0.1:8188/view", undiciFailure("ECONNRESET")],
+    ["a non-bare fetch error", "http://127.0.0.1:8188/view", new Error("fetch failed after sending")],
+  ])("does not retry %s when the manual request is outside the narrow gate", async (_label, target, failure) => {
+    authHeaders.mockReturnValue({});
+    fetchMock.mockRejectedValueOnce(failure);
+
+    await comfyuiFetch(target, { redirect: "manual" }).catch(() => undefined);
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 });
