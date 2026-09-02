@@ -3735,12 +3735,17 @@ async function cloneCustomNodeFallback(
   // #2523 — Manager v4 resolves a from-source install by BARE REPO NAME and
   // clones the channel/registry URL, so artokun/comfyui-teskors-utils can land
   // as teskor-hub/comfyui-teskors-utils in the same folder. A name hit is not
-  // the requested origin. Replace only when an origin is PROVEN different
-  // (listed aux_id or git remote); unknown origin is left in place.
+  // the requested origin. A verified disk remote is authoritative: stale
+  // Manager metadata must never delete a checkout that already has the right
+  // origin (or any local changes in it). If the disk remote is wrong, replace
+  // it; if the disk remote cannot answer, the Manager aux_id may still prove an
+  // alias replacement is needed.
   const diskOrigin = alreadyPresent ? readGitRemoteOrigin(nodeDir) : undefined;
+  const diskOriginDiffers = gitOriginsDiffer(gitId, diskOrigin);
+  const managerOriginDiffers = gitOriginsDiffer(gitId, opts?.replaceOrigin);
   if (
     alreadyPresent &&
-    (gitOriginsDiffer(gitId, diskOrigin) || gitOriginsDiffer(gitId, opts?.replaceOrigin))
+    (diskOriginDiffers || (!diskOrigin && managerOriginDiffers))
   ) {
     const landed = opts?.replaceOrigin ?? diskOrigin ?? "a different origin";
     try {
