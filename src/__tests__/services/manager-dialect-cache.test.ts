@@ -349,12 +349,15 @@ describe("#646 Manager API dialect cache invalidation", () => {
     // An unregistered GET that a frontend/proxy answers with a page of HTML must
     // never become "Manager is answering" — that is the whole point of the strict
     // parse in parseManagerMajor, and this branch is a new consumer of it.
-    stubQueuelessManager({
+    const calls = stubQueuelessManager({
       path: "/manager/version",
       body: "<!DOCTYPE html><html><body>ComfyUI</body></html>",
     });
 
     const error = await detectionError();
+    // The catchall WAS consulted (this is the new branch, not the old code path
+    // reaching the same words by never asking) and was correctly not believed.
+    expect(calls.map((c) => c.path)).toContain("/manager/version");
     expect(error.message).not.toMatch(/ComfyUI-Manager IS answering/i);
     expect(error.message).toMatch(/queue API is not reachable/i);
     expect((error.details as { managerVersionMajor?: number }).managerVersionMajor).toBeUndefined();
@@ -363,9 +366,12 @@ describe("#646 Manager API dialect cache invalidation", () => {
   it("keeps the queue-detection error when the version probe hard-fails (#2754)", async () => {
     // managerFetch throws on 401/403 even in soft mode (#2085). A secondary probe
     // that throws must not replace the reader's actual failure with its own.
-    stubQueuelessManager({ path: "/manager/version", body: "", status: 401 });
+    const calls = stubQueuelessManager({ path: "/manager/version", body: "", status: 401 });
 
     const error = await detectionError();
+    // The probe that throws is the one this branch added, so it must have run —
+    // otherwise this asserts nothing about swallowing anything.
+    expect(calls.map((c) => c.path)).toContain("/manager/version");
     expect(error.message).toMatch(/queue API is not reachable/i);
     expect(error.message).not.toMatch(/HTTP 401/);
     expect((error.details as { kind?: string }).kind).toBe("manager-queue-detection");
