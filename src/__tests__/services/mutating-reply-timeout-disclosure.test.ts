@@ -134,6 +134,32 @@ describe("a reply-timeout on a mutating command discloses that it may have appli
     expect(msg).not.toMatch(/apply it twice/i);
   });
 
+  // panel#2191 — the same claim, for the read that was NOT getting it.
+  //
+  // A screenshot takes a picture and puts the viewport back. It was nonetheless
+  // outside BRIDGE_READONLY_CMDS, so `ctx.mutating` was true and a reporter whose
+  // 264-node graph outran the reply window was told their SCREENSHOT "MUTATES and
+  // was already delivered to the tab … a blind retry can apply it twice" — advice
+  // to go verify state before daring to take another picture.
+  //
+  // This case is not redundant with graph_serialize above. That one asserts the
+  // branch exists; this one asserts graph_screenshot is ON it, which is the whole
+  // of the defect and the only thing that regresses if the ledger entry is
+  // dropped again.
+  it("panel#2191: a screenshot is a READ, and its timeout does not call it a mutation", async () => {
+    const msg = await timeoutMessage("graph_screenshot");
+
+    // Guard the guard: a pre-dispatch refusal would make every absence below
+    // true for the wrong reason. This must be a genuine reply-timeout.
+    expect(msg).toMatch(/did not reply to "graph_screenshot"/);
+    expect(msg).toMatch(/backgrounded or frozen/);
+
+    expect(msg).not.toMatch(/MUTATES/);
+    expect(msg).not.toMatch(/already delivered/i);
+    expect(msg).not.toMatch(/may have been applied/i);
+    expect(msg).not.toMatch(/apply it twice/i);
+  });
+
   // The disclosure is tied to DELIVERY, not merely to "this command mutates".
   // A pre-dispatch refusal never reached the socket, so claiming it "was already
   // delivered … may have been applied" would be the very inversion this file
