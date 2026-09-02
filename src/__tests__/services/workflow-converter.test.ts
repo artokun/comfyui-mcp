@@ -3973,6 +3973,63 @@ describe("convertUiToApi — forceInput-only scalar input (issue #2753)", () => 
     expect(inputs.insert_embedding).not.toBe("CHOOSE");
   });
 
+  // A row ONE longer than the modern layout is equally well explained by a modern
+  // row carrying a frontend-only serialized extra (#1869), and THAT reading is the
+  // right one — the extras pass recovers the real value and reports the skip, while
+  // a legacy strip would put the extra on a real widget. So the length coincidence
+  // must not be enough on its own.
+  const AMVIDEO_INFO = {
+    AMVideoRead: {
+      input: {
+        required: {
+          trigger: ["STRING", { forceInput: true }],
+          path: ["STRING", {}],
+          first_frame: ["INT", { default: 0 }],
+        },
+      },
+      input_order: { required: ["trigger", "path", "first_frame"] },
+      output: [],
+    },
+  } as never;
+
+  function amVideoGraph(row: unknown[]) {
+    return {
+      nodes: [
+        {
+          id: 1,
+          type: "AMVideoRead",
+          mode: 0,
+          inputs: [{ name: "trigger", type: "STRING", link: null }],
+          outputs: [],
+          widgets_values: row,
+        },
+      ],
+      links: [],
+    } as never;
+  }
+
+  it("a serialized action button beats the legacy-placeholder reading of the same length", () => {
+    const { workflow, warnings } = convertUiToApi(
+      amVideoGraph(["D:/input.mov", "detect_range", 12]),
+      AMVIDEO_INFO,
+    );
+    const inputs = (workflow["1"] as { inputs: Record<string, unknown> }).inputs;
+    expect(inputs.path).toBe("D:/input.mov");
+    expect(inputs.first_frame).toBe(12);
+    // and the discarded value is REPORTED, never dropped silently
+    expect(warnings.join(" ")).toContain("detect_range");
+  });
+
+  it("a type-refuted extra beats it too (the other #1869 signal)", () => {
+    const { workflow } = convertUiToApi(
+      amVideoGraph(["D:/input.mov", "not_a_number", 12]),
+      AMVIDEO_INFO,
+    );
+    const inputs = (workflow["1"] as { inputs: Record<string, unknown> }).inputs;
+    expect(inputs.path).toBe("D:/input.mov");
+    expect(inputs.first_frame).toBe(12);
+  });
+
   it("an INT forceInput input is socket-only too (not just STRING)", () => {
     const INFO = {
       N: {
