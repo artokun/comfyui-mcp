@@ -6,10 +6,13 @@ All notable changes to this project are documented here. This project adheres to
 
 ## Unreleased
 
+## [0.52.173] - 2026-09-02
+
 ### MCP
 
 #### Fixed
-- artokun-flow installs the SAM3 checkpoint its REPLACEMENT MODE subgraph requires, saves with VHS_VideoCombine (an OUTPUT_NODE), and honors the requested artokun/comfyui-teskors-utils git origin instead of Manager teskor-hub alias (#2523)
+- artokun-flow installs the SAM3 checkpoint its REPLACEMENT MODE subgraph requires, saves with VHS_VideoCombine (an OUTPUT_NODE), and honors the requested artokun/comfyui-teskors-utils git origin instead of Manager teskor-hub alias (#2523, #2657)
+- panel restart binds to the dynamic local target instead of a stale fixed origin (#2068, #2737)
 
 ## [0.52.172] - 2026-09-02
 
