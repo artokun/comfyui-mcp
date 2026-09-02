@@ -711,6 +711,21 @@ async function probeManagerMajor(base: string): Promise<number | undefined> {
 }
 
 /**
+ * `probeManagerMajor` for the FAILURE branch, where the answer only sharpens a
+ * diagnosis we are already committed to. `managerFetch` still throws on hard
+ * failures even in soft mode (an authenticating proxy, most of all), and letting
+ * that replace the queue-detection error would swap the reader's real problem for
+ * a secondary probe's. Absence of a version is simply "no version evidence".
+ */
+async function probeManagerMajorForDiagnosis(base: string): Promise<number | undefined> {
+  try {
+    return await probeManagerMajor(base);
+  } catch {
+    return undefined;
+  }
+}
+
+/**
  * Given that the /v2 queue surface answered, decide between the two pip-Manager
  * (v4) dialects. Both normal-v4 and legacy-UI mode register
  * GET /v2/manager/is_legacy_manager_ui and answer truthfully; a missing route
@@ -863,16 +878,52 @@ async function probeManagerApi(base: string): Promise<ManagerApi> {
     cacheManagerApi(base, "legacy", stamp);
     return "legacy";
   }
+  // #2754 — the queue routes answered nothing. That is evidence about the QUEUE
+  // API, and the sentence below used to spend it on a much bigger claim: "is
+  // ComfyUI-Manager installed and enabled?", plus a --enable-manager pointer. The
+  // reporter's Manager was installed AND had imported cleanly (ComfyUI appends
+  // " (IMPORT FAILED)" to its `N seconds: <path>` line, and theirs had no suffix),
+  // so the one instruction we gave was the one thing that could not help.
+  //
+  // Same defect class as #2085, where an authenticating proxy's 401 was translated
+  // into "Manager is missing". The fix is the same shape: consult the AUTHORITATIVE
+  // version routes before absence may be claimed. They are the right witness here
+  // because they are disjoint from the queue surface — /v2/manager/version is
+  // registered only by v4 and /manager/version only by 3.x — so an answer on either
+  // proves Manager is serving HTTP on this base even when its queue routes 404.
+  const managerVersionMajor = await probeManagerMajorForDiagnosis(base);
   throw new NodeManagementError(
-    "ComfyUI-Manager's queue API is not reachable (neither /v2/manager/queue/status " +
-      "nor /manager/queue/status answered with a queue status). Is ComfyUI-Manager " +
-      "installed and enabled on the connected ComfyUI? The pip comfyui_manager " +
-      "package only activates when ComfyUI is started with --enable-manager.",
+    managerVersionMajor !== undefined
+      ? `ComfyUI-Manager IS answering on ${base} — its version route reports generation ` +
+          `${managerVersionMajor}.x — but it serves NO queue API: neither ` +
+          "/v2/manager/queue/status nor /manager/queue/status answered with a queue " +
+          "status. So this is NOT a missing or disabled Manager, and neither installing " +
+          "the pip comfyui_manager package nor adding --enable-manager will fix it. What " +
+          "fits the evidence is a Manager whose queue routes specifically are absent: a " +
+          "partial or older Manager server build, a Manager whose queue module failed to " +
+          "register, or a proxy in front of ComfyUI that forwards only some /manager " +
+          "routes. Check the ComfyUI log around Manager's startup, and retry once it " +
+          "serves a queue surface."
+      : "ComfyUI-Manager's queue API is not reachable (neither /v2/manager/queue/status " +
+          "nor /manager/queue/status answered with a queue status), and neither " +
+          "/v2/manager/version nor /manager/version answered with a version either — so " +
+          `nothing at ${base} is serving ComfyUI-Manager routes at all. Is ComfyUI-Manager ` +
+          "installed and enabled on the connected ComfyUI? The pip comfyui_manager " +
+          "package only activates when ComfyUI is started with --enable-manager. NOTE: a " +
+          "custom_nodes/ComfyUI-Manager clone can import cleanly and still register no " +
+          "routes — ComfyUI logs `Blocked by policy: <path>` and skips the clone entirely " +
+          "when --enable-manager is set and the pip package shadows it (with " +
+          "--disable-manager-ui on top, that leaves no Manager routes at all), and the " +
+          "clone starts in CLI-only mode, serving nothing, when its .enable-cli-only-mode " +
+          "marker file is present.",
     {
       kind: MANAGER_QUEUE_DETECTION_FAILURE,
       base,
       queueStatusCodes,
       queueStatusKinds,
+      // Undefined when the version routes answered nothing either. Kept in the
+      // details so a report carries the evidence the message was earned on.
+      managerVersionMajor,
     },
   );
 }
