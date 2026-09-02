@@ -66,6 +66,7 @@ import {
   resolvePackWorkflowFile,
   resolveWorkflowFileName,
   describeMissingWorkflow,
+  coercePackMeta,
 } from "../../tools/skills-access.js";
 
 type Handler = (args: Record<string, any>) => Promise<{
@@ -813,5 +814,47 @@ describe("describeMissingWorkflow — states are not collapsed (#2748)", () => {
       expect(msg).toMatch(INSTALLER_ONLY);
       expect(msg).toMatch(/has_workflow: false/);
     }
+  });
+});
+
+/**
+ * #2748 (gate round 3) — a top-level YAML SEQUENCE is not metadata.
+ *
+ * `parseYaml("[]")` is truthy and `typeof === "object"`, so the obvious
+ * `parsed && typeof parsed === "object"` check accepts it as a record. Every
+ * field then reads `undefined`, and `workflow: undefined` is indistinguishable
+ * from a deliberate `workflow: null` — so `pack.yaml` containing `[]` had its
+ * malformed bundle reported as an intentional "installer-only" pack.
+ */
+describe("coercePackMeta — only a YAML mapping is metadata (#2748)", () => {
+  it("rejects a top-level sequence, which is truthy AND typeof object", () => {
+    expect([] as unknown).toBeTruthy();
+    expect(typeof []).toBe("object");
+    // …and is therefore exactly what a naive object check lets through.
+    expect(coercePackMeta([])).toBeNull();
+    expect(coercePackMeta([{ workflow: "graph.json" }])).toBeNull();
+  });
+
+  it("rejects scalars, null and undefined", () => {
+    for (const v of [null, undefined, "", "text", 0, 42, false, true]) {
+      expect(coercePackMeta(v)).toBeNull();
+    }
+  });
+
+  it("accepts a mapping unchanged", () => {
+    const meta = { workflow: "graph.json", family: "qwen" };
+    expect(coercePackMeta(meta)).toEqual(meta);
+    expect(coercePackMeta({})).toEqual({});
+  });
+
+  it("a sequence pack.yaml is described as unparseable, NOT as installer-only", () => {
+    // The end-to-end consequence: readPackMeta returns null for `[]`, and the
+    // classifier's null branch says so rather than inventing an intent.
+    const msg = describeMissingWorkflow("seq-pack", {
+      hasPackYaml: true,
+      meta: coercePackMeta([]),
+    });
+    expect(msg).toMatch(/did not parse to a YAML mapping/);
+    expect(msg).not.toMatch(/installer-only/);
   });
 });

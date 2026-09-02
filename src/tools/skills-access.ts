@@ -175,13 +175,27 @@ function enumerateSkills(): Array<{ name: string; description: string }> {
  *  found" — the catalog disagreeing with the filesystem (#2748). Deriving it once
  *  makes that divergence unrepresentable rather than merely absent from today's
  *  bundled packs. */
-/** Parse `packs/<name>/pack.yaml`, or null when absent/unreadable/malformed. */
+/** A pack.yaml must parse to a YAML MAPPING — pure so the trap below is
+ *  directly testable.
+ *
+ *  A top-level SEQUENCE is the trap: `parseYaml("[]")` is truthy AND
+ *  `typeof === "object"`, so a `parsed && typeof parsed === "object"` check
+ *  accepts it as a metadata record. Every field then reads `undefined`, and
+ *  `workflow: undefined` is indistinguishable from a deliberate `workflow: null`
+ *  — so a malformed bundle gets reported as an intentional installer-only pack.
+ *  Array.isArray is the only thing separating metadata from "something else that
+ *  happens to parse". */
+export function coercePackMeta(parsed: unknown): Record<string, unknown> | null {
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return null;
+  return parsed as Record<string, unknown>;
+}
+
+/** Parse `packs/<name>/pack.yaml`, or null when absent/unreadable/not a mapping. */
 function readPackMeta(packDir: string): Record<string, unknown> | null {
   const metaFile = join(packDir, "pack.yaml");
   if (!existsSync(metaFile)) return null;
   try {
-    const parsed = parseYaml(readFileSync(metaFile, "utf8"));
-    return parsed && typeof parsed === "object" ? (parsed as Record<string, unknown>) : null;
+    return coercePackMeta(parseYaml(readFileSync(metaFile, "utf8")));
   } catch {
     return null;
   }
@@ -215,13 +229,9 @@ export function enumeratePacks(): Array<Record<string, unknown>> {
     if (!isDir) continue;
     const metaFile = join(packDir, "pack.yaml");
     if (!existsSync(metaFile)) continue; // not a pack
-    let meta: Record<string, unknown> = {};
-    try {
-      const parsed = parseYaml(readFileSync(metaFile, "utf8"));
-      if (parsed && typeof parsed === "object") meta = parsed as Record<string, unknown>;
-    } catch {
-      // malformed pack.yaml — still report the pack with just its dir name
-    }
+    // Same parse contract read_workflow/check_runtime use — a malformed or
+    // non-mapping pack.yaml still reports the pack with just its dir name.
+    const meta = readPackMeta(packDir) ?? {};
     const workflowName = resolveWorkflowFileName(meta);
     out.push({
       name: entry,
