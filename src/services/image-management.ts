@@ -621,7 +621,7 @@ function normalizeViewRef(
 
   const rejectFilename = (): never => {
     throw new ValidationError(
-      `Invalid filename "${filename}": must be a single filename without path separators, drive prefixes, or '..' segments`,
+      `Invalid filename "${filename}": must be a filename or relative subfolder/filename reference without absolute paths, drive prefixes, or '..' segments`,
     );
   };
 
