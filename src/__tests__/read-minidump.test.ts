@@ -160,3 +160,24 @@ describe("panel#2023 the reader answers which crash this is", () => {
     expect(without).toMatch(/no DirectWrite\/Direct2D loaded/);
   });
 });
+
+describe("#2023 an unread module list is not a finding about the address", () => {
+  it("distinguishes 'in NO module' from 'the list could not be read'", () => {
+    const base = {
+      streamCount: 1,
+      modules: [] as Array<{ base: bigint; size: number; name: string }>,
+      exception: { codeHex: "0xc0000005", addressHex: "0x7ffd" },
+    };
+    // undefined: the moduleList stream was missing or out of bounds, so the
+    // parser never assigned faultingModule. We know NOTHING about the address.
+    const unread = describeMinidump("x", base as never);
+    // null: the parser DID read the list and the address matched no module --
+    // itself a finding (a jump through a freed pointer).
+    const noOwner = describeMinidump("x", { ...base, faultingModule: null } as never);
+
+    expect(unread).toContain("the module list could not be read");
+    expect(unread).not.toContain("inside NO loaded module");
+    expect(noOwner).toContain("inside NO loaded module");
+    expect(noOwner).not.toContain("could not be read");
+  });
+});

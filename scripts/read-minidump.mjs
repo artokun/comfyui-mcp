@@ -135,8 +135,15 @@ export function describeMinidump(name, dump) {
   }
   if (dump.faultingModule) {
     lines.push(`  faulting   ${dump.faultingModule.name}+${dump.faultingModule.offset}`);
-  } else if (dump.exception) {
+  } else if (dump.faultingModule === null) {
+    // STRICT null. The parser distinguishes "the address is in no module" (a
+    // finding: a jump through a freed pointer) from "the module list could not be
+    // read" (undefined, a gap in what we know) and says so in its own comment --
+    // and this line used to collapse them with a truthiness test, reporting the
+    // first for both. That turns a missing stream into a false diagnosis.
     lines.push("  faulting   <the address is inside NO loaded module>");
+  } else if (dump.exception) {
+    lines.push("  faulting   <unknown — the module list could not be read>");
   }
   const text = dump.modules.filter((m) => /dwrite|d2d1|dcomp|gdi32/i.test(m.name));
   lines.push(
