@@ -111,6 +111,10 @@ const http = vi.hoisted(() => ({
     | "refuse-enqueue"
     | "accept-enqueue"
     | "manager-absent"
+    // #2754 — Manager is SERVING (its version route answers) but has no queue
+    // API. The queue routes 404 exactly as in "manager-absent"; only the version
+    // route tells the two apart.
+    | "manager-queueless"
     | "manager-unavailable",
   calls: [] as string[],
 }));
@@ -137,6 +141,13 @@ vi.mock("../../comfyui/fetch.js", async (importOriginal) => {
       }
       if (http.mode === "manager-absent") {
         return new Response("missing", { status: 404, statusText: "Not Found" });
+      }
+      if (http.mode === "manager-queueless") {
+        // A legacy Manager that is up and answering its version route while its
+        // queue routes 404 — the #2754 shape.
+        return new URL(url).pathname === "/manager/version"
+          ? new Response("V3.41", { status: 200 })
+          : new Response("missing", { status: 404, statusText: "Not Found" });
       }
       const { pathname } = new URL(url);
       if (
@@ -336,6 +347,28 @@ describe("#1765 — install_custom_node must not write into an install this sess
     expect(ok).toMatchObject({
       details: { managerStatus: { manager_unavailable: true } },
     });
+  });
+
+  it("#2754 does not label the clone manager_absent when Manager answered its version route", async () => {
+    // Both queue routes 404, so the clone is still allowed and still happens —
+    // nothing was queued. But the SAME detection saw /manager/version answer
+    // "V3.41", so calling the result manager_absent is a claim contradicted by the
+    // error object the label was read from.
+    http.mode = "manager-queueless";
+    resetManagerApiCache("#2754 queueless-Manager label");
+
+    const { ok, error } = await install({ id: REPO, source: "git" });
+
+    expect(error).toBeUndefined();
+    expect(ok).toMatchObject({ mechanism: "git-clone" });
+    expect(clonedInto()).toBe(join(CONNECTED, PACK_DIR));
+    // Routing is unchanged by #2754 — only the name the outcome is given.
+    expect(ok).toMatchObject({
+      details: { managerStatus: { manager_unavailable: true } },
+    });
+    expect(
+      (ok as { details?: { managerStatus?: Record<string, unknown> } }).details?.managerStatus,
+    ).not.toHaveProperty("manager_absent");
   });
 
   it("#1129 serializes concurrent unavailable-Manager git installs", async () => {

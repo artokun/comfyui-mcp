@@ -3719,6 +3719,29 @@ function initialManagerQueueAbsenceWasProven(err: unknown): boolean {
 }
 
 /**
+ * #2754 — did the SAME detection failure also observe ComfyUI-Manager serving?
+ *
+ * The queue-detection error now carries what the version routes said, and two of
+ * those readings contradict the word "absent": `version` means a Manager answered
+ * with its generation, and `refused` means an authentication layer stopped us
+ * before anything could be established. Reporting `manager_absent: true` off the
+ * back of an error object that says either one is a claim refuted by its own
+ * details (codex gate round 5).
+ *
+ * Read for LABELLING only. Whether the git fallback is allowed to run stays with
+ * managerAbsenceAllowsGitFallback and its fresh re-probe — the queue routes really
+ * did 404 twice, so nothing was queued and the clone is still safe. This corrects
+ * what we CALL that clone, not whether it happens.
+ */
+function managerWasSeenServingDuringDetection(err: unknown): boolean {
+  if (!(err instanceof NodeManagementError) || !err.details || typeof err.details !== "object") {
+    return false;
+  }
+  const evidence = (err.details as { managerVersionEvidence?: unknown }).managerVersionEvidence;
+  return evidence === "version" || evidence === "refused";
+}
+
+/**
  * A direct clone is safe after either a Manager-native policy refusal whose body
  * explicitly proves no task was queued, a direct enqueue route-level 404, a
  * detection failure followed by a fresh probe proving BOTH queue dialects are
@@ -4556,7 +4579,11 @@ async function installCustomNodeImpl(
       const managerUnavailable =
         refusedBy === undefined &&
         isManagerQueueDetectionFailure(err) &&
-        !initialManagerQueueAbsenceWasProven(err);
+        // Two 404s no longer settle this on their own: if the same detection saw
+        // Manager answer its version route (or get auth-refused), "absent" is a
+        // claim its own error object refutes (#2754).
+        (!initialManagerQueueAbsenceWasProven(err) ||
+          managerWasSeenServingDuringDetection(err));
       logger.info("Manager refused, was unavailable, or was proven absent — cloning directly", {
         status: refusedBy,
         gitId,
