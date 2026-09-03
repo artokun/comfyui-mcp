@@ -297,8 +297,12 @@ describe("panel#1546 — `localhost` is blamed only when resolving it would sett
   it("the localhost COMFYUI_URL reason is distinct from the genuinely off-box one", async () => {
     hoistedBoot.base.value = "http://localhost:8188";
     const ambiguous = await refusalNote({ serverOrigin: "http://localhost:8188" });
+    // #2804: a concrete non-loopback Origin is a bound remote Manager restart,
+    // so the off-box boot disclosure has to use an origin that is NOT that bind
+    // (localhost here). A matching LAN Origin is covered in
+    // panel-restart-remote-origin.test.ts as a dispatch, not a refusal.
     hoistedBoot.base.value = "http://192.168.1.50:8188";
-    const offBox = await refusalNote({ serverOrigin: "http://192.168.1.50:8188" });
+    const offBox = await refusalNote({ serverOrigin: "http://localhost:8188" });
 
     expect(ambiguous).not.toBe(offBox);
     expect(offBox).toMatch(/is not a loopback address/);
