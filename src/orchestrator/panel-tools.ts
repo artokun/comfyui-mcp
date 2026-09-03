@@ -21785,6 +21785,7 @@ export function buildPanelToolDefs(): PanelToolDef[] {
           const written = rewriteMiniMaxH3DirectorWidgetRefusal(
             await ctx.call(
               {
+              cmd: "graph_set_widget",
               node_id: nodeId,
               widget,
               value,
