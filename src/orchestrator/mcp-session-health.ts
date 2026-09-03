@@ -135,16 +135,36 @@ export function inspectMcpServers(
  *
  *  - No tool list, or an empty one, says nothing about our servers.
  *  - A tool list containing NO `mcp__` name at all is a harness that does not
- *    list MCP tools here, not a session with none. Reporting every configured
- *    server then would fire on healthy sessions on any harness shaped that way.
- *    The cost is a real blind spot — if EVERY server were empty the list would
- *    look identical — and it is accepted deliberately, because the reported
- *    signature has `mcp__comfyui__*` present throughout ("headless mcp__comfyui__*
- *    tools remained available" in three of the five reports).
+ *    list MCP tools here, not a session with none — UNLESS this process has
+ *    already seen a namespaced MCP tool, which proves the harness does list them.
+ *    Reporting every configured server without that proof would fire on healthy
+ *    sessions on any harness shaped that way.
+ *
+ *    This started as an accepted blind spot, justified by `mcp__comfyui__*` being
+ *    present throughout ("headless mcp__comfyui__* tools remained available" in
+ *    three of the five reports). Self-review found that justification is evidence
+ *    about EARLIER reports, not a property of the failure: a sixth report
+ *    (2026-09-03, on 0.52.183) describes zero panel tools without saying whether
+ *    comfyui tools survived, so it may sit squarely inside the blind spot — the
+ *    fix would not fire on the case it was written for. The latch below closes it
+ *    without inventing a false alarm: a harness that never namespaces never
+ *    latches, so it is never reported on.
  *  - A server that is degraded or still pending is not reported here. It has no
  *    tools because it is not up; `inspectMcpServers` already says so, and saying
  *    it twice in different words would read as two faults.
  */
+/**
+ * Latched once per process: has ANY session listed a `mcp__*` tool? Until it has,
+ * an absent namespace is an unknown harness, not an empty server. It only ever
+ * moves false -> true, so the detection can widen but never narrow.
+ */
+let harnessListsNamespacedMcpTools = false;
+
+/** Test seam — the latch is process state, so suites must not leak into each other. */
+export function resetMcpToolNamespacingLatchForTests(): void {
+  harnessListsNamespacedMcpTools = false;
+}
+
 export function serversWithoutTools(
   configured: readonly string[],
   reported: readonly ReportedMcpServer[] | undefined,
@@ -152,7 +172,10 @@ export function serversWithoutTools(
 ): string[] {
   if (!Array.isArray(tools) || tools.length === 0) return [];
   const namespaced = tools.filter((t) => typeof t === "string" && t.startsWith("mcp__"));
-  if (namespaced.length === 0) return [];
+  // One namespaced tool, ever, is proof this harness lists them here. After that,
+  // an EMPTY namespaced set is a real observation rather than an unknown harness.
+  if (namespaced.length > 0) harnessListsNamespacedMcpTools = true;
+  else if (!harnessListsNamespacedMcpTools) return [];
   const health = inspectMcpServers(configured, reported);
   const notUp = new Set<string>([...health.degraded.map((d) => d.name), ...health.pending]);
   const empty: string[] = [];

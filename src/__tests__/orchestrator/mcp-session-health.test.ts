@@ -23,10 +23,11 @@
 // gone" on a healthy session is worse than the silence it replaces, so every
 // ambiguity resolves to saying nothing.
 
-import { describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it } from "vitest";
 import {
   degradedMcpNotice,
   emptyToolsMcpNotice,
+  resetMcpToolNamespacingLatchForTests,
   serversWithoutTools,
   inspectMcpServers,
   reconnectableMcpStatus,
@@ -377,11 +378,31 @@ describe("a server that connected and contributed NO tools (#2742)", () => {
     ).toEqual(["panel"]);
   });
 
-  it("stays silent when the harness lists no MCP tools at all", () => {
+  // The latch is PROCESS state, so every case starts from "this harness has never
+  // been seen listing an mcp__ tool". Without this the first case that latches it
+  // silently changes the meaning of every case after it.
+  beforeEach(() => resetMcpToolNamespacingLatchForTests());
+
+  it("stays silent when the harness has never listed an MCP tool", () => {
     // Indistinguishable from a harness that simply does not put MCP tools in this
     // list, and a false "your tools are gone" on every healthy session is worse
-    // than the blind spot. Documented on the function.
+    // than the blind spot.
     expect(serversWithoutTools(["comfyui", "panel"], CONNECTED, ["Read", "Bash"])).toEqual([]);
+  });
+
+  it("reports EVERY empty server once the harness has been seen listing MCP tools", () => {
+    // The blind spot this closes: a session where NO server contributes anything
+    // looked identical to a harness that does not namespace. One namespaced tool,
+    // ever, settles which it is -- and the newest #2742 report may sit exactly
+    // here, since it describes zero panel tools without saying comfyui survived.
+    expect(
+      serversWithoutTools(["comfyui", "panel"], CONNECTED, ["mcp__comfyui__queue", "Read"]),
+    ).toEqual(["panel"]);
+    // Now the harness is known to namespace, so an EMPTY namespaced set is real.
+    expect(serversWithoutTools(["comfyui", "panel"], CONNECTED, ["Read", "Bash"])).toEqual([
+      "comfyui",
+      "panel",
+    ]);
   });
 
   it("stays silent with no tool list, or an empty one", () => {
