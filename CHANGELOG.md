@@ -8,6 +8,7 @@ All notable changes to this project are documented here. This project adheres to
 
 ### MCP
 #### Fixed
+- **`panel_slice_workflow` seeds outputs inside nested overlapping groups (#2780).** Membership used the first containing box only, so a SaveImage inside both an outer group and a nested inner group was missed when slicing by the inner title. Any matching containing group now seeds, and a miss lists every containing title.
 - **the model picker's choice now survives a New chat (#2759).** `reset()` deleted the
 
 ## [0.52.182] - 2026-09-03
