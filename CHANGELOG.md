@@ -8,8 +8,7 @@ All notable changes to this project are documented here. This project adheres to
 
 ### MCP
 #### Fixed
-### MCP
-#### Fixed
+- **`panel_ui_render` documents the four-Image cap the validator already enforces (#2796).** The declared manual listed the 64-component ceiling but omitted `maxImages: 4`, so a valid-looking five-image card was rejected as `too many images (5 > 4)` after an avoidable retry.
 - the panel image relay deadline test no longer spends its whole wall-clock budget on scheduling delay before the request is dispatched, which made it refuse the request as already-expired and report a deadline of 0 under full-suite concurrency (test-only)
 
 ## [0.52.183] - 2026-09-03
