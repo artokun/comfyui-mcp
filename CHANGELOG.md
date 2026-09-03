@@ -20,6 +20,13 @@ All notable changes to this project are documented here. This project adheres to
   The deprecated `defaultInput` spelling is honoured the way the frontend migrates it:
   socket-only on an OPTIONAL input, widget kept on a REQUIRED one.
 - **`apply_manifest` now tracks Manager v4 custom-node enqueues that return an empty success body (#2725, #2749).** Already-enabled packs are satisfied without a duplicate enqueue, and an unverified empty-ack outcome remains pending instead of authorizing a speculative fallback.
+- **an MCP server that connects and registers NO tools is now reported (#2742).**
+  The session-health check compared connection STATUS, so the variant five reporters
+  hit passed it: panel=connected in every session with zero panel_* tools reaching the
+  model, no notice, no error. The init message already carried the tool list. The notice
+  distinguishes this from a connection failure and names the recovery that works —
+  Disconnect then Connect keeps the same orchestrator process, so only restarting that
+  process re-runs the registration. Detection only; the cause stays open on #2742.
 
 ## [0.52.178] - 2026-09-02
 
