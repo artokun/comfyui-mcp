@@ -60,8 +60,12 @@
 //
 // So the reply is not corrected by a refusal here. The REQUEST is corrected instead:
 // the git-URL route stops asking a channel nobody chose.
-import { describe, expect, it, vi } from "vitest";
-import { nodesInstallCommandArgs } from "../../services/node-management.js";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import {
+  nodesInstallCommandArgs,
+  resetManagerApiCacheForTests,
+  v4GitUrlQueueRefusal,
+} from "../../services/node-management.js";
 
 vi.mock("../../comfyui/client.js", () => ({
   getObjectInfo: vi.fn(),
@@ -91,9 +95,13 @@ function installNodeDef() {
  * deleting the `...cmdArgs` spread at the call site, or computing a note and never
  * appending it (#1129, which shipped once and never ran), fails here and nowhere else.
  */
+afterEach(() => resetManagerApiCacheForTests());
+
 async function dispatchInstall(
   args: Record<string, unknown>,
-): Promise<{ sent: Record<string, unknown>; text: string }> {
+  dialect: "legacy" | "v2" | "v2-batch" = "legacy",
+): Promise<{ sent: Record<string, unknown> | undefined; text: string; isError: boolean }> {
+  resetManagerApiCacheForTests(dialect);
   let sent: Record<string, unknown> | undefined;
   const bridge = {
     send: async (cmd: Record<string, unknown>) => {
@@ -119,9 +127,20 @@ async function dispatchInstall(
   } as unknown as PanelToolCtx["bridge"];
   const ctx = makePanelToolCtx(bridge, TAB, new WorkflowTargetStore());
   const res: ToolResult = await installNodeDef().handler(args as never, ctx);
-  expect(res.isError).not.toBe(true);
-  if (!sent) throw new Error("nodes_install was never dispatched");
-  return { sent, text: res.content.map((c) => (c as { text?: string }).text ?? "").join(" ") };
+  return {
+    sent,
+    text: res.content.map((c) => (c as { text?: string }).text ?? "").join(" "),
+    isError: res.isError === true,
+  };
+}
+
+async function dispatchLegacyInstall(
+  args: Record<string, unknown>,
+): Promise<{ sent: Record<string, unknown>; text: string }> {
+  const out = await dispatchInstall(args, "legacy");
+  expect(out.isError).not.toBe(true);
+  if (!out.sent) throw new Error("nodes_install was never dispatched");
+  return { sent: out.sent, text: out.text };
 }
 
 describe("legacy direct-URL normalization remains intact (#1539)", () => {
@@ -253,7 +272,7 @@ describe("legacy direct-URL normalization covers every git spelling (#1539)", ()
   });
 
   it("REACHES THE PANEL for the shorthand too, not just the args object", async () => {
-    const { sent } = await dispatchInstall({ id: "Wenaka2004/comfyui-anima-ipadapter" });
+    const { sent } = await dispatchLegacyInstall({ id: "Wenaka2004/comfyui-anima-ipadapter" });
     expect(sent.channel).toBe("default");
     expect(sent.repository).toBe(REPORTED_URL);
   });
@@ -418,7 +437,7 @@ describe("the FIRST attempt's wrong-author risk is disclosed too (#1539 gate rou
   });
 
   it("does not append the v4-only warning to a legacy-shaped response", async () => {
-    const cmd = await dispatchInstall({ repository: COLLIDING });
+    const cmd = await dispatchLegacyInstall({ repository: COLLIDING });
     expect(cmd.sent.channel).toBe("default");
     expect(cmd.text).not.toMatch(/NOT NECESSARILY THE URL YOU PASSED/i);
     expect(cmd.text).not.toMatch(/BlenderNeko\/ComfyUI_TiledKSampler you passed/);
@@ -427,22 +446,56 @@ describe("the FIRST attempt's wrong-author risk is disclosed too (#1539 gate rou
 
 describe("panel_install_node preserves legacy direct-URL dispatch normalization (#1539)", () => {
   it("sends channel 'default' to the panel for the reporter's request", async () => {
-    const { sent } = await dispatchInstall({ repository: REPORTED_URL });
+    const { sent } = await dispatchLegacyInstall({ repository: REPORTED_URL });
     expect(sent.cmd).toBe("nodes_install");
     expect(sent.repository).toBe(REPORTED_URL);
     expect(sent.channel).toBe("default");
   });
 
   it("relays an explicit channel unchanged", async () => {
-    const { sent } = await dispatchInstall({ repository: REPORTED_URL, channel: "dev" });
+    const { sent } = await dispatchLegacyInstall({ repository: REPORTED_URL, channel: "dev" });
     expect(sent.channel).toBe("dev");
   });
 
   it("does not append the v4-only channel disclosure to a legacy-shaped response", async () => {
-    const { sent, text } = await dispatchInstall({ repository: REPORTED_URL });
+    const { sent, text } = await dispatchLegacyInstall({ repository: REPORTED_URL });
     expect(sent.channel).toBe("default");
     expect(text).not.toMatch(/asked ComfyUI-Manager's "default" channel/i);
     expect(text).not.toMatch(/rules the pack out of "default" ONLY/);
+  });
+});
+
+describe("panel_install_node refuses Git URLs before Manager v4 queueing (#1539)", () => {
+  const REPORTER_SEARCH_ID = "https://github.com/Slimy-Comfy/Slimy_ImageComparer";
+
+  it("does not queue the reporter search id as a v4 registry lookup", async () => {
+    const out = await dispatchInstall({ id: REPORTER_SEARCH_ID }, "v2");
+    expect(out.isError).toBe(true);
+    expect(out.sent).toBeUndefined();
+    expect(out.text).toContain(v4GitUrlQueueRefusal(REPORTER_SEARCH_ID));
+    expect(out.text).toMatch(/install_custom_node\(source:'git'\)/);
+    expect(out.text).not.toMatch(/queued/i);
+  });
+
+  it("does not queue a repository URL on the v2 dialect either", async () => {
+    const out = await dispatchInstall({ repository: REPORTED_URL }, "v2");
+    expect(out.isError).toBe(true);
+    expect(out.sent).toBeUndefined();
+    expect(out.text).toMatch(/Refusing to queue/i);
+  });
+
+  it("still queues a registry id on v4", async () => {
+    const out = await dispatchInstall({ id: "comfyui-kjnodes" }, "v2");
+    expect(out.isError).not.toBe(true);
+    expect(out.sent?.cmd).toBe("nodes_install");
+    expect(out.sent?.id).toBe("comfyui-kjnodes");
+    expect(out.sent?.repository).toBeUndefined();
+  });
+
+  it("still queues a git URL on legacy Manager 3.x", async () => {
+    const out = await dispatchLegacyInstall({ id: REPORTER_SEARCH_ID });
+    expect(out.sent.cmd).toBe("nodes_install");
+    expect(out.sent.repository).toBe(REPORTER_SEARCH_ID);
   });
 });
 

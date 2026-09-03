@@ -11,6 +11,10 @@ export interface NodeSearchHit {
   id: string;
   title: string;
   description: string;
+  /** Present when the mapping's only identifier was a git URL. */
+  repository?: string;
+  /** True when `id` was derived from a git mapping key, not a registry id. */
+  git?: true;
 }
 
 export interface NodeSearchResult {
@@ -34,6 +38,102 @@ export const HOST_HTTP_SEARCH_NOTE =
   "Searched via ComfyUI-Manager HTTP because the panel's browser request to " +
   "Manager getmappings did not complete. Live canvas reads still work; this is a " +
   "panel-origin transport failure, not a Manager outage or a missing pack.";
+
+export const GIT_ONLY_SEARCH_NOTE =
+  "Hits with git:true are git repositories, not Manager registry ids. " +
+  "panel_install_node cannot install those on Manager v4 because v4 ignores the " +
+  "repository URL and resolves by bare name. Use install_custom_node(source:'git') " +
+  "only when its local target is the same ComfyUI as this panel.";
+
+/** A raw git clone URL — never a valid panel_install_node registry id (#1539). */
+export function isRawGitUrlInstallId(id: string): boolean {
+  const s = id.trim();
+  return /^(https?|ssh|git):\/\//i.test(s) || /^git\+/i.test(s) || /^git@/i.test(s);
+}
+
+export function gitMappingRepoName(url: string): string {
+  const trimmed = url.trim().replace(/\.git$/i, "").replace(/\/+$/, "");
+  const parts = trimmed.split(/[/:]/).filter(Boolean);
+  const last = parts[parts.length - 1];
+  return last && !/^(github\.com|gitlab\.com|bitbucket\.org)$/i.test(last) ? last : trimmed;
+}
+
+function joinNotes(...parts: Array<string | undefined>): string | undefined {
+  const joined = parts.filter((p): p is string => typeof p === "string" && p.length > 0).join(" ");
+  return joined || undefined;
+}
+
+function mappingInstallId(candidates: unknown[]): Pick<NodeSearchHit, "id" | "repository" | "git"> {
+  const strings = candidates
+    .map((c) => (c == null || c === "" ? "" : String(c)))
+    .filter((s) => s.length > 0);
+  const registry = strings.find((s) => !isRawGitUrlInstallId(s));
+  const url = strings.find((s) => isRawGitUrlInstallId(s));
+  if (registry) return url ? { id: registry, repository: url } : { id: registry };
+  if (url) return { id: gitMappingRepoName(url), repository: url, git: true };
+  return { id: strings[0] ?? "" };
+}
+
+function withGitSearchNote<T extends { note?: string; results?: NodeSearchHit[] }>(result: T): T {
+  if (!result.results?.some((hit) => hit.git)) return result;
+  const note = joinNotes(result.note, GIT_ONLY_SEARCH_NOTE);
+  return note === result.note ? result : { ...result, note };
+}
+
+function rewriteGitUrlHit(hit: NodeSearchHit): NodeSearchHit {
+  if (!isRawGitUrlInstallId(hit.id)) return hit;
+  return {
+    ...hit,
+    id: gitMappingRepoName(hit.id),
+    repository: hit.repository ?? hit.id,
+    git: true,
+  };
+}
+
+function tryParseJson(text: string): unknown {
+  try {
+    return JSON.parse(text);
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Rewrite a search payload (object or ToolResult JSON) so `id` is never a raw
+ * Git URL. Panel nodes_search still keys some hits on the mapping URL; passing
+ * that `id` to panel_install_node queues a Manager v4 registry lookup (#1539).
+ */
+export function sanitizeSearchInstallIds(value: unknown): unknown {
+  if (!value || typeof value !== "object") return value;
+  const rec = value as { isError?: boolean; content?: Array<{ type?: string; text?: string }>; results?: unknown };
+  if (Array.isArray(rec.content)) {
+    if (rec.isError === true) return value;
+    let changed = false;
+    const content = rec.content.map((block) => {
+      if (!block || block.type !== "text" || typeof block.text !== "string") return block;
+      const parsed = tryParseJson(block.text);
+      if (parsed === undefined) return block;
+      const sanitized = sanitizeSearchInstallIds(parsed);
+      if (sanitized === parsed) return block;
+      changed = true;
+      return { ...block, text: JSON.stringify(sanitized, null, 2) };
+    });
+    return changed ? { ...rec, content } : value;
+  }
+  if (!Array.isArray(rec.results)) return value;
+  let changed = false;
+  const results = rec.results.map((raw) => {
+    if (!raw || typeof raw !== "object") return raw;
+    const hit = raw as NodeSearchHit;
+    if (typeof hit.id !== "string") return raw;
+    const next = rewriteGitUrlHit(hit);
+    if (next !== hit) changed = true;
+    return next;
+  });
+  const payload = changed ? { ...rec, results } : rec;
+  const noted = withGitSearchNote(payload as { note?: string; results?: NodeSearchHit[] });
+  return noted === value ? value : noted;
+}
 
 export type FetchMappings = (mode: MappingsMode) => Promise<unknown>;
 
@@ -135,20 +235,32 @@ export function catalogueSize(data: unknown): number {
 /**
  * Normalize a ComfyUI-Manager `/customnode/getmappings` payload into
  * `{ count, results:[{id,title,description}] }`. Mirrors the panel parser
- * (array or repo-key map). `id` is cnr/reference or the map key — never title.
+ * (array or repo-key map). `id` is a CNR/reference id or the repo name derived
+ * from a git mapping key — never a raw Git URL, never title (#1539).
  */
 export function parseNodeMappings(data: unknown, query: string, limit?: number): NodeSearchResult {
   const terms = queryTerms(query);
   const out: NodeSearchHit[] = [];
-  const push = (id: unknown, title: unknown, desc: unknown, classNames?: unknown) => {
-    if (id == null || id === "") return;
-    const idStr = String(id);
-    const titleStr = title == null ? idStr : String(title);
+  const push = (
+    candidates: unknown[],
+    title: unknown,
+    desc: unknown,
+    classNames?: unknown,
+  ) => {
+    const install = mappingInstallId(candidates);
+    if (!install.id) return;
+    const titleStr = title == null ? install.id : String(title);
     const descStr = String(desc ?? "").slice(0, 160);
     const classes = Array.isArray(classNames) ? classNames.map(String).join(" ") : "";
-    const hay = `${idStr} ${titleStr} ${descStr} ${classes}`.toLowerCase();
+    const hay = `${candidates.join(" ")} ${install.id} ${titleStr} ${descStr} ${classes}`.toLowerCase();
     if (matchesAllTerms(hay, terms)) {
-      out.push({ id: idStr, title: titleStr, description: descStr });
+      out.push({
+        id: install.id,
+        title: titleStr,
+        description: descStr,
+        ...(install.repository ? { repository: install.repository } : {}),
+        ...(install.git ? { git: true } : {}),
+      });
     }
   };
   if (Array.isArray(data)) {
@@ -162,7 +274,12 @@ export function parseNodeMappings(data: unknown, query: string, limit?: number):
         description?: unknown;
         nodename?: unknown;
       };
-      push(pack.id ?? pack.reference ?? pack.title, pack.title ?? pack.title_aux, pack.description, pack.nodename);
+      push(
+        [pack.id, pack.reference, pack.title],
+        pack.title ?? pack.title_aux,
+        pack.description,
+        pack.nodename,
+      );
     }
   } else if (data && typeof data === "object") {
     for (const [key, val] of Object.entries(data as Record<string, unknown>)) {
@@ -172,16 +289,16 @@ export function parseNodeMappings(data: unknown, query: string, limit?: number):
         meta && typeof meta === "object"
           ? (meta as { id?: unknown; reference?: unknown; title?: unknown; title_aux?: unknown; description?: unknown })
           : {};
-      push(m.id ?? m.reference ?? key, m.title ?? m.title_aux, m.description, classes);
+      push([m.id, m.reference, key], m.title ?? m.title_aux, m.description, classes);
     }
   }
   const requested = Number(limit) || 15;
   const max = Math.min(requested, SEARCH_LIMIT_CAP);
-  const result: NodeSearchResult = {
+  const result: NodeSearchResult = withGitSearchNote({
     count: out.length,
     results: out.slice(0, max),
     catalogue_size: catalogueSize(data),
-  };
+  });
   if (requested > SEARCH_LIMIT_CAP) result.limit_cap = SEARCH_LIMIT_CAP;
   return result;
 }
@@ -288,7 +405,7 @@ async function hostSearchAfterTransport(
         manager_outage: true,
       };
     }
-    return { ...parsed, source: "host_http", note: HOST_HTTP_SEARCH_NOTE };
+    return { ...parsed, source: "host_http", note: joinNotes(HOST_HTTP_SEARCH_NOTE, parsed.note) };
   } catch (hostErr) {
     return dualCauseSearchFailure(opts.query, panelErr, hostErr);
   }
@@ -313,7 +430,7 @@ export async function searchPanelNodes(opts: {
 }): Promise<{ via: "panel"; value: unknown } | { via: "fallback"; value: NodeSearchResult }> {
   try {
     const value = await opts.panelSearch();
-    if (!shouldHostSearch(value)) return { via: "panel", value };
+    if (!shouldHostSearch(value)) return { via: "panel", value: sanitizeSearchInstallIds(value) };
     if (isManagerTransportFetchFailure(value)) {
       return { via: "fallback", value: await hostSearchAfterTransport(opts, value) };
     }
