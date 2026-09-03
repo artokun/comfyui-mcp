@@ -87,6 +87,7 @@ import {
 } from "../services/unexpose-host-link-shift.js";
 import { retryConnectAgainstLiveGraph } from "../services/connect-live-graph.js";
 import { verifyPrimitiveForceInputAfterConnect } from "../services/primitive-force-input-connect.js";
+import { retryRailSlotConnect } from "../services/rail-slot-connect.js";
 import { retryWildcardSlotConnect } from "../services/wildcard-slot-connect.js";
 import { retryExposeSubgraphInput } from "../services/expose-ae-wildcard.js";
 import {
@@ -7321,6 +7322,35 @@ function forgetStaleSubgraphIdentity(ctx: PanelToolCtx): void {
   ctx.bridge?.clearPromotedSubgraphIdentity?.(ctx.tabId);
 }
 
+/** Tabs whose promoted-container mapping is unverified after a queue-busy
+ * mutation refusal. `graph_get_subgraph` can stay indeterminate for ordinary
+ * root nodes until something walks the live graph (#2730). */
+const staleSubgraphMappingTabs = new Set<string>();
+
+function noteStaleSubgraphMapping(tabId: string): void {
+  if (tabId) staleSubgraphMappingTabs.add(tabId);
+}
+
+export function __resetStaleSubgraphMappingForTest(): void {
+  staleSubgraphMappingTabs.clear();
+}
+
+/** Root graph identity from a live query even when `is_subgraph` is missing.
+ * A missing container bit is indeterminate, but a published root identity is
+ * still enough to spend one mapping refresh before failing closed (#2730). */
+function parseRootGraphIdentity(payload: Record<string, unknown> | null): string | null {
+  if (!payload) return null;
+  const viewing = payload.viewing;
+  if (!viewing || typeof viewing !== "object" || Array.isArray(viewing)) return null;
+  const rec = viewing as Record<string, unknown>;
+  if (rec.scope !== "root") return null;
+  const graphIdentity = rec.graph_identity;
+  if (typeof graphIdentity !== "string" || graphIdentity.length === 0 || graphIdentity.length > 256) {
+    return null;
+  }
+  return graphIdentity;
+}
+
 /** Read the active viewing scope and node's explicit container bit before
  * attempting promoted-widget resolution. The pinpoint detail projection carries
  * the node bit even when the widget list is empty (which is how a fresh rgthree
@@ -7949,6 +7979,26 @@ function definitiveNonPromotedNodeType(res: ToolResult): string | null {
   return unwrapped || null;
 }
 
+/** Panel `graph_get_subgraph` flattens parentheses in the node type before
+ * embedding it in the definitive ordinary-node refusal (panel#1941), so a live
+ * `Power Lora Loader (rgthree)` is reported as `Power Lora Loader rgthree`.
+ * The scope probe still publishes the real type. Compare after that flatten;
+ * the write fence must keep the unflattened scope type (#2394). */
+function flattenDefinitiveOrdinaryNodeType(type: string): string {
+  return type.replace(/[()]/g, " ").replace(/\s+/g, " ").trim();
+}
+
+function sameDefinitiveOrdinaryNodeType(
+  fromSubgraphRead: string | null,
+  fromScopeProbe: string,
+): boolean {
+  if (!fromSubgraphRead) return false;
+  if (fromSubgraphRead === fromScopeProbe) return true;
+  const left = flattenDefinitiveOrdinaryNodeType(fromSubgraphRead);
+  const right = flattenDefinitiveOrdinaryNodeType(fromScopeProbe);
+  return left.length > 0 && left === right;
+}
+
 type PromotedSubgraphReadErrorKind = "definitive-ordinary" | "transient" | "permanent";
 
 /** The promoted-write refresh is deliberately narrower than the broad panel
@@ -8205,23 +8255,31 @@ const PROMOTED_PREFLIGHT_READ_OPTIONS: PanelToolCallOptions = {
   maxBridgeReconnectRetries: 0,
 };
 
+type PromotedTargetProbe = {
+  scope: QueriedNodeScope | null;
+  rootGraphIdentity: string | null;
+};
+
 async function readPromotedTargetScope(
   ctx: PanelToolCtx,
   nodeId: unknown,
   options: PanelToolCallOptions = PROMOTED_PREFLIGHT_READ_OPTIONS,
-): Promise<QueriedNodeScope | null> {
+): Promise<PromotedTargetProbe> {
   const probe = await ctx.call({
     cmd: "graph_query",
     ids: [nodeId],
     fields: "detail",
     limit: 1,
   }, undefined, undefined, undefined, options);
-  if (probe.isError) return null;
+  if (probe.isError) return { scope: null, rootGraphIdentity: null };
   const payload = parseToolResultJson(probe);
   if (parseViewingScope(payload?.viewing)?.scope === "root") {
     rememberLiveRootViewing(ctx, payload?.viewing);
   }
-  return parseVerifiedQueriedNodeScope(payload, nodeId);
+  return {
+    scope: parseVerifiedQueriedNodeScope(payload, nodeId),
+    rootGraphIdentity: parseRootGraphIdentity(payload),
+  };
 }
 
 function currentPromotedBindingError(
@@ -8845,16 +8903,57 @@ async function preparePromotedWidgetWrite(
     }
   }
 
+  // #2730 — after a queue-busy mutation refusal the panel's subgraph registry
+  // can stay stale until a graph walk. Refresh once before classifying, then
+  // re-probe so an ordinary root node can take the fast path without a manual
+  // panel_graph_outline.
+  let mappingRefreshed = false;
+  const refreshSubgraphMapping = async (): Promise<ToolResult | null> => {
+    if (mappingRefreshed) return null;
+    mappingRefreshed = true;
+    const outline = await ctx.call(
+      { cmd: "graph_outline" },
+      undefined,
+      undefined,
+      undefined,
+      PROMOTED_PREFLIGHT_READ_OPTIONS,
+    );
+    if (outline.isError) {
+      return promotedWriteRefusal(widget, "graph_outline could not refresh the subgraph mapping");
+    }
+    staleSubgraphMappingTabs.delete(ctx.tabId);
+    const payload = parseToolResultJson(outline);
+    if (parseViewingScope(payload?.viewing)?.scope === "root") {
+      rememberLiveRootViewing(ctx, payload?.viewing);
+      forgetStaleSubgraphIdentity(ctx);
+    }
+    const drift = panelBindingDriftReason(
+      ctx,
+      "after the subgraph mapping refresh",
+      hasIdentityApi,
+      identityBefore,
+      tabBefore,
+    );
+    if (drift) return ordinaryBindingRefusal(widget, drift);
+    return null;
+  };
+  if (staleSubgraphMappingTabs.has(ctx.tabId)) {
+    const refreshError = await refreshSubgraphMapping();
+    if (refreshError) return refreshError;
+  }
+
   // #2394 — a root-level rgthree Power Lora Loader may have no lora_N widget
   // yet. Prove the addressed node is an ordinary root node before asking the
   // promoted-container classifier to resolve a target that is intentionally
   // absent. An unreadable scope probe is not permission for an outer write;
   // it falls through to the existing conservative graph_get_subgraph path.
-  const targetScope = await readPromotedTargetScope(
+  let targetProbe = await readPromotedTargetScope(
     ctx,
     nodeId,
     PROMOTED_PREFLIGHT_READ_OPTIONS,
   );
+  let targetScope = targetProbe.scope;
+  const rootGraphIdentity = targetProbe.rootGraphIdentity;
   // #2518 — a live root query names the current root workflow instance. Do not
   // enter the promoted-subgraph identity path for an ordinary (or unproven)
   // root node; a truncated StringConcatenate pinpoint used to fall through,
@@ -8895,7 +8994,7 @@ async function preparePromotedWidgetWrite(
         // available.
         if (!targetScope.nodeIdentity) return null;
         const expectedNodeType = definitiveNonPromotedNodeType(sub);
-        if (expectedNodeType !== targetScope.nodeType) {
+        if (!sameDefinitiveOrdinaryNodeType(expectedNodeType, targetScope.nodeType)) {
           return promotedWriteRefusal(
             widget,
             "the ordinary node type changed between the scope and subgraph reads",
@@ -8934,6 +9033,31 @@ async function preparePromotedWidgetWrite(
       );
     }
     if (firstReadKind === "permanent") {
+      // #2730 — a stale subgraph registry is a permanent-looking miss for an
+      // ordinary root node. Refresh the mapping once and re-probe. Still
+      // unverifiable → refuse. Do not spend the transient subgraph re-read on
+      // a permanent application error.
+      if (!mappingRefreshed && rootGraphIdentity !== null) {
+        const refreshError = await refreshSubgraphMapping();
+        if (refreshError) return refreshError;
+        targetProbe = await readPromotedTargetScope(
+          ctx,
+          nodeId,
+          PROMOTED_PREFLIGHT_READ_OPTIONS,
+        );
+        targetScope = targetProbe.scope;
+        if (targetScope?.activeView === "root" && targetScope.node === "ordinary") {
+          const driftAfterMapping = panelBindingDriftReason(
+            ctx,
+            "after the subgraph mapping refresh",
+            hasIdentityApi,
+            identityBefore,
+            tabBefore,
+          );
+          if (driftAfterMapping) return ordinaryBindingRefusal(widget, driftAfterMapping);
+          return ordinaryWritePlanFromScope(widget, targetScope, tabBefore, identityBefore);
+        }
+      }
       return promotedSubgraphReadRefusal(
         widget,
         sub,
@@ -12234,7 +12358,20 @@ function refreshFenceFromOwnReply(ctx: PanelToolCtx, reply: ToolResult): Workflo
   const uuid = responseWorkflowUuid(parsed);
   if (!uuid) return null;
   try {
-    return refreshWorkflowUuid(ctx, parsed) ? { status: "refreshed", uuid, before } : null;
+    const destPath = saveDestWorkflowPath(parsed);
+    const destTab = destPath ? uniqueLiveTabForSaveDest(ctx, destPath) : undefined;
+    const adopted = refreshWorkflowUuid(ctx, parsed);
+    // #2768 — a SCOPE ctx.tabId never becomes dest. workflow_list stamps the
+    // routed tab's advertised identity (#1815), so dest must hold the new uuid
+    // or the next list/current-mode call is refused as a stale instance.
+    if (destTab && destTab !== ctx.tabId) {
+      try {
+        ctx.bridge.refreshWorkflowUuid?.(destTab, uuid);
+      } catch {
+        // dest restamp is best-effort; the session fence is the ctx adoption
+      }
+    }
+    return adopted ? { status: "refreshed", uuid, before } : null;
   } catch {
     return null; // never surface a throw here as worse than the existing fallback
   }
@@ -12317,6 +12454,30 @@ function routingIsUnsavedPredecessor(ctx: PanelToolCtx): boolean {
   return typeof pin?.path === "string" && pin.path.startsWith("tmp:");
 }
 
+/** The saved path this session was bound to before Save-As, if any. */
+function sessionSavedPath(ctx: PanelToolCtx): string | undefined {
+  const pin = ctx.workflowTarget?.get(ctx.tabId);
+  if (typeof pin?.path === "string" && pin.path.trim() && !pin.path.startsWith("tmp:")) {
+    return canonicalSavedWorkflowPath(pin.path) ?? pin.path.trim();
+  }
+  return savedPathFromTabId(ctx.tabId) ?? undefined;
+}
+
+/**
+ * #2768 — this Save-As replaced the canvas this session was editing.
+ * `workflow_instance_changed` is the panel's own signal; dest path ≠ the
+ * session's saved path is the same fact on a reply that omits the flag.
+ */
+function saveReplacedSessionCanvas(
+  ctx: PanelToolCtx,
+  parsed: Record<string, unknown>,
+  destPath: string,
+): boolean {
+  if (parsed.workflow_instance_changed === true) return true;
+  const from = sessionSavedPath(ctx);
+  return Boolean(from && from !== destPath);
+}
+
 function destPinnedTarget(
   pinned: { path?: string; filename?: string },
   destPath: string,
@@ -12361,9 +12522,14 @@ function adoptPinnedDestPath(
  * (`panel_set_todo`, `panel_canvas`) still address the old id.
  *
  * Follow dest when the current address is dead, when it already aliases onto
- * dest (same-socket tmp:→wf: / Save-As rename), or when it is the unsaved
+ * dest (same-socket tmp:→wf: / Save-As rename), when it is the unsaved
  * predecessor of dest (pinned tmp: canvas whose first save published a
- * `workflows/…` routing key). A live pin on a DIFFERENT saved tab is left
+ * `workflows/…` routing key), or when this Save-As replaced the canvas this
+ * session was editing (#2768 — dest path differs, or the panel set
+ * `workflow_instance_changed`). Leaving the session on the source id after
+ * that is a stale fence: dest is live, the source id may still canReach, and
+ * panel_list_workflows / mode:"current" then fail with instance mismatch.
+ * A live pin on a DIFFERENT saved tab that this save did not replace is left
  * alone — that is #1917 / #884.
  *
  * Matching is on the dest path the save reply proved, and only when exactly
@@ -12385,7 +12551,10 @@ function repointRoutingAfterSave(ctx: PanelToolCtx, reply: ToolResult): void {
   }
   const live = liveRoutingTab(ctx);
   const follow =
-    !live || live === destTab || routingIsUnsavedPredecessor(ctx);
+    !live ||
+    live === destTab ||
+    routingIsUnsavedPredecessor(ctx) ||
+    saveReplacedSessionCanvas(ctx, parsed, destPath);
   if (!follow) return;
   if (isScopeAddress(ctx.tabId)) {
     try {
@@ -17002,7 +17171,13 @@ export function makePanelToolCtx(
       // panel#1489 — reads are NOT refused here: they carry no unknown outcome,
       // so they are dispatched on the bounded budget above instead.
       const blocked = graphCmdBlockedByRunningPrompt(cmd);
-      if (blocked) return fail(blocked);
+      if (blocked) {
+        // #2730 — a fenced mutation never reached the panel, so the subgraph
+        // registry can stay stale until something walks the live graph. Mark
+        // this tab so the next idle write refreshes mapping once.
+        noteStaleSubgraphMapping(ctx.tabId);
+        return fail(blocked);
+      }
       // #2527 — a timed-out mutation may still be applying. Graph reads wait for
       // that settlement (or disclose the outstanding receipt) so they cannot
       // certify a stale widget value as current.
@@ -21437,7 +21612,7 @@ export function buildPanelToolDefs(): PanelToolDef[] {
     ),
     def(
       "panel_connect",
-      "Connect an output slot of one node to an input slot of another in the user's open graph. Slots accept a name ('MODEL', 'samples') or numeric index. If both slot args are omitted the panel picks the first type-compatible pairing. On failure the error lists every slot with its type and [connected] flag — re-check with panel_query_graph ({ids:[node_id], fields:'detail'}). LiteGraph wildcard-to-wildcard (`*` → `*`) pairings are compatible (a PrimitiveNode 'connect to widget input' output can land on LogicIF.when_true / when_false so the primitive becomes typed from the destination). A frontend PrimitiveNode only serializes through a target widget; connecting one to a forceInput-only / non-widget STRING is refused (panel_run would omit the required input) — use a backend STRING producer such as PrimitiveStringMultiline instead. Undoable.",
+      "Connect an output slot of one node to an input slot of another in the user's open graph. Slots accept a name ('MODEL', 'samples') or numeric index. If both slot args are omitted the panel picks the first type-compatible pairing. On failure the error lists every slot with its type and [connected] flag — re-check with panel_query_graph ({ids:[node_id], fields:'detail'}). LiteGraph wildcard-to-wildcard (`*` → `*`) pairings are compatible (a PrimitiveNode 'connect to widget input' output can land on LogicIF.when_true / when_false so the primitive becomes typed from the destination). An exposed subgraph INT rail (e.g. Scene Seed) is compatible with another INT widget input (LocalWildcardText.seed) — numeric widget min/max/step on the rail socket are not a different type. A frontend PrimitiveNode only serializes through a target widget; connecting one to a forceInput-only / non-widget STRING is refused (panel_run would omit the required input) — use a backend STRING producer such as PrimitiveStringMultiline instead. Undoable.",
       {
         from_node_id: nodeId().describe("Source node id."),
         from_output: slotRef
@@ -21472,7 +21647,8 @@ export function buildPanelToolDefs(): PanelToolDef[] {
         };
         const call = (cmd: Record<string, unknown>, timeoutMs?: number) => ctx.call(cmd, timeoutMs);
         const connected = await retryConnectAgainstLiveGraph(connectArgs, call);
-        const afterWildcard = await retryWildcardSlotConnect(connectArgs, connected, call);
+        const afterRail = await retryRailSlotConnect(connectArgs, connected, call);
+        const afterWildcard = await retryWildcardSlotConnect(connectArgs, afterRail, call);
         return verifyPrimitiveForceInputAfterConnect(connectArgs, afterWildcard, call);
       },
     ),
@@ -25126,13 +25302,14 @@ export function buildPanelToolDefs(): PanelToolDef[] {
         // attempting rebindWorkflowFence's independent workflow_list round trip,
         // which can be refused by the exact fence this repairs.
         //
-        // #2419 — BEFORE the fence refresh so the stamp lands on the dest
-        // address. Save-As mints a new tab id; the fence repair re-stamps
-        // graph commands, but session-scoped commands (set_todo, graph_canvas)
-        // still address the old id unless routing is re-pointed. Follow dest
-        // when the current address is dead, aliases onto dest, or is the
-        // unsaved tmp: predecessor of dest. A live pin on a different saved
-        // tab is left alone (#1917 / #884).
+        // #2419 / #2768 — BEFORE the fence refresh so the stamp lands on the
+        // dest address. Save-As mints a new tab id; the fence repair re-stamps
+        // graph commands, but session-scoped commands (set_todo, graph_canvas,
+        // workflow_list) still address the old id unless routing is re-pointed.
+        // Follow dest when the current address is dead, aliases onto dest, is
+        // the unsaved tmp: predecessor of dest, or this Save-As replaced the
+        // canvas this session was editing. A live pin on a different saved tab
+        // that this save did not replace is left alone (#1917 / #884).
         repointRoutingAfterSave(ctx, res);
         const fenceRebind = refreshFenceFromOwnReply(ctx, res) ?? (await rebindWorkflowFence(ctx));
         let canMutateNow: boolean | undefined;

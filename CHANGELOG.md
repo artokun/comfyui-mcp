@@ -7,9 +7,27 @@ All notable changes to this project are documented here. This project adheres to
 ## Unreleased
 
 ### MCP
-
 #### Fixed
 - list_local_models recovers remote inventory from panel object_info when fetch_comfyui_read rejects models/<category> as outside the panel allowlist (#2511)
+
+## [0.52.182] - 2026-09-03
+
+### MCP
+
+#### Fixed
+- **`panel_connect` wires an exposed subgraph INT rail to another INT widget input.** A Scene Seed rail that already fed KSampler.seed / FaceDetailer.seed was refused onto LocalWildcardText.seed as "INT is not compatible with INT" because the rail still carried numeric widget constraints as a COMBO-shaped socket type. Those specs are normalized to INT before compatibility; COMBO option lists and distinct concrete types are unchanged (#2778, #2808).
+- **`panel_set_widget` writes ordinary root widgets after a queue-busy refusal without a manual `panel_graph_outline` (#2730, #2807).** A correct queue-busy fence left the panel's subgraph registry stale, so the next idle `graph_set_widget` treated root `UNETLoader` nodes as unverifiable promoted containers. Mapping-unknown now refreshes once (or after the busy refusal clears) and retries the guard; still unverifiable stays fail-closed.
+- **`panel_save_workflow(name)` rebinds the session onto the Save-As dest canvas (#2768, #2805).** After a named save the live instance is dest, but the source tab id can still `canReach`; staying there left `panel_list_workflows` and `panel_set_workflow_target({mode:"current"})` stamped for the replaced instance. Dest is followed when this save replaced the session canvas, and dest's command stamp is refreshed from the save reply.
+- **`list_local_models` `action:"remove"` resolves against the same launch-proven extra-path files as inventory, including ComfyUI Desktop's `extra_models_config.yaml` (#2739, #2803).** Removal previously searched only the Desktop shared models yaml from argv, so a listed LTX file under another active extra root could not be deleted. Desktop extra roots are included only when the connected snapshot already named a Desktop extra-path config — never by probing a guessed :8188 origin — and still fail closed when that file cannot be proven unchanged since launch.
+
+
+## [0.52.181] - 2026-09-03
+
+### MCP
+
+#### Fixed
+- **`panel_set_widget` creates a documented `lora_N` row on an ordinary Power Lora Loader inside a live subgraph (#2394, #2794).** Current panels flatten parentheses in the `graph_get_subgraph` "is not a subgraph" line, so a live `Power Lora Loader (rgthree)` was reported as `Power Lora Loader rgthree` and the identity-fenced ordinary write refused it as a type change. The two types are compared after that flatten; the write still fences the real unflattened type.
+
 
 ## [0.52.180] - 2026-09-03
 

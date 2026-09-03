@@ -5131,6 +5131,108 @@ describe("definitive non-promoted read tolerates a parenthesised node type (#239
     ]);
   });
 
+  // Recurrence 2026-09-03: a current panel publishes node_identity on the
+  // ordinary pinpoint AND flattens parentheses in the graph_get_subgraph
+  // refusal (panel#1941). Strict string compare then refuses a live
+  // `Power Lora Loader (rgthree)` as if the type had changed.
+  it("writes an inside-subgraph rgthree lora_N row when the subgraph refusal flattened parentheses (#2394)", async () => {
+    const nodeIdentity = "node-incarnation:92:fresh";
+    const { isError, text, mutations, calls } = await setWidget(
+      { node_id: 92, widget: "lora_1", value: RGTHREE_VALUE },
+      {
+        ownerNodeId: 78,
+        startInSubgraph: true,
+        firstWrite: "ok",
+        nestedSubgraph: new Error("Node 92 (Power Lora Loader rgthree) is not a subgraph"),
+        promotedDetail: {
+          nodes: [
+            {
+              id: 92,
+              type: "Power Lora Loader (rgthree)",
+              is_subgraph: false,
+              node_identity: nodeIdentity,
+            },
+          ],
+        },
+      },
+    );
+
+    expect(text).not.toMatch(/ordinary node type changed between the scope and subgraph reads/);
+    expect(text).not.toMatch(/could not determine whether the addressed node is a promoted container/);
+    expect(isError).toBe(false);
+    expect(mutations).toBe(1);
+    expect(calls.filter((c) => c.cmd === "graph_set_widget")).toEqual([
+      expect.objectContaining({
+        node_id: 92,
+        widget: "lora_1",
+        value: RGTHREE_VALUE,
+        expected_node_type: "Power Lora Loader (rgthree)",
+        expected_node_identity: nodeIdentity,
+      }),
+    ]);
+  });
+
+  it("writes an inside-subgraph rgthree lora_N row when identity is present and nested parens are kept (#2394)", async () => {
+    const nodeIdentity = "node-incarnation:92:fresh";
+    const { isError, mutations, calls } = await setWidget(
+      { node_id: 92, widget: "lora_1", value: RGTHREE_VALUE },
+      {
+        ownerNodeId: 78,
+        startInSubgraph: true,
+        firstWrite: "ok",
+        nestedSubgraph: new Error("Node 92 (Power Lora Loader (rgthree)) is not a subgraph"),
+        promotedDetail: {
+          nodes: [
+            {
+              id: 92,
+              type: "Power Lora Loader (rgthree)",
+              is_subgraph: false,
+              node_identity: nodeIdentity,
+            },
+          ],
+        },
+      },
+    );
+
+    expect(isError).toBe(false);
+    expect(mutations).toBe(1);
+    expect(calls.filter((c) => c.cmd === "graph_set_widget")).toEqual([
+      expect.objectContaining({
+        node_id: 92,
+        widget: "lora_1",
+        expected_node_type: "Power Lora Loader (rgthree)",
+        expected_node_identity: nodeIdentity,
+      }),
+    ]);
+  });
+
+  it("still refuses an inside-subgraph ordinary write when the node type actually changed (#2394)", async () => {
+    const { isError, text, mutations, calls } = await setWidget(
+      { node_id: 92, widget: "lora_1", value: RGTHREE_VALUE },
+      {
+        ownerNodeId: 78,
+        startInSubgraph: true,
+        firstWrite: "ok",
+        nestedSubgraph: new Error("Node 92 (KSampler) is not a subgraph"),
+        promotedDetail: {
+          nodes: [
+            {
+              id: 92,
+              type: "Power Lora Loader (rgthree)",
+              is_subgraph: false,
+              node_identity: "node-incarnation:92:fresh",
+            },
+          ],
+        },
+      },
+    );
+
+    expect(isError).toBe(true);
+    expect(text).toMatch(/ordinary node type changed between the scope and subgraph reads/);
+    expect(mutations).toBe(0);
+    expect(calls.filter((c) => c.cmd === "graph_set_widget")).toHaveLength(0);
+  });
+
   // CONTROLS — these must hold BEFORE and AFTER the classifier change, or the two
   // pins above would be satisfied by simply authorizing every failed read.
   it("still refuses a genuinely indeterminate read", async () => {
