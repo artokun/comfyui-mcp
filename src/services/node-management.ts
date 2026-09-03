@@ -6700,6 +6700,28 @@ function gitInstallSubstitutionNote(channel: string, url: string): string {
  * the call site — because a rerouted git URL must DROP `id`, and a
  * `norm.id ?? args.id` merge silently restores it (codex gate round 4).
  */
+/**
+ * #1539 recurrence — Manager v4 (`v2` dialect) ignores `repository` and looks
+ * the pack up by bare name in its registry. Queueing a git URL there is the
+ * unlisted-URL failure the reporter still hits. Legacy 3.x / v2-batch still
+ * clone `files:[url]`.
+ */
+export function v4GitUrlQueueRefusal(url: string): string {
+  return (
+    `Refusing to queue "${url}" as a Manager v4 install. Manager v4 ignores the supplied ` +
+    `repository and resolves by bare name against its registry, so a Git URL is not a ` +
+    `successful v4 from-source install. Use a registry id from panel_search_nodes; or ` +
+    `install_custom_node(source:'git') only when its local target is the same ComfyUI as ` +
+    `this panel. If the panel drives another machine, install the repository on the ` +
+    `ComfyUI host instead.`
+  );
+}
+
+/** True when this dialect would send a git URL through v4's registry lookup. */
+export function managerDialectQueuesGitUrlAsRegistryLookup(api: ManagerApi): boolean {
+  return api === "v2";
+}
+
 export function nodesInstallCommandArgs(args: {
   id?: string;
   repository?: string;
