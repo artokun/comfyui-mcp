@@ -524,6 +524,24 @@ function resolveFromMappings(classType: string, index: MappingIndex): MappingRes
   // two packs matching one name is a real conflict rather than a tie to break.
   // `Inspire$`, `_jru$` and `- Ostris$` are each declared by two different
   // packs in the live catalogue today.
+  // #2765 (codex gate round 3) — the gate asked for a pattern-only resolution to
+  // be refused when the exact index is too small for `patternIsBroad` to be a
+  // real test (its repro: a one-entry catalogue declaring `Krea`, no exact names
+  // at all). Deliberately NOT done, for two measured reasons:
+  //
+  //  - It is not a reachable production state. The live catalogue carries 40,656
+  //    exactly-owned class names, so the corpus is never thin; and the case where
+  //    the catalogue genuinely answers nothing is already covered upstream by
+  //    `mappings_unavailable`.
+  //  - It would break pattern-only packs, which are normal. `rgthree-comfy`
+  //    declares ` \(rgthree\)$` and ZERO exact class names — refusing to certify
+  //    a pattern against a thin corpus un-resolves the very pack this issue names
+  //    as an expected owner.
+  //
+  // A bare literal like `Krea` is the catalogue author asserting their own naming
+  // convention, with no rival claiming otherwise; against a real corpus the
+  // foreign-owner veto below is what tests that assertion, and the shape probes
+  // above catch the patterns that are broad regardless of corpus size.
   const hits = new Map<string, string>();
   for (const entry of index.patterns) {
     if (!entry.re.test(classType)) continue;
@@ -803,12 +821,26 @@ export async function installWorkflowDependenciesForAnalysis(
   // it is blocked; we know the catalogue is empty and that this is not the
   // same fact as absence.
   const catalogueEmpty = !directInstall && channel !== "local" && packs.length === 0;
+  // #2765 — a pack name resolves to a catalogue entry here, and this is the last
+  // step before an install is queued. First-wins meant an entry could be selected
+  // by a key it SHARES with another entry: two unrelated repositories publishing
+  // the same `title` collapsed into whichever `/getlist` listed first, and the
+  // other one got installed. Refuse a colliding key instead of picking, exactly
+  // as the mapping resolver now does — a name that identifies two repositories
+  // identifies neither.
   const byKey = new Map<string, ManagerNodePack>();
+  const collidingKeys = new Set<string>();
   for (const p of packs) {
-    for (const key of [p.id, p.title, p.reference]) {
-      if (key && !byKey.has(key)) byKey.set(key, p);
+    // Within ONE entry the three keys may legitimately repeat (id === title);
+    // only a collision ACROSS entries is ambiguous.
+    for (const key of new Set([p.id, p.title, p.reference])) {
+      if (!key) continue;
+      const seen = byKey.get(key);
+      if (seen === undefined) byKey.set(key, p);
+      else if (seen !== p) collidingKeys.add(key);
     }
   }
+  for (const key of collidingKeys) byKey.delete(key);
 
   const toInstall: ManagerNodePack[] = [];
   const installed: string[] = [];

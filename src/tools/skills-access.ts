@@ -935,7 +935,12 @@ async function extractDepsAction(input: string | Record<string, unknown>): Promi
     // nodes were ALL ambiguous produces zero requiredPacks, and this line used to
     // announce it as needing nothing — the reassuring reading, printed above the
     // warning that contradicts it.
-    const unattributed = result.ambiguous.length + result.unresolved.length;
+    // Counted from the dependencies themselves, not from the two summary lists:
+    // an INSTALLED custom node whose /object_info carries no python_module and
+    // which Manager cannot name is in neither list, and it was making this line
+    // claim the graph was all built-in while such a node sat in it (codex gate
+    // round 3).
+    const unattributed = result.dependencies.filter((d) => !d.builtin && !d.pack).length;
     lines.push(
       unattributed === 0
         ? "All node types are core/built-in ComfyUI nodes. No custom node packs required."
@@ -1036,10 +1041,11 @@ async function installDepsAction(input: string | Record<string, unknown>): Promi
     // node was ambiguous queues nothing, and "no packs needed" is the opposite
     // of what happened. Nothing was installed BECAUSE we could not tell what to
     // install.
+    const blocked = result.ambiguous.length + result.unresolved.length;
     lines.push(
-      result.ambiguous.length > 0
-        ? `## Nothing installed — ${result.ambiguous.length} node type(s) have no attributable pack`
-        : "## No packs needed installation",
+      blocked === 0
+        ? "## No packs needed installation"
+        : `## Nothing installed — ${blocked} item(s) could not be resolved to a pack`,
       "",
     );
   }

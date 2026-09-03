@@ -193,6 +193,32 @@ describe("#2765 an ambiguous class_type is refused, not guessed", () => {
     ]);
   });
 
+  it("refuses to install through a catalogue key that names two repositories", async () => {
+    // codex gate round 3, P1 — the LAST step before a queue. `missingPacks` holds
+    // a name, and `/getlist` was matched first-wins across `id`/`title`/
+    // `reference`, so two unrelated repositories publishing the same title
+    // collapsed into whichever the catalogue listed first, and that one got
+    // installed. A name that identifies two repositories identifies neither.
+    const wf: WorkflowJSON = { "1": { class_type: "TargetNode", inputs: {} } };
+    const deps = makeDeps(
+      {},
+      { "https://github.com/real/owner": [["TargetNode"], { title: "Shared" }] },
+      {
+        fetchManagerList: vi.fn(async () => ({
+          channel: "default",
+          packs: [
+            { id: "unrelated-b", title: "Shared", reference: "https://github.com/b/unrelated" },
+            { id: "real-a", title: "Shared", reference: "https://github.com/real/owner" },
+          ],
+        })),
+      },
+    );
+    const result = await installWorkflowDependencies(wf, deps);
+    expect(deps.queueInstall).not.toHaveBeenCalled();
+    expect(result.installed).toEqual([]);
+    expect(result.unresolved).toEqual(["Shared"]);
+  });
+
   it("treats two packs declaring the same nodename_pattern as a conflict", async () => {
     // `Inspire$` really is declared by both "Inspire Pack" and "ComfyUI
     // Connection Helper" in the live catalogue; the latter's pattern reaches

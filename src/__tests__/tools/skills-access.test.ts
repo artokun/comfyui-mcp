@@ -460,6 +460,56 @@ describe("actions call the same services with the same arguments", () => {
     expect(out).not.toContain("### Missing packs");
   });
 
+  // codex gate round 3, P1 — an INSTALLED custom node whose /object_info carries
+  // no python_module and which Manager cannot name lands in neither the
+  // `ambiguous` nor the `unresolved` list, so a summary counted off those two
+  // lists called the graph all-built-in while such a node sat in it.
+  it('action:"extract_deps" does not call a graph all-built-in when a node has no attributable pack', async () => {
+    mocks.extractWorkflowDependencies.mockResolvedValueOnce({
+      classTypes: ["MysteryNode"],
+      requiredPacks: [],
+      missingPacks: [],
+      unresolved: [],
+      ambiguous: [],
+      dependencies: [
+        {
+          class_type: "MysteryNode",
+          pack: null,
+          builtin: false,
+          installed: true,
+          source: "unresolved",
+        },
+      ],
+    });
+    const out = text(
+      await handler()({
+        action: "extract_deps",
+        workflow: { "1": { class_type: "MysteryNode", inputs: {} } },
+      }),
+    );
+    expect(out).not.toContain("All node types are core/built-in");
+    expect(out).toContain("No custom node pack could be attributed to 1");
+  });
+
+  // codex gate round 3, P1 — same contradiction on the install path for an
+  // unresolved-only run: nothing was installed BECAUSE nothing could be resolved.
+  it('action:"install_deps" does not say "no packs needed" when packs went unresolved', async () => {
+    mocks.installWorkflowDependencies.mockResolvedValueOnce({
+      installed: [],
+      alreadyInstalled: [],
+      unresolved: ["Some-Pack"],
+      ambiguous: [],
+    });
+    const out = text(
+      await handler()({
+        action: "install_deps",
+        workflow: { "1": { class_type: "SomeNode", inputs: {} } },
+      }),
+    );
+    expect(out).not.toContain("No packs needed installation");
+    expect(out).toContain("Nothing installed — 1 item(s) could not be resolved to a pack");
+  });
+
   it('action:"install_deps" reports what it deliberately did NOT install', async () => {
     mocks.installWorkflowDependencies.mockResolvedValueOnce({
       installed: [],
@@ -482,7 +532,7 @@ describe("actions call the same services with the same arguments", () => {
     // Nothing was installed BECAUSE we could not tell what to install — the
     // opposite of "no packs needed".
     expect(out).not.toContain("No packs needed installation");
-    expect(out).toContain("Nothing installed — 1 node type(s) have no attributable pack");
+    expect(out).toContain("Nothing installed — 1 item(s) could not be resolved to a pack");
   });
 
   it('action:"generate_skill" forwards source + refresh and keeps structuredContent', async () => {
