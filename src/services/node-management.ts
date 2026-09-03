@@ -11,7 +11,6 @@ import {
 import {
   comfyuiFetch,
   describeComfyBodyTimeout,
-  isTimeoutAbort,
   raceAbort,
 } from "../comfyui/fetch.js";
 import { resetObjectInfoCache } from "../comfyui/client.js";
@@ -338,6 +337,10 @@ function managerBodyTimeoutSignal(): AbortSignal {
   return AbortSignal.timeout(Math.round(seconds * 1000));
 }
 
+function isManagerTimeoutAbort(err: unknown): boolean {
+  return err instanceof Error && (err.name === "TimeoutError" || err.name === "AbortError");
+}
+
 async function managerFetch<T>(
   path: string,
   options: ManagerFetchOptions = {},
@@ -428,7 +431,7 @@ async function managerFetch<T>(
   try {
     raw = await readBody();
   } catch (err) {
-    if (isTimeoutAbort(err)) {
+    if (isManagerTimeoutAbort(err)) {
       if (soft) {
         onSoftFailure?.(undefined);
         onSoftTransportFailure?.();
