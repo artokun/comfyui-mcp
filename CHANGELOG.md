@@ -6,6 +6,10 @@ All notable changes to this project are documented here. This project adheres to
 
 ## Unreleased
 
+
+### MCP
+#### Fixed
+- the panel image relay deadline test no longer spends its whole wall-clock budget on scheduling delay before the request is dispatched, which made it refuse the request as already-expired and report a deadline of 0 under full-suite concurrency (test-only)
 ### MCP
 #### Fixed
 - **stale `panel-op.lock` is reclaimed automatically when the owner process is gone (#2788).** Acquire takes the lock after the same proven-dead rename-aside path as `panel_action:"unlock"`; a living owner is never stolen, and an unreadable or reuse-ambiguous record still fails closed.

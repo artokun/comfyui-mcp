@@ -445,9 +445,17 @@ describe("panel image relay orchestrator poll", () => {
     const dir = tempChannel();
     const id = "deadline-race-123456";
     const createdAt = Date.now();
+    // 400ms, not 50. The budget is WALL-CLOCK and starts at `createdAt`, so on a
+    // loaded runner it could expire before processing even began -- the request
+    // was then refused as already-expired, `send` was never called, and the
+    // assertion below read `timeoutMs` as 0. That is the measurement apparatus
+    // being starved, not a race in the code under test (which is why widening is
+    // the right move here and not elsewhere -- see vitest.config.ts on #852).
+    // The panel still answers LATER than this, so the TIMEOUT verdict is real.
+    const budgetMs = 400;
     writeFileSync(requestFile(dir, id), JSON.stringify(request(id, {
       createdAt,
-      deadlineAt: createdAt + 50,
+      deadlineAt: createdAt + budgetMs,
     })));
     let timeoutMs = 0;
     await processPanelImageRequests({
@@ -458,13 +466,13 @@ describe("panel image relay orchestrator poll", () => {
         canReach: () => true,
         send: async (_command, options) => {
           timeoutMs = options.timeoutMs;
-          await new Promise((resolve) => setTimeout(resolve, 75));
+          await new Promise((resolve) => setTimeout(resolve, budgetMs * 2));
           return { ok: true, base64: "AQID", mimeType: "image/png", bytes: 3 };
         },
       },
     });
     expect(timeoutMs).toBeGreaterThan(0);
-    expect(timeoutMs).toBeLessThanOrEqual(50);
+    expect(timeoutMs).toBeLessThanOrEqual(budgetMs);
     expect(readResponse(dir, id)).toMatchObject({ ok: false, error: "TIMEOUT" });
   });
 
