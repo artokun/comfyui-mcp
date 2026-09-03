@@ -9,6 +9,7 @@ All notable changes to this project are documented here. This project adheres to
 ### MCP
 
 #### Fixed
+- **`panel_set_widget` MiniMaxH3Director prompt workaround recommends PrimitiveStringMultiline, not PrimitiveNode (#2790).** The panel correctly refuses a direct `prompt` / `builder_state` / `timeline_data` write, but its recovery instruction used to name a frontend PrimitiveNode for `external_prompt_overwrite`; `panel_connect` rejects that forceInput-only STRING. The producer advice now shares the same helper as `panel_connect`.
 - **`panel_ui_render` documents the four-Image cap the validator already enforces (#2796).** The declared manual listed the 64-component ceiling but omitted `maxImages: 4`, so a valid-looking five-image card was rejected as `too many images (5 > 4)` after an avoidable retry.
 
 

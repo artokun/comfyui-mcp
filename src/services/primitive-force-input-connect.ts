@@ -24,6 +24,21 @@ import {
 
 export const FRONTEND_PRIMITIVE_NODE_TYPE = "PrimitiveNode";
 
+/** Backend STRING producer `panel_connect` accepts on a forceInput-only STRING. */
+export const BACKEND_STRING_PRODUCER_EXAMPLE = "PrimitiveStringMultiline";
+
+/**
+ * Shared recovery instruction for a forceInput-only / non-widget STRING.
+ * `panel_connect` and `panel_set_widget` (MiniMaxH3Director) both use this so
+ * they cannot recommend a frontend PrimitiveNode that the other tool refuses.
+ */
+export function backendStringProducerConnectAdvice(inputName: string): string {
+  return (
+    `Add a backend STRING producer such as ${BACKEND_STRING_PRODUCER_EXAMPLE}, set its ` +
+    `STRING widget, then panel_connect that STRING output to "${inputName}".`
+  );
+}
+
 const DETAIL_MAX_CHARS = 60000;
 const DETAIL_TIMEOUT_MS = 8000;
 
@@ -268,8 +283,7 @@ export function primitiveForceInputRefusal(opts: {
     `Error: panel_connect refused frontend PrimitiveNode #${from} → #${to} ${slot}. ` +
     `A PrimitiveNode only serializes through a target widget; this input is forceInput-only ` +
     `(no serializable widget binding), so panel_run would omit the required input from the ` +
-    `queued prompt. Add a backend STRING producer such as PrimitiveStringMultiline, set its ` +
-    `STRING widget, then panel_connect that STRING output to "${opts.inputName}". ${undo} ` +
+    `queued prompt. ${backendStringProducerConnectAdvice(opts.inputName)} ${undo} ` +
     `(artokun/comfyui-mcp#2536)`
   );
 }
