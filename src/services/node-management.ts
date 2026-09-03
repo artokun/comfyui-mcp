@@ -10,7 +10,6 @@ import {
 } from "../config.js";
 import {
   comfyuiFetch,
-  defaultComfyTimeoutSignal,
   describeComfyBodyTimeout,
   isTimeoutAbort,
   raceAbort,
@@ -331,6 +330,14 @@ export function explainManagerAuthenticationRequired(status: number): string {
   );
 }
 
+/** Same 120s ceiling as fetch.ts, minted locally so tests that mock
+ *  `comfyui/fetch.js` without `defaultComfyTimeoutSignal` still load. */
+function managerBodyTimeoutSignal(): AbortSignal {
+  const raw = Number(process.env.COMFYUI_MCP_HTTP_TIMEOUT_S);
+  const seconds = Number.isFinite(raw) && raw > 0 ? raw : 120;
+  return AbortSignal.timeout(Math.round(seconds * 1000));
+}
+
 async function managerFetch<T>(
   path: string,
   options: ManagerFetchOptions = {},
@@ -354,7 +361,9 @@ async function managerFetch<T>(
   // comfyuiFetch: that helper rewrites a timeout into describeComfyTimeout only
   // when init.signal is undefined, so threading a signal through would silently
   // drop the transport-timeout diagnosis for every Manager call (#2773).
-  const budget = defaultComfyTimeoutSignal();
+  // Local AbortSignal — do not import defaultComfyTimeoutSignal from fetch.js;
+  // tests mock that module without this export.
+  const budget = managerBodyTimeoutSignal();
 
   let res: Response;
   try {
@@ -781,7 +790,7 @@ async function probeManagerVersionEvidence(base: string): Promise<ManagerVersion
   // these two probes so a late inner settlement cannot hold the diagnosis open
   // after this budget fires — this is the diagnosis a caller reached after
   // everything else had already failed.
-  const budget = defaultComfyTimeoutSignal();
+  const budget = managerBodyTimeoutSignal();
   for (const path of MANAGER_VERSION_ROUTES) {
     let kind: ManagerQueueStatusKind = "hard-error";
     // This route's own status. Recorded per-iteration, and promoted to
