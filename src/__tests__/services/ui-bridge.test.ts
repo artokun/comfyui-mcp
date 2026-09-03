@@ -1231,6 +1231,196 @@ describe("UiBridge (multi-tab)", () => {
     a2.close();
   });
 
+  // #2761 — park-and-resume used to key on `tabId` ALONE. A `wf:` route key
+  // RECURS (#486), so the connection holding it at resume time may be a different
+  // browser tab that opened the same saved workflow — and it would be handed the
+  // departed caller's parked read, its answer resolving that caller's promise. A
+  // wrong-tab `graph_serialize` is the worst of the set: an agent edits against it.
+  //
+  // These tests pin BOTH refusal sites (resumeAwaitingReconnect and
+  // handleMidCommandDisconnect's already-reconnected fast path) AND the three
+  // shapes that must keep resuming — the #2104 half is the reason this is a
+  // proof-of-takeover rule and not an incarnation-match rule.
+  describe("a parked read is never answered by a tab that merely took the route key over (#2761)", () => {
+    const KEY = "wf:recurring-2761.json";
+
+    /** Dispatch an idempotent read that is never answered, and confirm it reached
+     *  the socket — so the drop that follows is a genuine mid-command disconnect
+     *  (un-acked, in `pending`) rather than a command that never went out.
+     *
+     *  Returns the pending send WRAPPED in an object, deliberately: an async
+     *  function that returns a promise ADOPTS it, so a bare return would make
+     *  `await readInFlightOn(...)` wait for the very send the caller means to
+     *  hold and assert on later. */
+    async function readInFlightOn(
+      sock: WebSocket,
+      cmd: string,
+      timeoutMs: number,
+    ): Promise<{ promise: Promise<unknown> }> {
+      const frames: Array<Record<string, unknown>> = [];
+      sock.on("message", (buf) => frames.push(JSON.parse(buf.toString())));
+      const promise = bridge.send({ cmd }, { tabId: KEY, timeoutMs });
+      // Swallow the eventual rejection here; every caller asserts on it itself.
+      promise.catch(() => {});
+      await waitFor(() => expect(frames.some((f) => f.cmd === cmd)).toBe(true));
+      return { promise };
+    }
+
+    /** Record every frame the panel receives, and answer any command with `tag` —
+     *  so a wrongly-resumed read would visibly RESOLVE, not merely be observed. */
+    function recordAndAnswer(sock: WebSocket, tag: string): Array<Record<string, unknown>> {
+      const seen: Array<Record<string, unknown>> = [];
+      sock.on("message", (buf) => {
+        const msg = JSON.parse(buf.toString()) as Record<string, unknown>;
+        seen.push(msg);
+        if (msg.rid && msg.cmd) {
+          sock.send(JSON.stringify({ rid: msg.rid, ok: true, result: { from: tag } }));
+        }
+      });
+      return seen;
+    }
+
+    it("withholds a PARKED read from a different proven browser tab on the recurring key", async () => {
+      const a = await connectPanel(KEY, "wf", { tabSessionId: "browser-tab-A" });
+      await waitFor(() => expect(bridge.tabs()).toHaveLength(1));
+      const { promise } = await readInFlightOn(a, "graph_serialize", 1200);
+
+      // Drop A and let its close handler PARK the read BEFORE the stranger arrives.
+      // That ordering is what routes this through resumeAwaitingReconnect rather
+      // than through the already-reconnected fast path (pinned separately below).
+      a.close();
+      await waitFor(() => expect(bridge.tabs()).toHaveLength(0));
+
+      const b = await connectPanel(KEY, "wf", { tabSessionId: "browser-tab-B" });
+      const seenByB = recordAndAnswer(b, "B");
+      await waitFor(() => expect(bridge.tabs()).toHaveLength(1));
+
+      // The load-bearing assertion: B is never even ASKED. Asserting only on the
+      // rejection would pass against a "fix" that dispatched to B and discarded
+      // the answer — B's canvas would still have been read.
+      await expect(promise).rejects.toThrow(/DIFFERENT browser tab/);
+      expect(seenByB.some((m) => m.cmd === "graph_serialize")).toBe(false);
+      b.close();
+    });
+
+    it("withholds it on the already-reconnected FAST PATH too, where the stranger's hello beat the close", async () => {
+      const a = await connectPanel(KEY, "wf", { tabSessionId: "browser-tab-A" });
+      await waitFor(() => expect(bridge.tabs()).toHaveLength(1));
+      const { promise } = await readInFlightOn(a, "graph_outline", 1200);
+
+      // B hellos while A is STILL open. The hello supersedes A's socket, so A's
+      // close handler runs with B ALREADY live in `conns` — handleMidCommandDisconnect
+      // takes its "already reconnected, re-dispatch straight onto it" branch and never
+      // parks at all. Fixing only the resume would leave this path open.
+      const b = await connectPanel(KEY, "wf", { tabSessionId: "browser-tab-B" });
+      const seenByB = recordAndAnswer(b, "B");
+
+      await expect(promise).rejects.toThrow(/DIFFERENT browser tab/);
+      expect(seenByB.some((m) => m.cmd === "graph_outline")).toBe(false);
+      b.close();
+    });
+
+    it("still resumes when the SAME proven tab comes back (a reload is not a takeover)", async () => {
+      const a1 = await connectPanel(KEY, "wf", { tabSessionId: "browser-tab-A" });
+      await waitFor(() => expect(bridge.tabs()).toHaveLength(1));
+      const { promise } = await readInFlightOn(a1, "graph_serialize", 3000);
+      a1.close();
+      await waitFor(() => expect(bridge.tabs()).toHaveLength(0));
+
+      // `tab_session_id` is sessionStorage-backed, so an F5 brings the same one back.
+      const a2 = await connectPanel(KEY, "wf", { tabSessionId: "browser-tab-A" });
+      autoReply(a2, "A2");
+      await expect(promise).resolves.toMatchObject({ from: "A2", cmd: "graph_serialize" });
+      a2.close();
+    });
+
+    it("still resumes when NEITHER side proved an identity — the #2104 panel keeps working", async () => {
+      // A panel whose Web Locks lease is refused or unreadable omits `tab_session_id`
+      // entirely, and the bridge mints it a fresh per-CONNECTION `anon:<n>`. So every
+      // genuine reconnect of such a panel presents a new incarnation: an
+      // incarnation-match rule would refuse this resume forever, converting a working
+      // feature into an unconditional failure for those installs. The rule refuses
+      // only on PROOF, and there is none here in either direction.
+      const a1 = await connectPanel(KEY, "wf");
+      await waitFor(() => expect(bridge.tabs()).toHaveLength(1));
+      const firstAnon = bridge.tabIncarnation(KEY);
+      expect(firstAnon).toMatch(/^anon:/);
+      const { promise } = await readInFlightOn(a1, "graph_serialize", 3000);
+      a1.close();
+      await waitFor(() => expect(bridge.tabs()).toHaveLength(0));
+
+      const a2 = await connectPanel(KEY, "wf");
+      autoReply(a2, "A2");
+      await waitFor(() => expect(bridge.tabs()).toHaveLength(1));
+      // The reconnect really does look like a stranger to an incarnation test…
+      expect(bridge.tabIncarnation(KEY)).toMatch(/^anon:/);
+      expect(bridge.tabIncarnation(KEY)).not.toBe(firstAnon);
+      // …and is resumed anyway, because nothing proved that it was one.
+      await expect(promise).resolves.toMatchObject({ from: "A2", cmd: "graph_serialize" });
+      a2.close();
+    });
+
+    it("still resumes when only ONE side proved an identity (no evidence either way)", async () => {
+      // The same browser tab can fail to take its lock on one connection and take it
+      // on the next, so proven-after-anonymous is not proof of a different tab.
+      const a1 = await connectPanel(KEY, "wf");
+      await waitFor(() => expect(bridge.tabs()).toHaveLength(1));
+      const { promise } = await readInFlightOn(a1, "graph_serialize", 3000);
+      a1.close();
+      await waitFor(() => expect(bridge.tabs()).toHaveLength(0));
+
+      const a2 = await connectPanel(KEY, "wf", { tabSessionId: "browser-tab-late-proof" });
+      autoReply(a2, "A2");
+      await expect(promise).resolves.toMatchObject({ from: "A2", cmd: "graph_serialize" });
+      a2.close();
+    });
+
+    it("resumes for the ORIGINAL tab if it reclaims the key inside the grace, after a stranger was refused", async () => {
+      // A withheld read stays PARKED rather than being rejected on the spot, so the
+      // tab that issued it can still be served if it wins its key back. That is the
+      // difference between "never answer with a stranger's canvas" and "give up".
+      const a1 = await connectPanel(KEY, "wf", { tabSessionId: "browser-tab-A" });
+      await waitFor(() => expect(bridge.tabs()).toHaveLength(1));
+      const { promise } = await readInFlightOn(a1, "graph_serialize", 3000);
+      a1.close();
+      await waitFor(() => expect(bridge.tabs()).toHaveLength(0));
+
+      const b = await connectPanel(KEY, "wf", { tabSessionId: "browser-tab-B" });
+      const seenByB = recordAndAnswer(b, "B");
+      await waitFor(() => expect(bridge.tabs()).toHaveLength(1));
+      await new Promise((r) => setTimeout(r, 60));
+      expect(seenByB.some((m) => m.cmd === "graph_serialize")).toBe(false);
+
+      // A comes back and takes its own key back.
+      const a2 = await connectPanel(KEY, "wf", { tabSessionId: "browser-tab-A" });
+      autoReply(a2, "A2");
+      await expect(promise).resolves.toMatchObject({ from: "A2", cmd: "graph_serialize" });
+      b.close();
+      a2.close();
+    });
+
+    it("says a takeover happened rather than calling a visibly-live panel 'genuinely gone'", async () => {
+      const a = await connectPanel(KEY, "wf", { tabSessionId: "browser-tab-A" });
+      await waitFor(() => expect(bridge.tabs()).toHaveLength(1));
+      const { promise } = await readInFlightOn(a, "graph_serialize", 900);
+      a.close();
+      await waitFor(() => expect(bridge.tabs()).toHaveLength(0));
+      const b = await connectPanel(KEY, "wf", { tabSessionId: "browser-tab-B" });
+      await waitFor(() => expect(bridge.tabs()).toHaveLength(1));
+
+      const err = await promise.then(
+        () => null,
+        (e: Error) => e,
+      );
+      expect(err?.message).toMatch(/DIFFERENT browser tab has since taken its route key over/);
+      expect(err?.message).toMatch(/Re-issue it against the tab you meant/);
+      // The old wording would send an operator staring at a live panel off to wait
+      // for a tab that is sitting right there in front of them.
+      expect(err?.message).not.toMatch(/genuinely gone/);
+      b.close();
+    });
+  });
+
   it("dropQueuedDeliveries CANCELS a parked read so it is NOT re-dispatched onto a replacement (#570 P0)", async () => {
     const a1 = await connectPanel("wf:foo.json");
     await waitFor(() => expect(bridge.tabs()).toHaveLength(1));
