@@ -25,6 +25,7 @@ vi.mock("../../services/ai-toolkit.js", () => ({
 
 const {
   startTrainerImageBuild,
+  trainerImageBuildLooksStalled,
   runningTrainerImageBuild,
   trainerImageBuildStatus,
   getTrainerImageBuild,
@@ -163,5 +164,22 @@ describe("#2723 doctor can see the build", () => {
     await vi.waitFor(() => expect(build.status).toBe("error"));
     expect(trainerImageBuildStatus()).toMatchObject({ id: build.id, status: "error", error: "boom" });
     expect(getTrainerImageBuild(build.id)?.status).toBe("error");
+  });
+});
+
+describe("#2723 a detached build that HANGS is visible, not silently forever-running", () => {
+  it("calls a long-running build stalled, and a fresh one not", () => {
+    const started = 1_000_000;
+    const build = { status: "running", started_at: started } as never;
+    // Well inside a plausible cold CUDA + torch build: say nothing.
+    expect(trainerImageBuildLooksStalled(build, started + 20 * 60_000)).toBe(false);
+    // Far beyond it: the slot is pinned and every later build_image adopts this
+    // one, so the state has to be reportable rather than look like progress.
+    expect(trainerImageBuildLooksStalled(build, started + 90 * 60_000)).toBe(true);
+  });
+
+  it("never calls a SETTLED build stalled, however old", () => {
+    const done = { status: "done", started_at: 0 } as never;
+    expect(trainerImageBuildLooksStalled(done, 10 * 60 * 60_000)).toBe(false);
   });
 });

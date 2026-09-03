@@ -601,8 +601,26 @@ export function registerTrainTools(server: McpServer): void {
             const doctor = await trainerDoctor();
             const { bootstrapStatus } = await import("../services/trainer-bootstrap.js");
             const native = await bootstrapStatus();
-            const { trainerImageBuildStatus } = await import("../services/trainer-image-build.js");
-            const imageBuild = trainerImageBuildStatus();
+            const { trainerImageBuildStatus, trainerImageBuildLooksStalled } = await import(
+              "../services/trainer-image-build.js"
+            );
+            const liveBuild = trainerImageBuildStatus();
+            // A detached build that hangs pins the slot: every later build_image
+            // adopts it instead of starting one. Say so rather than reporting
+            // "running" forever, which is indistinguishable from progress.
+            const imageBuild =
+              liveBuild && trainerImageBuildLooksStalled(liveBuild)
+                ? {
+                    ...liveBuild,
+                    looks_stalled: true,
+                    note:
+                      `This build has been running far longer than a docker build of this image takes. ` +
+                      `It is most likely wedged (a stalled base-image pull, or a hung daemon). While it ` +
+                      `is in this state every build_image call ADOPTS it rather than starting a new one. ` +
+                      `Check \`docker ps\` for the build container; restarting the orchestrator clears ` +
+                      `the slot.`,
+                  }
+                : liveBuild;
             // Connected pod (if any): enough for the wizard's Local/Pod switch.
             let pod: Record<string, unknown> | null = null;
             try {

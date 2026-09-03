@@ -107,6 +107,35 @@ export function startTrainerImageBuild(opts: {
   return { build, adopted: false };
 }
 
+/**
+ * A `docker build` documented as "one-time, several minutes" that is still going
+ * after this long is not progressing — the network stalled pulling a base layer,
+ * or the daemon is wedged. Generous on purpose: a cold CUDA + torch build on a
+ * slow link genuinely takes a while, and crying stuck too early is worse than
+ * staying quiet.
+ */
+const LOOKS_STALLED_AFTER_MS = 45 * 60_000;
+
+/**
+ * Has this build outrun any plausible duration?
+ *
+ * #2723 made the build detached, which removed the 300s request timeout that was
+ * the bug. But a detached build that HANGS never settles, so `running` stays
+ * pinned and every later call adopts a corpse — the same "the tool burns its own
+ * ability to do the thing" shape as #2784, just quieter, because a wedged build
+ * and a healthy one look identical for as long as anyone cares to poll.
+ *
+ * Adoption is still the right answer (two `docker build` runs against one tag
+ * race for the layer cache), so this does not supersede anything. It just stops
+ * the state being invisible.
+ */
+export function trainerImageBuildLooksStalled(
+  build: TrainerImageBuild,
+  now: number = Date.now(),
+): boolean {
+  return build.status === "running" && now - build.started_at > LOOKS_STALLED_AFTER_MS;
+}
+
 /** The build in flight right now, if any. */
 export function runningTrainerImageBuild(): TrainerImageBuild | null {
   const id = running;
