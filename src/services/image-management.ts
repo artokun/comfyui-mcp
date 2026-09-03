@@ -1118,8 +1118,13 @@ export async function getOutputImage(
 ): Promise<{ base64: string; mimeType: string; filename: string }> {
   ({ filename, subfolder } = normalizeViewRef(filename, subfolder));
   const ext = extname(filename).toLowerCase();
-  const maxBytes =
-    forInlinePreview && IMAGE_EXTENSIONS.has(ext) ? MAX_PREVIEW_SOURCE_BYTES : MAX_VIEW_RESPONSE_BYTES;
+  // Named, because the RECOVERY ADVICE below is only true when this is the branch
+  // that was taken. `forInlinePreview` is set for every `get`, including videos
+  // and attachments -- but those keep the ordinary cap and are never rendered
+  // inline, so telling their caller about `max_preview_dimension` and the
+  // image-only `convert` action would be advice for a preview nobody attempted.
+  const usedPreviewCap = forInlinePreview && IMAGE_EXTENSIONS.has(ext);
+  const maxBytes = usedPreviewCap ? MAX_PREVIEW_SOURCE_BYTES : MAX_VIEW_RESPONSE_BYTES;
   const fetchOpts = {
     ...(signal ? { signal } : {}),
     ...(maxBytes !== MAX_VIEW_RESPONSE_BYTES ? { maxBytes } : {}),
@@ -1135,7 +1140,7 @@ export async function getOutputImage(
       const local = await readLocalViewFallback(filename, type, subfolder, maxBytes);
       if (local) {
         result = local;
-      } else if (isViewTooLarge(error)) {
+      } else if (isViewTooLarge(error) && usedPreviewCap) {
         throw viewTooLargeForPreview(filename, maxBytes);
       } else {
         throw error;

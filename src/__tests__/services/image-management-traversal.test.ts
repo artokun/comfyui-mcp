@@ -347,6 +347,29 @@ describe("getOutputImage — oversized PNG preview source (#2785)", () => {
     expect(openMock).toHaveBeenCalledWith(localPath, "r");
   });
 
+  it("a too-large VIDEO keeps the ORIGINAL size error, not the preview advice", async () => {
+    // `forInlinePreview` is set for every `get`, but a video keeps the ordinary
+    // 32 MB cap and is never rendered inline. Handing its caller the preview
+    // wording would advise `max_preview_dimension` for a preview nobody
+    // attempted, and an image-only `convert` action.
+    fetchImageMock.mockRejectedValue(viewTooLarge());
+    realpathMock.mockImplementation(async (path: string) => path);
+    statMock.mockResolvedValue({ isFile: () => true, size: 40 * 1024 * 1024 });
+
+    await expect(
+      getOutputImage("clip.mp4", "output", "", { forInlinePreview: true, allowMedia: true }),
+    ).rejects.toMatchObject({ code: "VIEW_TOO_LARGE" });
+
+    const thrown = await getOutputImage("clip.mp4", "output", "", {
+      forInlinePreview: true,
+      allowMedia: true,
+    }).catch((e: unknown) => e as Error);
+    expect(thrown.message).not.toMatch(/max_preview_dimension/);
+    expect(thrown.message).not.toMatch(/action:"convert"/);
+    // The ordinary cap was the one that applied, so no 64 MB claim either.
+    expect(thrown.message).not.toMatch(/64 MB/);
+  });
+
   it("refuses a source over the 64 MB preview cap without loading it", async () => {
     fetchImageMock.mockRejectedValue(viewTooLarge(previewCap));
     realpathMock.mockImplementation(async (path: string) => path);
