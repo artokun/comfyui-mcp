@@ -75,14 +75,22 @@ vi.mock("../../services/train-caption.js", () => ({
   captionImage: (...a: unknown[]) => mocks.captionImage(...a),
   captionDataset: (...a: unknown[]) => mocks.captionDataset(...a),
 }));
-vi.mock("../../services/ai-toolkit.js", () => ({
-  TRAINER_IMAGE: "trainer:test",
-  dockerAvailable: (...a: unknown[]) => mocks.dockerAvailable(...a),
-  trainerImageExists: (...a: unknown[]) => mocks.trainerImageExists(...a),
-  trainerDoctor: (...a: unknown[]) => mocks.trainerDoctor(...a),
-  buildTrainerImage: (...a: unknown[]) => mocks.buildTrainerImage(...a),
-  nativeToolkitReady: (...a: unknown[]) => mocks.nativeToolkitReady(...a),
-}));
+// TRAINER_COMMAND comes from the REAL module rather than a literal: the command
+// names are vocabulary-gated, so spelling one here would either trip check:vocabulary
+// or silently drift from the name the tool actually reports. Everything else stays
+// explicitly mocked — this is not a partial passthrough.
+vi.mock("../../services/ai-toolkit.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../../services/ai-toolkit.js")>();
+  return {
+    TRAINER_IMAGE: "trainer:test",
+    TRAINER_COMMAND: actual.TRAINER_COMMAND,
+    dockerAvailable: (...a: unknown[]) => mocks.dockerAvailable(...a),
+    trainerImageExists: (...a: unknown[]) => mocks.trainerImageExists(...a),
+    trainerDoctor: (...a: unknown[]) => mocks.trainerDoctor(...a),
+    buildTrainerImage: (...a: unknown[]) => mocks.buildTrainerImage(...a),
+    nativeToolkitReady: (...a: unknown[]) => mocks.nativeToolkitReady(...a),
+  };
+});
 vi.mock("../../services/trainer-bootstrap.js", () => ({
   bootstrapStatus: (...a: unknown[]) => mocks.bootstrapStatus(...a),
   bootstrapToolkit: (...a: unknown[]) => mocks.bootstrapToolkit(...a),
