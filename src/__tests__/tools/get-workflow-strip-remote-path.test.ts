@@ -13,6 +13,7 @@ const mocks = vi.hoisted(() => ({
   backfillObjectInfo: vi.fn(),
   liveWorkspace: vi.fn(),
   isRemoteMode: vi.fn(() => true),
+  isCloudMode: vi.fn(() => false),
   targetIsOnThisMachine: vi.fn(() => false),
   readFile: vi.fn(),
 }));
@@ -65,6 +66,7 @@ vi.mock("../../tools/workflow-lock.js", () => ({
 vi.mock("../../config.js", () => ({
   getComfyUIBaseUrl: () => "http://192.168.1.50:8188",
   isRemoteMode: () => mocks.isRemoteMode(),
+  isCloudMode: () => mocks.isCloudMode(),
   targetIsOnThisMachine: () => mocks.targetIsOnThisMachine(),
 }));
 vi.mock("../../services/frontend-virtual-types.js", () => ({
@@ -72,6 +74,7 @@ vi.mock("../../services/frontend-virtual-types.js", () => ({
 }));
 
 import {
+  isServerAbsolutePath,
   registerWorkflowLibraryTools,
   userdataKeyFromServerPath,
 } from "../../tools/workflow-library.js";
@@ -160,6 +163,40 @@ describe("#2782 get_workflow strip does not open a remote POSIX path locally", (
     );
     expect(text(res)).not.toMatch(/C:\\mydata/i);
     expect(text(res)).not.toMatch(/ENOENT/);
+  });
+
+  it("classifies BOTH platforms' absolute spellings, not just this host's", () => {
+    // node:path's isAbsolute is bound to the MCP host, so a POSIX host reads a
+    // remote Windows drive path as RELATIVE and would send the whole path as a
+    // userdata filename -- the mirror of the Win32-resolution bug this PR fixes.
+    // Asserted against the explicit posix/win32 matchers so the result does not
+    // depend on which platform runs the suite.
+    expect(isServerAbsolutePath("C:\\ComfyUI\\user\\default\\workflows\\x.json")).toBe(true);
+    expect(isServerAbsolutePath("/mydata/ComfyUI/user/default/workflows/x.json")).toBe(true);
+    expect(isServerAbsolutePath("my-workflow.json")).toBe(false);
+    expect(isServerAbsolutePath("subdir/my-workflow.json")).toBe(false);
+  });
+
+  it("Comfy Cloud is NOT this filesystem, so a path source is never read locally", async () => {
+    // isRemoteMode() is `!isCloudMode() && remoteUrlActive`, so it reads FALSE in
+    // cloud mode. The locality predicate used to answer "local" there and readFile
+    // an unrelated file on the MCP host while connected to Cloud.
+    mocks.isRemoteMode.mockReturnValue(false);
+    mocks.isCloudMode.mockReturnValue(true);
+    mocks.fetchApi.mockResolvedValue({
+      ok: true,
+      status: 200,
+      statusText: "OK",
+      json: async () => GRAPH,
+    });
+
+    const res = await getHandler()({ action: "strip", path: REMOTE_MODELS_WF, format: "raw" });
+
+    expect(mocks.readFile).not.toHaveBeenCalled();
+    expect(res.isError).toBeUndefined();
+    expect(mocks.fetchApi).toHaveBeenCalledWith(
+      `/api/userdata/${encodeURIComponent("workflows/example.json")}`,
+    );
   });
 
   it("a 200 whose body is not a workflow document is refused, not returned", async () => {

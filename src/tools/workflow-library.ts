@@ -1,13 +1,13 @@
 import { z } from "zod";
 import { readFile, realpath } from "node:fs/promises";
-import { isAbsolute, parse as pathParse, relative, resolve as pathResolve } from "node:path";
+import { isAbsolute, parse as pathParse, posix as pathPosix, relative, resolve as pathResolve, win32 as pathWin32 } from "node:path";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { UiWorkflow, WorkflowJSON } from "../comfyui/types.js";
 import { getObjectInfo, backfillObjectInfo, comfyApiFetch } from "../comfyui/client.js";
 import { bodyPrefixOf, describeStatus } from "../comfyui/json-guard.js";
 import { errorToToolResult, ValidationError } from "../utils/errors.js";
 import { logger } from "../utils/logger.js";
-import { getComfyUIBaseUrl, isRemoteMode, targetIsOnThisMachine } from "../config.js";
+import { getComfyUIBaseUrl, isCloudMode, isRemoteMode, targetIsOnThisMachine } from "../config.js";
 import {
   isUiFormat,
   isApiFormat,
@@ -66,12 +66,17 @@ async function loadRawFromSource(
     }
     return JSON.parse(await readWorkflowFile(path));
   }
-  if (filename && isAbsolute(filename)) {
+  if (filename && isServerAbsolutePath(filename)) {
     if (!comfyFilesystemIsLocalToThisProcess()) {
       return await fetchRemoteServerWorkflow(filename);
     }
-    const fromDisk = await tryReadWorkspaceWorkflow(filename);
-    if (fromDisk !== undefined) return fromDisk;
+    // The LOCAL read keeps this host's own semantics: a Windows path on a POSIX
+    // host is not something this machine can open, and must fall through to the
+    // userdata lookup exactly as before.
+    if (isAbsolute(filename)) {
+      const fromDisk = await tryReadWorkspaceWorkflow(filename);
+      if (fromDisk !== undefined) return fromDisk;
+    }
   }
   const encoded = encodeURIComponent(`workflows/${filename}`);
   const res = await comfyApiFetch(`/api/userdata/${encoded}`);
@@ -107,7 +112,24 @@ function isEnoent(err: unknown): boolean {
  * host is classified remote but the files are here).
  */
 function comfyFilesystemIsLocalToThisProcess(): boolean {
+  // Cloud is NOT covered by `isRemoteMode()` -- that predicate is
+  // `!isCloudMode() && remoteUrlActive`, so it reads FALSE while connected to
+  // Comfy Cloud and this function used to answer "local". A `path` source then
+  // took the local branch and `readFile`d an unrelated file on the MCP host.
+  if (isCloudMode()) return false;
   return !isRemoteMode() || targetIsOnThisMachine();
+}
+
+/**
+ * Is this absolute on the CONNECTED ComfyUI's platform, whatever this process
+ * runs on? `node:path`'s `isAbsolute` is bound to the MCP host, so a POSIX host
+ * reads `C:\ComfyUI\user\default\workflows\x.json` as RELATIVE and would send the whole
+ * drive path as a userdata filename -- the mirror image of the Win32-resolution
+ * bug this change is about. `userdataKeyFromServerPath` already normalizes both
+ * spellings; only the gate in front of it did not.
+ */
+export function isServerAbsolutePath(candidate: string): boolean {
+  return pathPosix.isAbsolute(candidate) || pathWin32.isAbsolute(candidate);
 }
 
 /**
@@ -363,7 +385,7 @@ export function registerWorkflowLibraryTools(server: McpServer): void {
     "Return, list, summarize or query a SAVED workflow FILE — files on disk, named from the library or given as a path/JSON — NOT the graph open on the user's canvas (that is panel_graph_outline). Every action here is READ-ONLY; saving and locking are save_workflow. Driven by the `action` parameter:\n" +
       '- action:"get" — the full JSON of one saved workflow FILE named from the library. Defaults to converted API format; pass format:\'ui\' for the raw on-disk UI JSON. Use action:"analyze" instead if you just need to UNDERSTAND the workflow — it returns a structured summary without flooding context with JSON. Use action:"get" only when you need the actual JSON for enqueue_workflow, create_workflow (action:"modify"), or save_workflow.\n' +
       '- action:"list" — the workflows saved in the connected ComfyUI server\'s user library (the same ones visible in the ComfyUI web UI), INCLUDING the ones filed in subfolders. Requires a running ComfyUI server. Takes no other parameters. Returns a numbered list of library names, each relative to the library root — a workflow in a folder appears as \'VIDEO/MiniMaxH3/clip.json\', and that whole string is what `filename` takes. It never reports an absence it did not establish: a listing it could not read says so, and an EMPTY listing says the library could not be CONFIRMED empty (an answer with no names in it cannot show whether it covered subfolders) and tells you to check the ComfyUI sidebar rather than recreate anything.\n' +
-      '- action:"strip" — strip a workflow to a clean, flat API graph, resolving Get/Set buses, Reroutes, subgraph definitions, and bypassed/muted nodes into real connections (the \'de-getter-setter\' pass). Unlike action:"get" this reads from ANY server-side file path on disk (not just the workflow library), so it loads ad-hoc / expert workflow files that action:"list" and panel_open_workflow can\'t resolve. Provide exactly one of: path, filename, or graph. Returns conversion warnings, a node-type summary, and the stripped graph (much smaller than the raw UI JSON).\n' +
+      '- action:"strip" — strip a workflow to a clean, flat API graph, resolving Get/Set buses, Reroutes, subgraph definitions, and bypassed/muted nodes into real connections (the \'de-getter-setter\' pass). Unlike action:"get" this reads from ANY file path on disk when the connected ComfyUI is THIS machine (not just the workflow library); against a REMOTE or Cloud ComfyUI this process is not on that filesystem, so an absolute path is proxied only when it sits under user/default/workflows, user/workflows or models/workflows, and any other remote absolute path is refused rather than resolved against the local disk of this MCP process, so it loads ad-hoc / expert workflow files that action:"list" and panel_open_workflow can\'t resolve. Provide exactly one of: path, filename, or graph. Returns conversion warnings, a node-type summary, and the stripped graph (much smaller than the raw UI JSON).\n' +
       '- action:"slice" — slice ONE pipeline out of a toggle-template workflow, the kind built with rgthree \'Fast Groups Bypasser/Muter\' where one graph holds many pipelines and only one is active at a time. Seeds from the output/SaveImage nodes in the named `groups`, takes their backward dependency closure (through real links AND virtual Set/Get buses), un-bypasses the kept nodes (and the internals of any subgraph defs they use), and returns a STANDALONE, activated UI graph carrying only the subgraph defs it uses. Pair with action:"strip" afterward to flatten the Set/Get buses into real connections.\n' +
       '- action:"from_image" — extract embedded ComfyUI workflow metadata from a PNG file. ComfyUI stores the full workflow (API format) and prompt data in PNG tEXt chunks. Use this to reverse-engineer how any ComfyUI image was generated.\n' +
       '- action:"analyze" — SUMMARIZE a saved workflow file named from the library: sections, node settings, connections, and data flow. Returns a concise text summary (not raw JSON) optimized for AI reasoning. Prefer this over action:"get" unless you need the raw JSON for enqueue_workflow or create_workflow (action:"modify").\n' +
@@ -794,7 +816,7 @@ async function listWorkflowsAction(): Promise<TextResult> {
 /** `get_workflow (action:"get")` — the body of the surviving get_workflow tool. */
 async function getWorkflowAction(filename: string, format: "ui" | "api"): Promise<TextResult> {
         let raw: unknown;
-        if (isAbsolute(filename) && !comfyFilesystemIsLocalToThisProcess()) {
+        if (isServerAbsolutePath(filename) && !comfyFilesystemIsLocalToThisProcess()) {
           raw = await fetchRemoteServerWorkflow(filename);
         } else {
         const fromDisk = await tryReadWorkspaceWorkflow(filename);
@@ -1074,7 +1096,7 @@ async function loadWorkflowApi(filename: string): Promise<{
   potentiallyExecutableNodeCount?: number;
 }> {
   let raw: unknown;
-  if (isAbsolute(filename) && !comfyFilesystemIsLocalToThisProcess()) {
+  if (isServerAbsolutePath(filename) && !comfyFilesystemIsLocalToThisProcess()) {
     raw = await fetchRemoteServerWorkflow(filename);
   } else {
   const fromDisk = await tryReadWorkspaceWorkflow(filename);

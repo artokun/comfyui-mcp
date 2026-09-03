@@ -99,6 +99,9 @@ vi.mock("../../tools/workflow-lock.js", () => ({
 vi.mock("../../config.js", () => ({
   getComfyUIBaseUrl: () => "http://127.0.0.1:8188",
   isRemoteMode: () => false,
+  // Cloud is a THIRD mode: isRemoteMode() is false there, so workflow-library
+  // asks isCloudMode() separately before treating the filesystem as local.
+  isCloudMode: () => false,
   targetIsOnThisMachine: () => true,
 }));
 
