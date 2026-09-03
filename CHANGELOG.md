@@ -6,6 +6,19 @@ All notable changes to this project are documented here. This project adheres to
 
 ## Unreleased
 
+### MCP
+
+#### Fixed
+- **the model picker's choice now survives a New chat (#2759).** `reset()` deleted the
+  key's model/effort override, so starting a New chat — or switching to a historical
+  chat — silently respawned the agent on the orchestrator's global default while the
+  dropdown went on showing the user's pick. A subscription user selected Sonnet and
+  burned their Opus limits with nothing anywhere saying so. The delete was guarding
+  provider switches, which it never needed to: the override is keyed by the composite
+  agent key whose last segment is the backend, and `reset()`'s only callers are
+  `new_session` and `resume_session`. A New chat is a conversation boundary, not a
+  provider one.
+
 ## [0.52.179] - 2026-09-02
 
 ### MCP
