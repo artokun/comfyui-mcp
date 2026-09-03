@@ -413,6 +413,151 @@ function canonicalPromotedNodeId(value: unknown): string | null {
     : normalized;
 }
 
+export type HostPromotedWidgetMapping = {
+  hostWidget: string;
+  label?: string;
+  type?: string;
+  innerNodeId?: number | string;
+};
+
+function hostInputWidgetName(record: Record<string, unknown>): string | null {
+  const widget = record.widget;
+  if (typeof widget === "string" && widget.length > 0) return widget;
+  if (isRecord(widget) && typeof widget.name === "string" && widget.name.length > 0) {
+    return widget.name;
+  }
+  return null;
+}
+
+/**
+ * #2791 — official Qwen Image host node 76 lists input label `prompt` mapped to
+ * widget `text`. A unique host input that actually carries a widget binding is
+ * the promoted rail to write when the terminal witness is incomplete. Name,
+ * label, and widget-name aliases are accepted; two distinct host widgets that
+ * all match the request are not.
+ */
+export function resolveHostPromotedWidgetMapping(
+  hostNode: Record<string, unknown> | null | undefined,
+  requestedWidget: string,
+): HostPromotedWidgetMapping | null {
+  if (!isRecord(hostNode) || requestedWidget.length === 0) return null;
+  const inputs = hostNode.inputs;
+  if (!Array.isArray(inputs)) return null;
+  const wanted = requestedWidget.toLowerCase();
+  const hits: HostPromotedWidgetMapping[] = [];
+  for (const raw of inputs) {
+    if (!isRecord(raw)) continue;
+    const widgetName = hostInputWidgetName(raw);
+    if (!widgetName) continue;
+    const name = typeof raw.name === "string" && raw.name.length > 0 ? raw.name : null;
+    const label = typeof raw.label === "string" && raw.label.length > 0 ? raw.label : undefined;
+    const aliases = [name, label, widgetName];
+    if (!aliases.some((alias) => alias !== null && alias !== undefined && alias.toLowerCase() === wanted)) {
+      continue;
+    }
+    const type = typeof raw.type === "string" && raw.type.length > 0 ? raw.type : undefined;
+    hits.push({
+      hostWidget: widgetName,
+      ...(label ? { label } : {}),
+      ...(type ? { type } : {}),
+    });
+  }
+  if (hits.length === 0) return null;
+  const hostWidgets = new Set(hits.map((hit) => hit.hostWidget.toLowerCase()));
+  if (hostWidgets.size !== 1) return null;
+  const hit = hits[0];
+  const properties = isRecord(hostNode.properties) ? hostNode.properties : null;
+  const proxyWidgets = properties?.proxyWidgets;
+  if (Array.isArray(proxyWidgets)) {
+    const innerIds: Array<number | string> = [];
+    for (const relation of proxyWidgets) {
+      if (!Array.isArray(relation) || relation.length < 2) continue;
+      const innerId = relation[0];
+      const innerWidget = relation[1];
+      if (!isNodeId(innerId) || typeof innerWidget !== "string" || innerWidget.length === 0) continue;
+      if (innerWidget.toLowerCase() !== hit.hostWidget.toLowerCase()) continue;
+      innerIds.push(innerId);
+    }
+    if (innerIds.length === 1) hit.innerNodeId = innerIds[0];
+  }
+  return hit;
+}
+
+function innerTargetFromEnvelopeNode(
+  node: Record<string, unknown>,
+  widget: string,
+): InnerPromotedTarget | null {
+  const id = innerNodeId(node);
+  if (id == null) return null;
+  const nodeType = node.type;
+  if (typeof nodeType !== "string" || nodeType.length === 0) return null;
+  const matched =
+    matchListedName(widget, widgetNamesOnInner(node)) ??
+    (innerHasNamedInput(node, widget) ? widget : null);
+  if (!matched) return null;
+  const inputs = terminalInputsFromInnerNode(node);
+  if (!inputs) return null;
+  return {
+    innerNodeId: id,
+    widget: matched,
+    ...(typeof node.node_identity === "string" ? { nodeIdentity: node.node_identity } : {}),
+    terminal: {
+      nodeId: id,
+      nodeType,
+      widget: matched,
+      inputs,
+      chainDepth: 0,
+    },
+  };
+}
+
+/**
+ * Map a host-proven promoted STRING onto the unique inner terminal named by
+ * `proxyWidgets` or, failing that, the unique rail-backed inner widget. A miss
+ * is not an ordinary-widget proof.
+ */
+export function resolveInnerFromHostPromotedMapping(
+  subgraph: Record<string, unknown> | null | undefined,
+  mapping: HostPromotedWidgetMapping,
+  ownerNodeId: number | string,
+): InnerPromotedTarget | null {
+  const envelope = validatePromotedSubgraphEnvelope(subgraph, ownerNodeId);
+  if (!envelope) return null;
+  if (mapping.innerNodeId !== undefined) {
+    const targetId = canonicalPromotedNodeId(mapping.innerNodeId);
+    if (!targetId) return null;
+    const node = envelope.nodes.find((candidate) => {
+      const candidateId = innerNodeId(candidate);
+      return candidateId !== null && canonicalPromotedNodeId(candidateId) === targetId;
+    });
+    if (!node) return null;
+    return innerTargetFromEnvelopeNode(node, mapping.hostWidget);
+  }
+  return resolveRailBackedInnerFromEnvelope(envelope, mapping.hostWidget);
+}
+
+/** #2791 — host detail uniquely proved a STRING rail, and the inner terminal
+ * agrees with that widget. Incomplete witnesses may then write the host. */
+export function isHostProvenPromotedStringWrite(
+  mapping: HostPromotedWidgetMapping | null | undefined,
+  inner: InnerPromotedTarget | null | undefined,
+): boolean {
+  if (!mapping || !inner) return false;
+  if (mapping.type !== "STRING") return false;
+  if (inner.widget.toLowerCase() !== mapping.hostWidget.toLowerCase()) return false;
+  if (!inner.terminal || inner.terminal.chainDepth !== 0) return false;
+  if (mapping.innerNodeId !== undefined) {
+    const mapped = canonicalPromotedNodeId(mapping.innerNodeId);
+    const innerId = canonicalPromotedNodeId(inner.innerNodeId);
+    if (!mapped || !innerId || mapped !== innerId) return false;
+  }
+  const named = inner.terminal.inputs.find(
+    (input) => input.name.toLowerCase() === inner.widget.toLowerCase(),
+  );
+  if (named?.type !== undefined && named.type !== "STRING") return false;
+  return true;
+}
+
 /** Parse the panel's structured current-graph identity without accepting a
  * prose/detail fallback. The panel deliberately omits workflow_uuid when the
  * live workflow identity cannot be read; owner_node_id remains the required
