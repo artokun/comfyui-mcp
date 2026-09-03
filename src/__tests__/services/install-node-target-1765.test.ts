@@ -115,6 +115,8 @@ const http = vi.hoisted(() => ({
     // API. The queue routes 404 exactly as in "manager-absent"; only the version
     // route tells the two apart.
     | "manager-queueless"
+    // #2754 — queue routes 404 and the version routes 5xx: presence UNKNOWN.
+    | "manager-version-unreadable"
     | "manager-unavailable",
   calls: [] as string[],
 }));
@@ -141,6 +143,11 @@ vi.mock("../../comfyui/fetch.js", async (importOriginal) => {
       }
       if (http.mode === "manager-absent") {
         return new Response("missing", { status: 404, statusText: "Not Found" });
+      }
+      if (http.mode === "manager-version-unreadable") {
+        return new URL(url).pathname.endsWith("/manager/version")
+          ? new Response("upstream down", { status: 503 })
+          : new Response("missing", { status: 404, statusText: "Not Found" });
       }
       if (http.mode === "manager-queueless") {
         // A legacy Manager that is up and answering its version route while its
@@ -369,6 +376,37 @@ describe("#1765 — install_custom_node must not write into an install this sess
     expect(
       (ok as { details?: { managerStatus?: Record<string, unknown> } }).details?.managerStatus,
     ).not.toHaveProperty("manager_absent");
+  });
+
+  it("#2754 does not label the clone manager_absent when the version probe was UNREADABLE", async () => {
+    // Queue routes 404, version routes 503. The diagnostic says presence is
+    // unknown; the label must not say absent in the same breath (gate round 7).
+    http.mode = "manager-version-unreadable";
+    resetManagerApiCache("#2754 unreadable-version label");
+
+    const { ok, error } = await install({ id: REPO, source: "git" });
+
+    expect(error).toBeUndefined();
+    expect(ok).toMatchObject({ mechanism: "git-clone" });
+    expect(ok).toMatchObject({
+      details: { managerStatus: { manager_unavailable: true } },
+    });
+    expect(
+      (ok as { details?: { managerStatus?: Record<string, unknown> } }).details?.managerStatus,
+    ).not.toHaveProperty("manager_absent");
+  });
+
+  it("#2754 STILL labels a fully-404 host manager_absent", async () => {
+    // The control: when every probe 404s, `absent` is exactly right and the round-5
+    // and round-7 predicates must not have quietly retired the label.
+    http.mode = "manager-absent";
+    resetManagerApiCache("#2754 absent control");
+
+    const { ok } = await install({ id: REPO, source: "git" });
+
+    expect(ok).toMatchObject({
+      details: { managerStatus: { manager_absent: true } },
+    });
   });
 
   it("#1129 serializes concurrent unavailable-Manager git installs", async () => {

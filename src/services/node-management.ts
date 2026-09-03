@@ -3733,10 +3733,11 @@ function initialManagerQueueAbsenceWasProven(err: unknown): boolean {
 /**
  * #2754 — did the SAME detection failure also observe ComfyUI-Manager serving?
  *
- * The queue-detection error now carries what the version routes said, and two of
- * those readings contradict the word "absent": `version` means a Manager answered
- * with its generation, and `refused` means an authentication layer stopped us
- * before anything could be established. Reporting `manager_absent: true` off the
+ * The queue-detection error now carries what the version routes said, and only
+ * ONE of those readings leaves the word "absent" standing. `version` means a
+ * Manager answered with its generation; `refused` means an authentication layer
+ * stopped us before anything could be established; `unreadable` means the message
+ * in the same object already says presence is UNKNOWN. Reporting `manager_absent: true` off the
  * back of an error object that says either one is a claim refuted by its own
  * details (codex gate round 5).
  *
@@ -3745,12 +3746,17 @@ function initialManagerQueueAbsenceWasProven(err: unknown): boolean {
  * did 404 twice, so nothing was queued and the clone is still safe. This corrects
  * what we CALL that clone, not whether it happens.
  */
-function managerWasSeenServingDuringDetection(err: unknown): boolean {
+function managerAbsenceUnprovenDuringDetection(err: unknown): boolean {
   if (!(err instanceof NodeManagementError) || !err.details || typeof err.details !== "object") {
     return false;
   }
   const evidence = (err.details as { managerVersionEvidence?: unknown }).managerVersionEvidence;
-  return evidence === "version" || evidence === "refused";
+  // `absent` is the ONLY reading that leaves "Manager is absent" standing, and an
+  // error that predates this field (undefined) keeps the old behaviour. Everything
+  // else contradicts it: `version` and `refused` positively, and `unreadable`
+  // because the diagnostic in the very same object says presence is UNKNOWN
+  // (codex gate round 7).
+  return evidence !== undefined && evidence !== "absent";
 }
 
 /**
@@ -4595,7 +4601,7 @@ async function installCustomNodeImpl(
         // Manager answer its version route (or get auth-refused), "absent" is a
         // claim its own error object refutes (#2754).
         (!initialManagerQueueAbsenceWasProven(err) ||
-          managerWasSeenServingDuringDetection(err));
+          managerAbsenceUnprovenDuringDetection(err));
       logger.info("Manager refused, was unavailable, or was proven absent — cloning directly", {
         status: refusedBy,
         gitId,
