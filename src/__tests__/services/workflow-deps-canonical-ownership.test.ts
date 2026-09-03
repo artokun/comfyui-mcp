@@ -247,23 +247,28 @@ describe("#2765 a nodename_pattern that discriminates nothing owns nothing", () 
    * `a|.*` and `.` while rejecting NONE of the 39 real `nodename_pattern`
    * entries, so it costs no genuine resolution.
    */
-  it("refuses to own a class_type it merely matched by matching everything", async () => {
-    const wf: WorkflowJSON = { "1": { class_type: "Krea2EditGroundedEncode", inputs: {} } };
-    const result = await extractWorkflowDependencies(
-      wf,
-      makeDeps({}, {
-        "https://github.com/DemonGatanjieu/Anomalous_Model_Browser": [
-          [],
-          { title: "Anomalous_Model_Browser", nodename_pattern: ".*" },
-        ],
-      }),
-    );
-    expect(byType(result)["Krea2EditGroundedEncode"]).toMatchObject({
-      pack: null,
-      source: "unresolved",
-    });
-    expect(result.missingPacks).toEqual([]);
-  });
+  // Every form a catch-all can take. One entry shaped like any of these used to
+  // own every class_type the catalogue does not name, unopposed.
+  it.each([".*", ".+", ".", "^", "(?:)", "a|.*", "\\w*", "[\\s\\S]*"])(
+    "refuses to own a class_type it matched with %j",
+    async (nodename_pattern) => {
+      const wf: WorkflowJSON = { "1": { class_type: "Krea2EditGroundedEncode", inputs: {} } };
+      const result = await extractWorkflowDependencies(
+        wf,
+        makeDeps({}, {
+          "https://github.com/DemonGatanjieu/Anomalous_Model_Browser": [
+            [],
+            { title: "Anomalous_Model_Browser", nodename_pattern },
+          ],
+        }),
+      );
+      expect(byType(result)["Krea2EditGroundedEncode"]).toMatchObject({
+        pack: null,
+        source: "unresolved",
+      });
+      expect(result.missingPacks).toEqual([]);
+    },
+  );
 
   it("keeps the well-formed SUFFIX-TAG patterns working", async () => {
     // The two real catalogue suffix-tag entries are catalogue entries and are

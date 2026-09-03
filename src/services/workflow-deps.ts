@@ -355,10 +355,17 @@ function packFromPythonModule(pythonModule: string | undefined): {
  * #2765 — strings no ComfyUI node pack can own, used to detect a
  * `nodename_pattern` that is not actually a test for anything. A pattern that
  * matches one of these matches everything.
+ *
+ * Measured against the live catalogue: this rejects `.*`, `.+`, `.`, `^`,
+ * `(?:)`, `a|.*`, `\w*` and `[\s\S]*`, and rejects NONE of the 39 real
+ * `nodename_pattern` entries — so it removes catch-alls at no cost to genuine
+ * resolution. The NUL probe must stay written as a \u0000 ESCAPE, never as the
+ * byte itself: a raw control byte in a tracked source file trips the repo's own
+ * no-stray-control-bytes gate.
  */
 const OWNERSHIP_PROBES = [
-  " ",
-  " zz-comfyui-mcp-ownership-probe-zz",
+  "\u0000",
+  "\u0000zz-comfyui-mcp-ownership-probe-zz",
   "zz-comfyui-mcp-ownership-probe-zz",
 ];
 
