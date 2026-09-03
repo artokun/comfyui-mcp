@@ -56,8 +56,12 @@ import { settleUntilStable } from "../services/vram-settle.js";
 import type { SettledRead } from "../services/vram-settle.js";
 import { assertPanelNotTargetedUnverifiable } from "../services/panel-pin-guard.js";
 import {
+  detectManagerApi,
   findPackOnDisk,
+  managerDialectQueuesGitUrlAsRegistryLookup,
   nodesInstallCommandArgs,
+  v4GitUrlQueueRefusal,
+  type ManagerApi,
 } from "../services/node-management.js";
 import {
   getModelInventoryDisclosure,
@@ -26576,7 +26580,7 @@ CHECKED FOR YOU: the graph read this message prescribes was just run, and it ` +
     ),
     def(
       "panel_search_nodes",
-      "Search installable custom-node packs via the user's BUILT-IN ComfyUI Manager (the same source the Manager UI uses). Returns matching packs {id, title, description}. Use the `id` with panel_install_node. Prefer this over the headless search_custom_nodes tool — it works against the user's actual (Desktop) Manager. If Manager's cache mappings endpoint returns HTTP 5xx, this retries remote/local and still searches; a remaining 5xx is a Manager outage, not proof the pack is missing. If the panel tab is live but the browser Manager request does not complete (Failed to fetch), the search is served from host Manager HTTP instead of dying as a transport error — that is a panel-origin failure, not a Manager outage.",
+      "Search installable custom-node packs via the user's BUILT-IN ComfyUI Manager (the same source the Manager UI uses). Returns matching packs {id, title, description}. `id` is a Manager registry id, never a raw Git URL — use it with panel_install_node. Hits that only have a git repository set git:true and are not v4-installable this way; use install_custom_node(source:'git') for those when the local target is the same ComfyUI. Prefer this over the headless search_custom_nodes tool — it works against the user's actual (Desktop) Manager. If Manager's cache mappings endpoint returns HTTP 5xx, this retries remote/local and still searches; a remaining 5xx is a Manager outage, not proof the pack is missing. If the panel tab is live but the browser Manager request does not complete (Failed to fetch), the search is served from host Manager HTTP instead of dying as a transport error — that is a panel-origin failure, not a Manager outage.",
       { query: z.string().describe("Search text, e.g. 'kjnodes', 'controlnet', 'ipadapter'."), limit: z.number().int().min(1).max(40).optional().describe("Max results to return, 1-40 (default 15). Requests above 40 are refused; the panel also clamps to 40 and discloses limit_cap.") },
       async (args: A, ctx) => {
         // #1669 — the panel asks getmappings?mode=cache and used to fail the
@@ -26640,9 +26644,8 @@ CHECKED FOR YOU: the graph read this message prescribes was just run, and it ` +
         // spellings (registry id and git URL) — see panel-pin-guard.
         assertPanelNotTargetedUnverifiable("panel_install_node", args.id);
         assertPanelNotTargetedUnverifiable("panel_install_node", args.repository);
-        // The panel owns dialect detection and enforces the v4 Git-URL refusal;
-        // these normalized fields remain here so legacy Manager 3.x can receive
-        // its direct `files:[url]` request shape.
+        // Legacy Manager 3.x / v2-batch still receive the direct `files:[url]`
+        // shape. Manager v4 is refused above before this dispatch.
         // #789 — a search result whose `id` is a repository URL (the Manager's
         // legacy/repository-style entries) cannot install as id+"latest": the
         // Manager resolves that as a registry version and rejects it ("not
@@ -26650,6 +26653,25 @@ CHECKED FOR YOU: the graph read this message prescribes was just run, and it ` +
         // repository install that works, and disclose the rewrite.
         const { conflict, note, ...cmdArgs } = nodesInstallCommandArgs(args);
         if (conflict) return fail(conflict);
+        // #1539 — do not send a git URL through Manager v4's registry lookup.
+        // The panel is supposed to refuse this too; the 0.52.179 recurrence still
+        // queued `{repository: url}` and Manager resolved the bare name. Legacy
+        // 3.x / v2-batch keep the direct `files:[url]` path.
+        if (typeof cmdArgs.repository === "string" && cmdArgs.repository.length > 0) {
+          let api: ManagerApi | undefined;
+          try {
+            api = await detectManagerApi();
+          } catch {
+            // The dialect is UNKNOWN, not v4. Refusing here would be an unproven
+            // claim — and it would block a legacy 3.x `files:[url]` install that
+            // still works, with a message naming the wrong cause. Fall through and
+            // let the dispatch below report whatever actually failed.
+            api = undefined;
+          }
+          if (api !== undefined && managerDialectQueuesGitUrlAsRegistryLookup(api)) {
+            return fail(v4GitUrlQueueRefusal(cmdArgs.repository));
+          }
+        }
         // #1129 — the panel identity is captured BEFORE dispatch, because a
         // takeover during the install is exactly what the follow-up read must not
         // be attributed to.

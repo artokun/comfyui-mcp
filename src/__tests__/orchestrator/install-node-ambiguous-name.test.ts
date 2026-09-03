@@ -34,8 +34,8 @@
 // the choice themselves and gets the collision named instead — which is also the escape
 // hatch from a stale snapshot, since a refusal a caller cannot get past would be a worse
 // tool than the hazard it prevents.
-import { describe, expect, it, vi } from "vitest";
-import { nodesInstallCommandArgs } from "../../services/node-management.js";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { nodesInstallCommandArgs, resetManagerApiCacheForTests } from "../../services/node-management.js";
 import {
   AMBIGUOUS_BARE_NAMES,
   ambiguousBareNameRefusal,
@@ -96,9 +96,13 @@ function installNodeDef() {
  * `if (conflict) return fail(conflict)` line at the call site passes every unit assertion
  * in this file and fails only here.
  */
+afterEach(() => resetManagerApiCacheForTests());
+
 async function attemptInstall(
   args: Record<string, unknown>,
+  dialect: "legacy" | "v2" | "v2-batch" = "legacy",
 ): Promise<{ sent: Record<string, unknown> | undefined; text: string; isError: boolean }> {
+  resetManagerApiCacheForTests(dialect);
   let sent: Record<string, unknown> | undefined;
   const bridge = {
     send: async (cmd: Record<string, unknown>) => {

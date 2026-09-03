@@ -10,7 +10,11 @@ import {
   isManagerMappingsServerError,
   isManagerTransportFetchFailure,
   managerMappingsOutageResult,
+  GIT_ONLY_SEARCH_NOTE,
+  gitMappingRepoName,
+  isRawGitUrlInstallId,
   parseNodeMappings,
+  sanitizeSearchInstallIds,
   searchNodesViaMappings,
   searchPanelNodes,
   setFetchMappingsForTests,
@@ -138,7 +142,8 @@ describe("searchNodesViaMappings (#1669)", () => {
       }),
     });
     expect(res.count).toBe(1);
-    expect(res.results[0]?.id).toContain("SolAttn");
+    expect(res.results[0]?.id).toBe("ComfyUI-SolAttn");
+    expect(res.results[0]?.id).not.toMatch(/^https?:\/\//i);
     expect(res.requested_mode).toBe("remote");
     expect(res.degraded_from).toBe("cache");
     expect(res.message).toMatch(/Manager outage/i);
@@ -232,6 +237,46 @@ describe("searchPanelNodes (#1669)", () => {
     });
     expect(out).toEqual({ via: "panel", value: panel });
   });
+
+  it("rewrites a panel hit whose id is the reporter GitHub URL (#1539)", async () => {
+    const url = "https://github.com/Slimy-Comfy/Slimy_ImageComparer";
+    const panel = {
+      count: 1,
+      results: [{ id: url, title: "ImageComparer", description: "compare images" }],
+    };
+    const out = await searchPanelNodes({
+      query: "ImageComparer",
+      panelSearch: async () => panel,
+      fetchMappings: async () => {
+        throw new Error("fallback must not run");
+      },
+    });
+    expect(out.via).toBe("panel");
+    if (out.via !== "panel") throw new Error("expected panel");
+    const value = out.value as {
+      results: Array<{ id: string; repository?: string; git?: true }>;
+      note?: string;
+    };
+    expect(value.results[0]?.id).toBe("Slimy_ImageComparer");
+    expect(isRawGitUrlInstallId(value.results[0]!.id)).toBe(false);
+    expect(value.results[0]?.repository).toBe(url);
+    expect(value.results[0]?.git).toBe(true);
+    expect(value.note).toBe(GIT_ONLY_SEARCH_NOTE);
+  });
+});
+
+describe("sanitizeSearchInstallIds (#1539)", () => {
+  it("rewrites Git URL ids inside a ToolResult JSON body", () => {
+    const url = "https://github.com/Slimy-Comfy/Slimy_ImageComparer";
+    const sanitized = sanitizeSearchInstallIds({
+      content: [{ type: "text", text: JSON.stringify({ count: 1, results: [{ id: url, title: "ImageComparer", description: "" }] }) }],
+    }) as { content: Array<{ text: string }> };
+    const body = JSON.parse(sanitized.content[0]!.text) as {
+      results: Array<{ id: string; git?: true }>;
+    };
+    expect(body.results[0]?.id).toBe(gitMappingRepoName(url));
+    expect(body.results[0]?.git).toBe(true);
+  });
 });
 
 describe("searchPanelNodes (#2492 transport Failed to fetch)", () => {
@@ -247,7 +292,7 @@ describe("searchPanelNodes (#2492 transport Failed to fetch)", () => {
     expect(out.via).toBe("fallback");
     if (out.via !== "fallback") throw new Error("expected fallback");
     expect(out.value.source).toBe("host_http");
-    expect(out.value.note).toBe(HOST_HTTP_SEARCH_NOTE);
+    expect(out.value.note).toContain(HOST_HTTP_SEARCH_NOTE);
     expect(out.value.note).toMatch(/not a Manager outage/i);
     expect(out.value.note).not.toMatch(/does not exist|not found/i);
     expect(out.value.manager_outage).toBeUndefined();
@@ -305,17 +350,53 @@ describe("searchPanelNodes (#2492 transport Failed to fetch)", () => {
 });
 
 describe("parseNodeMappings / outage copy", () => {
-  it("uses the repo-URL key as id, never the display title", () => {
+  it("does not return a raw Git URL as the install id (#1539)", () => {
     const res = parseNodeMappings(CATALOGUE, "SolAttn", 15);
-    expect(res.results[0]?.id).toBe("https://github.com/someone/ComfyUI-SolAttn");
+    expect(res.results[0]?.id).toBe("ComfyUI-SolAttn");
+    expect(res.results[0]?.id).not.toMatch(/^https?:\/\//i);
+    expect(res.results[0]?.repository).toBe("https://github.com/someone/ComfyUI-SolAttn");
+    expect(res.results[0]?.git).toBe(true);
     expect(res.results[0]?.title).toBe("SolAttn");
+    expect(res.note).toBe(GIT_ONLY_SEARCH_NOTE);
+  });
+
+  it("prefers a CNR id over the git mapping key", () => {
+    const res = parseNodeMappings(
+      {
+        "https://github.com/ltdrdata/ComfyUI-Impact-Pack": [
+          ["ImpactSomething"],
+          { id: "comfyui-impact-pack", title: "ComfyUI-Impact-Pack", description: "impact pack" },
+        ],
+      },
+      "impact",
+      15,
+    );
+    expect(res.results[0]?.id).toBe("comfyui-impact-pack");
+    expect(res.results[0]?.git).toBeUndefined();
+    expect(res.results[0]?.repository).toBe("https://github.com/ltdrdata/ComfyUI-Impact-Pack");
+  });
+
+  it("does not return the reporter's ImageComparer GitHub URL as id", () => {
+    const url = "https://github.com/Slimy-Comfy/Slimy_ImageComparer";
+    const res = parseNodeMappings(
+      {
+        [url]: [["ImageComparer"], { title: "Slimy Image Comparer", description: "compare images" }],
+      },
+      "ImageComparer",
+      15,
+    );
+    expect(res.count).toBe(1);
+    expect(res.results[0]?.id).toBe("Slimy_ImageComparer");
+    expect(isRawGitUrlInstallId(res.results[0]!.id)).toBe(false);
+    expect(res.results[0]?.repository).toBe(url);
+    expect(res.results[0]?.git).toBe(true);
   });
 
   it("matches a node CLASS name in the mappings first array", () => {
     // The reporter searched SolAttnPatch — a class_type, not a pack title.
     const res = parseNodeMappings(CATALOGUE, "SolAttnPatch", 15);
     expect(res.count).toBe(1);
-    expect(res.results[0]?.id).toContain("SolAttn");
+    expect(res.results[0]?.id).toBe("ComfyUI-SolAttn");
   });
 
   it("outage copy names Manager, not a missing pack", () => {

@@ -8,7 +8,9 @@ All notable changes to this project are documented here. This project adheres to
 
 ### MCP
 #### Fixed
+- **manga-director-codex MiniMax H3 adapter accepts documented `text_to_video`.** Native H3 T2V is `MiniMaxH3ImageToVideo` with both image sockets empty; the adapter omitted that mode and compilation refused a valid prompt spec. `text_to_video` is declared; I2V / FL2VA / L2VA / R2V modes are unchanged (#2786).
 - **`panel_slice_workflow` seeds outputs inside nested overlapping groups (#2780).** Membership used the first containing box only, so a SaveImage inside both an outer group and a nested inner group was missed when slicing by the inner title. Any matching containing group now seeds, and a miss lists every containing title.
+- panel_search_nodes no longer returns a raw Git URL as an install `id`, and panel_install_node refuses Git URLs before Manager v4 queueing rather than sending an unlisted URL as a registry lookup (#1539)
 - list_local_models recovers remote inventory from panel object_info when fetch_comfyui_read rejects models/<category> as outside the panel allowlist (#2511)
 
 ## [0.52.182] - 2026-09-03
@@ -21,14 +23,12 @@ All notable changes to this project are documented here. This project adheres to
 - **`panel_save_workflow(name)` rebinds the session onto the Save-As dest canvas (#2768, #2805).** After a named save the live instance is dest, but the source tab id can still `canReach`; staying there left `panel_list_workflows` and `panel_set_workflow_target({mode:"current"})` stamped for the replaced instance. Dest is followed when this save replaced the session canvas, and dest's command stamp is refreshed from the save reply.
 - **`list_local_models` `action:"remove"` resolves against the same launch-proven extra-path files as inventory, including ComfyUI Desktop's `extra_models_config.yaml` (#2739, #2803).** Removal previously searched only the Desktop shared models yaml from argv, so a listed LTX file under another active extra root could not be deleted. Desktop extra roots are included only when the connected snapshot already named a Desktop extra-path config — never by probing a guessed :8188 origin — and still fail closed when that file cannot be proven unchanged since launch.
 
-
 ## [0.52.181] - 2026-09-03
 
 ### MCP
 
 #### Fixed
 - **`panel_set_widget` creates a documented `lora_N` row on an ordinary Power Lora Loader inside a live subgraph (#2394, #2794).** Current panels flatten parentheses in the `graph_get_subgraph` "is not a subgraph" line, so a live `Power Lora Loader (rgthree)` was reported as `Power Lora Loader rgthree` and the identity-fenced ordinary write refused it as a type change. The two types are compared after that flatten; the write still fences the real unflattened type.
-
 
 ## [0.52.180] - 2026-09-03
 
