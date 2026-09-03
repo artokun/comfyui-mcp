@@ -342,6 +342,22 @@ describe("stageOutputAsInput (output → input via server API)", () => {
     });
   });
 
+  it("splits a get_history combined filename before /view (#2526)", async () => {
+    uploadImageHttpMock.mockResolvedValueOnce({
+      name: "qwen_baseline_face016_2807_00001_.png",
+      subfolder: "",
+      type: "input",
+    });
+    await stageOutputAsInput({
+      filename: "out_F/qwen_baseline_face016_2807_00001_.png",
+    });
+    expect(fetchImageMock).toHaveBeenCalledWith(
+      "qwen_baseline_face016_2807_00001_.png",
+      "output",
+      "out_F",
+    );
+  });
+
   it("verifies a nested stage reference against the fresh loader combo", async () => {
     uploadImageHttpMock.mockResolvedValueOnce({
       name: "example.png",

@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { fakeFetch } from "../helpers/fake-fetch.js";
-import { MAX_VIEW_RESPONSE_BYTES } from "../../comfyui/bounded-response.js";
+import { MAX_PREVIEW_SOURCE_BYTES, MAX_VIEW_RESPONSE_BYTES } from "../../comfyui/bounded-response.js";
 
 // Stub config helpers BEFORE importing the module under test.
 vi.mock("../../config.js", async () => {
@@ -27,6 +27,7 @@ const {
   interrupt,
   uploadImageHttp,
 } = await import("../../comfyui/cloud-client.js");
+const { enqueuePrompt: dispatchEnqueuePrompt } = await import("../../comfyui/client.js");
 
 describe("cloud-client", () => {
   const originalFetch = global.fetch;
@@ -64,6 +65,16 @@ describe("cloud-client", () => {
     const body = JSON.parse((calls[0]?.init?.body as string) ?? "{}");
     expect(body.prompt).toBeDefined();
     expect(body.extra_data).toEqual({ api_key_comfy_org: "x" });
+  });
+
+  it("preserves partial execution targets for scoped cloud enqueues", async () => {
+    await dispatchEnqueuePrompt(
+      { "380": { class_type: "VHS_VideoCombine", inputs: {} } } as never,
+      undefined,
+      { partialExecutionTargets: ["10:15:380"] },
+    );
+    const body = JSON.parse((calls[0]?.init?.body as string) ?? "{}");
+    expect(body.partial_execution_targets).toEqual(["10:15:380"]);
   });
 
   it("returns empty history (no global endpoint) when no prompt_id", async () => {
@@ -148,6 +159,40 @@ describe("cloud-client", () => {
     await expect(fetchImage("oversized.png")).rejects.toMatchObject({
       code: "VIEW_TOO_LARGE",
       details: { filename: "oversized.png", maxBytes: MAX_VIEW_RESPONSE_BYTES },
+    });
+  });
+
+  it("accepts a 33 MB Cloud /api/view body when the preview-source cap is requested (#2785)", async () => {
+    const size = MAX_VIEW_RESPONSE_BYTES + 1;
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new Uint8Array(size));
+        controller.close();
+      },
+    });
+    global.fetch = vi.fn(async () =>
+      new Response(body, { status: 200, headers: { "content-type": "image/png" } }),
+    );
+
+    const r = await fetchImage("big.png", "output", "", { maxBytes: MAX_PREVIEW_SOURCE_BYTES });
+    expect(r.mimeType).toBe("image/png");
+    expect(Buffer.from(r.base64, "base64").length).toBe(size);
+  });
+
+  it("still refuses a body over the 64 MB preview-source hard cap (#2785)", async () => {
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new Uint8Array(MAX_PREVIEW_SOURCE_BYTES + 1));
+        controller.close();
+      },
+    });
+    global.fetch = vi.fn(async () =>
+      new Response(body, { status: 200, headers: { "content-type": "image/png" } }),
+    );
+
+    await expect(fetchImage("huge.png", "output", "", { maxBytes: 1024 ** 4 })).rejects.toMatchObject({
+      code: "VIEW_TOO_LARGE",
+      details: { filename: "huge.png", maxBytes: MAX_PREVIEW_SOURCE_BYTES },
     });
   });
 

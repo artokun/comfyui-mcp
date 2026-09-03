@@ -310,6 +310,21 @@ describe("WIRING: the orchestrator offers a completion the moment it arrives (#1
     // …and nothing opens a ticket in between — the whole point is that there is none.
     expect(src.slice(record, flush)).not.toContain("openRun");
   });
+
+  it("#2700: the executed ingress sends a negative receipt when ownership rejects the key", async () => {
+    const { readFile } = await import("node:fs/promises");
+    const src = (await readFile(new URL("../../orchestrator/index.ts", import.meta.url), "utf-8"))
+      .replace(/\r\n/g, "\n");
+    const branchAt = src.indexOf('if (ev.kind === "executed") {');
+    expect(branchAt).toBeGreaterThan(-1);
+    const branchEnd = src.indexOf("return;", branchAt);
+    expect(branchEnd).toBeGreaterThan(branchAt);
+    const branch = src.slice(branchAt, branchEnd);
+
+    expect(branch).toContain("const completionReceipt = buildCompletionReceipt(");
+    expect(branch).toContain("receiptAccepted,");
+    expect(branch).toContain("bridge.push(completionReceipt, event.tab_id)");
+  });
 });
 
 describe("WIRING: panel_run stamps the dispatch time before dispatching (#1327)", () => {

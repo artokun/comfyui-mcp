@@ -5,6 +5,7 @@ import {
   getHistory,
   getObjectInfo,
   resetObjectInfoCache,
+  MAX_PREVIEW_SOURCE_BYTES,
   MAX_VIEW_RESPONSE_BYTES,
 } from "../comfyui/client.js";
 import type { ObjectInfo } from "../comfyui/types.js";
@@ -589,8 +590,9 @@ import { fetchImage, uploadImageHttp } from "../comfyui/client.js";
 import { readFile as nodeReadFile } from "node:fs/promises";
 
 /**
- * Reject filename / subfolder values that could traverse out of ComfyUI's
- * output, input or temp directory when forwarded to the /view endpoint.
+ * Split and reject filename / subfolder values that could traverse out of
+ * ComfyUI's output, input or temp directory when forwarded to the /view
+ * endpoint.
  *
  * ComfyUI's /view handler joins the requested `subfolder` and `filename`
  * onto the configured base directory; the server has historically been
@@ -599,12 +601,16 @@ import { readFile as nodeReadFile } from "node:fs/promises";
  * MCP tool surface could otherwise pivot through get_image (action:"get"/"view") /
  * upload_image (action:"stage") to read arbitrary files from the ComfyUI host.
  *
- * Legitimate ComfyUI values are a single filename (no separators) and a
- * relative subfolder produced by listOutputImages (forward-slash joined,
- * no ".." segments). Anything outside that shape is refused here BEFORE
- * the request is forwarded.
+ * get_history (action:"list") prints media as `subfolder/filename`, so callers
+ * paste that combined string into get_image's `filename`. A relative prefix is
+ * the same thing as the `subfolder` argument and is adopted, not refused.
+ * Absolute paths, drive prefixes, and ".." still fail closed BEFORE the
+ * request is forwarded.
  */
-function assertSafeViewRef(filename: string, subfolder: string): void {
+function normalizeViewRef(
+  filename: string,
+  subfolder: string,
+): { filename: string; subfolder: string } {
   if (typeof filename !== "string" || filename.length === 0) {
     throw new ValidationError("filename is required");
   }
@@ -613,37 +619,62 @@ function assertSafeViewRef(filename: string, subfolder: string): void {
       "filename / subfolder must not contain NUL bytes",
     );
   }
-  // Filename must be a single path segment — no separators, no traversal.
+
+  const rejectFilename = (): never => {
+    throw new ValidationError(
+      `Invalid filename "${filename}": must be a filename or relative subfolder/filename reference without absolute paths, drive prefixes, or '..' segments`,
+    );
+  };
+
+  // Rooted / drive-prefixed FILENAME is not a relative output ref. Refuse
+  // rather than stripping the prefix into a quietly different destination.
   if (
-    filename.includes("/") ||
-    filename.includes("\\") ||
-    /^[A-Za-z]:/.test(filename) ||
-    filename === "." ||
-    filename === ".." ||
-    filename.split(/[\\/]/).some((s) => s === "..")
+    filename.startsWith("/") ||
+    filename.startsWith("\\") ||
+    /^[A-Za-z]:/.test(filename)
   ) {
-    throw new ValidationError(
-      `Invalid filename "${filename}": must be a single filename without path separators, drive prefixes, or '..' segments`,
-    );
+    rejectFilename();
   }
-  if (!subfolder) return;
-  // Subfolder must be a forward-slash-joined relative path with no ".."
-  // segments and no Windows-style drive / absolute prefix.
-  if (
-    subfolder.startsWith("/") ||
-    subfolder.startsWith("\\") ||
-    /^[A-Za-z]:/.test(subfolder)
-  ) {
-    throw new ValidationError(
-      `Invalid subfolder "${subfolder}": must be relative to the ComfyUI media directory`,
-    );
+
+  const endsInSeparator = /[/\\]\s*$/.test(filename);
+  const parts = filename.split(/[/\\]+/).filter((p) => p !== "" && p !== ".");
+  const name = endsInSeparator ? "" : (parts.pop() ?? "");
+  if (name === "" || name === "." || name === ".." || /^[A-Za-z]:/.test(name)) {
+    rejectFilename();
   }
-  const segments = subfolder.split(/[\\/]/);
-  if (segments.some((s) => s === "..")) {
-    throw new ValidationError(
-      `Invalid subfolder "${subfolder}": '..' segments are not allowed`,
-    );
+  if (parts.some((p) => p === "..")) {
+    rejectFilename();
   }
+  const prefix = parts.join("/");
+
+  let resolvedSubfolder = subfolder;
+  if (prefix) {
+    resolvedSubfolder = subfolder
+      ? `${subfolder.replace(/\\/g, "/").replace(/\/+$/, "")}/${prefix}`
+      : prefix;
+  }
+
+  if (resolvedSubfolder) {
+    // Subfolder must be a forward-slash-joined relative path with no ".."
+    // segments and no Windows-style drive / absolute prefix.
+    if (
+      resolvedSubfolder.startsWith("/") ||
+      resolvedSubfolder.startsWith("\\") ||
+      /^[A-Za-z]:/.test(resolvedSubfolder)
+    ) {
+      throw new ValidationError(
+        `Invalid subfolder "${subfolder || prefix}": must be relative to the ComfyUI media directory`,
+      );
+    }
+    const segments = resolvedSubfolder.split(/[\\/]/);
+    if (segments.some((s) => s === "..")) {
+      throw new ValidationError(
+        `Invalid subfolder "${subfolder || prefix}": '..' segments are not allowed`,
+      );
+    }
+  }
+
+  return { filename: name, subfolder: resolvedSubfolder };
 }
 
 /** Strict lexical containment for the local fallback below. */
@@ -668,8 +699,11 @@ function localViewMimeType(filename: string): string {
   );
 }
 
-/** Read at most the shared /view limit, including when the file grows after stat(). */
-async function readLocalViewFileBounded(path: string): Promise<Buffer | undefined> {
+/** Read at most `maxBytes`, including when the file grows after stat(). */
+async function readLocalViewFileBounded(
+  path: string,
+  maxBytes: number,
+): Promise<Buffer | undefined> {
   const handle = await open(path, "r");
   const chunks: Buffer[] = [];
   let total = 0;
@@ -677,12 +711,12 @@ async function readLocalViewFileBounded(path: string): Promise<Buffer | undefine
     for (;;) {
       // Read one byte beyond the limit so growth after the initial stat is
       // refused rather than silently truncated into a valid-looking payload.
-      const capacity = Math.min(64 * 1024, MAX_VIEW_RESPONSE_BYTES - total + 1);
+      const capacity = Math.min(64 * 1024, maxBytes - total + 1);
       const chunk = Buffer.allocUnsafe(capacity);
       const { bytesRead } = await handle.read(chunk, 0, capacity, null);
       if (bytesRead === 0) return Buffer.concat(chunks, total);
       total += bytesRead;
-      if (total > MAX_VIEW_RESPONSE_BYTES) return undefined;
+      if (total > maxBytes) return undefined;
       chunks.push(chunk.subarray(0, bytesRead));
     }
   } finally {
@@ -701,6 +735,7 @@ async function readLocalViewFallback(
   filename: string,
   type: "output" | "input" | "temp",
   subfolder: string,
+  maxBytes: number = MAX_VIEW_RESPONSE_BYTES,
 ): Promise<{ base64: string; mimeType: string } | undefined> {
   if (isRemoteMode() || isCloudMode()) return undefined;
 
@@ -728,8 +763,8 @@ async function readLocalViewFallback(
     ]);
     if (!isStrictlyInside(realRoot, realCandidate)) return undefined;
     const candidateStat = await stat(realCandidate);
-    if (!candidateStat.isFile() || candidateStat.size > MAX_VIEW_RESPONSE_BYTES) return undefined;
-    const data = await readLocalViewFileBounded(realCandidate);
+    if (!candidateStat.isFile() || candidateStat.size > maxBytes) return undefined;
+    const data = await readLocalViewFileBounded(realCandidate, maxBytes);
     if (!data) return undefined;
     return { base64: data.toString("base64"), mimeType: localViewMimeType(filename) };
   } catch {
@@ -745,6 +780,21 @@ function isViewBadRequest(error: unknown): error is ComfyUIError {
     typeof error.details === "object" &&
     error.details !== null &&
     (error.details as { status?: unknown }).status === 400
+  );
+}
+
+function isViewTooLarge(error: unknown): error is ComfyUIError {
+  return error instanceof ComfyUIError && error.code === "VIEW_TOO_LARGE";
+}
+
+function viewTooLargeForPreview(filename: string, maxBytes: number): ComfyUIError {
+  return new ComfyUIError(
+    `ComfyUI /view response for "${filename}" exceeds the ${maxBytes / 1024 ** 2} MB safety limit, ` +
+      `so it was not loaded into memory and the inline preview (max_preview_dimension) could not be built. ` +
+      `If the file is on this machine, use get_image action:"convert" with its path under the ComfyUI output directory. ` +
+      `The output is still intact on the ComfyUI server — do not re-run the render.`,
+    "VIEW_TOO_LARGE",
+    { filename, maxBytes },
   );
 }
 
@@ -1050,25 +1100,49 @@ export async function getOutputImage(
      */
     requireImageContent = false,
     signal,
+    /**
+     * get_image action:"get" will downscale the inline payload. Raise the
+     * encoded-body ceiling for still images so a 32–64 MB PNG can be previewed
+     * instead of dying as VIEW_TOO_LARGE before max_preview_dimension runs.
+     * Videos/attachments keep the default 32 MB /view cap.
+     */
+    forInlinePreview = false,
   }: {
     allowMedia?: boolean;
     allowAttachment?: boolean;
     allowJson?: boolean;
     requireImageContent?: boolean;
     signal?: AbortSignal;
+    forInlinePreview?: boolean;
   } = {},
 ): Promise<{ base64: string; mimeType: string; filename: string }> {
-  assertSafeViewRef(filename, subfolder);
+  ({ filename, subfolder } = normalizeViewRef(filename, subfolder));
+  const ext = extname(filename).toLowerCase();
+  const maxBytes =
+    forInlinePreview && IMAGE_EXTENSIONS.has(ext) ? MAX_PREVIEW_SOURCE_BYTES : MAX_VIEW_RESPONSE_BYTES;
+  const fetchOpts = {
+    ...(signal ? { signal } : {}),
+    ...(maxBytes !== MAX_VIEW_RESPONSE_BYTES ? { maxBytes } : {}),
+  };
   let result: { base64: string; mimeType: string };
   try {
-    result = signal
-      ? await fetchImage(filename, type, subfolder, { signal })
-      : await fetchImage(filename, type, subfolder);
+    result =
+      Object.keys(fetchOpts).length > 0
+        ? await fetchImage(filename, type, subfolder, fetchOpts)
+        : await fetchImage(filename, type, subfolder);
   } catch (error) {
-    if (!isViewBadRequest(error)) throw error;
-    const local = await readLocalViewFallback(filename, type, subfolder);
-    if (!local) throw error;
-    result = local;
+    if (isViewTooLarge(error) || isViewBadRequest(error)) {
+      const local = await readLocalViewFallback(filename, type, subfolder, maxBytes);
+      if (local) {
+        result = local;
+      } else if (isViewTooLarge(error)) {
+        throw viewTooLargeForPreview(filename, maxBytes);
+      } else {
+        throw error;
+      }
+    } else {
+      throw error;
+    }
   }
 
   // Guard against non-image /view payloads. ComfyUI (or a reverse proxy in
@@ -1093,7 +1167,6 @@ export async function getOutputImage(
   const imageContentOk =
     !requireImageContent || (isImage && (await hasActualImageContent(result.base64, filename)));
   const sniffedFormat = allowMedia ? sniffMediaFormat(result.base64) : null;
-  const ext = extname(filename).toLowerCase();
   // The sniffed format must satisfy EVERY claim present: the declared
   // content-type (exact subtype match), and the requested filename's
   // extension whenever we can classify it — audio/wav bytes requested as
@@ -1748,12 +1821,11 @@ export async function stageOutputAsInput(
   // Fetch the existing asset's bytes via the same /view mechanism the asset
   // tools use (fetchImage handles cloud vs local). Despite the name, /view
   // returns raw bytes for any media type, not just images.
-  const sourceSubfolder = args.subfolder ?? "";
-  assertSafeViewRef(args.filename, sourceSubfolder);
+  const source = normalizeViewRef(args.filename, args.subfolder ?? "");
   const { base64 } = await fetchImage(
-    args.filename,
+    source.filename,
     sourceType,
-    sourceSubfolder,
+    source.subfolder,
   );
   const data = Buffer.from(base64, "base64");
 

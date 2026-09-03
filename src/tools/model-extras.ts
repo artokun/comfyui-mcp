@@ -85,7 +85,9 @@ export async function removeModelAction(args: { path: string }): Promise<CallToo
         );
       }
       try {
-        const { path: target, info } = await resolveExistingModelFile(args.path);
+        const { path: target, info } = await resolveExistingModelFile(args.path, {
+          mode: "remove",
+        });
 
         if (!info.isFile()) {
           throw new ValidationError(

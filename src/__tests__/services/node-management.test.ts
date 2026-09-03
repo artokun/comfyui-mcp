@@ -264,8 +264,10 @@ type QueueStatusFixture = {
   pending_count?: number;
 };
 
+type InstalledBodyFixture = Record<string, object> | object[];
+
 function stubFetch(opts: {
-  installedBody?: unknown;
+  installedBody?: InstalledBodyFixture | (() => InstalledBodyFixture);
   statusSequence?: QueueStatusFixture[] | (() => QueueStatusFixture);
   /** Fires when a queue op is submitted — lets a test make the install REAL. */
   onQueue?: () => void;
@@ -319,12 +321,33 @@ function stubFetch(opts: {
         return jsonResponse(opts.registryDetails ?? {});
       }
       if (path.startsWith("/v2/customnode/installed")) {
-        return jsonResponse(opts.installedBody ?? {});
+        const installedBody = typeof opts.installedBody === "function"
+          ? opts.installedBody()
+          : opts.installedBody ?? {};
+        return jsonResponse(installedBody);
+      }
+      // #2754 — "absent" means a host with NO ComfyUI-Manager, and such a host
+      // 404s the version routes exactly as it 404s the queue routes. Without this
+      // they fell through to the empty-200 catchall below, which models a server
+      // that answers every unknown path — the one shape that is neither a 404 nor
+      // a Manager. Detection reads the version routes now, so the fixture has to
+      // be honest about them or "confirmed absent" is asserted against a host that
+      // never confirmed anything.
+      if (
+        opts.managerQueueStatus === "absent" &&
+        (path === "/v2/manager/version" || path === "/manager/version")
+      ) {
+        return new Response("missing", { status: 404 });
       }
       if (path === "/v2/manager/queue/status" || path === "/manager/queue/status") {
         if (opts.queueStatusNull) {
           // This is intentionally a status response, not an enqueue response:
           // the accepted task has already crossed the Manager boundary.
+          return jsonResponse(null);
+        }
+        if (opts.managerQueueStatus === "manager-unavailable-null") {
+          // This is a status response, not an enqueue response: the accepted
+          // task has already crossed the Manager boundary.
           return jsonResponse(null);
         }
         if (opts.managerQueueStatus === "absent") {
@@ -391,11 +414,6 @@ function stubFetch(opts: {
         if (opts.queueOpEmpty && isInstallOp) {
           opts.onQueue?.();
           return new Response("", { status: 200 });
-        }
-        if (opts.managerQueueStatus === "manager-unavailable-null") {
-          // A JSON null is a successful response with no queue evidence. It
-          // must take the same fail-closed path as the empty 200 body.
-          return jsonResponse(null);
         }
         // A 405 on the unified task route is retried through v2-batch; model
         // that downgrade as an acknowledged enqueue for the existing race
@@ -728,6 +746,150 @@ describe("node-management service", () => {
       );
     });
 
+    it("#2725 skips already-enabled manifest packs without re-enqueueing them", async () => {
+      const { calls } = stubFetch({
+        installedBody: {
+          "rgthree-comfy": { cnr_id: "rgthree-comfy", enabled: true },
+          "ComfyUI-KJNodes": { cnr_id: "comfyui-kjnodes", enabled: true },
+          "ComfyUI-Krea2T-Enhancer": {
+            cnr_id: "comfyui-krea2t-enhancer",
+            enabled: true,
+          },
+          "ComfyUI-RBG-SmartSeedVariance": {
+            cnr_id: "comfyui-rbg-smartseedvariance",
+            enabled: true,
+          },
+        },
+      });
+
+      const result = await applyManifest({
+        manifest: {
+          custom_nodes: [
+            "https://github.com/rgthree/rgthree-comfy",
+            "https://github.com/kijai/ComfyUI-KJNodes",
+            "https://github.com/capitan01R/ComfyUI-Krea2T-Enhancer",
+            "https://github.com/RamonGuthrie/ComfyUI-RBG-SmartSeedVariance",
+          ],
+        },
+      });
+
+      expect(result.success).toBe(true);
+      expect(result.summary).toMatchObject({ applied: 0, skipped: 4, failed: 0, pending: 0 });
+      expect(result.results.every((entry) => entry.status === "skipped")).toBe(true);
+      expect(calls.some((c) => c.url.includes("/v2/manager/queue/task"))).toBe(false);
+      expect(calls.some((c) => c.url.endsWith("/v2/manager/queue/start"))).toBe(false);
+    });
+
+    it("#2725 starts and tracks a Manager-v4 empty-ack manifest install", async () => {
+      let installedListReads = 0;
+      const { calls } = stubFetch({
+        queueOpEmpty: true,
+        installedBody: () =>
+          installedListReads++ === 0
+            ? {}
+            : { "rgthree-comfy": { cnr_id: "rgthree-comfy", enabled: true } },
+      });
+
+      const result = await applyManifest({
+        manifest: {
+          custom_nodes: ["https://github.com/rgthree/rgthree-comfy"],
+        },
+      });
+
+      expect(result.success).toBe(true);
+      expect(result.results).toEqual([
+        expect.objectContaining({
+          item: "https://github.com/rgthree/rgthree-comfy",
+          action: "custom_node",
+          status: "applied",
+        }),
+      ]);
+      expect(calls.some((c) => c.url.endsWith("/v2/manager/queue/task"))).toBe(true);
+      expect(calls.some((c) => c.url.endsWith("/v2/manager/queue/start"))).toBe(true);
+      expect(calls.some((c) => c.url.endsWith("/v2/manager/queue/status"))).toBe(true);
+      expect(installedListReads).toBeGreaterThanOrEqual(2);
+    });
+
+    it("#2725 keeps an empty-ack install UNKNOWN when no post-state is visible", async () => {
+      const { calls } = stubFetch({
+        queueOpEmpty: true,
+        installedBody: {},
+      });
+
+      const result = await applyManifest({
+        manifest: {
+          custom_nodes: ["https://github.com/rgthree/rgthree-comfy"],
+        },
+      });
+
+      expect(result.success).toBe(false);
+      expect(result.summary).toMatchObject({ applied: 0, skipped: 0, failed: 0, pending: 1 });
+      expect(result.results[0]).toMatchObject({ status: "pending" });
+      expect(result.results[0].message).toMatch(/UNKNOWN/i);
+      expect(result.partial).toMatchObject({
+        still_installing: ["https://github.com/rgthree/rgthree-comfy"],
+        outcome_unknown: ["https://github.com/rgthree/rgthree-comfy"],
+      });
+      expect(calls.some((c) => c.url.endsWith("/v2/manager/queue/task"))).toBe(true);
+      expect(calls.some((c) => c.url.endsWith("/v2/manager/queue/start"))).toBe(true);
+      expect(mockedExec.mock.calls.find((c) => c[0] === "git" && (c[1] as string[])[0] === "clone"))
+        .toBeUndefined();
+    });
+
+    it("#2725 does not clone when an empty-ack Manager record is absent on disk", async () => {
+      let installedListReads = 0;
+      fsCtl.readdirSync = () => [];
+      const { calls } = stubFetch({
+        queueOpEmpty: true,
+        installedBody: () =>
+          installedListReads++ === 0
+            ? {}
+            : { "rgthree-comfy": { cnr_id: "rgthree-comfy", enabled: true } },
+      });
+
+      const result = await applyManifest({
+        manifest: {
+          custom_nodes: ["https://github.com/rgthree/rgthree-comfy"],
+        },
+      });
+
+      expect(result.success).toBe(false);
+      expect(result.summary).toMatchObject({ applied: 0, failed: 0, pending: 1 });
+      expect(result.results[0]).toMatchObject({ status: "pending" });
+      expect(result.results[0].message).toMatch(/UNKNOWN/i);
+      expect(result.results[0].message).toMatch(/no local fallback is authorized/i);
+      expect(calls.some((c) => c.url.endsWith("/v2/manager/queue/task"))).toBe(true);
+      expect(
+        mockedExec.mock.calls.find((c) => c[0] === "git" && (c[1] as string[])[0] === "clone"),
+      ).toBeUndefined();
+    });
+
+    it("#2725 keeps an empty-ack install UNKNOWN when its installed list is unreadable", async () => {
+      let installedListReads = 0;
+      const { calls } = stubFetch({
+        queueOpEmpty: true,
+        installedBody: () =>
+          installedListReads++ === 0 ? {} : { error: {} },
+      });
+
+      const result = await applyManifest({
+        manifest: {
+          custom_nodes: ["https://github.com/rgthree/rgthree-comfy"],
+        },
+      });
+
+      expect(result.success).toBe(false);
+      expect(result.summary).toMatchObject({ applied: 0, failed: 0, pending: 1 });
+      expect(result.results[0]).toMatchObject({ status: "pending" });
+      expect(result.results[0].message).toMatch(/installed-pack list could not be read/i);
+      expect(result.results[0].message).toMatch(/UNKNOWN/i);
+      expect(result.results[0].message).toMatch(/no local fallback is authorized/i);
+      expect(calls.some((c) => c.url.endsWith("/v2/manager/queue/task"))).toBe(true);
+      expect(
+        mockedExec.mock.calls.find((c) => c[0] === "git" && (c[1] as string[])[0] === "clone"),
+      ).toBeUndefined();
+    });
+
     it("throws when a registry id is queued but never lands (silent no-op)", async () => {
       // The Manager drains "done" without installing an unknown CNR id; a non-URL
       // id can't be cloned, so this must be a hard error — not a false success.
@@ -857,6 +1019,176 @@ describe("node-management service", () => {
       const cloneEnv = (cloneCall![2] as { env?: Record<string, string> })?.env;
       expect(cloneEnv?.GIT_TERMINAL_PROMPT).toBe("0");
       expect(cloneEnv?.GIT_ASKPASS).toBe("echo");
+    });
+
+    it("replaces a Manager-aliased teskor-hub checkout with the requested artokun origin (#2523)", async () => {
+      // Manager v4 keys from-source installs by bare repo name, so requesting
+      // artokun/comfyui-teskors-utils still clones teskor-hub's repository into
+      // the same folder and reports success. The pack's TS nodes then come from
+      // the wrong fork.
+      stubFetch({
+        installedBody: {
+          "comfyui-teskors-utils": {
+            ver: "nightly",
+            aux_id: "teskor-hub/comfyui-teskors-utils",
+            enabled: true,
+          },
+        },
+      });
+      let cloned = false;
+      mockedExists.mockImplementation((p: unknown) => {
+        const s = String(p);
+        if (s.includes("requirements.txt") || s.includes("install.py")) return false;
+        if (s.includes(".venv") || s.includes("cm-cli.py")) return false;
+        if (s.includes(NODE_DIR_UTILS) || s.endsWith("comfyui-teskors-utils")) {
+          if (cloned) return true;
+          return !fsCtl.removed.includes(NODE_DIR_UTILS);
+        }
+        return false;
+      });
+      fsCtl.readdirSync = (p) => {
+        const norm = p.replace(/\\/g, "/");
+        return norm.endsWith("/comfyui-teskors-utils") ? ["__init__.py", ".git"] : [];
+      };
+      mockedExec.mockImplementation(((bin: string, args: string[]) => {
+        const argv = args as string[];
+        if (bin === "git" && argv[0] === "clone") {
+          cloned = true;
+          return "";
+        }
+        if (bin === "git" && argv.includes("get-url")) {
+          return "https://github.com/teskor-hub/comfyui-teskors-utils.git";
+        }
+        return "";
+      }) as never);
+
+      const res = await installCustomNode({
+        id: "https://github.com/artokun/comfyui-teskors-utils",
+      });
+
+      expect(res.mechanism).toBe("git-clone");
+      expect(res.message).toMatch(/artokun\/comfyui-teskors-utils/);
+      expect(res.message).toMatch(/teskor-hub\/comfyui-teskors-utils/);
+      expect(fsCtl.removed).toContain(NODE_DIR_UTILS);
+      const cloneCall = mockedExec.mock.calls.find(
+        (c) => c[0] === "git" && (c[1] as string[])[0] === "clone",
+      );
+      expect(cloneCall).toBeDefined();
+      expect(cloneCall![1]).toEqual([
+        "clone",
+        "--depth",
+        "1",
+        "--end-of-options",
+        "https://github.com/artokun/comfyui-teskors-utils",
+        NODE_DIR_UTILS,
+      ]);
+    });
+
+    it("keeps a correct disk origin when Manager aux_id is stale (#2523)", async () => {
+      // Manager can retain the old alias after the local checkout was corrected.
+      // The disk remote is the stronger witness and must protect the checkout,
+      // including files the user changed locally, from replacement.
+      stubFetch({
+        installedBody: {
+          "comfyui-teskors-utils": {
+            ver: "nightly",
+            aux_id: "teskor-hub/comfyui-teskors-utils",
+            enabled: true,
+          },
+        },
+      });
+      let cloned = false;
+      mockedExists.mockImplementation((p: unknown) => {
+        const s = String(p);
+        if (s.includes("requirements.txt") || s.includes("install.py")) return false;
+        if (s.includes(".venv") || s.includes("cm-cli.py")) return false;
+        if (s.includes(NODE_DIR_UTILS) || s.endsWith("comfyui-teskors-utils")) {
+          return cloned || !fsCtl.removed.includes(NODE_DIR_UTILS);
+        }
+        return false;
+      });
+      fsCtl.readdirSync = (p) => {
+        const norm = p.replace(/\\/g, "/");
+        return norm.endsWith("/comfyui-teskors-utils")
+          ? ["__init__.py", ".git", "local-change.py"]
+          : [];
+      };
+      mockedExec.mockImplementation(((bin: string, args: string[]) => {
+        const argv = args as string[];
+        if (bin === "git" && argv[0] === "clone") {
+          cloned = true;
+          return "";
+        }
+        if (bin === "git" && argv.includes("get-url")) {
+          return "https://github.com/artokun/comfyui-teskors-utils.git";
+        }
+        return "";
+      }) as never);
+
+      const res = await installCustomNode({
+        id: "https://github.com/artokun/comfyui-teskors-utils",
+      });
+
+      expect(res.mechanism).toBe("git-clone");
+      expect(res.message).toMatch(/already exists in custom_nodes/);
+      expect(fsCtl.removed).not.toContain(NODE_DIR_UTILS);
+      expect(
+        mockedExec.mock.calls.find(
+          (c) => c[0] === "git" && (c[1] as string[])[0] === "clone",
+        ),
+      ).toBeUndefined();
+    });
+
+    it("does not treat a Manager listing of teskor-hub as the requested artokun origin (#2523)", async () => {
+      // Same substitution, but the on-disk remote cannot be read — aux_id is
+      // still enough proof to refuse the Manager hit and clone the URL passed.
+      stubFetch({
+        installedBody: {
+          "comfyui-teskors-utils": {
+            ver: "nightly",
+            aux_id: "teskor-hub/comfyui-teskors-utils",
+            enabled: true,
+          },
+        },
+      });
+      let cloned = false;
+      mockedExists.mockImplementation((p: unknown) => {
+        const s = String(p);
+        if (s.includes("requirements.txt") || s.includes("install.py")) return false;
+        if (s.includes(".venv") || s.includes("cm-cli.py")) return false;
+        if (s.includes(NODE_DIR_UTILS) || s.endsWith("comfyui-teskors-utils")) {
+          return cloned || !fsCtl.removed.includes(NODE_DIR_UTILS);
+        }
+        return false;
+      });
+      fsCtl.readdirSync = (p) => {
+        const norm = p.replace(/\\/g, "/");
+        return norm.endsWith("/comfyui-teskors-utils") ? ["__init__.py", ".git"] : [];
+      };
+      mockedExec.mockImplementation(((bin: string, args: string[]) => {
+        const argv = args as string[];
+        if (bin === "git" && argv[0] === "clone") {
+          cloned = true;
+          return "";
+        }
+        if (bin === "git" && argv.includes("get-url")) {
+          throw Object.assign(new Error("not a git repository"), { status: 128 });
+        }
+        return "";
+      }) as never);
+
+      const res = await installCustomNode({
+        id: "https://github.com/artokun/comfyui-teskors-utils",
+      });
+
+      expect(res.mechanism).toBe("git-clone");
+      expect(fsCtl.removed).toContain(NODE_DIR_UTILS);
+      const cloneCall = mockedExec.mock.calls.find(
+        (c) => c[0] === "git" && (c[1] as string[])[0] === "clone",
+      );
+      expect((cloneCall![1] as string[]).includes("https://github.com/artokun/comfyui-teskors-utils")).toBe(
+        true,
+      );
     });
 
     // #463 — a detection failure is allowed to reach a direct clone only after
@@ -3969,6 +4301,9 @@ describe("node-management service", () => {
         expect(nodes).toEqual([
           {
             module: "ComfyUI-Manager",
+            // #2714 — the object payload's key is a folder key, carried explicitly
+            // so the on-disk corroboration never has to guess whether it is one.
+            moduleKey: "ComfyUI-Manager",
             cnrId: "comfyui-manager",
             version: "3.1",
             enabled: true,
@@ -4079,6 +4414,33 @@ describe("node-management service", () => {
       const nodes = await listInstalledNodes();
       expect(nodes).toHaveLength(1);
       expect(nodes[0].module).toBe("PackA");
+    });
+
+    it("#2714 — a title-derived module carries NO folder key", async () => {
+      // `module` keeps its precedence (title first) because that is what this list
+      // displays and what Manager is sent back as `node_name`. But #2714's on-disk
+      // corroboration reads a module as a PATH, and prose is not one — so the key
+      // the payload actually stated is carried separately, and is absent when the
+      // payload stated none.
+      stubFetch({
+        installedBody: [
+          { title: "Friendly Label", ver: "1.0.0", cnr_id: "packa", enabled: true },
+          { title: "Pack A", module: "ComfyUI-PackA", ver: "1.0.0", enabled: true },
+        ],
+      });
+      const nodes = await listInstalledNodes();
+      expect(nodes[0].module).toBe("Friendly Label");
+      expect(nodes[0].moduleKey).toBeUndefined();
+      expect(nodes[1].module).toBe("Pack A");
+      expect(nodes[1].moduleKey).toBe("ComfyUI-PackA");
+    });
+
+    it("#2714 — the object shape's KEY is a folder key", async () => {
+      stubFetch({
+        installedBody: { "ComfyUI-PackB": { ver: "1.0.0", cnr_id: "packb", enabled: true } },
+      });
+      const nodes = await listInstalledNodes();
+      expect(nodes[0].moduleKey).toBe("ComfyUI-PackB");
     });
 
     it("missing enabled/is_disabled is UNKNOWN, never defaulted to a definite state", async () => {

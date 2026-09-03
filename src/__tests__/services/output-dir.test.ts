@@ -162,15 +162,12 @@ vi.mock("../../services/workspace-env.js", async () => {
   return {
     resolveEffectiveComfyUIBase: () => config.comfyuiPath ?? savedDefaultWorkspace,
     // #1052 — backed by the REAL argv parsing, like the resolvers above, so the
-    // live-root rung is exercised end to end rather than stubbed away.
-    resolveLiveComfyUIBase: async () => {
-      try {
-        const stats = await getSystemStats();
-        return actual.liveRootFromArgv(stats?.system?.argv, stats?.system?.cwd);
-      } catch {
-        return undefined;
-      }
-    },
+    // live-root rung is exercised end to end rather than stubbed away. This is
+    // deliberately one snapshot: explicit I/O flags and the inferred live root
+    // must describe the same server instance.
+    // Use the real snapshot boundary so a production-shaped malformed response
+    // cannot bypass its runtime argv/cwd validation in this resolver suite.
+    getLiveServerSnapshot: () => actual.getLiveServerSnapshot(),
     liveRootFromArgv: actual.liveRootFromArgv,
     hasComfyUIEntrypoint: (dir: string) =>
       hasEntrypointFor ? hasEntrypointFor(dir) : baseHasEntrypoint,
@@ -1328,11 +1325,13 @@ describe("#1052: I/O dirs follow the CONNECTED server, not a second install", ()
     const got = await resolveOutputDir();
     expect(got).toBe(join(CONNECTED, "output"));
     expect(got).not.toBe(resolve(DESKTOP, "output")); // the reported failure
+    expect(getSystemStats).toHaveBeenCalledTimes(1);
   });
 
   it("resolves the INPUT dir the same way", async () => {
     connectedServerNoExplicitDirs();
     expect(await resolveInputDir()).toBe(join(CONNECTED, "input"));
+    expect(getSystemStats).toHaveBeenCalledTimes(1);
   });
 
   // An EXPLICIT --output-directory is the server telling us outright; it must
@@ -1358,6 +1357,12 @@ describe("#1052: I/O dirs follow the CONNECTED server, not a second install", ()
   it("falls back when the live argv identifies no root", async () => {
     getSystemStats.mockResolvedValue({ system: { argv: ["python"] } });
     expect(await resolveOutputDir()).toBe(resolve(DESKTOP, "output"));
+  });
+
+  it("fails closed on a production-shaped malformed argv response", async () => {
+    getSystemStats.mockResolvedValue({ system: { argv: [1] } });
+    await expect(resolveOutputDir()).resolves.toBe(resolve(DESKTOP, "output"));
+    expect(getSystemStats).toHaveBeenCalledTimes(1);
   });
 
   // #2539 — ComfyUI Desktop / Windows portable report a RELATIVE

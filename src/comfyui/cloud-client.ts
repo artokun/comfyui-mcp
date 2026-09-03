@@ -24,6 +24,7 @@ import {
 } from "./fetch.js";
 import {
   BoundedResponseError,
+  clampViewResponseBytes,
   MAX_HISTORY_RESPONSE_BYTES,
   MAX_VIEW_RESPONSE_BYTES,
   readResponseBodyBounded,
@@ -118,11 +119,15 @@ export interface CloudJobStatus {
 export async function enqueuePrompt(
   workflow: Record<string, unknown>,
   extraData?: Record<string, unknown>,
+  opts?: { partialExecutionTargets?: readonly string[] },
 ): Promise<{ prompt_id: string; queue_remaining?: number }> {
   logger.info("Cloud: submitting workflow to Comfy Cloud");
   const body: Record<string, unknown> = { prompt: workflow };
   if (extraData && Object.keys(extraData).length > 0) {
     body.extra_data = extraData;
+  }
+  if (opts?.partialExecutionTargets?.length) {
+    body.partial_execution_targets = [...opts.partialExecutionTargets];
   }
   const res = await cloudFetch("/api/prompt", {
     method: "POST",
@@ -325,7 +330,7 @@ export async function fetchImage(
   filename: string,
   type: "output" | "input" | "temp" = "output",
   subfolder = "",
-  options: { signal?: AbortSignal } = {},
+  options: { signal?: AbortSignal; maxBytes?: number } = {},
 ): Promise<{ base64: string; mimeType: string }> {
   const params = new URLSearchParams({ filename, type, subfolder });
   const url = cloudUrl(`/api/view?${params.toString()}`);
@@ -367,6 +372,7 @@ export async function fetchImage(
   }
   const contentType = res.headers.get("content-type") ?? "image/png";
   const mimeType = contentType.split(";")[0].trim();
+  const limit = clampViewResponseBytes(options.maxBytes);
   let bytes: Buffer;
   try {
     // Cloud /api/view is reached by every automatic history availability probe.
@@ -376,16 +382,16 @@ export async function fetchImage(
     bytes = await readResponseBodyBounded(
       res,
       Math.round(comfyHttpTimeoutSeconds() * 1000),
-      MAX_VIEW_RESPONSE_BYTES,
+      limit,
       options.signal,
     );
   } catch (error) {
     if (error instanceof BoundedResponseError) {
       if (error.kind === "too-large") {
         throw new ComfyUIError(
-          `Cloud /api/view response for "${filename}" exceeds the ${MAX_VIEW_RESPONSE_BYTES / 1024 ** 2} MB safety limit.`,
+          `Cloud /api/view response for "${filename}" exceeds the ${limit / 1024 ** 2} MB safety limit.`,
           "VIEW_TOO_LARGE",
-          { filename, maxBytes: MAX_VIEW_RESPONSE_BYTES },
+          { filename, maxBytes: limit },
         );
       }
       throw new ConnectionError(

@@ -1,4 +1,5 @@
 import { Client } from "@stable-canvas/comfyui-client";
+import { LoopbackWebSocket } from "../transport/loopback-websocket.js";
 import {
   config,
   getComfyUIApiHost,
@@ -18,6 +19,7 @@ import {
   comfyuiFetch,
   connectedPanelFallbackOriginsNow,
   comfyHttpTimeoutSeconds,
+  deliveryDoubt,
   describeMissingInputMediaDrift,
   isComfyTransportFailure,
   isTimeoutAbort,
@@ -25,6 +27,7 @@ import {
   raceAbort,
 } from "./fetch.js";
 import { isKnownLoaderInput } from "./loader-asset-inputs.js";
+import { sameOrigin } from "../utils/origin.js";
 import {
   choosePanelFallbackOrigin,
   describeDeclinedPanelFallback,
@@ -41,7 +44,9 @@ import {
 } from "../services/panel-image-relay.js";
 import {
   BoundedResponseError,
+  clampViewResponseBytes,
   MAX_HISTORY_RESPONSE_BYTES,
+  MAX_PREVIEW_SOURCE_BYTES,
   MAX_VIEW_RESPONSE_BYTES as SHARED_MAX_VIEW_RESPONSE_BYTES,
   readResponseBodyBounded,
 } from "./bounded-response.js";
@@ -109,15 +114,29 @@ function requireLocalComfyUI(op: string): void {
 
 let clientInstance: Client | null = null;
 
+/** One in-flight /upload/image POST per ComfyUI origin (#2801). Concurrent
+ *  stage/upload writes share a socket and can EPIPE; overlapping POSTs are also
+ *  non-idempotent, so they wait rather than racing. */
+const uploadChains = new Map<string, Promise<void>>();
+
+/** Keep the SDK's configured URL literal until a refused loopback dial proves
+ * that Node should retry through its IPv6-capable localhost resolver. */
+function connectionWebSocket(): typeof WebSocket | undefined {
+  // oxlint-disable-next-line anti-slop/no-chained-type-assertions -- the SDK's DOM WebSocket type is wider than this Node adapter's runtime-compatible surface
+  return LoopbackWebSocket as unknown as typeof WebSocket;
+}
+
 export function getClient(): Client {
   requireLocalMode("getClient");
   if (!clientInstance) {
+    const ws = connectionWebSocket();
     clientInstance = new Client({
       api_host: getComfyUIApiHost(),
       // Path prefix for reverse-proxied / gateway'd ComfyUI (e.g. "/comfyapi").
       api_base: getComfyUIBasePath(),
       ssl: config.comfyuiSsl,
       clientId: "comfyui-mcp",
+      ...(ws ? { WebSocket: ws } : {}),
       // Inject generic auth headers (COMFYUI_AUTH_*) on the library's own HTTP
       // calls; a no-op when unset. Node 22+ provides global WebSocket.
       //
@@ -274,8 +293,19 @@ async function panelReadFallback(
     if (error instanceof PanelComfyUIReadRelayError && error.unavailable) return undefined;
     const primary = primaryError instanceof Error ? primaryError.message : String(primaryError);
     const code = error instanceof PanelComfyUIReadRelayError ? error.code : "RELAY_ERROR";
+    // #2703 - the code alone was the whole answer, and PANEL_FETCH_FAILED does
+    // not distinguish "the read exceeded the relay's byte ceiling" from "the
+    // panel's fetch timed out" from "ComfyUI answered 403" from "that panel
+    // predates the read relay". The reporter got `fetch failed: connect
+    // ECONNREFUSED 127.0.0.1:8188 ... (PANEL_FETCH_FAILED)` and had nothing to
+    // act on: the headless target was dead AND the one path that could have
+    // answered declined without saying why. The relay now carries the cause
+    // (services/panel-image-relay.ts, panelFailureReason); say it here, because
+    // this message - not the relay error - is what reaches the caller.
+    const reason = error instanceof PanelComfyUIReadRelayError ? error.reason : undefined;
     throw new Error(
-      `${primary} The connected panel ComfyUI read fallback failed safely (${code}).`,
+      `${primary} The connected panel ComfyUI read fallback failed safely (${code}).` +
+        (reason ? ` The panel reported: ${reason}` : ""),
       { cause: error },
     );
   }
@@ -403,6 +433,11 @@ let objectInfoInflight: Promise<ObjectInfo> | null = null;
 // repopulate it with the PRE-restart schema, and future callers would await that
 // stale value (codex WS-3 finding #1).
 let objectInfoEpoch = 0;
+
+/** Fresh `/object_info` snapshot, or null when the cache is empty or expired. */
+export function peekObjectInfoCache(): ObjectInfo | null {
+  return objectInfoCacheFresh() ? objectInfoCache : null;
+}
 
 function objectInfoCacheFresh(): boolean {
   if (objectInfoCache === null) return false;
@@ -767,9 +802,9 @@ function describeRejectedOutputs(nodeErrors: unknown): string | undefined {
 export async function enqueuePrompt(
   workflow: Record<string, unknown>,
   extraData?: Record<string, unknown>,
-  opts?: { front?: boolean },
+  opts?: { front?: boolean; partialExecutionTargets?: readonly string[] },
 ): Promise<{ prompt_id: string; queue_remaining?: number; rejectedOutputs?: string }> {
-  if (isCloudMode()) return cloudClient.enqueuePrompt(workflow, extraData);
+  if (isCloudMode()) return cloudClient.enqueuePrompt(workflow, extraData, opts);
 
   // POST /prompt directly (rather than the SDK's _enqueue_prompt) for two
   // reasons: (1) the SDK does not forward `extra_data` — how comfy.org API-node
@@ -788,6 +823,9 @@ export async function enqueuePrompt(
       client_id: "comfyui-mcp",
       ...(extraData ? { extra_data: extraData } : {}),
       ...(opts?.front ? { front: true } : {}),
+      ...(opts?.partialExecutionTargets?.length
+        ? { partial_execution_targets: [...opts.partialExecutionTargets] }
+        : {}),
     }),
   });
   if (!res.ok) {
@@ -1167,6 +1205,7 @@ export async function getUpscaleModels(): Promise<string[]> {
 }
 
 export function resetClient(): void {
+  uploadChains.clear();
   if (clientInstance) {
     try {
       clientInstance.close();
@@ -1529,11 +1568,25 @@ export async function getHistory(
 
 /** A /view response is saved and may later be previewed, so bound the first read too. */
 export const MAX_VIEW_RESPONSE_BYTES = SHARED_MAX_VIEW_RESPONSE_BYTES;
+export { MAX_PREVIEW_SOURCE_BYTES };
+
+export interface FetchImageOptions {
+  signal?: AbortSignal;
+  /**
+   * Encoded-body ceiling for this /view read. Capped at MAX_PREVIEW_SOURCE_BYTES
+   * so a caller cannot ask for an unbounded download. Defaults to
+   * MAX_VIEW_RESPONSE_BYTES (32 MB).
+   */
+  maxBytes?: number;
+}
 
 function validateViewResponseOrigin(res: Response, expectedOrigin: string, label: string): void {
   if (res.url) {
     const actualOrigin = httpOriginOf(res.url);
-    if (actualOrigin !== expectedOrigin) {
+    // The transport may retry exact 127.0.0.1 at localhost for an IPv6-only
+    // loopback listener. The comparator folds only those known loopback aliases;
+    // remote origins remain an exact scheme/host/port match.
+    if (!sameOrigin(actualOrigin, expectedOrigin)) {
       throw new ComfyUIError(
         `ComfyUI /view response from ${label} changed origin unexpectedly; the response was refused.`,
         "VIEW_RESPONSE_ORIGIN",
@@ -1553,11 +1606,11 @@ function validateViewResponseOrigin(res: Response, expectedOrigin: string, label
   }
 }
 
-function viewTooLarge(filename: string): ComfyUIError {
+function viewTooLarge(filename: string, maxBytes: number): ComfyUIError {
   return new ComfyUIError(
-    `ComfyUI /view response for "${filename}" exceeds the ${MAX_VIEW_RESPONSE_BYTES / 1024 ** 2} MB safety limit.`,
+    `ComfyUI /view response for "${filename}" exceeds the ${maxBytes / 1024 ** 2} MB safety limit.`,
     "VIEW_TOO_LARGE",
-    { filename, maxBytes: MAX_VIEW_RESPONSE_BYTES },
+    { filename, maxBytes },
   );
 }
 
@@ -1566,12 +1619,14 @@ async function readViewResponseBounded(
   filename: string,
   timeoutMs: number,
   signal?: AbortSignal,
+  maxBytes = MAX_VIEW_RESPONSE_BYTES,
 ): Promise<Buffer> {
+  const limit = clampViewResponseBytes(maxBytes);
   try {
-    return await readResponseBodyBounded(res, timeoutMs, MAX_VIEW_RESPONSE_BYTES, signal);
+    return await readResponseBodyBounded(res, timeoutMs, limit, signal);
   } catch (error) {
     if (error instanceof BoundedResponseError) {
-      if (error.kind === "too-large") throw viewTooLarge(filename);
+      if (error.kind === "too-large") throw viewTooLarge(filename, limit);
       throw new ComfyUIError(
         `ComfyUI /view did not finish sending "${filename}" within ${timeoutMs / 1000}s; the response was aborted.`,
         "VIEW_READ_TIMEOUT",
@@ -1590,7 +1645,7 @@ export async function fetchImage(
   filename: string,
   type: "output" | "input" | "temp" = "output",
   subfolder = "",
-  options: { signal?: AbortSignal } = {},
+  options: FetchImageOptions = {},
 ): Promise<{ base64: string; mimeType: string }> {
   if (isCloudMode()) return cloudClient.fetchImage(filename, type, subfolder, options);
   const client = getClient();
@@ -1628,8 +1683,13 @@ export async function fetchImage(
       } catch (relayError) {
         if (relayError instanceof PanelImageRelayError && !relayError.unavailable) {
           const primary = primaryError instanceof Error ? primaryError.message : String(primaryError);
+          // #2703 - the same collapse on the image relay's own dead end. Both
+          // codes are produced by ONE catch in the relay, so leaving this one
+          // bare would have left half the reports unactionable for the same
+          // reason the history path was.
           throw new Error(
-            `${primary} The connected panel image relay failed safely (${relayError.code}).`,
+            `${primary} The connected panel image relay failed safely (${relayError.code}).` +
+              (relayError.reason ? ` The panel reported: ${relayError.reason}` : ""),
             { cause: relayError },
           );
         }
@@ -1701,41 +1761,63 @@ export async function fetchImage(
   }
   const contentType = res.headers.get("content-type") ?? "image/png";
   const mimeType = contentType.split(";")[0].trim();
-  const bytes = await readViewResponseBounded(res, filename, responseReadTimeoutMs, options.signal);
+  const bytes = await readViewResponseBounded(
+    res,
+    filename,
+    responseReadTimeoutMs,
+    options.signal,
+    options.maxBytes,
+  );
   const base64 = bytes.toString("base64");
   return { base64, mimeType };
 }
 
-/**
- * Upload an image to ComfyUI's input/ directory via HTTP multipart POST.
- * Works over HTTP — no local filesystem access needed.
- */
-export async function uploadImageHttp(
-  filename: string,
+type UploadImageResult = { name: string; subfolder: string; type: string };
+type UploadLanding = "committed" | "absent" | "unknown";
+
+function serializePerTargetUpload<T>(key: string, work: () => Promise<T>): Promise<T> {
+  const prior = uploadChains.get(key);
+  let release = () => {};
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  uploadChains.set(key, gate);
+  const run = async (): Promise<T> => {
+    if (prior) {
+      // unknown-ok: a prior upload's failure must not block this one
+      await prior.catch(() => undefined);
+    }
+    try {
+      return await work();
+    } finally {
+      release();
+      if (uploadChains.get(key) === gate) uploadChains.delete(key);
+    }
+  };
+  return run();
+}
+
+function uploadDeliveryUnknown(err: unknown): boolean {
+  if (!isComfyTransportFailure(err)) return false;
+  return deliveryDoubt(describeFetchFailure(err).code, "POST") !== "";
+}
+
+function buildUploadForm(
+  name: string,
   data: Buffer,
-  mimeType = "image/png",
-  overwrite = true,
-): Promise<{ name: string; subfolder: string; type: string }> {
-  if (isCloudMode()) return cloudClient.uploadImageHttp(filename, data, mimeType, overwrite);
-  const client = getClient();
-  // #946 — a `filename` carrying a path ("assets/clip.mp4") is a SUBFOLDER
-  // request, and ComfyUI's /upload/image takes that as its own form field, not
-  // as a slash inside the multipart filename. Sending the whole path as the
-  // filename put it somewhere between the transport and ComfyUI's handler and
-  // came back as a bare `Unexpected non-whitespace character after JSON at
-  // position 4` — no upload, no usable error. Split it and use the field the
-  // API actually has, which is also what the caller was asking for.
-  const { subfolder, name } = splitUploadTarget(filename);
+  mimeType: string,
+  overwrite: boolean,
+  subfolder: string,
+): FormData {
   const formData = new FormData();
-  const blob = new Blob([data], { type: mimeType });
-  formData.append("image", blob, name);
+  formData.append("image", new Blob([data], { type: mimeType }), name);
   formData.append("type", "input");
   formData.append("overwrite", String(overwrite));
   if (subfolder) formData.append("subfolder", subfolder);
-  const res = await comfyApiFetch("/upload/image", {
-    method: "POST",
-    body: formData,
-  });
+  return formData;
+}
+
+async function readUploadImageResponse(res: Response): Promise<UploadImageResult> {
   if (!res.ok) {
     // This branch only became REACHABLE with #385, and reaching it must not cost
     // the #1160 diagnosis. An auth gate answering 401 with a sign-in page is the
@@ -1772,11 +1854,113 @@ export async function uploadImageHttp(
   // still-starting server answering 200 with HTML used to surface as a raw
   // SyntaxError with no mention of what was requested (#946, and the same class
   // as #918/#952).
-  return readComfyJson<{ name: string; subfolder: string; type: string }>(res, {
+  return readComfyJson<UploadImageResult>(res, {
     url: "/upload/image",
     expectShape: (v: unknown) => !!v && typeof v === "object" && typeof (v as { name?: unknown }).name === "string",
-    shapeHint: 'the upload result ({ name, subfolder, type })',
+    shapeHint: "the upload result ({ name, subfolder, type })",
   });
+}
+
+async function proveUploadedInputLanded(
+  name: string,
+  subfolder: string,
+  data: Buffer,
+): Promise<UploadLanding> {
+  try {
+    const params = new URLSearchParams({ filename: name, type: "input", subfolder });
+    const res = await comfyApiFetch(`/view?${params.toString()}`, { method: "GET" });
+    if (res.status === 404) return "absent";
+    if (!res.ok) return "unknown";
+    const timeoutMs = Math.round(comfyHttpTimeoutSeconds() * 1000);
+    const bytes = await readViewResponseBounded(
+      res,
+      name,
+      timeoutMs,
+      undefined,
+      Math.max(data.length, 1),
+    );
+    return bytes.equals(data) ? "committed" : "absent";
+  } catch {
+    // unknown-ok: a failed /view cannot prove the POST committed or missed
+    return "unknown";
+  }
+}
+
+async function postUploadImage(
+  name: string,
+  data: Buffer,
+  mimeType: string,
+  overwrite: boolean,
+  subfolder: string,
+): Promise<UploadImageResult> {
+  const res = await comfyApiFetch("/upload/image", {
+    method: "POST",
+    body: buildUploadForm(name, data, mimeType, overwrite, subfolder),
+  });
+  return readUploadImageResponse(res);
+}
+
+async function uploadImageHttpOnce(
+  name: string,
+  data: Buffer,
+  mimeType: string,
+  overwrite: boolean,
+  subfolder: string,
+): Promise<UploadImageResult> {
+  try {
+    return await postUploadImage(name, data, mimeType, overwrite, subfolder);
+  } catch (err) {
+    if (!uploadDeliveryUnknown(err)) throw err;
+    const landing = await proveUploadedInputLanded(name, subfolder, data);
+    if (landing === "committed") {
+      logger.info("Upload POST transport failed; /view proved the input landed", {
+        name,
+        subfolder,
+      });
+      return { name, subfolder, type: "input" };
+    }
+    if (landing === "absent" && overwrite) {
+      try {
+        return await postUploadImage(name, data, mimeType, overwrite, subfolder);
+      } catch (retryErr) {
+        if (!uploadDeliveryUnknown(retryErr)) throw retryErr;
+        const again = await proveUploadedInputLanded(name, subfolder, data);
+        if (again === "committed") {
+          logger.info("Upload retry transport failed; /view proved the input landed", {
+            name,
+            subfolder,
+          });
+          return { name, subfolder, type: "input" };
+        }
+        throw retryErr;
+      }
+    }
+    throw err;
+  }
+}
+
+/**
+ * Upload an image to ComfyUI's input/ directory via HTTP multipart POST.
+ * Works over HTTP — no local filesystem access needed.
+ */
+export async function uploadImageHttp(
+  filename: string,
+  data: Buffer,
+  mimeType = "image/png",
+  overwrite = true,
+): Promise<UploadImageResult> {
+  if (isCloudMode()) return cloudClient.uploadImageHttp(filename, data, mimeType, overwrite);
+  // #946 — a `filename` carrying a path ("assets/clip.mp4") is a SUBFOLDER
+  // request, and ComfyUI's /upload/image takes that as its own form field, not
+  // as a slash inside the multipart filename. Sending the whole path as the
+  // filename put it somewhere between the transport and ComfyUI's handler and
+  // came back as a bare `Unexpected non-whitespace character after JSON at
+  // position 4` — no upload, no usable error. Split it and use the field the
+  // API actually has, which is also what the caller was asking for.
+  const { subfolder, name } = splitUploadTarget(filename);
+  return serializePerTargetUpload(getComfyUIBaseUrl(), () =>
+    uploadImageHttpOnce(name, data, mimeType, overwrite, subfolder),
+  );
 }
 
 /**

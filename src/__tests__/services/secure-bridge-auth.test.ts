@@ -44,11 +44,10 @@ describe("advertiseBridge auth headers", () => {
 
     expect(ok).toBe(true);
     const [, init] = advertiseCall(fetchMock);
-    expect(init.headers).toMatchObject({
-      "Content-Type": "application/json",
-      "CF-Access-Client-Id": "cid.access",
-      "CF-Access-Client-Secret": "csecret",
-    });
+    const headers = new Headers(init.headers);
+    expect(headers.get("Content-Type")).toBe("application/json");
+    expect(headers.get("CF-Access-Client-Id")).toBe("cid.access");
+    expect(headers.get("CF-Access-Client-Secret")).toBe("csecret");
   });
 
   it("also forwards COMFYUI_AUTH_TOKEN alongside CF Access", async () => {
@@ -62,11 +61,10 @@ describe("advertiseBridge auth headers", () => {
     await advertiseBridge("https://podid-3000.proxy.runpod.net", "wss://relay/?token=t");
 
     const [, init] = advertiseCall(fetchMock);
-    expect(init.headers).toMatchObject({
-      Authorization: "Bearer abc123",
-      "CF-Access-Client-Id": "cid.access",
-      "CF-Access-Client-Secret": "csecret",
-    });
+    const headers = new Headers(init.headers);
+    expect(headers.get("Authorization")).toBe("Bearer abc123");
+    expect(headers.get("CF-Access-Client-Id")).toBe("cid.access");
+    expect(headers.get("CF-Access-Client-Secret")).toBe("csecret");
   });
 
   it("no auth configured → advertise POST carries only Content-Type (no regression)", async () => {
@@ -77,7 +75,7 @@ describe("advertiseBridge auth headers", () => {
     await advertiseBridge("https://podid-3000.proxy.runpod.net", "wss://relay/?token=t");
 
     const [, init] = advertiseCall(fetchMock);
-    expect(init.headers).toEqual({ "Content-Type": "application/json" });
+    expect([...new Headers(init.headers).entries()]).toEqual([["content-type", "application/json"]]);
   });
 
   it("carries local_url so the pack can follow the bound loopback port (#2030)", async () => {

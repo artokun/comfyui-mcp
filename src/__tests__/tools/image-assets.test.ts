@@ -329,6 +329,17 @@ describe("get_image: each action reaches exactly one service", () => {
       allowAttachment: true,
       // #1373 — the input dir legitimately holds workflow .json files.
       allowJson: true,
+      forInlinePreview: true,
+    });
+  });
+
+  it('action:"get" forwards a get_history subfolder-qualified filename for service normalization', async () => {
+    await getImage()({ action: "get", filename: "out_F/p.png" });
+    expect(getOutputImageMock).toHaveBeenCalledWith("out_F/p.png", "output", "", {
+      allowMedia: true,
+      allowAttachment: true,
+      allowJson: true,
+      forInlinePreview: true,
     });
   });
 
@@ -341,6 +352,7 @@ describe("get_image: each action reaches exactly one service", () => {
       allowMedia: true,
       allowAttachment: true,
       allowJson: true,
+      forInlinePreview: true,
     });
   });
 
@@ -666,6 +678,7 @@ describe("guards test ABSENCE, never falsiness", () => {
       allowMedia: true,
       allowAttachment: true,
       allowJson: true,
+      forInlinePreview: true,
     });
   });
 

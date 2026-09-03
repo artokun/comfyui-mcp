@@ -14,8 +14,10 @@ import { join } from "node:path";
  * The only production path for a /view retry when the configured headless
  * ComfyUI target is unreachable. The child writes a reference-only request;
  * the orchestrator resolves an in-memory capability to a live panel and
- * performs the authenticated bridge command. No URL, origin, or file-supplied
- * tab identity crosses this channel.
+ * performs the authenticated bridge command. The child supplies only the
+ * canonical target identity it was spawned for; the orchestrator compares it
+ * with its current target before and after the bridge command. No origin or
+ * file-supplied tab identity crosses this channel.
  */
 export const PANEL_IMAGE_RELAY_VERSION = 1;
 export const PANEL_IMAGE_RELAY_MAX_BYTES = 32 * 1024 * 1024;
@@ -65,6 +67,9 @@ export interface PanelImageRelayRequest {
   version: typeof PANEL_IMAGE_RELAY_VERSION;
   requestId: string;
   capability: string;
+  /** Target identity captured by the child at spawn time. */
+  targetUrl: string;
+  targetGeneration: number;
   filename: string;
   subfolder: string;
   type: PanelImageType;
@@ -76,6 +81,9 @@ export interface PanelComfyUIReadRelayRequest {
   version: typeof PANEL_IMAGE_RELAY_VERSION;
   requestId: string;
   capability: string;
+  /** Target identity captured by the child at spawn time. */
+  targetUrl: string;
+  targetGeneration: number;
   operation: PanelComfyUIReadOperation;
   createdAt: number;
   deadlineAt: number;
@@ -83,9 +91,14 @@ export interface PanelComfyUIReadRelayRequest {
 
 export type PanelRelayRequest = PanelImageRelayRequest | PanelComfyUIReadRelayRequest;
 
+export interface PanelImageRelayTarget {
+  url: string;
+  generation: number;
+}
+
 export type PanelImageRelayAuthInput = Pick<
   PanelImageRelayRequest,
-  "requestId" | "filename" | "subfolder" | "type" | "createdAt" | "deadlineAt"
+  "requestId" | "targetUrl" | "targetGeneration" | "filename" | "subfolder" | "type" | "createdAt" | "deadlineAt"
 >;
 
 export interface PanelImageRelaySuccess {
@@ -119,6 +132,11 @@ interface PanelImageRelayResponseFailure {
   ok: false;
   error: string;
   updated: number;
+  /** #2703 - WHY the panel could not answer, when the code alone cannot say.
+   *  Carried only for PANEL_FETCH_FAILED, the one code that stands for a whole
+   *  family of distinct panel-side causes. Signed with the rest of the response;
+   *  see panelFailureReason for what may appear here. */
+  reason?: string;
 }
 
 interface PanelImageRelayResponseSuccess extends PanelImageRelaySuccess {
@@ -160,24 +178,31 @@ export interface PanelImageRelayBridge {
 export class PanelImageRelayError extends Error {
   readonly code: string;
   readonly unavailable: boolean;
+  /** #2703 - the panel-side cause behind a PANEL_FETCH_FAILED, when one was
+   *  carried. DIAGNOSTIC PROSE ONLY: nothing branches on it. */
+  readonly reason?: string;
 
-  constructor(message: string, code: string, unavailable = false) {
+  constructor(message: string, code: string, unavailable = false, reason?: string) {
     super(message);
     this.name = "PanelImageRelayError";
     this.code = code;
     this.unavailable = unavailable;
+    if (reason !== undefined) this.reason = reason;
   }
 }
 
 export class PanelComfyUIReadRelayError extends Error {
   readonly code: string;
   readonly unavailable: boolean;
+  /** #2703 - see PanelImageRelayError.reason. */
+  readonly reason?: string;
 
-  constructor(message: string, code: string, unavailable = false) {
+  constructor(message: string, code: string, unavailable = false, reason?: string) {
     super(message);
     this.name = "PanelComfyUIReadRelayError";
     this.code = code;
     this.unavailable = unavailable;
+    if (reason !== undefined) this.reason = reason;
   }
 }
 
@@ -200,6 +225,104 @@ function isSafeText(value: unknown, max: number): value is string {
       return code < 0x20 || code === 0x7f;
     })
   );
+}
+
+/**
+ * How much of a panel-side failure cause may ride back with the code (#2703).
+ *
+ * 200 rather than the 160 used for `error`: `error` is a fixed token from a
+ * closed set, while this is a sentence. The panel's longest shipped message
+ * ("fetch_comfyui_read response exceeds the 16777216-byte limit") fits well
+ * inside it, and a bound this size cannot be used to move a payload.
+ */
+const PANEL_FAILURE_REASON_MAX = 200;
+
+/**
+ * Turn the rejected bridge send into ONE sentence naming what actually went
+ * wrong (#2703).
+ *
+ * WHY THIS EXISTS. `PANEL_FETCH_FAILED` is the answer for every non-timeout
+ * throw out of `bridge.send`, and that is a whole family of distinct,
+ * differently-actionable causes: the panel's own `too_large` (the read exceeded
+ * its byte ceiling), `timeout`, `network_error`, `http_error` with a status,
+ * `invalid_origin`, `redirect_error`, `api_unavailable`, the workflow-reload
+ * guard, and an "Unknown command" from a panel that predates the read relay.
+ * The code separates NONE of them, so the reporter on #2703 was told
+ * "the connected panel ComfyUI read fallback failed safely (PANEL_FETCH_FAILED)"
+ * - true, and unactionable. The error this catch is already holding says which
+ * one it was; it was simply being dropped on the floor.
+ *
+ * TRUST. This is panel-authored prose reaching an agent, so it is treated the
+ * way the image path already treats a panel-authored `error` string: bounded,
+ * control characters removed, and gated on `isSafeText`. Nothing parses it and
+ * nothing branches on it - it is one sentence appended to an error message.
+ * There is no credential-reflection surface behind it either: the panel's read
+ * helper builds its messages from a FIXED route, a status number, a byte count
+ * and the browser's own fetch error, never from a response body (the class of
+ * leak #385 hit). Anything that fails the guard is dropped whole rather than
+ * repaired, so the worst case is exactly the pre-#2703 bare code.
+ */
+function panelFailureReason(error: unknown): string | undefined {
+  const raw = error instanceof Error ? error.message : typeof error === "string" ? error : "";
+  // Control characters are folded to spaces rather than rejecting the whole
+  // string: a message that merely wraps a line still carries its cause, and
+  // dropping it would put us back at the bare code this exists to replace.
+  const flattened = raw.replace(/[\u0000-\u001f\u007f]+/g, " ").replace(/\s+/g, " ").trim();
+  if (!flattened) return undefined;
+  const clipped =
+    flattened.length > PANEL_FAILURE_REASON_MAX
+      ? `${flattened.slice(0, PANEL_FAILURE_REASON_MAX - 1)}\u2026`
+      : flattened;
+  return isSafeText(clipped, PANEL_FAILURE_REASON_MAX) ? clipped : undefined;
+}
+
+/**
+ * ABSENT, or an OWN bounded safe string on the ONE code that carries one
+ * (#2703). Anything else is a malformed reply.
+ *
+ * Kept separate from the `hasOnlyKeys` list because the two say different
+ * things: the key list decides which fields MAY appear, and this decides what
+ * the field is allowed to be. A `reason` present but wrong is a malformed
+ * reply, not a reply with the field quietly ignored - the MAC covers it, so a
+ * value we would not accept is a value the writer and reader disagree about.
+ *
+ * Two refusals here that the first draft did not have (codex gate, round 2):
+ *
+ *  - THE CODE. Widening the key set let a signed `TIMEOUT` carrying a `reason`
+ *    validate, where before the extra key made it MALFORMED_REPLY. Dropping
+ *    that reason at RENDER time (the first draft did) fixed what the user sees
+ *    while still loosening the wire contract for every code except the one that
+ *    legitimately changed. Refusing it here restores the old answer for all of
+ *    them, and makes this the single place the rule is stated - the two readers
+ *    downstream may then simply repeat `response.reason`.
+ *
+ *  - INHERITANCE. `hasOwn` said "absent" for a `reason` reached through the
+ *    prototype while `record.reason` downstream reads it, so a polluted
+ *    `Object.prototype` slipped past this gate. This one is LOAD-BEARING, and
+ *    a first draft of the comment here wrongly said it was not: the reasoning
+ *    was that `responseMacPayload` reads the same inherited value, so the
+ *    digest would disagree and the reply be refused anyway. It disagrees only
+ *    when the SENDER did not account for it. A peer that signs the six-element
+ *    digest over the inherited value sends a body with no `reason` key at all,
+ *    and the MAC then verifies perfectly - leaving this the only check between
+ *    an unbounded string and the user's error message. Mutation testing is what
+ *    said so: deleting this line killed nothing until the test signed the
+ *    polluted value. An inherited value is refused outright rather than
+ *    accepted-if-safe; nothing on the wire put it there.
+ */
+function validFailureReason(record: Record<string, unknown>): boolean {
+  // The EFFECTIVE value (own or inherited), because that is what every reader
+  // of this record - including the MAC payload - will see.
+  const effective = (record as { reason?: unknown }).reason;
+  if (effective === undefined) return true;
+  if (!hasOwn(record, "reason")) return false;
+  if (record.error !== "PANEL_FETCH_FAILED") return false;
+  return isSafeText(effective, PANEL_FAILURE_REASON_MAX);
+}
+
+/** The one rendering of a carried reason, shared by both readers. */
+function reasonSuffix(reason: string | undefined): string {
+  return reason ? ` The panel reported: ${reason}` : "";
 }
 
 /** Strict wire-level validation. Keep this stricter than the legacy tool path. */
@@ -240,9 +363,90 @@ function isSafeRelaySecret(value: unknown): value is string {
   return typeof value === "string" && RELAY_SECRET_RE.test(value);
 }
 
+const RELAY_TARGET_URL_MAX_LENGTH = 4_096;
+
+/** Keep only the identity-bearing, non-secret parts of a ComfyUI URL. */
+function canonicalRelayTargetUrl(value: unknown): string | undefined {
+  if (typeof value !== "string" || value.length === 0 || value.length > RELAY_TARGET_URL_MAX_LENGTH) return undefined;
+  try {
+    const url = new URL(value.trim());
+    if (
+      (url.protocol !== "http:" && url.protocol !== "https:") ||
+      url.username ||
+      url.password ||
+      url.search ||
+      url.hash
+    ) return undefined;
+    return `${url.protocol}//${url.host}${url.pathname.replace(/\/+$/, "")}`;
+  } catch {
+    return undefined;
+  }
+}
+
+function relayTargetFromEnv(): PanelImageRelayTarget | undefined {
+  const url = canonicalRelayTargetUrl(process.env.COMFYUI_URL);
+  const rawGeneration = process.env.COMFYUI_MCP_TARGET_GENERATION?.trim();
+  if (!url || !rawGeneration || !/^\d+$/.test(rawGeneration)) return undefined;
+  const generation = Number(rawGeneration);
+  if (!Number.isSafeInteger(generation) || generation < 0) return undefined;
+  return { url, generation };
+}
+
+function relayTargetMatches(request: PanelRelayRequest, target: PanelImageRelayTarget | undefined): boolean {
+  return !!target &&
+    canonicalRelayTargetUrl(request.targetUrl) === canonicalRelayTargetUrl(target.url) &&
+    request.targetGeneration === target.generation;
+}
+
+function currentRelayTarget(options: PanelImageRelayServerOptions): PanelImageRelayTarget | undefined {
+  try {
+    const target = options.resolveCurrentTarget();
+    if (
+      !target ||
+      typeof target.url !== "string" ||
+      !Number.isSafeInteger(target.generation) ||
+      target.generation < 0 ||
+      !canonicalRelayTargetUrl(target.url)
+    ) return undefined;
+    return target;
+  } catch {
+    return undefined;
+  }
+}
+
+function currentPanelRelayTarget(
+  options: PanelImageRelayServerOptions,
+  tabId: string,
+): PanelImageRelayTarget | undefined {
+  try {
+    const target = options.resolvePanelTarget(tabId);
+    if (
+      !target ||
+      typeof target.url !== "string" ||
+      !Number.isSafeInteger(target.generation) ||
+      target.generation < 0 ||
+      !canonicalRelayTargetUrl(target.url)
+    ) return undefined;
+    return target;
+  } catch {
+    return undefined;
+  }
+}
+
+function relayTargetsMatch(
+  options: PanelImageRelayServerOptions,
+  request: PanelRelayRequest,
+  panelTab: string,
+): boolean {
+  return relayTargetMatches(request, currentRelayTarget(options)) &&
+    relayTargetMatches(request, currentPanelRelayTarget(options, panelTab));
+}
+
 function relayAuthPayload(input: PanelImageRelayAuthInput): string {
   return JSON.stringify([
     input.requestId,
+    input.targetUrl,
+    input.targetGeneration,
     input.filename,
     input.subfolder,
     input.type,
@@ -267,13 +471,21 @@ export function verifyPanelImageRelayCapability(
   return timingSafeEqual(Buffer.from(request.capability, "hex"), Buffer.from(expected, "hex"));
 }
 
-function readRelayAuthPayload(input: Pick<PanelComfyUIReadRelayRequest, "requestId" | "operation" | "createdAt" | "deadlineAt">): string {
-  return JSON.stringify(["fetch_comfyui_read", input.requestId, input.operation, input.createdAt, input.deadlineAt]);
+function readRelayAuthPayload(input: Pick<PanelComfyUIReadRelayRequest, "requestId" | "targetUrl" | "targetGeneration" | "operation" | "createdAt" | "deadlineAt">): string {
+  return JSON.stringify([
+    "fetch_comfyui_read",
+    input.requestId,
+    input.targetUrl,
+    input.targetGeneration,
+    input.operation,
+    input.createdAt,
+    input.deadlineAt,
+  ]);
 }
 
 export function makePanelComfyUIReadRelayCapability(
   secret: string,
-  input: Pick<PanelComfyUIReadRelayRequest, "requestId" | "operation" | "createdAt" | "deadlineAt">,
+  input: Pick<PanelComfyUIReadRelayRequest, "requestId" | "targetUrl" | "targetGeneration" | "operation" | "createdAt" | "deadlineAt">,
 ): string {
   return createHmac("sha256", secret).update(readRelayAuthPayload(input)).digest("hex");
 }
@@ -478,10 +690,14 @@ function validateRequest(value: unknown, requestId: string): PanelImageRelayRequ
   const createdAt = record.createdAt;
   const deadlineAt = record.deadlineAt;
   if (
-    !hasOnlyKeys(record, ["version", "requestId", "capability", "filename", "subfolder", "type", "createdAt", "deadlineAt"]) ||
+    !hasOnlyKeys(record, ["version", "requestId", "capability", "targetUrl", "targetGeneration", "filename", "subfolder", "type", "createdAt", "deadlineAt"]) ||
     record.version !== PANEL_IMAGE_RELAY_VERSION ||
     record.requestId !== requestId ||
     !isSafeRelayCapability(capability) ||
+    !canonicalRelayTargetUrl(record.targetUrl) ||
+    typeof record.targetGeneration !== "number" ||
+    !Number.isSafeInteger(record.targetGeneration) ||
+    record.targetGeneration < 0 ||
     !isSafePanelImageRef(record.filename, record.subfolder, record.type) ||
     typeof createdAt !== "number" ||
     typeof deadlineAt !== "number" ||
@@ -500,10 +716,14 @@ function validateReadRequest(value: unknown, requestId: string): PanelComfyUIRea
   const createdAt = record.createdAt;
   const deadlineAt = record.deadlineAt;
   if (
-    !hasOnlyKeys(record, ["version", "requestId", "capability", "operation", "createdAt", "deadlineAt"]) ||
+    !hasOnlyKeys(record, ["version", "requestId", "capability", "targetUrl", "targetGeneration", "operation", "createdAt", "deadlineAt"]) ||
     record.version !== PANEL_IMAGE_RELAY_VERSION ||
     record.requestId !== requestId ||
     !isSafeRelayCapability(capability) ||
+    !canonicalRelayTargetUrl(record.targetUrl) ||
+    typeof record.targetGeneration !== "number" ||
+    !Number.isSafeInteger(record.targetGeneration) ||
+    record.targetGeneration < 0 ||
     typeof record.operation !== "string" ||
     !isPanelComfyUIReadOperation(record.operation) ||
     typeof createdAt !== "number" ||
@@ -561,20 +781,30 @@ function validateResponse(value: unknown, requestId: string): PanelImageRelayRes
     typeof record.error === "string" &&
     record.error.length <= 160 &&
     isSafeText(record.error, 160) &&
-    hasOnlyKeys(record, ["version", "requestId", "ok", "error", "updated"])
+    validFailureReason(record) &&
+    hasOnlyKeys(record, ["version", "requestId", "ok", "error", "updated", "reason"])
   ) {
     return record as unknown as PanelImageRelayResponseFailure;
   }
   throw new PanelImageRelayError("The panel returned a malformed image relay reply.", "MALFORMED_REPLY");
 }
 
-function failureResponse(requestId: string, error: string, updated = Date.now()): PanelImageRelayResponseFailure {
+function failureResponse(
+  requestId: string,
+  error: string,
+  updated = Date.now(),
+  reason?: string,
+): PanelImageRelayResponseFailure {
   return {
     version: PANEL_IMAGE_RELAY_VERSION,
     requestId,
     ok: false,
     error,
     updated,
+    // Omitted rather than set to undefined: the far side validates the KEY SET
+    // with hasOnlyKeys, and JSON.stringify drops an explicit undefined anyway -
+    // which would leave the two sides disagreeing about the shape they signed.
+    ...(reason === undefined ? {} : { reason }),
   };
 }
 
@@ -585,21 +815,53 @@ function responseFailureMessage(response: PanelImageRelayResponseFailure): never
     "MALFORMED_REPLY",
     "NO_LIVE_PANEL",
     "PANEL_FETCH_FAILED",
+    "STALE_TARGET",
     "STALE_REQUEST",
     "TIMEOUT",
   ]);
   const code = known.has(response.error) ? response.error : "PANEL_FETCH_FAILED";
+  // #2703 - `response` reached here through validFailureReason, which admits a
+  // reason ONLY alongside a literal `PANEL_FETCH_FAILED` error. So a reason
+  // present here cannot belong to a remapped unknown code or to a TIMEOUT, and
+  // `code` necessarily equals `response.error`. A second filter at this point
+  // was written first and then removed: mutation testing showed it unreachable,
+  // and an unreachable guard that looks load-bearing misdirects the next reader
+  // about where the rule actually lives. It lives in validFailureReason.
+  const reason = response.reason;
   throw new PanelImageRelayError(
     code === "PANEL_FETCH_FAILED"
-      ? "The connected panel could not fetch that image."
+      ? `The connected panel could not fetch that image.${reasonSuffix(reason)}`
       : `The connected panel image relay failed (${code}).`,
     code,
+    false,
+    reason,
   );
 }
 
 function responseMacPayload(response: PanelRelayResponse): string {
   if (!response.ok) {
-    return JSON.stringify([response.version, response.requestId, false, response.error, response.updated]);
+    // `reason` is part of the SIGNED payload. A field the MAC does not cover is
+    // a field the reader may not rely on, and this one is read out loud to the
+    // user - an unauthenticated sentence attributed to the panel is worse than
+    // no sentence at all.
+    //
+    // APPENDED, not always-present-as-null. Writing it unconditionally changed
+    // the digest of a REASONLESS failure too, and that is a compatibility break
+    // this fix has no business making: the relay server and its client are two
+    // PROCESSES. An in-place package update swaps `dist` under a running
+    // orchestrator, and the children it spawns afterwards load the new code
+    // while it still runs the old - so an old signer would meet a new verifier
+    // and every relay failure would read MALFORMED_REPLY until the orchestrator
+    // restarted. (Caught by the shipped `classifies an authenticated server
+    // TIMEOUT before deadline freshness` test, which hand-signs the pre-#2703
+    // payload; that test was the old signer, and it was right to reject the
+    // change.) Appending keeps the old shape byte-identical.
+    //
+    // The two forms still cannot be confused: a 5-element array and a
+    // 6-element one never serialise to the same string, so stripping a reason
+    // or adding one both fail verification.
+    const base = [response.version, response.requestId, false, response.error, response.updated];
+    return JSON.stringify(response.reason === undefined ? base : [...base, response.reason]);
   }
   if ("operation" in response) {
     return JSON.stringify([
@@ -651,7 +913,8 @@ function validateReadResponse(
       typeof record.error === "string" &&
       record.error.length <= 160 &&
       isSafeText(record.error, 160) &&
-      hasOnlyKeys(record, ["version", "requestId", "ok", "error", "updated"])
+      validFailureReason(record) &&
+      hasOnlyKeys(record, ["version", "requestId", "ok", "error", "updated", "reason"])
     ) return record as unknown as PanelImageRelayResponseFailure;
     throw new PanelComfyUIReadRelayError("The panel returned a malformed ComfyUI read reply.", "MALFORMED_REPLY");
   }
@@ -876,6 +1139,10 @@ export interface PanelImageRelayServerOptions {
   bridge: PanelImageRelayBridge;
   resolvePanelAgent: (request: PanelRelayRequest) => PanelImageRelayResolvedAgent | undefined;
   resolvePanelTab: (agentKey: string) => string | undefined;
+  /** The orchestrator's authoritative target and monotonic generation. */
+  resolveCurrentTarget: () => PanelImageRelayTarget;
+  /** The exact target identity currently proven for the selected live panel tab. */
+  resolvePanelTarget: (tabId: string) => PanelImageRelayTarget | undefined;
 }
 
 export interface PanelImageRelayServer {
@@ -945,6 +1212,11 @@ export async function startPanelImageRelayServer(
             now >= requestDeadline(request) ? "TIMEOUT" : "STALE_REQUEST",
             now >= requestDeadline(request) ? requestDeadline(request) : now,
           );
+        } else if (!relayTargetMatches(request, currentRelayTarget(options))) {
+          // A child can remain on the previous target while its agent turn drains
+          // across a retarget. Never let that authenticated child address the new
+          // live panel: the capability proves ownership, not target freshness.
+          response = failureResponse(request.requestId, "STALE_TARGET");
         } else {
           const panelTab = options.resolvePanelTab(auth.agentKey);
           if (!panelTab || !options.bridge.canReach(panelTab)) {
@@ -952,10 +1224,17 @@ export async function startPanelImageRelayServer(
               request.requestId,
               options.bridge.resolveFailure?.(auth.agentKey) === "ambiguous" ? "AMBIGUOUS_REQUESTER" : "NO_LIVE_PANEL",
             );
+          } else if (!relayTargetsMatch(options, request, panelTab)) {
+            // The global target fence does not prove that this particular tab
+            // fronts the child target. Missing, stale, or ambiguous tab proof
+            // must refuse before the targetless bridge command is dispatched.
+            response = failureResponse(request.requestId, "STALE_TARGET");
           } else {
             const remainingMs = requestDeadline(request) - Date.now();
             if (remainingMs <= 0) {
               response = failureResponse(request.requestId, "TIMEOUT", requestDeadline(request));
+            } else if (!relayTargetsMatch(options, request, panelTab)) {
+              response = failureResponse(request.requestId, "STALE_TARGET");
             } else {
               try {
                 const reply = await withinDeadline(
@@ -971,7 +1250,9 @@ export async function startPanelImageRelayServer(
                 const imagePayload = !isReadRelayRequest(request) && replyRecord
                   ? validateImagePayload({ base64: replyRecord.base64, mimeType: replyRecord.mimeType, bytes: replyRecord.bytes })
                   : undefined;
-                if (Date.now() >= requestDeadline(request)) {
+                if (!relayTargetsMatch(options, request, panelTab)) {
+                  response = failureResponse(request.requestId, "STALE_TARGET");
+                } else if (Date.now() >= requestDeadline(request)) {
                   response = failureResponse(request.requestId, "TIMEOUT", requestDeadline(request));
                 } else if (isReadRelayRequest(request)) {
                   const payload = replyRecord ? validateReadPayload(replyRecord) : undefined;
@@ -999,6 +1280,10 @@ export async function startPanelImageRelayServer(
                   request.requestId,
                   timedOut ? "TIMEOUT" : "PANEL_FETCH_FAILED",
                   timedOut ? requestDeadline(request) : Date.now(),
+                  // #2703 - TIMEOUT already says what happened and by when; only
+                  // PANEL_FETCH_FAILED is the code that stands for many causes,
+                  // so only it needs the sentence.
+                  timedOut ? undefined : panelFailureReason(error),
                 );
               }
             }
@@ -1053,11 +1338,15 @@ export async function requestPanelImage(
   const endpoint = relayEndpoint();
   const secret = process.env.COMFYUI_MCP_RELAY_SECRET;
   if (!endpoint || !isSafeRelaySecret(secret)) return undefined;
+  const target = relayTargetFromEnv();
+  if (!target) return undefined;
   const createdAt = Date.now();
   const request: PanelImageRelayRequest = {
     version: PANEL_IMAGE_RELAY_VERSION,
     requestId: `${Date.now().toString(36)}-${process.pid.toString(36)}-${randomBytes(8).toString("hex")}`,
     capability: "",
+    targetUrl: target.url,
+    targetGeneration: target.generation,
     filename,
     subfolder,
     type,
@@ -1127,12 +1416,16 @@ export async function requestPanelComfyUIRead(
   const endpoint = relayEndpoint();
   const secret = process.env.COMFYUI_MCP_RELAY_SECRET;
   if (!endpoint || !isSafeRelaySecret(secret)) return undefined;
+  const target = relayTargetFromEnv();
+  if (!target) return undefined;
   const createdAt = Date.now();
   const timeoutMs = readTimeoutMs(operation);
   const request: PanelComfyUIReadRelayRequest = {
     version: PANEL_IMAGE_RELAY_VERSION,
     requestId: `${Date.now().toString(36)}-${process.pid.toString(36)}-${randomBytes(8).toString("hex")}`,
     capability: "",
+    targetUrl: target.url,
+    targetGeneration: target.generation,
     operation,
     createdAt,
     deadlineAt: createdAt + timeoutMs,
@@ -1192,15 +1485,21 @@ export async function requestPanelComfyUIRead(
       "MALFORMED_REPLY",
       "NO_LIVE_PANEL",
       "PANEL_FETCH_FAILED",
+      "STALE_TARGET",
       "STALE_REQUEST",
       "TIMEOUT",
     ]);
     const code = known.has(response.error) ? response.error : "PANEL_FETCH_FAILED";
+    // #2703 - see responseFailureMessage: validFailureReason is where "only
+    // PANEL_FETCH_FAILED carries a reason" is enforced, on the way in.
+    const reason = response.reason;
     throw new PanelComfyUIReadRelayError(
       code === "PANEL_FETCH_FAILED"
-        ? "The connected panel could not read ComfyUI."
+        ? `The connected panel could not read ComfyUI.${reasonSuffix(reason)}`
         : `The connected panel ComfyUI read relay failed (${code}).`,
       code,
+      false,
+      reason,
     );
   }
   return {
@@ -1220,6 +1519,8 @@ export async function requestPanelImageFromFileChannel(
   const dir = process.env.COMFYUI_MCP_PROGRESS_DIR?.trim() ?? "";
   const secret = process.env.COMFYUI_MCP_RELAY_SECRET;
   if (!dir || !isSafeRelaySecret(secret)) return undefined;
+  const target = relayTargetFromEnv();
+  if (!target) return undefined;
   if (!isSafePanelImageRef(filename, subfolder, type)) {
     throw new PanelImageRelayError("The image reference is unsafe and was refused.", "UNSAFE_REFERENCE");
   }
@@ -1237,6 +1538,8 @@ export async function requestPanelImageFromFileChannel(
     version: PANEL_IMAGE_RELAY_VERSION,
     requestId,
     capability: "",
+    targetUrl: target.url,
+    targetGeneration: target.generation,
     filename,
     subfolder,
     type,

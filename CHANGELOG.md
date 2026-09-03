@@ -6,6 +6,201 @@ All notable changes to this project are documented here. This project adheres to
 
 ## Unreleased
 
+### MCP
+
+#### Fixed
+- **`panel_restart_comfyui` restarts the panel's bound remote ComfyUI via Manager instead of refusing it as a foreign local instance (#2804).** A live tab whose server-observed Origin is a concrete non-loopback host no longer requires `COMFYUI_MCP_FORCE_REMOTE`; the busy guard still applies, a guessed origin is never restarted, and unbound/local identity confirmation is unchanged.
+- **`upload_image` concurrent `action:"stage"` POSTs no longer die as outcome-unknown EPIPE (#2801).** Uploads to one ComfyUI target run one at a time. A write EPIPE/ECONNRESET is settled against `/view` of the intended input before the tool returns: matching bytes count as committed, a 404 is retried once, and only an unprovable miss stays unknown.
+- **`panel_set_widget` writes the official Qwen Image subgraph prompt from the host input/widget mapping (#2791).** Live host node 76 lists input label `prompt` on widget `text`, but an incomplete promoted-terminal witness refused the STRING write. The unique host mapping (and `proxyWidgets` inner CLIPTextEncode) now authorizes the enclosing subgraph widget; official subgraphs are not unpacked. Still unverifiable mappings stay fail-closed.
+- **`panel_set_widget` MiniMaxH3Director prompt workaround recommends PrimitiveStringMultiline, not PrimitiveNode (#2790).** The panel correctly refuses a direct `prompt` / `builder_state` / `timeline_data` write, but its recovery instruction used to name a frontend PrimitiveNode for `external_prompt_overwrite`; `panel_connect` rejects that forceInput-only STRING. The producer advice now shares the same helper as `panel_connect`.
+- **`panel_ui_render` documents the four-Image cap the validator already enforces (#2796).** The declared manual listed the 64-component ceiling but omitted `maxImages: 4`, so a valid-looking five-image card was rejected as `too many images (5 > 4)` after an avoidable retry.
+
+
+## [0.52.183] - 2026-09-03
+
+### MCP
+#### Fixed
+- **stale `panel-op.lock` is reclaimed automatically when the owner process is gone (#2788, #2814).** Acquire takes the lock after the same proven-dead rename-aside path as `panel_action:"unlock"`; a living owner is never stolen, and an unreadable or reuse-ambiguous record still fails closed.
+- **`get_image` applies `max_preview_dimension` to a PNG that exceeds the 32 MB `/view` cap (#2785, #2815).** A 41.5 MB upscale previously died as `VIEW_TOO_LARGE` before the documented preview downscale ran. Still images requested for inline preview now use a 64 MB encoded-source ceiling (the same bound as `action:"convert"`), recover a local file in that window without an unbounded read, and fail closed with a size error that names convert when the original is still too large.
+- **parallel CivitAI downloads accept a proven shared extra-path `base_path` as `model_root` (#2787, #2813).** Category expansion still lists `E:\models\poses (poses)`, but omitting the configured group `base_path` made concurrent `download_model` `action:"download_civitai"` calls reject that same valid root while siblings wrote into it. Known-root discovery stays request-local, never probes a guessed `:8188` origin, and still refuses an unproven invented path.
+- **manga-director-codex MiniMax H3 adapter accepts documented `text_to_video`.** Native H3 T2V is `MiniMaxH3ImageToVideo` with both image sockets empty; the adapter omitted that mode and compilation refused a valid prompt spec. `text_to_video` is declared; I2V / FL2VA / L2VA / R2V modes are unchanged (#2786, #2812).
+- **`panel_slice_workflow` seeds outputs inside nested overlapping groups (#2780, #2806).** Membership used the first containing box only, so a SaveImage inside both an outer group and a nested inner group was missed when slicing by the inner title. Any matching containing group now seeds, and a miss lists every containing title.
+- panel_search_nodes no longer returns a raw Git URL as an install `id`, and panel_install_node refuses Git URLs before Manager v4 queueing rather than sending an unlisted URL as a registry lookup (#1539, #2795)
+
+
+## [0.52.182] - 2026-09-03
+
+### MCP
+
+#### Fixed
+- **`panel_connect` wires an exposed subgraph INT rail to another INT widget input.** A Scene Seed rail that already fed KSampler.seed / FaceDetailer.seed was refused onto LocalWildcardText.seed as "INT is not compatible with INT" because the rail still carried numeric widget constraints as a COMBO-shaped socket type. Those specs are normalized to INT before compatibility; COMBO option lists and distinct concrete types are unchanged (#2778, #2808).
+- **`panel_set_widget` writes ordinary root widgets after a queue-busy refusal without a manual `panel_graph_outline` (#2730, #2807).** A correct queue-busy fence left the panel's subgraph registry stale, so the next idle `graph_set_widget` treated root `UNETLoader` nodes as unverifiable promoted containers. Mapping-unknown now refreshes once (or after the busy refusal clears) and retries the guard; still unverifiable stays fail-closed.
+- **`panel_save_workflow(name)` rebinds the session onto the Save-As dest canvas (#2768, #2805).** After a named save the live instance is dest, but the source tab id can still `canReach`; staying there left `panel_list_workflows` and `panel_set_workflow_target({mode:"current"})` stamped for the replaced instance. Dest is followed when this save replaced the session canvas, and dest's command stamp is refreshed from the save reply.
+- **`list_local_models` `action:"remove"` resolves against the same launch-proven extra-path files as inventory, including ComfyUI Desktop's `extra_models_config.yaml` (#2739, #2803).** Removal previously searched only the Desktop shared models yaml from argv, so a listed LTX file under another active extra root could not be deleted. Desktop extra roots are included only when the connected snapshot already named a Desktop extra-path config — never by probing a guessed :8188 origin — and still fail closed when that file cannot be proven unchanged since launch.
+
+## [0.52.181] - 2026-09-03
+
+### MCP
+
+#### Fixed
+- **`panel_set_widget` creates a documented `lora_N` row on an ordinary Power Lora Loader inside a live subgraph (#2394, #2794).** Current panels flatten parentheses in the `graph_get_subgraph` "is not a subgraph" line, so a live `Power Lora Loader (rgthree)` was reported as `Power Lora Loader rgthree` and the identity-fenced ordinary write refused it as a type change. The two types are compared after that flatten; the write still fences the real unflattened type.
+
+## [0.52.180] - 2026-09-03
+
+### MCP
+
+#### Fixed
+- normalize saved workflow filenames (#2779)
+
+
+## [0.52.179] - 2026-09-02
+
+### MCP
+
+#### Fixed
+- **the UI→API converter no longer shifts widgets past a `forceInput`-only input (#2753, #2755).**
+  A `["STRING", {forceInput: true}]` input is a socket on canvas, so ComfyUI writes no
+  `widgets_values` slot for it; the converter classified it as a widget, consumed the first
+  saved value, and reported every real widget with its neighbour's value — `get_workflow`
+  returned `unet_name` holding `clip_name`'s model, and so on down the row.
+  A workflow saved before ComfyUI's widget/input unification kept a placeholder slot for
+  such an input; that row is indistinguishable from one carrying an extra serialized
+  value, so it is no longer guessed at — it is reported, naming the unmapped values.
+  The deprecated `defaultInput` spelling is honoured the way the frontend migrates it:
+  socket-only on an OPTIONAL input, widget kept on a REQUIRED one.
+- **`apply_manifest` now tracks Manager v4 custom-node enqueues that return an empty success body (#2725, #2749).** Already-enabled packs are satisfied without a duplicate enqueue, and an unverified empty-ack outcome remains pending instead of authorizing a speculative fallback.
+
+- a parked read resumes only for a tab that PROVES it is the one that issued it (#2769)
+- qwen-txt2img examples start 16-channel, matching the official Qwen Image template (#2767)
+- the tunnel/pairing listener reads the handshake Origin it was throwing away (#2766)
+- a 404 on both queue routes is not evidence that ComfyUI-Manager is missing (#2762)
+- a screenshot is a READ — stop calling its timeout a mutation, and give it the bounded read budget (#2760)
+- a pack workflow miss must not advertise the pack it just refused (#2750)
+
+
+## [0.52.178] - 2026-09-02
+
+### MCP
+
+#### Fixed
+- support IPv6-only ComfyUI loopback targets when `COMFYUI_URL` uses `127.0.0.1`, for issue #2719 (#2747)
+
+## [0.52.177] - 2026-09-02
+
+### MCP
+
+#### Fixed
+- **`node_pack` accepts documented pack-relative paths for git operations (#2716).**
+  Paths are now resolved against the selected pack before the existing jail
+  containment checks, so entries such as `preset_core.py` no longer resolve
+  from `custom_nodes/` and get rejected as outside the pack.
+
+## [0.52.176] - 2026-09-02
+
+### MCP
+
+#### Fixed
+- make wan-multitalk workflow runnable (#2702)
+
+
+## [0.52.175] - 2026-09-02
+
+### MCP
+
+#### Fixed
+- get_workflow strip resolves an absolute path under the live ComfyUI userdata/workflows tree without dropping the workflows segment or mangling Unicode dashes (#2528, #2658)
+- panel_run accepts VHS_VideoCombine (and any class with live object_info output_node true) as a run-to-node target instead of refusing it as not an output node (#2529, #2659); recovery preserves scoped batch and cloud targets, and refuses a nested fallback when the panel cannot provide its exact colon-qualified execution path
+
+
+## [0.52.174] - 2026-09-02
+
+### MCP
+
+#### Fixed
+- get_image accepts a get_history filename that includes a relative subfolder prefix (#2526)
+
+## [0.52.173] - 2026-09-02
+
+### MCP
+
+#### Fixed
+- artokun-flow installs the SAM3 checkpoint its REPLACEMENT MODE subgraph requires, saves with VHS_VideoCombine (an OUTPUT_NODE), and honors the requested artokun/comfyui-teskors-utils git origin instead of Manager teskor-hub alias (#2523, #2657)
+- panel restart binds to the dynamic local target instead of a stale fixed origin (#2068, #2737)
+
+## [0.52.172] - 2026-09-02
+
+### MCP
+
+#### Fixed
+- retry graph reads after `panel_open_workflow` when the initial panel response is incomplete (#2286, #2734)
+
+
+## [0.52.171] - 2026-09-02
+
+### MCP
+
+#### Fixed
+- recover full-graph `panel_run` queued-unknown responses from an exact rid-correlated Panel receipt without inferring a foreign queue prompt (#2143, #2732)
+
+
+## [0.52.170] - 2026-09-01
+
+### MCP
+
+#### Fixed
+- keep ingress completion blind-safe (#925)
+- canonicalize completion receipt prompt ids
+- acknowledge uncorrelatable completion frames
+
+
+## [0.52.169] - 2026-09-01
+
+### MCP
+
+#### Fixed
+- list_local_models removal resolves category-relative models from launch-state-proven ComfyUI Desktop shared roots without falling back to stale local roots (#1474)
+
+## [0.52.168] - 2026-09-01
+
+### MCP
+
+#### Fixed
+- resolve train refs from one live snapshot (#2720)
+- a git install must be corroborated on disk, not by ComfyUI-Manager's own list (#2715)
+- settle an unacked workflow_new against the panel's own rid-correlated receipt (#2710)
+- prove a VRAM release landed before reporting the reading as settled (#2708)
+- a PANEL_FETCH_FAILED panel read now names its cause (#2706)
+
+## [0.52.167] - 2026-09-01
+
+### MCP
+
+#### Fixed
+- panel_set_widget reconciles a missing ACK with a graph read-back and mutation receipt instead of leaving an applied subgraph write as outcome-unknown (#2489)
+- bind panel relay to selected tab target (#2656)
+- bind panel fallback relay to target generation
+- keep Unreleased changelog; vocabulary-safe list_assets mentions
+- name PreviewImage temp refs in panel completion events
+
+
+## [0.52.166] - 2026-09-01
+
+### MCP
+
+#### Fixed
+- panel_run(to_node_id) treats the paired random-mode seed-control graph-stamp diff as queue-time volatility rather than a real graph mismatch, while outer WorkerTransport failures remain outcome-unknown and are fenced for control-plane recovery (#2120, #2670)
+- panel-connected apply_manifest adopts the current panel-reported local ComfyUI path when COMFYUI_PATH is unset (#463, #2695)
+
+- handle DaSiWa seed stamp recurrence safely
+- ignore seed-only run-to-node stamp races
+- a promoted write refused by the ownership envelope names the invariant that failed (#2690)
+- terminate a generated API-node prompt with a sink matching its output type (#2687)
+- stop asserting a run the ComfyUI server has not confirmed (#2685)
+- flag an image-edit graph whose sampled canvas is not derived from the reference (#2683)
+- flag a sampler set below full denoise over an empty latent before it renders a flat field (#2682)
+- a loader input naming a file the server does not have says where it looked, and how to fix it (#2679)
+- a Windows updater that cannot reach npm or git says so, and says what to do (#2672)
+
 ## [0.52.165] - 2026-08-30
 
 ### MCP
@@ -22,7 +217,6 @@ All notable changes to this project are documented here. This project adheres to
 #### Fixed
 - check_runtime does not classify environment-authenticated paid Gemini and WaveSpeed nodes as local/free (#2543, #2665)
 - install_comfyui action:"environment" reports the pip-installed ComfyUI-Manager version from a trusted interpreter instead of a disabled custom_nodes/ComfyUI-Manager checkout (#2538, #2664)
-
 
 ## [0.52.163] - 2026-08-30
 
@@ -44,6 +238,7 @@ All notable changes to this project are documented here. This project adheres to
 ### MCP
 
 #### Fixed
+- get_image list_assets and get_system_stats logs fall back to the connected panel same-origin history/logs/view reads when the configured headless route is unreachable, and panel_run completion events name PreviewImage outputs with type temp (#2283)
 - panel_set_widget does not treat a MiniMaxH3Director duration write as failed when the value landed and only a setting-store onValueChange callback threw (#2545, #2654)
 - panel_connect retries a LiteGraph wildcard-to-wildcard (`*` → `*`) pairing when the panel reports "No input accepts type *" — PrimitiveNode "connect to widget input" can land on LogicIF.when_true / when_false so the primitive becomes typed from the destination (#2542, #2653)
 - panel_query_graph inspects the unsaved live canvas after custom-widget / builder content-only [root-shape-mismatch] instead of recommending a destructive re-open (#2544, #2652)

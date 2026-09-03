@@ -28,9 +28,10 @@
 // is simply "inactive" and nothing in the orchestrator changes. It must never
 // throw into the main path.
 
-import WebSocket from "ws";
+import { type RawData } from "ws";
 import { logger } from "../utils/logger.js";
 import { getComfyUIAuthHeaders } from "../config.js";
+import { LoopbackWebSocket } from "../transport/loopback-websocket.js";
 import { comfyuiFetch } from "../comfyui/fetch.js";
 import { sameOrigin } from "../utils/origin.js";
 
@@ -229,7 +230,7 @@ const TRAINING_NODE_CLASS_TYPES = new Set([
 ]);
 
 class QueueMonitorImpl {
-  private ws: WebSocket | null = null;
+  private ws: LoopbackWebSocket | null = null;
   private url: string | null = null;
   private stopped = false;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
@@ -522,13 +523,13 @@ class QueueMonitorImpl {
 
   private connect(): void {
     if (this.stopped) return;
-    let ws: WebSocket;
+    let ws: LoopbackWebSocket;
     try {
       // Ride the same auth as HTTP (COMFYUI_AUTH_* + Cloudflare Access service
       // token) on the WS handshake, so the watchdog reaches a ComfyUI behind a
       // proxy / CF Access. undefined when unauth'd → identical to `new WebSocket(url)`.
       const authHeaders = getComfyUIAuthHeaders();
-      ws = new WebSocket(
+      ws = new LoopbackWebSocket(
         this.wsUrl(),
         Object.keys(authHeaders).length ? { headers: authHeaders } : undefined,
       );
@@ -547,7 +548,7 @@ class QueueMonitorImpl {
       this.state.connected = true;
       logger.debug("[queue-monitor] watchdog WS connected");
     });
-    ws.on("message", (raw: WebSocket.RawData, isBinary: boolean) => {
+    ws.on("message", (raw: RawData, isBinary: boolean) => {
       if (this.ws !== ws) return;
       if (isBinary) return; // preview image frames — ignore
       this.onMessage(raw.toString());

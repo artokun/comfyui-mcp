@@ -9,9 +9,11 @@
 # All 6 model URLs below are HEAD-verified live (packs:check-urls, 6/6 OK). Wav2Vec
 # is auto-downloaded by DownloadAndLoadWav2VecModel (no manifest entry needed).
 # The GGUF downloads under city96's name and is saved as the workflow's local name.
-# NOT yet render-verified — do a live render on a local ComfyUI before shipping.
-# If AudioSeparation/AudioCrop don't resolve from WanVideoWrapper, add the audio
-# node pack that provides them.
+# The workflow's AudioSeparation/AudioCrop nodes come from the explicitly declared
+# audio-separation-nodes-comfyui pack below; they are not WanVideoWrapper nodes.
+# The bundled WanVideoWrapper revision rejects scaled_fp8 UMT5 checkpoints, so use
+# the compatible FP16 pairing instead. NOT yet render-verified — do
+# a live render on a local ComfyUI before shipping.
 
 pip:
   - imageio-ffmpeg   # VHS_VideoCombine needs an ffmpeg for the mux
@@ -20,6 +22,7 @@ custom_nodes:
   - https://github.com/kijai/ComfyUI-WanVideoWrapper.git   # WanVideo*/MultiTalk*/Wav2Vec/T5 nodes
   - https://github.com/kijai/ComfyUI-KJNodes.git           # ImageResizeKJv2
   - https://github.com/Kosinkadink/ComfyUI-VideoHelperSuite.git  # VHS_VideoCombine
+  - https://github.com/christian-byrne/audio-separation-nodes-comfyui.git  # AudioSeparation + AudioCrop
 
 models:
   # --- WAN 2.1 14B Image-to-Video 480p, GGUF Q8 (main transformer) ---
@@ -32,9 +35,9 @@ models:
   - url: https://huggingface.co/Kijai/WanVideo_comfy/resolve/main/WanVideo_2_1_Multitalk_14B_fp8_e4m3fn.safetensors
     local_path: diffusion_models/WanVideo_2_1_Multitalk_14B_fp8_e4m3fn.safetensors
 
-  # --- umt5-xxl text encoder (fp8 scaled) ---
-  - url: https://huggingface.co/Comfy-Org/Wan_2.1_ComfyUI_repackaged/resolve/main/split_files/text_encoders/umt5_xxl_fp8_e4m3fn_scaled.safetensors
-    local_path: text_encoders/umt5_xxl_fp8_e4m3fn_scaled.safetensors
+  # --- umt5-xxl text encoder (fp16; compatible with LoadWanVideoT5TextEncoder) ---
+  - url: https://huggingface.co/Comfy-Org/Wan_2.1_ComfyUI_repackaged/resolve/main/split_files/text_encoders/umt5_xxl_fp16.safetensors
+    local_path: text_encoders/umt5_xxl_fp16.safetensors
 
   # --- WAN 2.1 VAE (bf16) ---
   - url: https://huggingface.co/Kijai/WanVideo_comfy/resolve/main/Wan2_1_VAE_bf16.safetensors

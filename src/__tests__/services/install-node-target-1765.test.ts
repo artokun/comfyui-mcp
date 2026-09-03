@@ -111,16 +111,28 @@ const http = vi.hoisted(() => ({
     | "refuse-enqueue"
     | "accept-enqueue"
     | "manager-absent"
+    // #2754 — Manager is SERVING (its version route answers) but has no queue
+    // API. The queue routes 404 exactly as in "manager-absent"; only the version
+    // route tells the two apart.
+    | "manager-queueless"
+    // #2754 — queue routes 404 and the version routes 5xx: presence UNKNOWN.
+    | "manager-version-unreadable"
     | "manager-unavailable",
   calls: [] as string[],
 }));
-vi.mock("../../comfyui/fetch.js", () => {
+// Only `comfyuiFetch` is being stood in for. Everything else in the module —
+// raceAbort, defaultComfyTimeoutSignal, the failure describers — is real, because
+// a mock that silently omits them turns "node-management started using another
+// helper from this module" into a confusing failure in a suite about install
+// TARGETS (#2754).
+vi.mock("../../comfyui/fetch.js", async (importOriginal) => {
   const json = (body: unknown) =>
     new Response(JSON.stringify(body), {
       status: 200,
       headers: { "content-type": "application/json" },
     });
   return {
+    ...(await importOriginal<typeof import("../../comfyui/fetch.js")>()),
     comfyuiFetch: async (url: string) => {
       http.calls.push(url);
       if (http.mode === "refuse-enqueue") {
@@ -131,6 +143,18 @@ vi.mock("../../comfyui/fetch.js", () => {
       }
       if (http.mode === "manager-absent") {
         return new Response("missing", { status: 404, statusText: "Not Found" });
+      }
+      if (http.mode === "manager-version-unreadable") {
+        return new URL(url).pathname.endsWith("/manager/version")
+          ? new Response("upstream down", { status: 503 })
+          : new Response("missing", { status: 404, statusText: "Not Found" });
+      }
+      if (http.mode === "manager-queueless") {
+        // A legacy Manager that is up and answering its version route while its
+        // queue routes 404 — the #2754 shape.
+        return new URL(url).pathname === "/manager/version"
+          ? new Response("V3.41", { status: 200 })
+          : new Response("missing", { status: 404, statusText: "Not Found" });
       }
       const { pathname } = new URL(url);
       if (
@@ -329,6 +353,59 @@ describe("#1765 — install_custom_node must not write into an install this sess
     expect(http.calls.some((url) => url.endsWith("/manager/queue/install"))).toBe(false);
     expect(ok).toMatchObject({
       details: { managerStatus: { manager_unavailable: true } },
+    });
+  });
+
+  it("#2754 does not label the clone manager_absent when Manager answered its version route", async () => {
+    // Both queue routes 404, so the clone is still allowed and still happens —
+    // nothing was queued. But the SAME detection saw /manager/version answer
+    // "V3.41", so calling the result manager_absent is a claim contradicted by the
+    // error object the label was read from.
+    http.mode = "manager-queueless";
+    resetManagerApiCache("#2754 queueless-Manager label");
+
+    const { ok, error } = await install({ id: REPO, source: "git" });
+
+    expect(error).toBeUndefined();
+    expect(ok).toMatchObject({ mechanism: "git-clone" });
+    expect(clonedInto()).toBe(join(CONNECTED, PACK_DIR));
+    // Routing is unchanged by #2754 — only the name the outcome is given.
+    expect(ok).toMatchObject({
+      details: { managerStatus: { manager_unavailable: true } },
+    });
+    expect(
+      (ok as { details?: { managerStatus?: Record<string, unknown> } }).details?.managerStatus,
+    ).not.toHaveProperty("manager_absent");
+  });
+
+  it("#2754 does not label the clone manager_absent when the version probe was UNREADABLE", async () => {
+    // Queue routes 404, version routes 503. The diagnostic says presence is
+    // unknown; the label must not say absent in the same breath (gate round 7).
+    http.mode = "manager-version-unreadable";
+    resetManagerApiCache("#2754 unreadable-version label");
+
+    const { ok, error } = await install({ id: REPO, source: "git" });
+
+    expect(error).toBeUndefined();
+    expect(ok).toMatchObject({ mechanism: "git-clone" });
+    expect(ok).toMatchObject({
+      details: { managerStatus: { manager_unavailable: true } },
+    });
+    expect(
+      (ok as { details?: { managerStatus?: Record<string, unknown> } }).details?.managerStatus,
+    ).not.toHaveProperty("manager_absent");
+  });
+
+  it("#2754 STILL labels a fully-404 host manager_absent", async () => {
+    // The control: when every probe 404s, `absent` is exactly right and the round-5
+    // and round-7 predicates must not have quietly retired the label.
+    http.mode = "manager-absent";
+    resetManagerApiCache("#2754 absent control");
+
+    const { ok } = await install({ id: REPO, source: "git" });
+
+    expect(ok).toMatchObject({
+      details: { managerStatus: { manager_absent: true } },
     });
   });
 

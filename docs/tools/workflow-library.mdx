@@ -36,7 +36,7 @@ Return, list, summarize or query a SAVED workflow FILE — files on disk, named 
   Options: `ui`, `api`, `raw`.
 </ParamField>
 <ParamField path="path" type="string">
-  action:"strip" / "slice" / "query" — Absolute server-side path to a workflow .json on disk (e.g. C:\\Users\\you\\ComfyUI\\user\\default\\workflows\\pusa_extend.json). Read directly from disk — no library lookup.
+  action:"strip" / "slice" / "query" — Absolute server-side path to a workflow .json on disk (e.g. C:\\Users\\you\\ComfyUI\\user\\default\\workflows\\pusa_extend.json). Read directly from disk — no library lookup. If a userdata path is missing the `workflows` segment after `user/default`, it is retried with that segment restored, preserving the filename exactly.
 </ParamField>
 <ParamField path="graph" type="object">
   action:"strip" / "slice" / "query" — Inline workflow JSON (UI format for "strip"/"slice"; UI or API for "query"), as an alternative to path/filename.
@@ -232,7 +232,7 @@ WRITE to the ComfyUI user library: persist a workflow, or capture/verify its pro
   Options: `action:"save"`, `action:"lock"`, `action:"verify_lock"`.
 </ParamField>
 <ParamField path="filename" type="string">
-  Workflow filename in the ComfyUI user library (e.g. 'my_workflow.json'). REQUIRED for every action. For action:"save" this OVERWRITES an existing file of the same name; for "lock"/"verify_lock" the lock is read/written as '&lt;filename&gt;.lock.json' alongside it.
+  Workflow filename in the ComfyUI user library (e.g. 'my_workflow.json'). REQUIRED for every action. A missing `.json` suffix is appended before use; extension case and forward-slash subfolders are preserved. The name must be a safe relative path. For action:"save" this OVERWRITES an existing file of the same canonical name; for "lock"/"verify_lock" the lock is read/written as '&lt;filename&gt;.lock.json' alongside it.
 </ParamField>
 <ParamField path="workflow" type="object">
   action:"save" (REQUIRED) — Workflow JSON to save. Web UI format (&#123; nodes: [], links: [] &#125;) is stored verbatim; API format (&#123; '1': &#123; class_type, inputs &#125; &#125;) is auto-converted to Web UI format (generated layout) so it stays openable in ComfyUI's canvas. Not validated against the server before saving.

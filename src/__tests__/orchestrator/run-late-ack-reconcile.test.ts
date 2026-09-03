@@ -29,6 +29,7 @@ import {
   buildPanelToolDefs,
   makePanelToolCtx,
   RETRY_TOKEN_CMDS,
+  __panelRunTestHooks,
   __panelToolsTestHooks,
   type PanelToolCtx,
   type ToolResult,
@@ -81,6 +82,7 @@ beforeEach(async () => {
 });
 
 afterEach(async () => {
+  __panelRunTestHooks.setGotPromptLinesProbe(null);
   __panelToolsTestHooks.setRunLateAckGraceMs(null);
   for (const s of sockets.splice(0)) s.close();
   await bridge.stop();
@@ -147,6 +149,49 @@ function scriptRunPanel(
   return { rids, lateReplySent };
 }
 
+/** A current Panel full-graph shape: the bounded command returns queued_unknown,
+ * then the at-least-once receipt outbox reports the exact /prompt id later. */
+function scriptQueuedUnknownThenReceipt(
+  sock: WebSocket,
+  receiptDelayMs: number,
+): { rids: string[]; receiptSent: Promise<void> } {
+  const rids: string[] = [];
+  let markSent: () => void = () => {};
+  const receiptSent = new Promise<void>((resolve) => (markSent = resolve));
+  sock.on("message", (buf) => {
+    const msg = JSON.parse(buf.toString()) as { rid?: string; cmd?: string };
+    if (typeof msg.rid !== "string" || msg.cmd !== "graph_run") return;
+    const rid = msg.rid;
+    rids.push(rid);
+    setTimeout(() => {
+      sock.send(
+        JSON.stringify({
+          rid,
+          ok: true,
+          result: {
+            queued_unknown: true,
+            indeterminate_count: 1,
+            inFlight: 1,
+            error: "queuePrompt did not answer within the Panel command budget",
+          },
+        }),
+      );
+    }, 0);
+    setTimeout(() => {
+      sock.send(
+        JSON.stringify({
+          type: "run_receipt",
+          run_rid: rid,
+          prompt_id: "p-full-late-receipt",
+          completion_key: JSON.stringify(["tab-full-late-receipt", "prompt-full-late-receipt"]),
+        }),
+      );
+      markSent();
+    }, receiptDelayMs);
+  });
+  return { rids, receiptSent };
+}
+
 /**
  * The REAL ctx with one property shortened: panel_run passes an EXPLICIT 20 000 ms
  * to ctx.call, so unlike the #694 e2e a default cannot be lowered — the value is
@@ -175,6 +220,27 @@ async function settle(): Promise<void> {
 }
 
 describe("panel_run reconciles a late graph_run acknowledgement (#1175)", () => {
+  it("full-graph queued_unknown waits for the exact Panel receipt (#2143)", async () => {
+    // A Panel full-graph command can answer with this uncertainty body before
+    // its run_receipt outbox has delivered the prompt id.
+    // There is no safe queue-id inference here: only the rid-correlated Panel
+    // receipt may turn this into a queued run.
+    __panelRunTestHooks.setGotPromptLinesProbe(async () => []);
+    const sock = await connectPanel("tab-full-late-receipt");
+    const panel = scriptQueuedUnknownThenReceipt(sock, 250);
+    const ctx = fastCtx("tab-full-late-receipt");
+
+    const res = await panelRun().handler({}, ctx);
+    const text = textOf(res);
+
+    expect(res.isError, `expected the exact receipt to recover the run, got: ${text}`).toBeFalsy();
+    expect(text).toContain("p-full-late-receipt");
+    expect(text).toContain("[RECOVERED]");
+    expect(text).toContain("notified automatically");
+    expect(panel.rids).toHaveLength(1);
+    await panel.receiptSent;
+  });
+
   it("THE REPORT: a run acked after the bound is reported as queued, not unknown", async () => {
     const sock = await connectPanel("tab-late-run");
     const panel = scriptRunPanel(sock, { queued: true, prompt_id: "p-late-1" }, 250);

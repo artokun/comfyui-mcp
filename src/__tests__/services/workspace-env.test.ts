@@ -112,6 +112,7 @@ import {
   resolveLocalWorkspaceBase,
   resolveInstallInterpreter,
   resolveLiveComfyUIBase,
+  getLiveServerSnapshot,
   resolveLiveServerRoot,
   resolveRootInterpreter,
   torchVersionsAgree,
@@ -2048,6 +2049,15 @@ describe("resolveLiveComfyUIBase (#490 / #463 — live connected install root)",
   it("returns undefined (never throws) when the server is unreachable", async () => {
     mockGetSystemStats.mockRejectedValue(new Error("ECONNREFUSED"));
     await expect(resolveLiveComfyUIBase()).resolves.toBeUndefined();
+  });
+
+  it("sanitizes malformed argv and cwd from the production JSON response", async () => {
+    mockGetSystemStats.mockResolvedValue({ system: { argv: [1], cwd: 42 } });
+    await expect(getLiveServerSnapshot()).resolves.toEqual({
+      reachable: true,
+      argv: undefined,
+      cwd: undefined,
+    });
   });
 });
 

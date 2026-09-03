@@ -16,7 +16,11 @@ import {
   type PanelComfyUIReadOperation,
   type PanelComfyUIReadSuccess,
 } from "./panel-image-relay.js";
-import { getExtraModelRoots, getLiveExtraModelRoots } from "./extra-paths.js";
+import {
+  getExtraModelRoots,
+  getLaunchStateExtraModelRoots,
+  getLiveExtraModelRoots,
+} from "./extra-paths.js";
 import {
   liveRootFromArgv,
   resolveEffectiveComfyUIBase,
@@ -2562,6 +2566,10 @@ async function listKnownDownloadModelRoots(
     known.push({ dir: resolved, category: cat });
   };
   try {
+    // Request-local: each download builds its own list. Extra roots include
+    // category dirs AND each group's proven base_path as a generic models
+    // root, so parallel download_civitai calls share the same list_paths
+    // model_root (#2787). Live extras use THIS snapshot — never a guessed :8188.
     for (const er of await getExtraModelRoots()) add(er.dir, er.category);
   } catch {
     // Extra roots are additive; an unreadable config just contributes none.
@@ -3156,14 +3164,58 @@ export interface ResolvedModelFile {
   info: Stats;
 }
 
+export interface ResolveExistingModelFileOptions {
+  /** `remove` enables the stricter live launch-state deletion authorization. */
+  mode?: "read" | "remove";
+}
+
+async function getAuthorizedModelRootsForRemoval(configuredModelsRoot: string) {
+  if (isRemoteMode()) {
+    return { primaryRoots: [configuredModelsRoot], extraRoots: [] };
+  }
+
+  // This is the same live resolution used by download destinations. A reachable
+  // server's configured-base fallback is not deletion authority: it can be a
+  // different install from the one answering /system_stats. The server-named
+  // predicate is deliberately narrower than the write-side observed-root
+  // predicate: an OS-inferred portable bundle is not proof of the primary root.
+  const resolved = await resolveModelsDirWithBases();
+  if (resolved.snapshot.reachable) {
+    const primaryRoots = modelsDirNamedByServer(resolved.source)
+      ? [resolve(resolved.modelsDir)]
+      : [];
+    let extraRoots: Awaited<ReturnType<typeof getLaunchStateExtraModelRoots>> = {
+      authoritative: false,
+      roots: [],
+    };
+    try {
+      // This is deletion-specific. It uses the SAME snapshot, but rejects a
+      // current config that cannot be proven unchanged since the connected
+      // process started. The generic live helper remains current-config based
+      // for downloads and symlink authorization.
+      extraRoots = await getLaunchStateExtraModelRoots(resolved.snapshot);
+    } catch {
+      extraRoots = { authoritative: false, roots: [] };
+    }
+    return {
+      primaryRoots,
+      extraRoots: extraRoots.authoritative ? extraRoots.roots : [],
+    };
+  }
+
+  // Removal has no safe offline fallback: the configured path may belong to a
+  // stale install, and current extra-path config is not proof of what a server
+  // loaded. Refuse before stat() so an unreachable target cannot authorize a
+  // local deletion by accident.
+  return { primaryRoots: [], extraRoots: [] };
+}
+
 /**
  * Locate an existing model file given a path relative to ComfyUI's models/
- * directory, searching ACROSS every configured root: the primary
- * `<COMFYUI_PATH>/models` AND every directory declared in
- * extra_model_paths.yaml / extra_models_config.yaml (e.g. models stored on
- * another drive such as E:\). This mirrors the set of roots ComfyUI itself
- * loads from, so a model installed under an extra root can be found (and
- * removed) the same way as one under the primary install.
+ * directory. Read-only callers retain the configured primary and extra-root
+ * lookup. The explicit `mode:"remove"` path instead searches only connected
+ * server-named/launch-state-proven roots, so deletion cannot inherit read-only
+ * visibility from mutable local configuration.
  *
  * Resolution rules:
  *  - The primary root is searched with the full relative path.
@@ -3179,6 +3231,7 @@ export interface ResolvedModelFile {
  */
 export async function resolveExistingModelFile(
   relativePath: string,
+  options: ResolveExistingModelFileOptions = {},
 ): Promise<ResolvedModelFile> {
   if (!resolveComfyUIBase()) {
     throw new ModelError(
@@ -3206,17 +3259,23 @@ export async function resolveExistingModelFile(
   const searched: string[] = [];
   let dirHit: ResolvedModelFile | undefined;
 
-  // Primary root: <COMFYUI_PATH>/models/<relativePath>. containWithinRoot throws
-  // on traversal/escape, preserving the existing security behavior.
-  const modelsRoot = resolve(getModelsRoot());
-  const primaryTarget = containWithinRoot(modelsRoot, raw);
-  searched.push(modelsRoot);
-  try {
-    const info = await stat(primaryTarget);
-    if (info.isFile()) return { path: primaryTarget, root: modelsRoot, info };
-    dirHit = { path: primaryTarget, root: modelsRoot, info };
-  } catch {
-    // Not present under the primary root; fall through to extra roots.
+  const configuredModelsRoot = resolve(getModelsRoot());
+  const rootResolution = options.mode === "remove"
+    ? await getAuthorizedModelRootsForRemoval(configuredModelsRoot)
+    : { primaryRoots: [configuredModelsRoot], extraRoots: undefined };
+
+  // Primary roots are searched in authority order. Each candidate remains
+  // containment-checked, preserving the absolute/traversal guard.
+  for (const modelsRoot of rootResolution.primaryRoots) {
+    const primaryTarget = containWithinRoot(modelsRoot, raw);
+    searched.push(modelsRoot);
+    try {
+      const info = await stat(primaryTarget);
+      if (info.isFile()) return { path: primaryTarget, root: modelsRoot, info };
+      if (!dirHit) dirHit = { path: primaryTarget, root: modelsRoot, info };
+    } catch {
+      // Not present under this primary root; keep searching authorized roots.
+    }
   }
 
   // Extra roots are declared per category, so peel off the first path segment
@@ -3225,7 +3284,7 @@ export async function resolveExistingModelFile(
   const category = segments[0];
   const remainder = segments.slice(1).join("/");
   if (category && remainder) {
-    const extraRoots = await getExtraModelRoots();
+    const extraRoots = rootResolution.extraRoots ?? (await getExtraModelRoots());
     for (const er of extraRoots) {
       if (er.category !== category) continue;
       const rootDir = resolve(er.dir);
@@ -3250,12 +3309,10 @@ export async function resolveExistingModelFile(
 
   if (dirHit) return dirHit;
 
-  // #1474 — say WHY only these roots were searched. `list_paths` may display roots
-  // this resolver refused to enumerate (it backs DELETION, so it uses only roots
-  // provable from the running server's launch arguments), and the caller was left
-  // holding two tools that disagreed with nothing to reconcile them.
+  // #1474 — removal says WHY only its authorized roots were searched. Read-only
+  // callers use the normal configured-root lookup and do not inherit this policy.
   throw new ModelError(
-    modelNotFoundMessage({ relativePath, searched }),
+    modelNotFoundMessage({ relativePath, searched, deletion: options.mode === "remove" }),
     { path: relativePath, searched },
   );
 }

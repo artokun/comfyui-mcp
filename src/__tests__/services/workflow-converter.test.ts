@@ -3749,3 +3749,374 @@ describe("convertUiToApi — extras-skipping must never eat a legitimate value (
     expect(workflow["1"].inputs.count).toBe(7);
   });
 });
+
+// ─────────────────────────────────────────────────────────────────────────────
+// #2753 — a forceInput-only scalar input is a SOCKET, not a widget, so it has no
+// widgets_values slot. Classifying it as one consumed the first saved value and
+// shifted every real widget down the row.
+// ─────────────────────────────────────────────────────────────────────────────
+describe("convertUiToApi — forceInput-only scalar input (issue #2753)", () => {
+  // The reporter's node: trainer_status is declared ["STRING", {forceInput:true}]
+  // and rendered as an input socket only; the five widgets after it are the ones
+  // the frontend actually serializes.
+  const ANIMA_INFO = {
+    AnimaTrainerLoader: {
+      input: {
+        required: {
+          trainer_status: ["STRING", { forceInput: true }],
+          unet_name: [["anima-base-v1.0.safetensors", "qwen_3_06b_base.safetensors"]],
+          clip_name: [["qwen_3_06b_base.safetensors", "qwen_image_vae.safetensors"]],
+          vae_name: [["qwen_image_vae.safetensors", "other_vae.safetensors"]],
+          weight_dtype: [["default", "fp8_e4m3fn"]],
+          clip_device: [["default", "cpu"]],
+        },
+      },
+      input_order: {
+        required: [
+          "trainer_status",
+          "unet_name",
+          "clip_name",
+          "vae_name",
+          "weight_dtype",
+          "clip_device",
+        ],
+      },
+      output: ["MODEL", "CLIP", "VAE"],
+      output_name: ["MODEL", "CLIP", "VAE"],
+    },
+  } as never;
+
+  // Exactly the widgets_values the reporter's saved workflow carries: FIVE values
+  // for five widgets, with NO slot for the socket-only trainer_status.
+  const SAVED_ROW = [
+    "anima-base-v1.0.safetensors",
+    "qwen_3_06b_base.safetensors",
+    "qwen_image_vae.safetensors",
+    "default",
+    "default",
+  ];
+
+  function animaNode(row: unknown[], trainerLink: number | null = null) {
+    return {
+      id: 7,
+      type: "AnimaTrainerLoader",
+      mode: 0,
+      inputs: [{ name: "trainer_status", type: "STRING", link: trainerLink }],
+      outputs: [
+        { name: "MODEL", type: "MODEL", links: [] },
+        { name: "CLIP", type: "CLIP", links: [] },
+        { name: "VAE", type: "VAE", links: [] },
+      ],
+      widgets_values: row,
+    };
+  }
+
+  function animaGraph(row: unknown[]) {
+    return { nodes: [animaNode(row)], links: [] } as never;
+  }
+
+  it("exact reported symptom: every widget keeps its own saved value", () => {
+    const { workflow, warnings } = convertUiToApi(animaGraph(SAVED_ROW), ANIMA_INFO);
+    const inputs = (workflow["7"] as { inputs: Record<string, unknown> }).inputs;
+    expect(inputs).toMatchObject({
+      unet_name: "anima-base-v1.0.safetensors",
+      clip_name: "qwen_3_06b_base.safetensors",
+      vae_name: "qwen_image_vae.safetensors",
+      weight_dtype: "default",
+      clip_device: "default",
+    });
+    // the pre-fix (shifted) reading must not reappear
+    expect(inputs.unet_name).not.toBe("qwen_3_06b_base.safetensors");
+    expect(inputs.clip_name).not.toBe("qwen_image_vae.safetensors");
+    expect(inputs.vae_name).not.toBe("default");
+    expect(warnings).toEqual([]);
+  });
+
+  it("the socket-only input never steals a widget slot, wired or not", () => {
+    // Wired: the value arrives over the link, and the widgets stay put.
+    const wired = {
+      nodes: [
+        {
+          id: 6,
+          type: "CheckpointLoaderSimple",
+          mode: 0,
+          inputs: [],
+          outputs: [{ name: "MODEL", type: "MODEL", links: [1] }],
+          widgets_values: ["x.safetensors"],
+        },
+        animaNode(SAVED_ROW, 1),
+      ],
+      links: [[1, 6, 0, 7, 0, "STRING"]],
+    } as never;
+    const { workflow } = convertUiToApi(wired, {
+      ...(ANIMA_INFO as object),
+      CheckpointLoaderSimple: {
+        input: { required: { ckpt_name: [["x.safetensors"]] } },
+        input_order: { required: ["ckpt_name"] },
+        output: ["MODEL"],
+        output_name: ["MODEL"],
+      },
+    } as never);
+    const inputs = (workflow["7"] as { inputs: Record<string, unknown> }).inputs;
+    expect(inputs.trainer_status).toEqual(["6", 0]);
+    expect(inputs.unet_name).toBe("anima-base-v1.0.safetensors");
+    expect(inputs.clip_device).toBe("default");
+  });
+
+  // Excluding the socket-only input hands a row that is one longer than the widget
+  // layout back to the #1869 extras pass, which is what reads it correctly. Pin
+  // that, because the tempting "normalize the row by length first" shortcut breaks
+  // exactly here: it would claim the extra as a legacy placeholder and put
+  // "detect_range" on `path`, silently. (The reverse — a genuinely legacy row with a
+  // placeholder — is the accepted limitation noted at the mapping site: the two are
+  // indistinguishable by length, so neither is guessed.)
+  const AMVIDEO_INFO = {
+    AMVideoRead: {
+      input: {
+        required: {
+          trigger: ["STRING", { forceInput: true }],
+          path: ["STRING", {}],
+          first_frame: ["INT", { default: 0 }],
+        },
+      },
+      input_order: { required: ["trigger", "path", "first_frame"] },
+      output: [],
+    },
+  } as never;
+
+  function amVideoGraph(row: unknown[]) {
+    return {
+      nodes: [
+        {
+          id: 1,
+          type: "AMVideoRead",
+          mode: 0,
+          inputs: [{ name: "trigger", type: "STRING", link: null }],
+          outputs: [],
+          widgets_values: row,
+        },
+      ],
+      links: [],
+    } as never;
+  }
+
+  it("hands a one-long row to the #1869 extras pass, which recovers the real value", () => {
+    const { workflow, warnings } = convertUiToApi(
+      amVideoGraph(["D:/input.mov", "detect_range", 12]),
+      AMVIDEO_INFO,
+    );
+    const inputs = (workflow["1"] as { inputs: Record<string, unknown> }).inputs;
+    expect(inputs.path).toBe("D:/input.mov");
+    expect(inputs.first_frame).toBe(12);
+    // and the discarded value is REPORTED, never dropped silently
+    expect(warnings.join(" ")).toContain("detect_range");
+  });
+
+  it("…via the other #1869 signal too (a value the declared type refutes)", () => {
+    const { workflow } = convertUiToApi(
+      amVideoGraph(["D:/input.mov", "not_a_number", 12]),
+      AMVIDEO_INFO,
+    );
+    const inputs = (workflow["1"] as { inputs: Record<string, unknown> }).inputs;
+    expect(inputs.path).toBe("D:/input.mov");
+    expect(inputs.first_frame).toBe(12);
+  });
+
+  // The accepted limitation must be AUDIBLE. A pre-unification row keeps a
+  // placeholder slot for the socket-only input, so it is one longer than the widget
+  // layout and every widget reads one position early. Which reading is right cannot
+  // be decided from the row, so nothing is changed — but it must not pass silently.
+  it("a leftover value on a forceInput node is reported, not swallowed", () => {
+    const { workflow, warnings } = convertUiToApi(
+      animaGraph([null, ...SAVED_ROW]),
+      ANIMA_INFO,
+    );
+    // values are NOT guessed at — the row is mapped exactly as saved
+    const inputs = (workflow["7"] as { inputs: Record<string, unknown> }).inputs;
+    expect(inputs.unet_name).toBe(null);
+    // …but the leftover, and why it matters, are named
+    const w = warnings.join(" ");
+    expect(w).toContain("remain unmapped");
+    expect(w).toContain("forceInput");
+    expect(w).toContain('"default"'); // the value left over
+  });
+
+  it("stays quiet when the row maps exactly (no false leftover warning)", () => {
+    const { warnings } = convertUiToApi(animaGraph(SAVED_ROW), ANIMA_INFO);
+    expect(warnings.join(" ")).not.toContain("remain unmapped");
+  });
+
+  it("stays quiet when the extras pass already accounted for the row", () => {
+    const { warnings } = convertUiToApi(
+      amVideoGraph(["D:/input.mov", "detect_range", 12]),
+      AMVIDEO_INFO,
+    );
+    expect(warnings.join(" ")).not.toContain("remain unmapped");
+  });
+
+  // `defaultInput` is the deprecated spelling, and the frontend migrates it
+  // ASYMMETRICALLY (ComfyNodeDefImpl._migrateDefaultInput): on an OPTIONAL input it
+  // becomes forceInput — socket-only, no slot — while on a REQUIRED input it only
+  // logs "please drop the defaultInput option" and the widget is KEPT. Both halves
+  // are pinned, because getting the required half wrong shifts the row in the
+  // opposite direction to the bug being fixed.
+  it("an OPTIONAL defaultInput input is socket-only, like forceInput", () => {
+    const INFO = {
+      N: {
+        input: {
+          required: { mode: [["a", "b"]] },
+          optional: {
+            hook: ["STRING", { defaultInput: true }],
+            label: ["STRING", {}],
+          },
+        },
+        input_order: { required: ["mode"], optional: ["hook", "label"] },
+        output: [],
+      },
+    } as never;
+    const { workflow } = convertUiToApi(
+      {
+        nodes: [
+          {
+            id: 1,
+            type: "N",
+            mode: 0,
+            inputs: [{ name: "hook", type: "STRING", link: null }],
+            outputs: [],
+            widgets_values: ["b", "my label"],
+          },
+        ],
+        links: [],
+      } as never,
+      INFO,
+    );
+    const inputs = (workflow["1"] as { inputs: Record<string, unknown> }).inputs;
+    expect(inputs.mode).toBe("b");
+    expect(inputs.label).toBe("my label");
+  });
+
+  it("a REQUIRED defaultInput input keeps its widget slot", () => {
+    const INFO = {
+      N: {
+        input: {
+          required: {
+            hook: ["STRING", { defaultInput: true }],
+            label: ["STRING", {}],
+          },
+        },
+        input_order: { required: ["hook", "label"] },
+        output: [],
+      },
+    } as never;
+    const { workflow } = convertUiToApi(
+      {
+        nodes: [
+          {
+            id: 1,
+            type: "N",
+            mode: 0,
+            inputs: [],
+            outputs: [],
+            widgets_values: ["hooked", "my label"],
+          },
+        ],
+        links: [],
+      } as never,
+      INFO,
+    );
+    const inputs = (workflow["1"] as { inputs: Record<string, unknown> }).inputs;
+    // the frontend keeps this widget, so its slot is real — dropping it would
+    // shift `label` onto `hook`
+    expect(inputs.hook).toBe("hooked");
+    expect(inputs.label).toBe("my label");
+  });
+
+  // The socket-only rule is TOP-LEVEL ONLY, and that is not an omission.
+  // `_migrateDefaultInput` walks the node's own input.required/input.optional in
+  // two flat loops and does NOT recurse into a dynamic combo option's inputs, and
+  // the widget factory that honours forceInput runs on the node's own inputs. A
+  // nested leaf therefore keeps its widget and its slot whatever it declares —
+  // dropping it here would remove a slot the frontend does write, which is the same
+  // shift in the other direction.
+  it("a NESTED combo leaf keeps its slot whatever it declares", () => {
+    const INFO = {
+      N: {
+        input: {
+          required: {
+            combo: [
+              "COMFY_DYNAMICCOMBO_V3",
+              {
+                options: [
+                  {
+                    key: "a",
+                    inputs: {
+                      optional: { hook: ["STRING", { defaultInput: true }] },
+                    },
+                  },
+                ],
+              },
+            ],
+            tail: ["INT", { default: 0 }],
+          },
+        },
+        input_order: { required: ["combo", "tail"] },
+        output: [],
+      },
+    } as never;
+    const { workflow } = convertUiToApi(
+      {
+        nodes: [
+          {
+            id: 1,
+            type: "N",
+            mode: 0,
+            inputs: [],
+            outputs: [],
+            widgets_values: ["a", "hooked", 7],
+          },
+        ],
+        links: [],
+      } as never,
+      INFO,
+    );
+    const inputs = (workflow["1"] as { inputs: Record<string, unknown> }).inputs;
+    expect(inputs["combo.hook"]).toBe("hooked");
+    expect(inputs.tail).toBe(7); // NOT stolen by the nested leaf
+  });
+
+  it("an INT forceInput input is socket-only too (not just STRING)", () => {
+    const INFO = {
+      N: {
+        input: {
+          required: {
+            steps: ["INT", { forceInput: true, default: 20 }],
+            cfg: ["FLOAT", { default: 8 }],
+            sampler: [["euler", "dpmpp_2m"]],
+          },
+        },
+        input_order: { required: ["steps", "cfg", "sampler"] },
+        output: [],
+      },
+    } as never;
+    const { workflow } = convertUiToApi(
+      {
+        nodes: [
+          {
+            id: 1,
+            type: "N",
+            mode: 0,
+            inputs: [{ name: "steps", type: "INT", link: null }],
+            outputs: [],
+            widgets_values: [7.5, "dpmpp_2m"],
+          },
+        ],
+        links: [],
+      } as never,
+      INFO,
+    );
+    const inputs = (workflow["1"] as { inputs: Record<string, unknown> }).inputs;
+    expect(inputs.cfg).toBe(7.5);
+    expect(inputs.sampler).toBe("dpmpp_2m");
+  });
+});
+

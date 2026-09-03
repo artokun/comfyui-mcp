@@ -218,7 +218,7 @@ export function registerImageManagementTools(server: McpServer): void {
   server.tool(
     "get_image",
     "Fetch, browse and inspect ComfyUI images and registered assets. Driven by the `action` parameter:\n" +
-      '- action:"get" — Fetch a generated image from ComfyUI by FILENAME and return it as an inline image. Video/audio outputs (e.g. a VHS_VideoCombine .mp4) and allowlisted mesh/material attachments (.obj, .glb, .gltf, .fbx, .ply, .stl, .mtl) are saved to save_dir with their original extension instead of being rendered inline. Works with remote ComfyUI instances — does not require COMFYUI_PATH. Use get_history (action:"list") first to obtain the filename.\n' +
+      '- action:"get" — Fetch a generated image from ComfyUI by FILENAME and return it as an inline image. Video/audio outputs (e.g. a VHS_VideoCombine .mp4) and allowlisted mesh/material attachments (.obj, .glb, .gltf, .fbx, .ply, .stl, .mtl) are saved to save_dir with their original extension instead of being rendered inline. Works with remote ComfyUI instances — does not require COMFYUI_PATH. Use get_history (action:"list") first to obtain the filename; if it returns `subfolder/filename`, pass that relative path as-is and get_image will split it automatically.\n' +
       '- action:"view" — Fetch a registered asset\'s bytes by ASSET ID and return them as an inline image so the agent can see the result. Use this after a render completes (asset_id is included in the completion notification) to inspect, critique, or compare generated images. Only supports image mime types (PNG/JPEG/WebP); audio/video assets must be saved to disk via action:"get".\n' +
       '- action:"list_outputs" — List recently generated image AND video files from ComfyUI\'s output/ directory, newest-first, with each file\'s kind (\'image\' | \'video\'), subfolder, size, and modification time. Covers stills (.png/.jpg/.jpeg/.bmp) and video/animation outputs (.mp4/.webm/.mov/.mkv/.m4v/.avi/.gif/.webp). LOCAL ComfyUI (COMFYUI_PATH set): a RECURSIVE filesystem scan of output/ (stills + video, including subfolders like video/ that VHS/SaveVideo write to) AND of temp/ for video files — VHS_VideoCombine with `save_output` unchecked writes the completed .mp4 (including the "-audio.mp4" a run completion names) there; those entries are tagged type:"temp" so action:"get" / upload_image (action:"stage") can fetch them. Reports size + modification time. Preview stills in temp/ (PreviewImage) are omitted. REMOTE ComfyUI: derives the list from /history over HTTP instead (size/modified are unavailable and omitted) and includes type:"temp" videos from history the same way. It does NOT return the media bytes themselves — fetch those with action:"get". USE THIS TO CONFIRM A VIDEO RENDER (e.g. VHS_VideoCombine / LTX / WAN output) when get_history (action:"list") shows the prompt done but lists no output: VHS-style video nodes write the file but often do NOT register in ComfyUI\'s /history, so the local filesystem scan is the reliable way to verify the .mp4 exists — then chain it with upload_image (action:"stage"). THAT GUARANTEE IS LOCAL-ONLY AND INVERTS ON A REMOTE TARGET: with no disk to scan, this falls back to /history, so a REMOTE listing can neither confirm nor deny a VHS video that never registered, and absence from it is NOT evidence the file is missing. Check a specific filename with action:"get" or upload_image (action:"stage") instead — both read /view. Every remote result says so in its own text. Read-only.\n' +
       '- action:"convert" — Re-encode a generated image to PNG, JPEG, or WebP and return it inline as an image content block. Source can be a registered asset_id or a path under the local ComfyUI output directory. Optionally writes the converted image back under the output directory and reports source/output size plus bytes saved.\n' +
@@ -235,7 +235,7 @@ export function registerImageManagementTools(server: McpServer): void {
         .string()
         .optional()
         .describe(
-          'Output image filename, e.g. PulID_Klein_00001_.png. REQUIRED for action:"get". OPTIONAL for action:"analyze_color", where it is one of the three ways to name a source (pair it with subfolder/type).',
+          'Output image filename or a relative `subfolder/filename` reference from get_history, e.g. PulID_Klein_00001_.png or out_F/PulID_Klein_00001_.png. REQUIRED for action:"get". Relative prefixes are split automatically; absolute paths, drive prefixes, and `..` segments are refused. OPTIONAL for action:"analyze_color", where it is one of the three ways to name a source (pair it with subfolder/type).',
         ),
       asset_id: z
         .string()
@@ -253,7 +253,7 @@ export function registerImageManagementTools(server: McpServer): void {
         .string()
         .optional()
         .describe(
-          'Subfolder within the directory, if any (default empty). Used by action:"get" and by action:"analyze_color" when the source is a `filename`.',
+          'Subfolder within the directory, if any (default empty). Used by action:"get" and by action:"analyze_color" when the source is a `filename`. If filename already includes a relative prefix, it is combined with this subfolder.',
         ),
       save_dir: z
         .string()
@@ -406,7 +406,9 @@ export function registerImageManagementTools(server: McpServer): void {
               args.type ?? "output",
               args.subfolder ?? "",
               // #1373 — the input dir legitimately holds workflow .json files.
-              { allowMedia: true, allowAttachment: true, allowJson: true },
+              // #2785 — still images use the 64 MB preview-source cap so
+              // max_preview_dimension can run instead of VIEW_TOO_LARGE at 32 MB.
+              { allowMedia: true, allowAttachment: true, allowJson: true, forInlinePreview: true },
             );
 
             // The bytes are already in hand at this point. Saving them is a SEPARATE

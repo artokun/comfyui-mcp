@@ -311,7 +311,9 @@ function assertNoWindowsHazards(raw: string): void {
         `Refusing reserved Windows device name "${seg}".`,
       );
     }
-    if (/[ .]$/.test(seg)) {
+    // `.` and `..` are traversal operators, not Windows filenames with a
+    // trailing dot. Containment checks below still decide whether they escape.
+    if (seg !== "." && seg !== ".." && /[ .]$/.test(seg)) {
       throw new NodeDevError(
         `Refusing path segment "${seg}": trailing dot or space is unsafe on Windows.`,
       );
@@ -1476,19 +1478,119 @@ export function gitWritesEnabled(): boolean {
   return v === "1" || v === "true";
 }
 
-/** Jail-check a caller-supplied path and return it relative to the pack dir. */
+/**
+ * #2716: before this fix, the pack-name-prefixed spelling was the ONLY one that reached
+ * git, so callers learned it. Anchored at the pack it now names `MyPack/MyPack/nodes.py`
+ * — and git answers a pathspec that matches nothing with an EMPTY result, not an error,
+ * so the workaround would fail silently. Refuse it instead, naming the correction.
+ *
+ * The refusal rests on ONE disk fact: whether the pack contains a child named like the
+ * pack. If it does not, the prefixed reading names a directory that is not there — which
+ * decides a wildcard (`MyPack/*.py`) as well as a literal path, and needs no probe of the
+ * de-prefixed path. That last part matters: `git diff`/`git add` are exactly how a DELETED
+ * file is inspected and staged, so a path absent from the worktree is a legitimate
+ * pathspec, and probing it would refuse the deletion.
+ *
+ * Where the fact is not conclusive, the refusal must stay escapable, so it fires only on
+ * the AMBIGUOUS spelling:
+ *   • Only a RELATIVE entry can be the prefix mistake. An absolute entry spells the whole
+ *     path out, so it is honoured as written — and it is therefore the escape hatch for
+ *     the one shape the disk cannot settle: a same-named child that is TRACKED but deleted
+ *     from the worktree, where git can still match `MyPack/gone.py`. The message says so.
+ *   • A head carrying a wildcard is not a literal reference to the pack, even when it
+ *     matches the pack's own name — `assertSafeRepoName` allows `*` in a folder name, and
+ *     on a POSIX filesystem a pack really can be called `Pack*`.
+ *
+ * `pack` reaches here two ways — the caller's spelling and the real directory name — and
+ * they differ when custom_nodes/<name> is a symlink or junction to a differently-named
+ * directory, since `packDir` is the REALPATH. Match either, or an aliased pack silently
+ * loses the correction.
+ */
+function assertNotPackPrefixed(
+  packDir: string,
+  packName: string,
+  original: string,
+  rel: string,
+  deps: NodeDevDeps,
+): void {
+  const segs = rel.split("/");
+  const head = segs[0];
+  if (/[*?]/.test(head)) return;
+  const lower = head.toLowerCase();
+  if (lower !== basename(packDir).toLowerCase() && lower !== packName.toLowerCase()) return;
+  // A deeper entry needs the head to be a traversable DIRECTORY; a bare "<pack>" only
+  // needs something of that name to exist, since it names the match itself.
+  const headPath = join(packDir, head);
+  if (segs.length > 1 ? deps.isDirectory(headPath) : deps.existsSync(headPath)) return;
+  const stripped = segs.slice(1).join("/");
+  throw new NodeDevError(
+    `Path "${original}" is resolved relative to the pack, so it names ` +
+      `custom_nodes/${basename(packDir)}/${rel} — and ` +
+      `custom_nodes/${basename(packDir)}/${head} is not in the working tree. ` +
+      `\`paths\` entries are pack-relative: ` +
+      (stripped
+        ? `drop the "${head}/" prefix and pass "${stripped}"`
+        : `omit \`paths\` to scope the whole pack, or pass "."`) +
+      `. If you did mean that path — a tracked file whose directory was deleted, say — ` +
+      `pass it as an absolute path, which is taken as written.`,
+  );
+}
+
+/**
+ * Jail-check one caller-supplied `paths` entry and return it relative to the pack dir.
+ *
+ * #2716: `paths` is documented as "pack-relative paths to stage/scope", and the pack is
+ * already chosen by `pack` — but a relative entry went to `resolveInJail()` as-is, and
+ * that anchors a relative input at the custom_nodes/ ROOT. So the documented form
+ * ("preset_core.py") landed BESIDE the pack and every such call was refused as "outside
+ * the target pack", leaving an undocumented pack-name prefix as the only spelling that
+ * worked. Anchor a relative entry at the pack instead.
+ *
+ * The anchor is applied to the jail-relative STRING (`<pack>/<entry>`) rather than by
+ * joining onto the resolved `packDir`, for two reasons: the resolver's Windows-hazard
+ * scan then still sees only caller-controlled segments (joining onto an absolute base
+ * would drag the install path's own segments through it), and an install whose
+ * custom_nodes/ is a junction keeps working — `packDir` is the REALPATH'd directory, so
+ * an absolute join would fail the resolver's lexical containment check against the
+ * un-resolved root. Containment itself is unchanged: the single auditable resolver still
+ * decides it (lexical + realpath, so the custom_nodes/ jail and its symlink/junction
+ * check are intact), and the result must still land inside the selected pack.
+ *
+ * One deliberate consequence: `join()` collapses `..` BEFORE the resolver's hazard scan
+ * sees the string, so an INTERIOR climb that stays in the pack ("sub/../nodes.py") is now
+ * accepted as the file it names, where the old anchor refused it. Nothing escapes on that
+ * path — a climb that leaves the pack still fails the containment check below, and one
+ * that leaves custom_nodes/ still fails the resolver's — and git receives the same
+ * normalised pathspec we decided on, so there is no second interpretation.
+ */
 function packRelativePath(
   packDir: string,
+  packName: string,
   p: string,
   deps: NodeDevDeps,
   resolvedBase?: string,
 ): string {
-  const { abs } = resolveInJail(p, deps, resolvedBase);
+  const raw = (p ?? "").trim();
+  // An empty entry would resolve to the pack itself and silently widen the command's
+  // scope to every file in it, which is what omitting `paths` already means.
+  if (!raw) throw new NodeDevError("A path is required (received an empty string).");
+
+  const spelledOut = isAbsolute(raw);
+  // Check the caller's spelling before joining it to the pack name. In particular,
+  // path.join("Pack", "\\\\server\\share\\file.py") can erase the leading UNC marker
+  // on Windows (and POSIX does not consider it absolute), turning a Windows hazard
+  // into an apparently harmless pack-relative path.
+  assertNoWindowsHazards(raw);
+  const { abs } = resolveInJail(spelledOut ? raw : join(packName, raw), deps, resolvedBase);
   const rel = relative(packDir, abs);
   if (rel.startsWith("..") || isAbsolute(rel)) {
     throw new NodeDevError(`Path "${p}" is outside the target pack.`);
   }
-  return rel.split(/[\\/]/).join("/") || ".";
+  const posix = rel.split(/[\\/]/).join("/") || ".";
+  // Only a relative entry can be the pack-name-prefix mistake; an absolute one already
+  // says exactly which file it means, so it is honoured as written.
+  if (!spelledOut) assertNotPackPrefixed(packDir, packName, p, posix, deps);
+  return posix;
 }
 
 /** #809: the git action's real ceiling is READ_MAX_CHARS (24000) — a CODE clamp the
@@ -1515,7 +1617,9 @@ export function nodePackGit(
     READ_MAX_CHARS,
   );
 
-  const relPaths = (options.paths ?? []).map((p) => packRelativePath(packDir, p, deps, resolvedBase));
+  const relPaths = (options.paths ?? []).map((p) =>
+    packRelativePath(packDir, name, p, deps, resolvedBase),
+  );
 
   let argv: string[];
   let timeoutMs = GIT_TIMEOUT_MS;

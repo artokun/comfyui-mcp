@@ -380,6 +380,60 @@ describe("applyManifest", () => {
     expect(downloadModelMock).not.toHaveBeenCalled();
   });
 
+  it("does not skip a requested git origin when Manager listed a different author (#2523)", async () => {
+    listInstalledNodesMock.mockResolvedValue([
+      {
+        module: "comfyui-teskors-utils",
+        auxId: "teskor-hub/comfyui-teskors-utils",
+        enabled: true,
+      },
+    ]);
+    installCustomNodeMock.mockResolvedValue({
+      mechanism: "git-clone",
+      message: "cloned artokun/comfyui-teskors-utils",
+    });
+
+    const result = await applyManifest({
+      manifest: {
+        custom_nodes: ["https://github.com/artokun/comfyui-teskors-utils"],
+      },
+    });
+
+    expect(installCustomNodeMock).toHaveBeenCalledTimes(1);
+    expect(installCustomNodeMock.mock.calls[0][0]).toMatchObject({
+      id: "https://github.com/artokun/comfyui-teskors-utils",
+    });
+    expect(result.results[0]).toMatchObject({
+      action: "custom_node",
+      item: "https://github.com/artokun/comfyui-teskors-utils",
+      status: "applied",
+    });
+    expect(result.results[0].status).not.toBe("skipped");
+  });
+
+  it("still skips when Manager listed the requested git origin (#2523)", async () => {
+    listInstalledNodesMock.mockResolvedValue([
+      {
+        module: "comfyui-teskors-utils",
+        auxId: "artokun/comfyui-teskors-utils",
+        enabled: true,
+      },
+    ]);
+
+    const result = await applyManifest({
+      manifest: {
+        custom_nodes: ["https://github.com/artokun/comfyui-teskors-utils"],
+      },
+    });
+
+    expect(installCustomNodeMock).not.toHaveBeenCalled();
+    expect(result.results[0]).toMatchObject({
+      action: "custom_node",
+      item: "https://github.com/artokun/comfyui-teskors-utils",
+      status: "skipped",
+    });
+  });
+
   it("continues after individual failures and reports each item", async () => {
     installCustomNodeMock.mockRejectedValueOnce(new Error("node failed"));
     downloadModelMock.mockResolvedValueOnce("/fake/ComfyUI/models/loras/model.safetensors");

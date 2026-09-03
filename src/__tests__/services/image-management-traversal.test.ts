@@ -40,6 +40,7 @@ const uploadImageHttpMock = vi.fn();
 const getHistoryMock = vi.fn();
 vi.mock("../../comfyui/client.js", () => ({
   MAX_VIEW_RESPONSE_BYTES: 32 * 1024 * 1024,
+  MAX_PREVIEW_SOURCE_BYTES: 64 * 1024 * 1024,
   fetchImage: (...a: unknown[]) => fetchImageMock(...a),
   uploadImageHttp: (...a: unknown[]) => uploadImageHttpMock(...a),
   getHistory: (...a: unknown[]) => getHistoryMock(...a),
@@ -98,6 +99,45 @@ describe("getOutputImage — happy path (legitimate ComfyUI references)", () => 
       "output",
       "video/clip",
     );
+  });
+
+  it("accepts a get_history filename that already includes a relative subfolder (#2526)", async () => {
+    // get_history (action:"list") prints media as `subfolder/filename` so
+    // callers paste that combined string into get_image. That is a valid
+    // ComfyUI output reference, not a traversal.
+    await expect(
+      getOutputImage(
+        "out_F/qwen_baseline_face016_2807_00001_.png",
+        "output",
+        "",
+      ),
+    ).resolves.toBeDefined();
+    expect(fetchImageMock).toHaveBeenCalledWith(
+      "qwen_baseline_face016_2807_00001_.png",
+      "output",
+      "out_F",
+    );
+  });
+
+  it("accepts a nested relative prefix in filename and splits it for /view (#2526)", async () => {
+    await expect(
+      getOutputImage("video/clip/frame.png", "output", ""),
+    ).resolves.toBeDefined();
+    expect(fetchImageMock).toHaveBeenCalledWith("frame.png", "output", "video/clip");
+  });
+
+  it("joins a filename prefix with an explicit subfolder (#2526)", async () => {
+    await expect(
+      getOutputImage("clip/frame.png", "output", "video"),
+    ).resolves.toBeDefined();
+    expect(fetchImageMock).toHaveBeenCalledWith("frame.png", "output", "video/clip");
+  });
+
+  it("treats a Windows-style relative prefix as a subfolder too (#2526)", async () => {
+    await expect(
+      getOutputImage("out_F\\face.png", "output", ""),
+    ).resolves.toBeDefined();
+    expect(fetchImageMock).toHaveBeenCalledWith("face.png", "output", "out_F");
   });
 
   it("accepts an empty subfolder (top-level output)", async () => {
@@ -244,6 +284,84 @@ describe("getOutputImage — local fallback for ComfyUI's 400 rejection (#2194)"
   });
 });
 
+describe("getOutputImage — oversized PNG preview source (#2785)", () => {
+  const filename = "NC04_4X_UPSCALE_00002_.png";
+  const png = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+  const previewCap = 64 * 1024 * 1024;
+
+  function viewTooLarge(maxBytes = 32 * 1024 * 1024): ComfyUIError {
+    return new ComfyUIError(
+      `ComfyUI /view response for "${filename}" exceeds the ${maxBytes / 1024 ** 2} MB safety limit.`,
+      "VIEW_TOO_LARGE",
+      { filename, maxBytes },
+    );
+  }
+
+  function fileHandleFor(bytes: Buffer) {
+    let position = 0;
+    return {
+      read: async (buffer: Buffer, offset: number, length: number) => {
+        const slice = bytes.subarray(position, position + length);
+        slice.copy(buffer, offset);
+        position += slice.length;
+        return { bytesRead: slice.length, buffer };
+      },
+      close: async () => undefined,
+    };
+  }
+
+  it("asks /view for 64 MB when the caller will downscale a still image", async () => {
+    await getOutputImage(filename, "output", "", { forInlinePreview: true });
+    expect(fetchImageMock).toHaveBeenCalledWith(filename, "output", "", { maxBytes: previewCap });
+  });
+
+  it("does not raise the cap for video even when a preview was requested", async () => {
+    fetchImageMock.mockResolvedValue({
+      base64: Buffer.from([
+        0x00, 0x00, 0x00, 0x18, 0x66, 0x74, 0x79, 0x70,
+        0x69, 0x73, 0x6f, 0x6d, 0x00, 0x00, 0x02, 0x00,
+        0x69, 0x73, 0x6f, 0x6d, 0x69, 0x73, 0x6f, 0x32,
+      ]).toString("base64"),
+      mimeType: "video/mp4",
+    });
+    await getOutputImage("clip.mp4", "output", "", { forInlinePreview: true, allowMedia: true });
+    expect(fetchImageMock).toHaveBeenCalledWith("clip.mp4", "output", "");
+  });
+
+  it("reads a 40 MB local PNG after /view hits VIEW_TOO_LARGE so preview can run", async () => {
+    const root = resolve("/comfy", "output");
+    const localPath = resolve(root, filename);
+    fetchImageMock.mockRejectedValue(viewTooLarge());
+    realpathMock.mockImplementation(async (path: string) => path);
+    statMock.mockResolvedValue({ isFile: () => true, size: 40 * 1024 * 1024 });
+    openMock.mockResolvedValue(fileHandleFor(png));
+
+    await expect(
+      getOutputImage(filename, "output", "", { forInlinePreview: true }),
+    ).resolves.toMatchObject({
+      base64: png.toString("base64"),
+      mimeType: "image/png",
+      filename,
+    });
+    expect(fetchImageMock).toHaveBeenCalledWith(filename, "output", "", { maxBytes: previewCap });
+    expect(openMock).toHaveBeenCalledWith(localPath, "r");
+  });
+
+  it("refuses a source over the 64 MB preview cap without loading it", async () => {
+    fetchImageMock.mockRejectedValue(viewTooLarge(previewCap));
+    realpathMock.mockImplementation(async (path: string) => path);
+    statMock.mockResolvedValue({ isFile: () => true, size: previewCap + 1 });
+
+    await expect(
+      getOutputImage(filename, "output", "", { forInlinePreview: true }),
+    ).rejects.toMatchObject({
+      code: "VIEW_TOO_LARGE",
+      message: expect.stringMatching(/64 MB safety limit[\s\S]*max_preview_dimension/),
+    });
+    expect(openMock).not.toHaveBeenCalled();
+  });
+});
+
 describe("getOutputImage — path-traversal sanitisation (CWE-22)", () => {
   // ComfyUI's /view endpoint historically allows path traversal via the
   // subfolder parameter. Untrusted MCP tool inputs must be rejected BEFORE
@@ -284,7 +402,7 @@ describe("getOutputImage — path-traversal sanitisation (CWE-22)", () => {
     expect(fetchImageMock).not.toHaveBeenCalled();
   });
 
-  it("rejects a filename containing path separators", async () => {
+  it("still rejects a filename whose separators are traversal, not a subfolder", async () => {
     await expect(
       getOutputImage("../../etc/passwd", "output", ""),
     ).rejects.toBeInstanceOf(ValidationError);

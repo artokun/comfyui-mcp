@@ -614,6 +614,22 @@ export async function resolveLiveComfyUIBase(): Promise<string | undefined> {
 }
 
 /**
+ * Keep values from the server's JSON response at the runtime boundary. The
+ * SystemStats TypeScript type describes the normal ComfyUI response, but the
+ * response is still untrusted JSON at runtime; a shape such as `argv: [1]`
+ * must not reach the string-only launch-argv parsers.
+ */
+function validatedLaunchArgv(value: unknown): string[] | undefined {
+  return Array.isArray(value) && value.every((token): token is string => typeof token === "string")
+    ? value
+    : undefined;
+}
+
+function validatedServerCwd(value: unknown): string | undefined {
+  return typeof value === "string" ? value : undefined;
+}
+
+/**
  * ONE `/system_stats` snapshot for callers that need to derive several things from the
  * SAME server state (the launch flags AND the install root), rather than issuing two
  * calls that could straddle a restart — the same invariant `resolveModelsDirWithBases`
@@ -628,10 +644,14 @@ export async function getLiveServerSnapshot(): Promise<{
   if (isRemoteMode()) return { reachable: false };
   try {
     const stats = await getSystemStats();
+    const system =
+      stats && typeof stats === "object" && stats.system && typeof stats.system === "object"
+        ? (stats.system as Record<string, unknown>)
+        : undefined;
     return {
       reachable: true,
-      argv: stats.system?.argv,
-      cwd: (stats.system as { cwd?: string })?.cwd,
+      argv: validatedLaunchArgv(system?.argv),
+      cwd: validatedServerCwd(system?.cwd),
     };
   } catch {
     return { reachable: false };
@@ -1094,6 +1114,8 @@ export interface LiveServerRootResolution {
   /** The PID the observation was made against, so a caller can confirm the
    *  anchor describes the very process it is acting on (#535). */
   observedPid?: number;
+  /** Normalized process creation time captured by the same correlated observation. */
+  observedStartedAtMs?: number;
 }
 
 /** How far up from the observed interpreter we look for the live install root.
@@ -1244,6 +1266,7 @@ function observeLivePython(
   pid: number;
   launchScript?: string;
   launchScriptInvalid?: boolean;
+  startedAtMs?: number;
 } | undefined {
   let statsHost: string | undefined;
   try {
@@ -1262,12 +1285,14 @@ function observeLivePython(
     // The PID travels with the interpreter (#535). A caller that is about to STOP
     // a process must be able to confirm the anchor describes that very process
     // and not some other ComfyUI — an interpreter path alone cannot prove it.
-    return live && (binary || live.launchScript || live.launchScriptInvalid)
+    return live &&
+      (binary || live.launchScript || live.launchScriptInvalid || live.startedAtMs !== undefined)
       ? {
           python: binary,
           pid: live.pid,
           launchScript: live.launchScript,
           launchScriptInvalid: live.launchScriptInvalid,
+          startedAtMs: live.startedAtMs,
         }
       : undefined;
   } catch {
@@ -1318,6 +1343,10 @@ export function resolveLiveServerRoot(
     observedLaunchScript?: string;
     /** Correlated launch script was present but invalid/non-regular. */
     observedLaunchScriptInvalid?: boolean;
+    /** Test/caller seam for the normalized process start time. */
+    observedStartedAtMs?: number;
+    /** Capture the correlated process start time for launch-state authorization. */
+    includeProcessStart?: boolean;
     /** Skip the process-table probe entirely (remote server). Defaults to isRemoteMode(). */
     remote?: boolean;
   },
@@ -1325,7 +1354,16 @@ export function resolveLiveServerRoot(
   const relDir = liveRelDirFromArgv(argv);
   const lexicalFromArgv = liveRootFromArgv(argv, cwd);
   const argvScriptResolution = liveScriptResolutionFromArgv(argv, cwd);
-  if (argvScriptResolution.indeterminate) return { source: "unresolved", relDir };
+  const remote = opts?.remote ?? isRemoteMode();
+  let observedStartedAtMs = opts?.observedStartedAtMs;
+  let observed: ReturnType<typeof observeLivePython> | undefined;
+  if (observedStartedAtMs === undefined && opts?.includeProcessStart && !remote) {
+    observed = observeLivePython(argv);
+    observedStartedAtMs = observed?.startedAtMs;
+  }
+  if (argvScriptResolution.indeterminate) {
+    return { source: "unresolved", relDir, observedStartedAtMs };
+  }
   const argvScript = argvScriptResolution.path;
   const fromArgv = argvScript ? dirname(argvScript) : lexicalFromArgv;
   // Preserve the historical unresolved/missing-path behavior, but never let an
@@ -1333,37 +1371,37 @@ export function resolveLiveServerRoot(
   // parent as a live install.
   if (argvScript) {
     const entry = pathEntryExists(argvScript);
-    if (entry === "indeterminate") return { source: "unresolved", relDir };
+    if (entry === "indeterminate") return { source: "unresolved", relDir, observedStartedAtMs };
     if (entry === "present" && regularFileState(argvScript) !== "file") {
-      return { source: "unresolved", relDir };
+      return { source: "unresolved", relDir, observedStartedAtMs };
     }
   }
-  if (fromArgv) return { root: fromArgv, source: "argv", relDir };
-  const remote = opts?.remote ?? isRemoteMode();
-  if (remote || relDir === undefined) return { source: "unresolved", relDir };
+  if (fromArgv) return { root: fromArgv, source: "argv", relDir, observedStartedAtMs };
+  if (remote || relDir === undefined) return { source: "unresolved", relDir, observedStartedAtMs };
 
   let observedPython = opts?.observedPython;
   let observedPid = opts?.observedPid;
   let observedLaunchScript = opts?.observedLaunchScript;
   let observedLaunchScriptInvalid = opts?.observedLaunchScriptInvalid;
   if (!observedPython && !observedLaunchScript && !observedLaunchScriptInvalid) {
-    const observed = observeLivePython(argv);
+    observed ??= observeLivePython(argv);
     observedPython = observed?.python;
     observedPid = observed?.pid;
     observedLaunchScript = observed?.launchScript;
     observedLaunchScriptInvalid = observed?.launchScriptInvalid;
+    observedStartedAtMs ??= observed?.startedAtMs;
   }
 
   // A correlated but unusable launch script is explicit contradictory evidence.
   // It must not be erased by anchoring the same observation on its interpreter.
   if (observedLaunchScriptInvalid) {
-    return { source: "unresolved", relDir, observedPython, observedPid };
+    return { source: "unresolved", relDir, observedPython, observedPid, observedStartedAtMs };
   }
 
   if (observedLaunchScript) {
     const resolvedLaunchScript = realpathIfPresent(observedLaunchScript);
     if (!resolvedLaunchScript.path || resolvedLaunchScript.indeterminate) {
-      return { source: "unresolved", relDir, observedPython, observedPid };
+      return { source: "unresolved", relDir, observedPython, observedPid, observedStartedAtMs };
     }
     if (resolvedLaunchScript.path) {
       const resolvedPath = resolvedLaunchScript.path;
@@ -1381,14 +1419,15 @@ export function resolveLiveServerRoot(
           observedPython,
           observedPid,
           observedLaunchScript: resolvedPath,
+          observedStartedAtMs,
         };
       }
     }
     // An explicit observed script that did not authorize its root is not a
     // reason to fall through to an interpreter anchor from another tree.
-    return { source: "unresolved", relDir, observedPython, observedPid };
+    return { source: "unresolved", relDir, observedPython, observedPid, observedStartedAtMs };
   }
-  if (!observedPython) return { source: "unresolved", relDir };
+  if (!observedPython) return { source: "unresolved", relDir, observedStartedAtMs };
 
   const anchored = anchorRelDirOnInterpreter(observedPython, relDir);
   if (anchored) {
@@ -1400,9 +1439,17 @@ export function resolveLiveServerRoot(
       observedPid,
       observedLaunchScript,
       anchorDir: anchored.anchorDir,
+      observedStartedAtMs,
     };
   }
-  return { source: "unresolved", relDir, observedPython, observedPid, observedLaunchScript };
+  return {
+    source: "unresolved",
+    relDir,
+    observedPython,
+    observedPid,
+    observedLaunchScript,
+    observedStartedAtMs,
+  };
 }
 
 /**

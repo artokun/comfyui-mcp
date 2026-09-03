@@ -1,4 +1,4 @@
-import { existsSync, realpathSync, statSync } from "node:fs";
+import { existsSync, lstatSync, realpathSync, statSync, type Stats } from "node:fs";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { homedir, platform } from "node:os";
 import { basename, dirname, join, isAbsolute, resolve } from "node:path";
@@ -207,6 +207,33 @@ function joinCategoryEntryToBase(base: string, entry: string): string {
 const RESERVED_KEYS = new Set(["base_path", "is_default"]);
 const SAFE_KEY_RE = /^[A-Za-z0-9_.-]+$/;
 const CONTROL_RE = /[\x00\r\n]/;
+/** YAML / extra-paths key for a generic models tree (not a per-category folder). */
+const GENERIC_MODELS_CATEGORY = "models";
+const CODE_EXTRA_CATEGORIES = new Set(["custom_nodes"]);
+
+function isProvenAbsolutePath(p: string): boolean {
+  return isAbsolute(p) || /^[a-zA-Z]:[\\/]/.test(p) || p.startsWith("\\\\");
+}
+
+function groupServesModelDownloads(categories: readonly ExtraPathCategory[]): boolean {
+  return categories.some((c) => !CODE_EXTRA_CATEGORIES.has(c.category.trim().toLowerCase()));
+}
+
+/**
+ * list_paths reports each group's configured `base_path`. Category expansion
+ * still happens; omitting the base made concurrent `download_civitai` calls
+ * reject that same proven model_root while siblings accepted it (#2787).
+ * Relative bases stay out — they are unproven from this process.
+ */
+function pushProvenGroupBase(
+  roots: ExtraModelRoot[],
+  group: string,
+  categories: readonly ExtraPathCategory[],
+  base: string | undefined,
+): void {
+  if (!base || !groupServesModelDownloads(categories) || !isProvenAbsolutePath(base)) return;
+  roots.push({ category: GENERIC_MODELS_CATEGORY, dir: resolve(base), group });
+}
 
 function assertSafeKey(value: string, label: string): string {
   const trimmed = value.trim();
@@ -1384,6 +1411,7 @@ export async function getExtraModelRoots(
   const roots: ExtraModelRoot[] = [];
   for (const group of info.groups) {
     const base = group.base_path?.trim();
+    pushProvenGroupBase(roots, group.name, group.categories, base);
     for (const category of group.categories) {
       for (const p of category.paths) {
         const dir = isAbsolute(p)
@@ -1414,10 +1442,16 @@ export async function getExtraModelRoots(
  *   - every ABSOLUTE `--extra-model-paths-config` file the server was LAUNCHED with
  *     (raw argv values; a RELATIVE flag value is SKIPPED — it can't be resolved to
  *     the live server's file from the MCP process, so trusting it would let a stale
- *     local same-named config authorize; fail closed); and
+ *     local same-named config authorize; fail closed);
  *   - `<live main.py root>/extra_model_paths.yaml` — ComfyUI's auto-loaded default,
  *     anchored to the server's OWN install root (its main.py dir from argv), NOT an
- *     arbitrary base dir or the local workspace.
+ *     arbitrary base dir or the local workspace; and
+ *   - ComfyUI Desktop's app-data `extra_models_config.yaml`, but ONLY when the
+ *     connected snapshot already named a Desktop extra-path config (the generated
+ *     `shared_model_paths.yaml` or that same extra_models_config file). Desktop
+ *     inventory can list a file from that user extra-path file while argv only
+ *     names the shared yaml (#2739). The file is still launch-state-stamped for
+ *     deletion. Never guessed from a default :8188 origin.
  *
  * Relative `base_path` / category paths are resolved against the CONFIG FILE's own
  * directory, exactly as ComfyUI resolves them — never against the MCP process CWD —
@@ -1437,15 +1471,103 @@ export async function getExtraModelRoots(
  * needs that inference it has to be built and TESTED alongside its consumer.
  * Never throws.
  */
+interface LiveExtraModelRootOptions {
+  /** Require the current config file to be provably unchanged since process
+   * launch. This is for deletion authority only; downloads intentionally retain
+   * their current-config behavior. */
+  launchStateBound?: boolean;
+}
+
+interface ConfigLaunchStamp {
+  pathDev: number;
+  pathIno: number;
+  pathMtimeMs: number;
+  pathCtimeMs: number;
+  dev: number;
+  ino: number;
+  size: number;
+  mtimeMs: number;
+  ctimeMs: number;
+}
+
+function configLaunchStamp(path: string, startedAtMs: number): ConfigLaunchStamp | undefined {
+  if (!Number.isFinite(startedAtMs) || startedAtMs <= 0) return undefined;
+  try {
+    const pathInfo: Stats = lstatSync(path);
+    const info: Stats = statSync(path);
+    if (!info.isFile()) return undefined;
+    const stamp = {
+      pathDev: pathInfo.dev,
+      pathIno: pathInfo.ino,
+      pathMtimeMs: pathInfo.mtimeMs,
+      pathCtimeMs: pathInfo.ctimeMs,
+      dev: info.dev,
+      ino: info.ino,
+      size: info.size,
+      mtimeMs: info.mtimeMs,
+      ctimeMs: info.ctimeMs,
+    };
+    // A file that was created or modified after the server started is not proof
+    // of what ComfyUI loaded at launch. ctime catches a rewrite whose mtime was
+    // deliberately backdated; refusing is safer than unlinking under it.
+    return stamp.pathMtimeMs <= startedAtMs &&
+        stamp.pathCtimeMs <= startedAtMs &&
+        stamp.mtimeMs <= startedAtMs &&
+        stamp.ctimeMs <= startedAtMs
+      ? stamp
+      : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function sameConfigLaunchStamp(path: string, expected: ConfigLaunchStamp): boolean {
+  try {
+    const pathInfo: Stats = lstatSync(path);
+    const info: Stats = statSync(path);
+    return (
+      pathInfo.dev === expected.pathDev &&
+      pathInfo.ino === expected.pathIno &&
+      pathInfo.mtimeMs === expected.pathMtimeMs &&
+      pathInfo.ctimeMs === expected.pathCtimeMs &&
+      info.isFile() &&
+      info.dev === expected.dev &&
+      info.ino === expected.ino &&
+      info.size === expected.size &&
+      info.mtimeMs === expected.mtimeMs &&
+      info.ctimeMs === expected.ctimeMs
+    );
+  } catch {
+    return false;
+  }
+}
+
 export async function getLiveExtraModelRoots(
   snapshot: LiveServerSnapshot,
+  options: LiveExtraModelRootOptions = {},
 ): Promise<{ authoritative: boolean; roots: ExtraModelRoot[] }> {
   if (!snapshot?.reachable) return { authoritative: false, roots: [] };
+  const launchStateBound = options.launchStateBound === true;
+  const startedAtMs = snapshot.processStartedAtMs;
+  if (launchStateBound && !Number.isFinite(startedAtMs)) {
+    return { authoritative: false, roots: [] };
+  }
   const argv = snapshot.argv;
   const configPaths = new Set<string>();
   // Launched flag files — ABSOLUTE values only (relative → fail closed, see docblock).
   for (const raw of parseExtraModelPathsConfigsFromArgvRaw(argv)) {
     if (isAbsolute(raw)) configPaths.add(resolve(raw));
+  }
+  // Desktop's user extra-path file is not always repeated on argv. The connected
+  // snapshot must already have named a Desktop extra-path config; we never probe
+  // a guessed :8188 origin to discover it (#2739).
+  if (!isRemoteMode()) {
+    for (const named of configPaths) {
+      if (looksLikeDesktopConfig(named)) {
+        configPaths.add(resolve(desktopConfigPath()));
+        break;
+      }
+    }
   }
   // Auto-loaded default in the LIVE install root (its main.py dir). Skip in remote
   // mode: the live root is a path on the remote host.
@@ -1457,7 +1579,12 @@ export async function getLiveExtraModelRoots(
     // which made a legitimate external model root look like "no extra roots"
     // (codex gate, round 12). Falls back to the argv derivation.
     const liveRoot = snapshot.liveRoot ?? liveRootFromArgv(argv, snapshot.cwd);
-    if (liveRoot) configPaths.add(resolve(liveRoot, "extra_model_paths.yaml"));
+    // An implicit config beside an OS-inferred root is not launch-state proof:
+    // the interpreter may belong to a stale portable bundle. Deletion can use
+    // this file only when the server's argv named its own install root.
+    if (liveRoot && (!launchStateBound || snapshot.liveRootSource === "argv")) {
+      configPaths.add(resolve(liveRoot, "extra_model_paths.yaml"));
+    }
   }
 
   // Whether it is safe to expand a config `$VAR`/`%VAR%` against process.env: ONLY a
@@ -1467,11 +1594,17 @@ export async function getLiveExtraModelRoots(
   const trustServerEnv = !isRemoteMode() && didLaunchLocalComfyUI();
 
   const roots: ExtraModelRoot[] = [];
+  let sawLaunchStateConfig = false;
   for (const cfg of configPaths) {
     // A config that is gone (never existed, or deleted since the server loaded it)
     // contributes no roots here — but the RUNNING process may still hold the roots it
     // gave at startup. That is why no caller may treat this result as the complete
     // set; see the docblock.
+    const launchStamp = launchStateBound
+      ? configLaunchStamp(cfg, startedAtMs as number)
+      : undefined;
+    if (launchStateBound && !launchStamp) continue;
+    if (launchStateBound) sawLaunchStateConfig = true;
     if (!existsSync(cfg)) continue;
     let raw: Record<string, unknown>;
     try {
@@ -1483,6 +1616,11 @@ export async function getLiveExtraModelRoots(
       raw = parseConfig(await readFile(cfg, "utf-8"));
     } catch {
       continue; // unreadable/malformed — skip; never authorize from a bad file
+    }
+    // The config may have been replaced while it was being read. Never let a
+    // root parsed from a different file version become deletion authority.
+    if (launchStateBound && (!launchStamp || !sameConfigLaunchStamp(cfg, launchStamp))) {
+      continue;
     }
     // Match ComfyUI: relative entries resolve against the YAML file's OWN directory.
     const cfgDir = dirname(resolve(cfg));
@@ -1501,6 +1639,7 @@ export async function getLiveExtraModelRoots(
         if (expanded === undefined) continue; // unresolvable base_path → skip this group
         base = isAbsolute(expanded) ? resolve(expanded) : resolve(cfgDir, expanded);
       }
+      pushProvenGroupBase(roots, name, group.categories, base);
       for (const category of group.categories) {
         for (const p of category.paths) {
           // With a base_path, EVERY entry is os.path.join'd to it (incl. the Windows
@@ -1516,7 +1655,26 @@ export async function getLiveExtraModelRoots(
       }
     }
   }
-  return { authoritative: true, roots };
+  return {
+    // In strict mode, an unreachable/replaced/recent config proves nothing. Do
+    // not report an authoritative empty set that a deletion caller could mistake
+    // for a complete launch inventory.
+    authoritative: launchStateBound ? sawLaunchStateConfig : true,
+    roots,
+  };
+}
+
+/**
+ * Extra model roots that are safe to use for unlinking. Unlike the download
+ * authorizer above, this requires a connected process-start proof and a config
+ * file whose identity and metadata predate that process. A current config with
+ * no such proof is only a description of what might be configured, never a
+ * deletion capability.
+ */
+export async function getLaunchStateExtraModelRoots(
+  snapshot: LiveServerSnapshot,
+): Promise<{ authoritative: boolean; roots: ExtraModelRoot[] }> {
+  return getLiveExtraModelRoots(snapshot, { launchStateBound: true });
 }
 
 function ensureGroup(raw: Record<string, unknown>, name: string): Record<string, unknown> {
