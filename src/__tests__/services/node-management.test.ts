@@ -326,6 +326,19 @@ function stubFetch(opts: {
           : opts.installedBody ?? {};
         return jsonResponse(installedBody);
       }
+      // #2754 — "absent" means a host with NO ComfyUI-Manager, and such a host
+      // 404s the version routes exactly as it 404s the queue routes. Without this
+      // they fell through to the empty-200 catchall below, which models a server
+      // that answers every unknown path — the one shape that is neither a 404 nor
+      // a Manager. Detection reads the version routes now, so the fixture has to
+      // be honest about them or "confirmed absent" is asserted against a host that
+      // never confirmed anything.
+      if (
+        opts.managerQueueStatus === "absent" &&
+        (path === "/v2/manager/version" || path === "/manager/version")
+      ) {
+        return new Response("missing", { status: 404 });
+      }
       if (path === "/v2/manager/queue/status" || path === "/manager/queue/status") {
         if (opts.queueStatusNull) {
           // This is intentionally a status response, not an enqueue response:

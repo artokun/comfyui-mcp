@@ -189,10 +189,19 @@ VAELoader → VAE
 CLIPTextEncode (positive) → CONDITIONING
 ConditioningZeroOut → negative CONDITIONING
 
-EmptyLatentImage (1024x1344) → LATENT
+EmptySD3LatentImage (1024x1344) → LATENT
 
 KSampler → VAEDecode → SaveImage
 ```
+
+**Latent node:** use `EmptySD3LatentImage`, matching the official Comfy-Org
+`image_qwen_image` template. Qwen Image’s latent format is `Wan21`, so its latent is
+16-channel; `EmptyLatentImage` emits 4. A bare `EmptyLatentImage → KSampler` still renders,
+because ComfyUI’s `fix_empty_latent_channels` (`comfy/sample.py`, called by every sampler
+node) repeats an **all-zero** latent up to the model’s channel count. But that rescue is
+gated on `torch.count_nonzero(latent) == 0`, so it stops applying the moment a node inserted
+here writes into the latent — which is exactly what this approach is for. Start 16-channel
+and the question never arises.
 
 ### Complete Workflow: Separate Loading (Lightning 4-Step)
 
@@ -204,7 +213,7 @@ KSampler → VAEDecode → SaveImage
   "4": { "class_type": "VAELoader", "inputs": { "vae_name": "qwen_image_vae.safetensors" }},
   "5": { "class_type": "CLIPTextEncode", "inputs": { "clip": ["3", 0], "text": "<detailed natural language prompt>" }},
   "6": { "class_type": "ConditioningZeroOut", "inputs": { "conditioning": ["5", 0] }},
-  "7": { "class_type": "EmptyLatentImage", "inputs": { "width": 1024, "height": 1344, "batch_size": 1 }},
+  "7": { "class_type": "EmptySD3LatentImage", "inputs": { "width": 1024, "height": 1344, "batch_size": 1 }},
   "8": { "class_type": "KSampler", "inputs": {
     "model": ["2", 0],
     "positive": ["5", 0],
@@ -227,7 +236,7 @@ KSampler → VAEDecode → SaveImage
   "4": { "class_type": "VAELoader", "inputs": { "vae_name": "qwen_image_vae.safetensors" }},
   "5": { "class_type": "CLIPTextEncode", "inputs": { "clip": ["3", 0], "text": "<detailed natural language prompt>" }},
   "6": { "class_type": "ConditioningZeroOut", "inputs": { "conditioning": ["5", 0] }},
-  "7": { "class_type": "EmptyLatentImage", "inputs": { "width": 1328, "height": 1328, "batch_size": 1 }},
+  "7": { "class_type": "EmptySD3LatentImage", "inputs": { "width": 1328, "height": 1328, "batch_size": 1 }},
   "8": { "class_type": "KSampler", "inputs": {
     "model": ["2", 0],
     "positive": ["5", 0],
@@ -333,5 +342,5 @@ Tips:
 
 ## Sources
 
-- **Official:** none found.
+- **Official:** Comfy-Org workflow template `image_qwen_image.json` — https://github.com/Comfy-Org/workflow_templates/blob/main/templates/image_qwen_image.json
 - **Empirical:** sampler values, wiring, and prompt notes from working graphs in `packs/` and observed renders; not a vendor prompting guide.

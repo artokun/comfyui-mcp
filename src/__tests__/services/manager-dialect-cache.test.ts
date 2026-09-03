@@ -268,6 +268,260 @@ describe("#646 Manager API dialect cache invalidation", () => {
     expect(error.message).not.toMatch(/queue API is not reachable.*installed and enabled/i);
   });
 
+  // -------------------------------------------------------------------------
+  // #2754 — both queue/status routes 404. That is evidence about the QUEUE API;
+  // it is NOT evidence that ComfyUI-Manager is absent or disabled. The reporter's
+  // Manager was installed and had imported cleanly, so "is it installed and
+  // enabled? / start ComfyUI with --enable-manager" was the one instruction that
+  // could not help. The version routes are disjoint from the queue surface
+  // (/v2/manager/version is v4-only, /manager/version is 3.x-only), so they are
+  // the witness that decides which of the two claims the evidence supports.
+  // -------------------------------------------------------------------------
+
+  /** ComfyUI serving a Manager whose version route answers and whose queue
+   *  routes do not. `versionBody` is what BOTH version routes reply with. */
+  const stubQueuelessManager = (
+    version: { path: string; body: string; status?: number } | undefined,
+  ): Call[] => {
+    const calls: Call[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string, init?: RequestInit): Promise<Response> => {
+        const path = new URL(url).pathname;
+        calls.push({ url, path, method: init?.method ?? "GET", body: undefined });
+        if (version && path === version.path) {
+          return new Response(version.body, { status: version.status ?? 200 });
+        }
+        return new Response("404: Not Found", { status: 404 });
+      }),
+    );
+    return calls;
+  };
+
+  const detectionError = async (): Promise<Error & { details?: unknown }> =>
+    (await detectManagerApi(BASE).catch((e: unknown) => e)) as Error & { details?: unknown };
+
+  it("does not claim Manager is missing when its VERSION route answers (#2754)", async () => {
+    stubQueuelessManager({ path: "/manager/version", body: "V3.41" });
+
+    const error = await detectionError();
+    expect(error).toBeInstanceOf(Error);
+    // The claim it is now allowed to make: Manager is up, its queue API is not.
+    expect(error.message).toMatch(/ComfyUI-Manager IS answering/i);
+    expect(error.message).toMatch(/generation 3\.x/);
+    expect(error.message).toMatch(/serves NO queue API/i);
+    // The claims the evidence does NOT support, and which cost the reporter the
+    // whole investigation.
+    expect(error.message).not.toMatch(/installed and enabled/i);
+    expect(error.message).not.toMatch(/only activates when ComfyUI is started with/i);
+    // --enable-manager may only appear as the thing being RULED OUT, never as an
+    // instruction: prescribing it here is the exact wrong turn #2754 reported.
+    expect(error.message).toMatch(/neither installing[^.]*nor adding --enable-manager will fix it/i);
+    // The evidence the message was earned on travels with the error.
+    expect((error.details as { managerVersionMajor?: number }).managerVersionMajor).toBe(3);
+  });
+
+  it("does not tell a busy Manager its queue module failed to register (#2754, gate round 6)", async () => {
+    // Manager is up (V4.2.2) and its queue routes 503. The queue side gets the
+    // same treatment as the version side: 503 is a route we could not read, not a
+    // queue API that is absent, so the "queue module failed to register" reading
+    // is withheld.
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string): Promise<Response> => {
+        const path = new URL(url).pathname;
+        if (path === "/v2/manager/version") return new Response("V4.2.2", { status: 200 });
+        if (path.endsWith("/manager/queue/status")) {
+          return new Response("upstream down", { status: 503 });
+        }
+        return new Response("404: Not Found", { status: 404 });
+      }),
+    );
+
+    const error = await detectionError();
+    expect(error.message).toMatch(/ComfyUI-Manager IS answering/i);
+    expect(error.message).toMatch(/generation 4\.x/);
+    // The claim withheld: nothing here establishes the queue API is absent.
+    expect(error.message).not.toMatch(/serves NO queue API/i);
+    expect(error.message).not.toMatch(/failed to register/i);
+    expect(error.message).toMatch(/server-error/);
+    expect(error.message).toMatch(/could not READ/i);
+  });
+
+  it("reports the v4 generation when /v2/manager/version is the one answering (#2754)", async () => {
+    stubQueuelessManager({ path: "/v2/manager/version", body: "V4.2.2" });
+
+    const error = await detectionError();
+    expect(error.message).toMatch(/generation 4\.x/);
+    expect((error.details as { managerVersionMajor?: number }).managerVersionMajor).toBe(4);
+  });
+
+  it("still says 'not reachable' when the version routes answer nothing either (#2754)", async () => {
+    const calls = stubQueuelessManager(undefined);
+
+    const error = await detectionError();
+    // The original diagnosis survives — it is the correct one for THIS evidence.
+    expect(error.message).toMatch(/queue API is not reachable/i);
+    expect(error.message).toMatch(/installed and enabled/i);
+    // …but it now states the second observation that makes it more than a guess.
+    expect(error.message).toMatch(/neither \/v2\/manager\/version nor \/manager\/version/i);
+    expect((error.details as { managerVersionMajor?: number }).managerVersionMajor).toBeUndefined();
+    // A clean 404 on every probe, NOT a refusal and NOT an unreadable response —
+    // this is the only state entitled to the strong "nothing is serving Manager
+    // routes at all" claim, and the message says every probe 404'd.
+    expect((error.details as { managerVersionEvidence?: string }).managerVersionEvidence).toBe(
+      "absent",
+    );
+    expect(error.message).toMatch(/every probe 404'd/);
+    // The version routes were actually consulted — the claim is not asserted for free.
+    expect(calls.map((c) => c.path)).toEqual(
+      expect.arrayContaining(["/v2/manager/version", "/manager/version"]),
+    );
+  });
+
+  it("does not read ComfyUI's SPA catchall 200 as a Manager version (#2754)", async () => {
+    // An unregistered GET that a frontend/proxy answers with a page of HTML must
+    // never become "Manager is answering" — that is the whole point of the strict
+    // parse in parseManagerMajor, and this branch is a new consumer of it.
+    const calls = stubQueuelessManager({
+      path: "/manager/version",
+      body: "<!DOCTYPE html><html><body>ComfyUI</body></html>",
+    });
+
+    const error = await detectionError();
+    // The catchall WAS consulted (this is the new branch, not the old code path
+    // reaching the same words by never asking) and was correctly not believed.
+    expect(calls.map((c) => c.path)).toContain("/manager/version");
+    expect(error.message).not.toMatch(/ComfyUI-Manager IS answering/i);
+    expect(error.message).toMatch(/queue API is not reachable/i);
+    expect((error.details as { managerVersionMajor?: number }).managerVersionMajor).toBeUndefined();
+    // A 200 page of HTML is a route we could not READ, not a server saying the
+    // route is absent — so it lands in `unreadable`, and the strong absence
+    // wording (with its migrate/--enable-manager advice) is withheld.
+    expect((error.details as { managerVersionEvidence?: string }).managerVersionEvidence).toBe(
+      "unreadable",
+    );
+    expect(error.message).toMatch(/NOT evidence that ComfyUI-Manager is absent/i);
+    expect(error.message).not.toMatch(/every probe 404'd/);
+    expect(error.message).not.toMatch(/only activates when ComfyUI is started with/i);
+  });
+
+  it("settles instead of hanging on a version body that never ends (#2754, gate round 4)", async () => {
+    // comfyuiFetch's ceiling cancels the exchange but not the body read (#1672,
+    // fetch.ts:575-584), so a 200 whose body never closes leaves managerFetch's
+    // `await res.text()` pending forever. Without raceAbort around these two
+    // probes this test does not fail — it HANGS, which is the point.
+    const previousTimeout = process.env.COMFYUI_MCP_HTTP_TIMEOUT_S;
+    process.env.COMFYUI_MCP_HTTP_TIMEOUT_S = "0.3";
+    try {
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(async (url: string): Promise<Response> => {
+          const path = new URL(url).pathname;
+          if (path === "/v2/manager/version") {
+            // Headers arrive; the body never does and is never closed.
+            return new Response(
+              new ReadableStream({
+                start() {
+                  /* deliberately never enqueues and never closes */
+                },
+              }),
+              { status: 200 },
+            );
+          }
+          return new Response("404: Not Found", { status: 404 });
+        }),
+      );
+
+      const started = Date.now();
+      const error = await detectionError();
+      // Bounded by ONE budget for the whole probe, not one per route.
+      expect(Date.now() - started).toBeLessThan(5_000);
+      expect((error.details as { kind?: string }).kind).toBe("manager-queue-detection");
+      // A stall is unreadable — it establishes nothing about whether Manager is there.
+      expect((error.details as { managerVersionEvidence?: string }).managerVersionEvidence).toBe(
+        "unreadable",
+      );
+      expect(error.message).not.toMatch(/every probe 404'd/);
+    } finally {
+      if (previousTimeout === undefined) delete process.env.COMFYUI_MCP_HTTP_TIMEOUT_S;
+      else process.env.COMFYUI_MCP_HTTP_TIMEOUT_S = previousTimeout;
+    }
+  }, 20_000);
+
+  it("does not call a BODY-read failure an authentication refusal (#2754, gate round 3)", async () => {
+    // managerFetch's `await res.text()` is unguarded, so a 2xx whose body rejects
+    // throws from the same place a 401 does. Classifying every throw as "refused"
+    // would answer a broken pipe with "configure your gateway credentials".
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string): Promise<Response> => {
+        const path = new URL(url).pathname;
+        if (path === "/manager/version") {
+          return new Response(
+            new ReadableStream({
+              start(controller) {
+                controller.error(new Error("aborted"));
+              },
+            }),
+            { status: 200 },
+          );
+        }
+        return new Response("404: Not Found", { status: 404 });
+      }),
+    );
+
+    const error = await detectionError();
+    expect((error.details as { managerVersionEvidence?: string }).managerVersionEvidence).toBe(
+      "unreadable",
+    );
+    expect(error.message).not.toMatch(/authentication failure/i);
+    expect(error.message).not.toMatch(/credentials/i);
+    expect(error.message).toMatch(/could not be established/i);
+  });
+
+  it("will not call a 5xx on the version route absence (#2754, gate round 2)", async () => {
+    // Both queue routes 404 and the version routes 503. The old single-arm message
+    // recommended --enable-manager here — a Manager migration prescribed to a
+    // ComfyUI that was merely sick for a moment.
+    stubQueuelessManager({ path: "/manager/version", body: "upstream down", status: 503 });
+
+    const error = await detectionError();
+    expect((error.details as { managerVersionEvidence?: string }).managerVersionEvidence).toBe(
+      "unreadable",
+    );
+    expect(error.message).toMatch(/could not be established/i);
+    expect(error.message).toMatch(/server-error/);
+    expect(error.message).toMatch(/do not reinstall or migrate Manager/i);
+    expect(error.message).not.toMatch(/only activates when ComfyUI is started with/i);
+  });
+
+  it("does not spend a REFUSED version route as absence evidence (#2754)", async () => {
+    // managerFetch throws on 401/407 even in soft mode — deliberately, because
+    // #2085 is exactly the lesson that a credential rejection is not absence. A
+    // bare catch → "no version evidence" here would launder that 401 straight back
+    // into "nothing is serving Manager routes at all" (caught by the codex gate).
+    const calls = stubQueuelessManager({ path: "/manager/version", body: "", status: 401 });
+
+    const error = await detectionError();
+    // The probe that throws is the one this branch added, so it must have run —
+    // otherwise this asserts nothing about how its failure is handled.
+    expect(calls.map((c) => c.path)).toContain("/manager/version");
+    // The reader's real failure survives: this is still queue detection, not the
+    // secondary probe's error wearing its name.
+    expect(error.message).toMatch(/queue API is not reachable/i);
+    expect((error.details as { kind?: string }).kind).toBe("manager-queue-detection");
+    // …and the 401 is reported as the unknown it is, never as absence.
+    expect(error.message).toMatch(/REJECTED/);
+    expect(error.message).toMatch(/not evidence that ComfyUI-Manager is missing/i);
+    expect(error.message).toMatch(/UNKNOWN from here/);
+    expect(error.message).not.toMatch(/is serving ComfyUI-Manager routes at all/i);
+    expect(error.message).not.toMatch(/installed and enabled/i);
+    expect((error.details as { managerVersionEvidence?: string }).managerVersionEvidence).toBe(
+      "refused",
+    );
+  });
+
   it("re-detects after a restart at the SAME url (explicit invalidation)", async () => {
     let persona: Persona = "v2-batch";
     const calls = stubServer({ persona: () => persona });
