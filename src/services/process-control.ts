@@ -49,6 +49,7 @@ import {
   preferStabilityMatrixPackagePython,
   readLiveProcessEnv,
   resolveLaunchEnvironment,
+  withUtf8StdioEnv,
   type LaunchEnvInfo,
   type LaunchEnvResolution,
 } from "./launcher-env.js";
@@ -2151,7 +2152,14 @@ function spawnFromProcessInfo(info: ProcessInfo): SpawnedComfyUI | null {
     // environment, exactly as before #776. Set only when we have a BETTER answer:
     // the live process's own environment, or a launcher environment reconstructed
     // from disk.
-    env: envPlan.env,
+    //
+    // #2693 — plus UTF-8, on Windows, because the `stdio` line ABOVE is what makes
+    // it necessary: pointing the child at a log file instead of a console makes
+    // Python encode to the locale codepage, and rgthree's emoji banner then kills
+    // startup with a cp949 UnicodeEncodeError. We chose the destination, so the
+    // encoding on it is ours. An explicit setting of the user's always wins, and
+    // a launch that already had one is returned untouched.
+    env: withUtf8StdioEnv(envPlan.env),
     // Prefer the cwd the command resolved against (the live process cwd or the
     // absolute install anchor for a relaunch, #535/#711); only then the
     // configured install dir — and only as an ABSOLUTE path that exists on disk.

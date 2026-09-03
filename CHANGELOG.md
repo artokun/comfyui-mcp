@@ -6,6 +6,19 @@ All notable changes to this project are documented here. This project adheres to
 
 ## Unreleased
 
+### MCP
+
+#### Fixed
+- **a relaunched ComfyUI no longer dies on an emoji under a legacy Windows codepage
+  (#2693).** The relaunch points the child's stdout at a log file so a failed launch can
+  say what it printed, and Python not writing to a terminal encodes to the locale
+  codepage instead — so rgthree-comfy's startup banner killed ComfyUI with
+  `UnicodeEncodeError: 'cp949' codec can't encode character '\U0001f389'`. The relaunch
+  now sets `PYTHONUTF8=1` / `PYTHONIOENCODING=utf-8` on Windows unless the user set them
+  explicitly. The same report's argv half — interpreter flags like `-s` are absent from
+  Python's `sys.argv` and are not yet recovered from the OS command line — is untouched
+  and #2693 stays open for it.
+
 ## [0.52.180] - 2026-09-03
 
 ### MCP
