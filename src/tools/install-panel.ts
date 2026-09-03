@@ -289,11 +289,13 @@ export async function panelAction(
   }
 
   if (action === "unlock") {
-    // Explicit recovery for a wedged lock whose owner cannot be proven
-    // dead (unreadable / reuse-ambiguous). Acquire already reclaims a
-    // proven-dead owner on its own (#2788); this still re-verifies before
-    // deleting anything (#1953: a fresh lock whose owner already exited is
-    // abandoned), and does NOT take the lock itself.
+    // An explicit RE-CHECK and report, not a force. It runs the same proof as
+    // acquire, so a lock whose owner cannot be proven dead (unreadable /
+    // reuse-ambiguous) is REFUSED here too -- that case is recovered by hand,
+    // after confirming no orchestrator still runs. What this adds over acquire
+    // is an on-demand verdict: acquire reclaims a proven-dead owner on its own
+    // (#2788), while this re-verifies on request (#1953: a fresh lock whose
+    // owner already exited is abandoned) and does NOT take the lock itself.
     return json({ action: "unlock", ...reclaimAbandonedPanelLock() });
   }
 

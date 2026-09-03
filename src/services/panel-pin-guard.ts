@@ -469,7 +469,19 @@ function startTimesMatch(obs: PanelLockObservation): boolean {
  *   - the pid is ours, but the recorded process start predates this life
  *     (the number was recycled onto us) AND the lock is past the stale window.
  */
-function ownerProvablyDead(obs: PanelLockObservation): boolean {
+function ownerProvablyDead(
+  obs: PanelLockObservation,
+  /**
+   * May this call spawn the PROCESS-TABLE probe? `processTableHasPid` runs
+   * `tasklist.exe` (or `ps`) through `execFileSync` — synchronously, on the
+   * event loop, with a 3s timeout. It is only ever reached when `kill(0)` already
+   * said the owner is alive or is EPERM-unsure, i.e. in the cases where reclaim
+   * refuses anyway; a genuinely dead owner is caught by `alive === false` with no
+   * subprocess at all. So the waiter can poll cheaply every second and pay for the
+   * table lookup far less often without slowing dead-owner reclaim down.
+   */
+  allowProcessTableProbe = true,
+): boolean {
   if (obs.pid === undefined) return false;
   if (obs.pid === process.pid) {
     if (obs.ownerStartedMs !== undefined) {
@@ -503,6 +515,7 @@ function ownerProvablyDead(obs: PanelLockObservation): boolean {
   }
   if (obs.alive === false) return true;
   if (obs.alive === true || obs.alive === "unsure") {
+    if (!allowProcessTableProbe) return false;
     return processTableHasPid(obs.pid) === false;
   }
   return false;
@@ -650,7 +663,9 @@ export interface PanelLockReclaimResult {
  * overwrite a fresh lock that appeared at the path in the meantime, while
  * linkSync fails with EEXIST and both files are reported, nothing destroyed.
  */
-export function reclaimAbandonedPanelLock(): PanelLockReclaimResult {
+export function reclaimAbandonedPanelLock(
+  { allowProcessTableProbe = true }: { allowProcessTableProbe?: boolean } = {},
+): PanelLockReclaimResult {
   const path = panelLockPath();
   // A test pointed at the real home must never move or delete a lock a live
   // orchestrator is holding — reclaim is exactly the operation that does.
@@ -682,7 +697,7 @@ export function reclaimAbandonedPanelLock(): PanelLockReclaimResult {
   }
   // Owner-aware: a dead owner is abandoned even inside the grace window. A
   // self-restart (#1953) leaves a lock seconds old whose holder is already gone.
-  if (!ownerProvablyDead(obs)) {
+  if (!ownerProvablyDead(obs, allowProcessTableProbe)) {
     if (obs.pid === process.pid && startTimesMatch(obs)) {
       return refuse(
         `it is held by this process (pid ${obs.pid}), which is still running, ` +
@@ -923,7 +938,12 @@ async function acquireFileLock(timeoutMs: number): Promise<() => void> {
   // probe fires immediately: the common case is a lock left by an
   // orchestrator that already died, and that is answerable at once (#2788).
   const LIVENESS_PROBE_MS = 1_000;
+  /** How often the reclaim poll may spawn `tasklist.exe` / `ps`. See the call site. */
+  const PROCESS_TABLE_PROBE_MS = 15_000;
   let nextLivenessProbe = 0;
+  // 0 so the FIRST poll still pays for the full probe -- an owner that died just
+  // before this waiter arrived is reclaimed immediately, not 15s later.
+  let nextProcessTableProbe = 0;
 
   for (;;) {
     try {
@@ -1097,7 +1117,18 @@ async function acquireFileLock(timeoutMs: number): Promise<() => void> {
       // prove death, so it stays until timeout (fail closed).
       if (Date.now() >= nextLivenessProbe) {
         nextLivenessProbe = Date.now() + LIVENESS_PROBE_MS;
-        const reclaim = reclaimAbandonedPanelLock();
+        // Cheap by default. `kill(0)` alone already proves a DEAD owner
+        // (`alive === false`), which is the case this poll exists to notice, so
+        // withholding the process-table probe costs no reclaim latency. The
+        // expensive lookup only matters for an EPERM-unsure pid or a Windows
+        // handle-kept-open zombie, and those stay refused either way — so it runs
+        // on its own much slower clock instead of once a second, and always once
+        // more at the deadline below.
+        const allowProcessTableProbe = Date.now() >= nextProcessTableProbe;
+        if (allowProcessTableProbe) {
+          nextProcessTableProbe = Date.now() + PROCESS_TABLE_PROBE_MS;
+        }
+        const reclaim = reclaimAbandonedPanelLock({ allowProcessTableProbe });
         if (reclaim.outcome === "reclaimed" || reclaim.outcome === "no-lock") {
           continue;
         }
@@ -1132,12 +1163,14 @@ async function acquireFileLock(timeoutMs: number): Promise<() => void> {
         throw new Error(
           `Timed out after ${timeoutMs}ms waiting for the panel operation lock. ` +
             `${describeObservedLock(path, obs)} It was not auto-reclaimed: a living ` +
-            `owner is never stolen, and an unproven owner is left in place. To ` +
-            `recover a lock whose owner cannot be identified, run ` +
-            `install_comfyui(action:'panel', panel_action:'unlock') — it re-verifies that the recorded owner is ` +
-            `dead before deleting anything, and refuses otherwise. ` +
-            `Or do it by hand: stop or restart every comfyui-mcp orchestrator, verify ` +
-            `none remain, delete this exact lock file, then retry.`,
+            `owner is never stolen, and an unproven owner is left in place. ` +
+            `install_comfyui(action:'panel', panel_action:'unlock') RE-CHECKS and reports: it applies this ` +
+            `same proof, so it clears the lock only if the recorded owner can be ` +
+            `shown dead, and REFUSES for exactly the cases that reach this timeout ` +
+            `(an unreadable record, or a pid whose identity cannot be told apart ` +
+            `from a reused one). When it refuses, the recovery is by hand: stop or ` +
+            `restart every comfyui-mcp orchestrator, verify none remain, delete ` +
+            `this exact lock file, then retry.`,
         );
       }
       await sleep(POLL_MS);

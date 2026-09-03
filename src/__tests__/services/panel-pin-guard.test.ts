@@ -371,7 +371,10 @@ describe("withPanelMutationLock — a FILE lock, so it holds across processes", 
   });
 
   it("auto-reclaims a fresh lock whose recorded pid is dead (#2788)", async () => {
-    writeFileSync(panelLockPath(), JSON.stringify({ pid: 999999 }));
+    // 0x7fffffff, the sentinel the rest of this file uses, NOT 999999: Linux
+    // allows pid_max up to 4194304, so a seven-digit pid can name a real live
+    // process and turn this into a flake that never exercises reclaim at all.
+    writeFileSync(panelLockPath(), JSON.stringify({ pid: 0x7fffffff }));
     await expect(
       withPanelMutationLock(async () => "reclaimed", { timeoutMs: 1_000 }),
     ).resolves.toBe("reclaimed");
@@ -539,6 +542,31 @@ describe("reclaimAbandonedPanelLock — the explicit recovery for a wedged lock 
     const res = reclaimAbandonedPanelLock();
     expect(res.outcome).toBe("no-lock");
     expect(res.detail).toMatch(/nothing to reclaim/i);
+  });
+
+  it("still reclaims a DEAD owner with the process-table probe withheld (#2788 review)", async () => {
+    // The load-bearing claim behind throttling that probe: `kill(0)` alone
+    // already proves a dead owner, so the once-a-second poll can skip the
+    // synchronous `tasklist.exe` / `ps` spawn WITHOUT slowing reclaim down. If
+    // this ever fails, the throttle is trading correctness for cost and the
+    // interval must go back to matching the liveness poll.
+    await plantLock(
+      JSON.stringify({ pid: DEAD_PID, startedAt: "2026-08-02T10:06:42.831Z" }),
+      60 * 60_000,
+    );
+    const res = reclaimAbandonedPanelLock({ allowProcessTableProbe: false });
+    expect(res.outcome).toBe("reclaimed");
+  });
+
+  it("withholding the probe never turns an unproven owner into a reclaim", async () => {
+    // The other direction: the option may only ever make reclaim MORE
+    // conservative. An unreadable record has no owner whose death could be
+    // shown, and that verdict must not change with the probe disabled.
+    await plantLock(JSON.stringify({ note: "no pid here" }), 60 * 60_000);
+    const withProbe = reclaimAbandonedPanelLock();
+    const withoutProbe = reclaimAbandonedPanelLock({ allowProcessTableProbe: false });
+    expect(withProbe.outcome).toBe("refused");
+    expect(withoutProbe.outcome).toBe("refused");
   });
 
   it("reclaims a lock that is BOTH old AND owned by a dead pid — and a new op proceeds", async () => {
