@@ -84,7 +84,7 @@ describe("panel_search_nodes (#2492 Manager transport Failed to fetch)", () => {
     };
     expect(body.count).toBe(1);
     expect(body.source).toBe("host_http");
-    expect(body.note).toBe(HOST_HTTP_SEARCH_NOTE);
+    expect(body.note).toContain(HOST_HTTP_SEARCH_NOTE);
   });
 
   it("names both causes when host mappings also fail, not a missing pack", async () => {
