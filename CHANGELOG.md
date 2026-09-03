@@ -6,10 +6,11 @@ All notable changes to this project are documented here. This project adheres to
 
 ## Unreleased
 
-
 ### MCP
 #### Fixed
+- **`panel_set_widget` accepts a complete promoted-subgraph ownership envelope that omits `truncated:false` (#2783).** `graph_get_subgraph` already proves completeness when `node_count === nodes.length`; an omitted or null `truncated` flag is then `false`. An asserted `truncated:true`, or a list shorter than `node_count`, stays fail-closed.
 - the Manager-dialect guard's unit tests no longer probe the developer's real ComfyUI: three orchestrator test files passed on CI (nothing listening) and failed on any machine with ComfyUI actually running, because detection then succeeded and the git-URL guard refused the installs the fixtures are built on (test-only)
+
 ## [0.52.184] - 2026-09-03
 
 ### MCP
