@@ -371,6 +371,7 @@ describe("actions call the same services with the same arguments", () => {
       requiredPacks: ["impact-pack"],
       missingPacks: ["impact-pack"],
       unresolved: [],
+      ambiguous: [],
       dependencies: [{ class_type: "ImpactNode", pack: "impact-pack", installed: false }],
     });
     const workflow = { "1": { class_type: "ImpactNode", inputs: {} } };
@@ -389,6 +390,7 @@ describe("actions call the same services with the same arguments", () => {
       requiredPacks: [],
       missingPacks: [],
       unresolved: [],
+      ambiguous: [],
       dependencies: [],
     });
     await handler()({ action: "extract_deps", workflow: '{"1":{"class_type":"KSampler"}}' });
@@ -403,6 +405,7 @@ describe("actions call the same services with the same arguments", () => {
       installed: ["impact-pack"],
       alreadyInstalled: [],
       unresolved: [],
+      ambiguous: [],
       queue: { total_count: 1, done_count: 0, in_progress_count: 1, is_processing: true },
     });
     const workflow = { "1": { class_type: "ImpactNode", inputs: {} } };
@@ -410,6 +413,67 @@ describe("actions call the same services with the same arguments", () => {
     expect(mocks.installWorkflowDependencies).toHaveBeenCalledWith(workflow, { deps: "sentinel" });
     expect(text(res)).toContain("## Queued 1 node pack(s) for install");
     expect(text(res)).toContain("### Manager queue status");
+  });
+
+  // #2765 — the resolver refusing to name an owner only helps if the RENDERED
+  // reply says so. Silence reads as "nothing else is needed", which is the
+  // reading that let an approval-gated preflight point at an unrelated repo.
+  it('action:"extract_deps" renders ambiguous ownership with every claimant, naming no owner', async () => {
+    mocks.extractWorkflowDependencies.mockResolvedValueOnce({
+      classTypes: ["Krea2EditGroundedEncode"],
+      requiredPacks: [],
+      missingPacks: [],
+      unresolved: [],
+      ambiguous: [
+        {
+          class_type: "Krea2EditGroundedEncode",
+          candidates: ["Anomalous_Model_Browser", "comfyui-krea2edit"],
+        },
+      ],
+      dependencies: [
+        {
+          class_type: "Krea2EditGroundedEncode",
+          pack: null,
+          builtin: false,
+          installed: false,
+          source: "ambiguous",
+          candidates: ["Anomalous_Model_Browser", "comfyui-krea2edit"],
+        },
+      ],
+    });
+    const res = await handler()({
+      action: "extract_deps",
+      workflow: { "1": { class_type: "Krea2EditGroundedEncode", inputs: {} } },
+    });
+    const out = text(res);
+    expect(out).toContain("### Ambiguous ownership (1)");
+    expect(out).toContain("claimed by: Anomalous_Model_Browser, comfyui-krea2edit");
+    expect(out).toContain("will not install them");
+    // The per-node line must not present one claimant as the answer.
+    expect(out).toContain("`Krea2EditGroundedEncode` → AMBIGUOUS");
+    // And it must NOT be laundered through the missing-pack remediation path.
+    expect(out).not.toContain("### Missing packs");
+  });
+
+  it('action:"install_deps" reports what it deliberately did NOT install', async () => {
+    mocks.installWorkflowDependencies.mockResolvedValueOnce({
+      installed: [],
+      alreadyInstalled: [],
+      unresolved: [],
+      ambiguous: [
+        {
+          class_type: "Krea2EditGroundedEncode",
+          candidates: ["Anomalous_Model_Browser", "comfyui-krea2edit"],
+        },
+      ],
+    });
+    const res = await handler()({
+      action: "install_deps",
+      workflow: { "1": { class_type: "Krea2EditGroundedEncode", inputs: {} } },
+    });
+    const out = text(res);
+    expect(out).toContain("### Not installed — ambiguous ownership (1)");
+    expect(out).toContain("claimed by: Anomalous_Model_Browser, comfyui-krea2edit");
   });
 
   it('action:"generate_skill" forwards source + refresh and keeps structuredContent', async () => {
@@ -481,6 +545,7 @@ describe("only action:\"install_deps\" can reach the install service", () => {
       requiredPacks: [],
       missingPacks: [],
       unresolved: [],
+      ambiguous: [],
       dependencies: [],
     });
     mocks.generateSkillCached.mockResolvedValue({

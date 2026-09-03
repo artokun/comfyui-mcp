@@ -968,15 +968,37 @@ async function extractDepsAction(input: string | Record<string, unknown>): Promi
     );
   }
 
+  // #2765 — rendered separately from `unresolved`, whose sentence above ("neither
+  // installed nor known to ComfyUI-Manager") is false for these: the catalogue
+  // knows them by SEVERAL owners. Naming one used to be an arbitrary pick of
+  // whichever entry enumerated first, which is how four unrelated node classes
+  // came back owned by one unrelated repository.
+  if (result.ambiguous.length > 0) {
+    lines.push(
+      `### Ambiguous ownership (${result.ambiguous.length})`,
+      "The ComfyUI-Manager catalogue attributes each of these class_types to MORE THAN ONE pack, " +
+        "so the owning pack cannot be determined and is deliberately not guessed. " +
+        'They are excluded from the missing-pack list and `list_packs (action:"install_deps")` ' +
+        "will not install them — installing the wrong candidate means running unrelated " +
+        "third-party code. Pick the correct pack yourself and install it by name.",
+      ...result.ambiguous.map(
+        (a) => `- \`${a.class_type}\` — claimed by: ${a.candidates.join(", ")}`,
+      ),
+      "",
+    );
+  }
+
   lines.push("### Per-node mapping");
   for (const dep of result.dependencies) {
     const where = dep.builtin
       ? "built-in"
       : dep.pack
         ? `${dep.pack} (${dep.installed ? "installed" : "missing"})`
-        : dep.installed
-          ? "installed, pack unknown"
-          : "UNRESOLVED";
+        : dep.source === "ambiguous"
+          ? `AMBIGUOUS — ${(dep.candidates ?? []).length} claimants, not guessed`
+          : dep.installed
+            ? "installed, pack unknown"
+            : "UNRESOLVED";
     lines.push(`- \`${dep.class_type}\` → ${where}`);
   }
 
@@ -1024,6 +1046,22 @@ async function installDepsAction(input: string | Record<string, unknown>): Promi
       `### Could not resolve (${result.unresolved.length})`,
       "Not found in ComfyUI-Manager — install manually:",
       ...result.unresolved.map((p) => `- ${p}`),
+      "",
+    );
+  }
+
+  // #2765 — say what was deliberately NOT installed. Silence here reads as
+  // "everything needed was handled", which is the reading that let a preflight
+  // report an unrelated pack as the missing dependency.
+  if (result.ambiguous.length > 0) {
+    lines.push(
+      `### Not installed — ambiguous ownership (${result.ambiguous.length})`,
+      "ComfyUI-Manager attributes each of these class_types to MORE THAN ONE pack. " +
+        "Installing a guess would run unrelated third-party code, so nothing was queued " +
+        "for them. Choose the right pack and install it by name:",
+      ...result.ambiguous.map(
+        (a) => `- \`${a.class_type}\` — claimed by: ${a.candidates.join(", ")}`,
+      ),
       "",
     );
   }
