@@ -7321,6 +7321,35 @@ function forgetStaleSubgraphIdentity(ctx: PanelToolCtx): void {
   ctx.bridge?.clearPromotedSubgraphIdentity?.(ctx.tabId);
 }
 
+/** Tabs whose promoted-container mapping is unverified after a queue-busy
+ * mutation refusal. `graph_get_subgraph` can stay indeterminate for ordinary
+ * root nodes until something walks the live graph (#2730). */
+const staleSubgraphMappingTabs = new Set<string>();
+
+function noteStaleSubgraphMapping(tabId: string): void {
+  if (tabId) staleSubgraphMappingTabs.add(tabId);
+}
+
+export function __resetStaleSubgraphMappingForTest(): void {
+  staleSubgraphMappingTabs.clear();
+}
+
+/** Root graph identity from a live query even when `is_subgraph` is missing.
+ * A missing container bit is indeterminate, but a published root identity is
+ * still enough to spend one mapping refresh before failing closed (#2730). */
+function parseRootGraphIdentity(payload: Record<string, unknown> | null): string | null {
+  if (!payload) return null;
+  const viewing = payload.viewing;
+  if (!viewing || typeof viewing !== "object" || Array.isArray(viewing)) return null;
+  const rec = viewing as Record<string, unknown>;
+  if (rec.scope !== "root") return null;
+  const graphIdentity = rec.graph_identity;
+  if (typeof graphIdentity !== "string" || graphIdentity.length === 0 || graphIdentity.length > 256) {
+    return null;
+  }
+  return graphIdentity;
+}
+
 /** Read the active viewing scope and node's explicit container bit before
  * attempting promoted-widget resolution. The pinpoint detail projection carries
  * the node bit even when the widget list is empty (which is how a fresh rgthree
@@ -8225,23 +8254,31 @@ const PROMOTED_PREFLIGHT_READ_OPTIONS: PanelToolCallOptions = {
   maxBridgeReconnectRetries: 0,
 };
 
+type PromotedTargetProbe = {
+  scope: QueriedNodeScope | null;
+  rootGraphIdentity: string | null;
+};
+
 async function readPromotedTargetScope(
   ctx: PanelToolCtx,
   nodeId: unknown,
   options: PanelToolCallOptions = PROMOTED_PREFLIGHT_READ_OPTIONS,
-): Promise<QueriedNodeScope | null> {
+): Promise<PromotedTargetProbe> {
   const probe = await ctx.call({
     cmd: "graph_query",
     ids: [nodeId],
     fields: "detail",
     limit: 1,
   }, undefined, undefined, undefined, options);
-  if (probe.isError) return null;
+  if (probe.isError) return { scope: null, rootGraphIdentity: null };
   const payload = parseToolResultJson(probe);
   if (parseViewingScope(payload?.viewing)?.scope === "root") {
     rememberLiveRootViewing(ctx, payload?.viewing);
   }
-  return parseVerifiedQueriedNodeScope(payload, nodeId);
+  return {
+    scope: parseVerifiedQueriedNodeScope(payload, nodeId),
+    rootGraphIdentity: parseRootGraphIdentity(payload),
+  };
 }
 
 function currentPromotedBindingError(
@@ -8865,16 +8902,57 @@ async function preparePromotedWidgetWrite(
     }
   }
 
+  // #2730 — after a queue-busy mutation refusal the panel's subgraph registry
+  // can stay stale until a graph walk. Refresh once before classifying, then
+  // re-probe so an ordinary root node can take the fast path without a manual
+  // panel_graph_outline.
+  let mappingRefreshed = false;
+  const refreshSubgraphMapping = async (): Promise<ToolResult | null> => {
+    if (mappingRefreshed) return null;
+    mappingRefreshed = true;
+    const outline = await ctx.call(
+      { cmd: "graph_outline" },
+      undefined,
+      undefined,
+      undefined,
+      PROMOTED_PREFLIGHT_READ_OPTIONS,
+    );
+    if (outline.isError) {
+      return promotedWriteRefusal(widget, "graph_outline could not refresh the subgraph mapping");
+    }
+    staleSubgraphMappingTabs.delete(ctx.tabId);
+    const payload = parseToolResultJson(outline);
+    if (parseViewingScope(payload?.viewing)?.scope === "root") {
+      rememberLiveRootViewing(ctx, payload?.viewing);
+      forgetStaleSubgraphIdentity(ctx);
+    }
+    const drift = panelBindingDriftReason(
+      ctx,
+      "after the subgraph mapping refresh",
+      hasIdentityApi,
+      identityBefore,
+      tabBefore,
+    );
+    if (drift) return ordinaryBindingRefusal(widget, drift);
+    return null;
+  };
+  if (staleSubgraphMappingTabs.has(ctx.tabId)) {
+    const refreshError = await refreshSubgraphMapping();
+    if (refreshError) return refreshError;
+  }
+
   // #2394 — a root-level rgthree Power Lora Loader may have no lora_N widget
   // yet. Prove the addressed node is an ordinary root node before asking the
   // promoted-container classifier to resolve a target that is intentionally
   // absent. An unreadable scope probe is not permission for an outer write;
   // it falls through to the existing conservative graph_get_subgraph path.
-  const targetScope = await readPromotedTargetScope(
+  let targetProbe = await readPromotedTargetScope(
     ctx,
     nodeId,
     PROMOTED_PREFLIGHT_READ_OPTIONS,
   );
+  let targetScope = targetProbe.scope;
+  const rootGraphIdentity = targetProbe.rootGraphIdentity;
   // #2518 — a live root query names the current root workflow instance. Do not
   // enter the promoted-subgraph identity path for an ordinary (or unproven)
   // root node; a truncated StringConcatenate pinpoint used to fall through,
@@ -8954,6 +9032,31 @@ async function preparePromotedWidgetWrite(
       );
     }
     if (firstReadKind === "permanent") {
+      // #2730 — a stale subgraph registry is a permanent-looking miss for an
+      // ordinary root node. Refresh the mapping once and re-probe. Still
+      // unverifiable → refuse. Do not spend the transient subgraph re-read on
+      // a permanent application error.
+      if (!mappingRefreshed && rootGraphIdentity !== null) {
+        const refreshError = await refreshSubgraphMapping();
+        if (refreshError) return refreshError;
+        targetProbe = await readPromotedTargetScope(
+          ctx,
+          nodeId,
+          PROMOTED_PREFLIGHT_READ_OPTIONS,
+        );
+        targetScope = targetProbe.scope;
+        if (targetScope?.activeView === "root" && targetScope.node === "ordinary") {
+          const driftAfterMapping = panelBindingDriftReason(
+            ctx,
+            "after the subgraph mapping refresh",
+            hasIdentityApi,
+            identityBefore,
+            tabBefore,
+          );
+          if (driftAfterMapping) return ordinaryBindingRefusal(widget, driftAfterMapping);
+          return ordinaryWritePlanFromScope(widget, targetScope, tabBefore, identityBefore);
+        }
+      }
       return promotedSubgraphReadRefusal(
         widget,
         sub,
@@ -17121,7 +17224,13 @@ export function makePanelToolCtx(
       // panel#1489 — reads are NOT refused here: they carry no unknown outcome,
       // so they are dispatched on the bounded budget above instead.
       const blocked = graphCmdBlockedByRunningPrompt(cmd);
-      if (blocked) return fail(blocked);
+      if (blocked) {
+        // #2730 — a fenced mutation never reached the panel, so the subgraph
+        // registry can stay stale until something walks the live graph. Mark
+        // this tab so the next idle write refreshes mapping once.
+        noteStaleSubgraphMapping(ctx.tabId);
+        return fail(blocked);
+      }
       // #2527 — a timed-out mutation may still be applying. Graph reads wait for
       // that settlement (or disclose the outstanding receipt) so they cannot
       // certify a stale widget value as current.
