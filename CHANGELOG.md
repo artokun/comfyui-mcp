@@ -18,6 +18,13 @@ All notable changes to this project are documented here. This project adheres to
   Resumable partials are counted separately from retained entries, since eviction skips
   them. The default limit is unchanged and still unbounded; that decision stays open.
 
+## [0.52.180] - 2026-09-03
+
+### MCP
+
+#### Fixed
+- normalize saved workflow filenames (#2779)
+
 ## [0.52.179] - 2026-09-02
 
 ### MCP
