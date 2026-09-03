@@ -117,3 +117,43 @@ describe("slice miss explains itself (panel#690(4))", () => {
     expect(stats.seeds).toBe(1);
   });
 });
+
+describe("slice seeds from nested overlapping groups (#2780)", () => {
+  // Outer group listed FIRST so groups.find() would attribute the SaveImage to
+  // "Save Group" and miss a slice for the inner title.
+  const nestedOverlapWf = {
+    nodes: [
+      { id: 838, type: "SaveImage", pos: [50, 50] },
+      { id: 1, type: "CheckpointLoaderSimple", pos: [40, 40] },
+    ],
+    links: [[1, 1, 0, 838, 0, "IMAGE"]],
+    groups: [
+      { title: "Save Group", bounding: [0, 0, 200, 200] },
+      { title: "#Save Draft 📐", bounding: [25, 25, 75, 75] },
+    ],
+  } as UiWorkflow;
+
+  it("slices when the output is inside a nested inner group that overlaps a larger outer group", () => {
+    const { stats, workflow } = sliceWorkflow(nestedOverlapWf, ["save draft"]);
+    expect(stats.seeds).toBe(1);
+    expect(workflow.nodes?.some((n) => n.id === 838)).toBe(true);
+  });
+
+  it("still slices by the outer overlapping group title", () => {
+    const { stats } = sliceWorkflow(nestedOverlapWf, ["save group"]);
+    expect(stats.seeds).toBe(1);
+  });
+
+  it("lists every containing group on a miss, not only the first box", () => {
+    expect(() => sliceWorkflow(nestedOverlapWf, ["#Save Draft"])).not.toThrow();
+    try {
+      sliceWorkflow(nestedOverlapWf, ["does-not-match"]);
+      throw new Error("expected slice miss");
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      expect(msg).toContain("Save Group");
+      expect(msg).toContain("#Save Draft");
+      expect(msg).toContain("#838 SaveImage");
+    }
+  });
+});
