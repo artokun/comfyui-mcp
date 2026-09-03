@@ -109,6 +109,22 @@ describe("#1477 downloadCacheFootprint measures what the cache is holding", () =
     expect(f.retainedBytes).toBe(10);
   });
 
+  it("counts the .ct sidecar too, so the buckets ACCOUNT FOR the directory", async () => {
+    // The fixture has always written this sidecar; nothing asserted on it, and the
+    // first version of the report dropped it from BOTH buckets — hidden, so not
+    // retained; not `.partial`, so not staged. The numbers then could not be
+    // reconciled against `du`, which is the one thing a footprint report is for.
+    await seedCache();
+    const f = await downloadCacheFootprint();
+    expect(f.sidecarEntries).toBe(1);
+    expect(f.sidecarBytes).toBe("application/octet-stream".length);
+    // Every FILE in the directory lands in exactly one bucket.
+    expect(f.retainedBytes + f.stagedBytes + f.sidecarBytes).toBe(
+      10 + 5 + "application/octet-stream".length,
+    );
+    expect(f.retainedEntries + f.stagedEntries + f.sidecarEntries).toBe(3);
+  });
+
   it("counts a resumable partial as STAGED, never as retained", async () => {
     await seedCache();
     const f = await downloadCacheFootprint();

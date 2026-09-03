@@ -3520,6 +3520,14 @@ export interface DownloadCacheFootprint {
   /** Resumable staging, which eviction never touches. */
   stagedBytes: number;
   stagedEntries: number;
+  /**
+   * Hidden files that are NOT `.partial` — the `.<name>.ct` change-tag and `.etag`
+   * sidecars. Tiny, and eviction ignores them, but they are on the disk: without a
+   * bucket of their own the two numbers above cannot be reconciled against `du`,
+   * and reconciling them is the whole point of a footprint report (#1477).
+   */
+  sidecarBytes: number;
+  sidecarEntries: number;
   /** COMFYUI_LRU_CACHE_SIZE_GB in bytes. 0 means eviction is OFF. */
   limitBytes: number;
   /** The directory could not be listed at all (missing, or unreadable). */
@@ -3534,6 +3542,8 @@ export async function downloadCacheFootprint(): Promise<DownloadCacheFootprint> 
     retainedEntries: 0,
     stagedBytes: 0,
     stagedEntries: 0,
+    sidecarBytes: 0,
+    sidecarEntries: 0,
     limitBytes: cacheSizeLimitBytes(),
   };
   let entries;
@@ -3560,6 +3570,11 @@ export async function downloadCacheFootprint(): Promise<DownloadCacheFootprint> 
     } else if (entry.name.endsWith(".partial")) {
       out.stagedBytes += size;
       out.stagedEntries += 1;
+    } else {
+      // Everything else hidden: `.<name>.ct`, `.etag`. Counted rather than dropped
+      // so retained + staged + sidecar accounts for every FILE in the directory.
+      out.sidecarBytes += size;
+      out.sidecarEntries += 1;
     }
   }
   return out;
