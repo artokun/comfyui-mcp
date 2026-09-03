@@ -19,6 +19,7 @@ import {
   comfyuiFetch,
   connectedPanelFallbackOriginsNow,
   comfyHttpTimeoutSeconds,
+  deliveryDoubt,
   describeMissingInputMediaDrift,
   isComfyTransportFailure,
   isTimeoutAbort,
@@ -112,6 +113,11 @@ function requireLocalComfyUI(op: string): void {
 }
 
 let clientInstance: Client | null = null;
+
+/** One in-flight /upload/image POST per ComfyUI origin (#2801). Concurrent
+ *  stage/upload writes share a socket and can EPIPE; overlapping POSTs are also
+ *  non-idempotent, so they wait rather than racing. */
+const uploadChains = new Map<string, Promise<void>>();
 
 /** Keep the SDK's configured URL literal until a refused loopback dial proves
  * that Node should retry through its IPv6-capable localhost resolver. */
@@ -1199,6 +1205,7 @@ export async function getUpscaleModels(): Promise<string[]> {
 }
 
 export function resetClient(): void {
+  uploadChains.clear();
   if (clientInstance) {
     try {
       clientInstance.close();
@@ -1765,36 +1772,52 @@ export async function fetchImage(
   return { base64, mimeType };
 }
 
-/**
- * Upload an image to ComfyUI's input/ directory via HTTP multipart POST.
- * Works over HTTP — no local filesystem access needed.
- */
-export async function uploadImageHttp(
-  filename: string,
+type UploadImageResult = { name: string; subfolder: string; type: string };
+type UploadLanding = "committed" | "absent" | "unknown";
+
+function serializePerTargetUpload<T>(key: string, work: () => Promise<T>): Promise<T> {
+  const prior = uploadChains.get(key);
+  let release = () => {};
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  uploadChains.set(key, gate);
+  const run = async (): Promise<T> => {
+    if (prior) {
+      // unknown-ok: a prior upload's failure must not block this one
+      await prior.catch(() => undefined);
+    }
+    try {
+      return await work();
+    } finally {
+      release();
+      if (uploadChains.get(key) === gate) uploadChains.delete(key);
+    }
+  };
+  return run();
+}
+
+function uploadDeliveryUnknown(err: unknown): boolean {
+  if (!isComfyTransportFailure(err)) return false;
+  return deliveryDoubt(describeFetchFailure(err).code, "POST") !== "";
+}
+
+function buildUploadForm(
+  name: string,
   data: Buffer,
-  mimeType = "image/png",
-  overwrite = true,
-): Promise<{ name: string; subfolder: string; type: string }> {
-  if (isCloudMode()) return cloudClient.uploadImageHttp(filename, data, mimeType, overwrite);
-  const client = getClient();
-  // #946 — a `filename` carrying a path ("assets/clip.mp4") is a SUBFOLDER
-  // request, and ComfyUI's /upload/image takes that as its own form field, not
-  // as a slash inside the multipart filename. Sending the whole path as the
-  // filename put it somewhere between the transport and ComfyUI's handler and
-  // came back as a bare `Unexpected non-whitespace character after JSON at
-  // position 4` — no upload, no usable error. Split it and use the field the
-  // API actually has, which is also what the caller was asking for.
-  const { subfolder, name } = splitUploadTarget(filename);
+  mimeType: string,
+  overwrite: boolean,
+  subfolder: string,
+): FormData {
   const formData = new FormData();
-  const blob = new Blob([uploadBody(data)], { type: mimeType });
-  formData.append("image", blob, name);
+  formData.append("image", new Blob([uploadBody(data)], { type: mimeType }), name);
   formData.append("type", "input");
   formData.append("overwrite", String(overwrite));
   if (subfolder) formData.append("subfolder", subfolder);
-  const res = await comfyApiFetch("/upload/image", {
-    method: "POST",
-    body: formData,
-  });
+  return formData;
+}
+
+async function readUploadImageResponse(res: Response): Promise<UploadImageResult> {
   if (!res.ok) {
     // This branch only became REACHABLE with #385, and reaching it must not cost
     // the #1160 diagnosis. An auth gate answering 401 with a sign-in page is the
@@ -1831,11 +1854,113 @@ export async function uploadImageHttp(
   // still-starting server answering 200 with HTML used to surface as a raw
   // SyntaxError with no mention of what was requested (#946, and the same class
   // as #918/#952).
-  return readComfyJson<{ name: string; subfolder: string; type: string }>(res, {
+  return readComfyJson<UploadImageResult>(res, {
     url: "/upload/image",
     expectShape: (v: unknown) => !!v && typeof v === "object" && typeof (v as { name?: unknown }).name === "string",
-    shapeHint: 'the upload result ({ name, subfolder, type })',
+    shapeHint: "the upload result ({ name, subfolder, type })",
   });
+}
+
+async function proveUploadedInputLanded(
+  name: string,
+  subfolder: string,
+  data: Buffer,
+): Promise<UploadLanding> {
+  try {
+    const params = new URLSearchParams({ filename: name, type: "input", subfolder });
+    const res = await comfyApiFetch(`/view?${params.toString()}`, { method: "GET" });
+    if (res.status === 404) return "absent";
+    if (!res.ok) return "unknown";
+    const timeoutMs = Math.round(comfyHttpTimeoutSeconds() * 1000);
+    const bytes = await readViewResponseBounded(
+      res,
+      name,
+      timeoutMs,
+      undefined,
+      Math.max(data.length, 1),
+    );
+    return bytes.equals(data) ? "committed" : "absent";
+  } catch {
+    // unknown-ok: a failed /view cannot prove the POST committed or missed
+    return "unknown";
+  }
+}
+
+async function postUploadImage(
+  name: string,
+  data: Buffer,
+  mimeType: string,
+  overwrite: boolean,
+  subfolder: string,
+): Promise<UploadImageResult> {
+  const res = await comfyApiFetch("/upload/image", {
+    method: "POST",
+    body: buildUploadForm(name, data, mimeType, overwrite, subfolder),
+  });
+  return readUploadImageResponse(res);
+}
+
+async function uploadImageHttpOnce(
+  name: string,
+  data: Buffer,
+  mimeType: string,
+  overwrite: boolean,
+  subfolder: string,
+): Promise<UploadImageResult> {
+  try {
+    return await postUploadImage(name, data, mimeType, overwrite, subfolder);
+  } catch (err) {
+    if (!uploadDeliveryUnknown(err)) throw err;
+    const landing = await proveUploadedInputLanded(name, subfolder, data);
+    if (landing === "committed") {
+      logger.info("Upload POST transport failed; /view proved the input landed", {
+        name,
+        subfolder,
+      });
+      return { name, subfolder, type: "input" };
+    }
+    if (landing === "absent" && overwrite) {
+      try {
+        return await postUploadImage(name, data, mimeType, overwrite, subfolder);
+      } catch (retryErr) {
+        if (!uploadDeliveryUnknown(retryErr)) throw retryErr;
+        const again = await proveUploadedInputLanded(name, subfolder, data);
+        if (again === "committed") {
+          logger.info("Upload retry transport failed; /view proved the input landed", {
+            name,
+            subfolder,
+          });
+          return { name, subfolder, type: "input" };
+        }
+        throw retryErr;
+      }
+    }
+    throw err;
+  }
+}
+
+/**
+ * Upload an image to ComfyUI's input/ directory via HTTP multipart POST.
+ * Works over HTTP — no local filesystem access needed.
+ */
+export async function uploadImageHttp(
+  filename: string,
+  data: Buffer,
+  mimeType = "image/png",
+  overwrite = true,
+): Promise<UploadImageResult> {
+  if (isCloudMode()) return cloudClient.uploadImageHttp(filename, data, mimeType, overwrite);
+  // #946 — a `filename` carrying a path ("assets/clip.mp4") is a SUBFOLDER
+  // request, and ComfyUI's /upload/image takes that as its own form field, not
+  // as a slash inside the multipart filename. Sending the whole path as the
+  // filename put it somewhere between the transport and ComfyUI's handler and
+  // came back as a bare `Unexpected non-whitespace character after JSON at
+  // position 4` — no upload, no usable error. Split it and use the field the
+  // API actually has, which is also what the caller was asking for.
+  const { subfolder, name } = splitUploadTarget(filename);
+  return serializePerTargetUpload(getComfyUIBaseUrl(), () =>
+    uploadImageHttpOnce(name, data, mimeType, overwrite, subfolder),
+  );
 }
 
 /**
