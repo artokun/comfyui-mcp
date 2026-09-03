@@ -272,10 +272,11 @@ export interface ImageRef {
 /** One queued user turn (a panel message, or an injected panel event).
  *
  *  `eventTokens` carry #468's run-completion journal tokens through the queue.
- *  A completion is only ACKED once the turn that carried it ended, so an item
- *  that is queued-but-unread when the agent dies (or whose turn is abandoned by
- *  the stall watchdog) is handed BACK to the journal and replayed instead of
- *  vanishing with the agent. */
+ *  A completion is ACKED when the carrying turn ends, or when a user interrupt
+ *  lands AFTER the backend has produced an event for that turn (#2486). An item
+ *  that is queued-but-unread when the agent dies (or whose turn is abandoned
+ *  before the model received it) is handed BACK to the journal and replayed
+ *  instead of vanishing with the agent. */
 export interface QueueItem {
   text: string;
   images?: ImageRef[];
@@ -676,6 +677,19 @@ export class PanelAgent {
     }
   }
 
+  /** Settle tokens the model has already been shown (#2486). Same callback the
+   *  carrying turn's `result` uses; interrupt() steals the tokens from that
+   *  path, so without this a mid-reply Stop re-injects a completion the agent
+   *  already read. */
+  private ackEventTokens(tokens: string[] | undefined): void {
+    if (!tokens?.length) return;
+    try {
+      this.deps.onEventDelivered?.(this.tabId, [...tokens], { carrier: this.carrierId });
+    } catch (err) {
+      logger.warn(`[panel-agent ${this.short()}] acking completion tokens: ${msgOf(err)}`);
+    }
+  }
+
   /** Rewind the CONVERSATION: fork the session at `anchor` (an assistant UUID
    *  reported via onTurnAnchor) so everything after it is dropped from the agent's
    *  memory, then restart. `anchor` null forks to a fresh session. The edited
@@ -997,15 +1011,15 @@ export class PanelAgent {
       // sibling branches already refuse.
       const unnamedImgs = imgs.length - attachableImgs.length;
       // What the agent is NOT being shown, in coordinates it can actually call
-      // get_image with. `names` is filenames only and a `note` replaces it
-      // outright, so neither can carry a withheld PreviewImage that lives in
-      // `temp` or a subfolder — get_image would default to type "output" and
-      // miss it. Withholding pixels is only honest if the pointer works.
+      // get_image with. A custom `note` (video storyboard, etc.) replaces the
+      // default name list outright, so that list cannot carry a PreviewImage
+      // that lives in `temp` — get_image would default to type "output" and
+      // miss it (#2283). Withholding pixels is only honest if the pointer works.
       const withheldImgs = correlationIsUntrusted
         ? attachableImgs
         : attachableImgs.slice(attachedImgs.length);
       const withheldRefs = describeImageRefs(withheldImgs);
-      const names = imgs.map((i) => i.filename).filter(Boolean).join(", ") || "(unnamed)";
+      const names = describeImageRefs(attachableImgs) || "(unnamed)";
       // A custom `note` (e.g. the panel's video-storyboard summary) replaces the
       // default image-acknowledgement wording so the agent is told accurately
       // what it's looking at (a contact sheet of a video, not a still image).
@@ -1069,8 +1083,12 @@ export class PanelAgent {
                     ? sessionBound
                       ? `The first ${attachedImgs.length} image(s) are attached below; all ${imgs.length} outputs are already shown to the user in the panel. ${omittedImgs} further preview(s) were omitted because this conversation's cumulative automatic-preview budget (${MAX_SESSION_PREVIEW_ATTACHMENTS} images / ~${previewByteBudgetLabel()}) is nearly spent — fetch one with get_image action:"get" if you need it: ${withheldRefs}. `
                       : `The first ${attachedImgs.length} image(s) are attached below; all ${imgs.length} outputs are already shown to the user in the panel. ${omittedImgs} further preview(s) were omitted to keep this TURN's image context bounded — fetch one with get_image action:"get" if you need it: ${withheldRefs}. `
-                    : `The image(s) are attached below and already shown to the user in the panel. `
-            : `You cannot view images on this provider, but they are already shown to the user in the panel. `
+                    : note && names !== "(unnamed)"
+                      ? `The image(s) are attached below and already shown to the user in the panel. Fetch one with get_image action:"get" if you need to inspect or stage it: ${names}. `
+                      : `The image(s) are attached below and already shown to the user in the panel. `
+            : names !== "(unnamed)"
+              ? `You cannot view images on this provider, but they are already shown to the user in the panel. Fetch one with get_image action:"get": ${names}. `
+              : `You cannot view images on this provider, but they are already shown to the user in the panel. `
           : ``) +
         // Said on TOP of whichever branch fired, because every one of them is
         // arithmetically incomplete while an unnamed output is in the event: the
@@ -1440,25 +1458,35 @@ export class PanelAgent {
     // the user wants BOTH the interrupted message and the new one answered. A plain
     // Stop / Ctrl+C / Esc (requeueInFlight=false) must NOT re-queue, or it would
     // silently re-run the turn the user just stopped (double tool actions).
-    // #468 — the interrupted turn's run-completion tokens travel with its text.
-    // Re-queued: they ride the re-queued item and are acked when THAT turn ends.
-    // Dropped (plain Stop): hand them back so the completion is replayed rather
-    // than dying with the turn the user cancelled.
+    //
+    // #468 / #2486 — the interrupted turn's run-completion tokens.
+    // The model HAS seen them (`turnProducedEvents`): settle, and do not put
+    // `completionOnly` items back on the queue. Replaying after a mid-reply
+    // interrupt is what made the same prompt fire 3+ "Acknowledge the result"
+    // turns. The model has NOT seen them (pre-submission abort): keep the old
+    // rule — requeue so they ride the next turn, or hand them back so a plain
+    // Stop does not swallow a completion nobody read.
     const interruptedTokens = this.turnEventTokens;
     this.turnEventTokens = [];
+    const alreadyRead = this.turnProducedEvents;
     if (interrupted && opts.requeueInFlight) {
       // Front of the queue: the interrupted work is addressed before whatever the
       // user sends next (which is appended after this interrupt is handled). The
       // ORIGINAL items go back (not one merged item) — the next splice re-joins
       // them into the same text, while an injected completion stays a separate
       // `completionOnly` item that a later detach can remove cleanly (#468).
-      this.queue.unshift(...interrupted.items);
+      const items = alreadyRead
+        ? interrupted.items.filter((item) => !item.completionOnly)
+        : interrupted.items;
+      this.queue.unshift(...items);
+      if (alreadyRead) this.ackEventTokens(interruptedTokens);
+    } else if (alreadyRead) {
+      this.ackEventTokens(interruptedTokens);
     } else {
-      // UNCARRIED on purpose. This is a plain Stop — a deliberate human act that
-      // does not repeat on its own, so it cannot form the automatic loop the
-      // bound exists to break; settling a completion on the user's third Stop
-      // would be a surprise, not a safeguard. (The stall watchdog and rewind DO
-      // auto-repeat, so those are carried.)
+      // UNCARRIED on purpose. This is a plain Stop before the model received
+      // the turn — a deliberate human act that does not repeat on its own, so
+      // it cannot form the automatic loop the bound exists to break. (The stall
+      // watchdog and rewind DO auto-repeat, so those are carried.)
       this.releaseEventTokens(interruptedTokens);
     }
     // Track the turn this interrupt is aborting (the one holding the gate). The
@@ -2357,8 +2385,9 @@ export class PanelAgent {
         this.inFlight = null;
         // #468 — the turn that CARRIED the run completion(s) has ended, so they
         // demonstrably reached the model's context. Ack them: the journal drops
-        // them and settles their run tickets. This is the ONLY ack point; every
-        // other exit from a turn hands the tokens back for replay.
+        // them and settles their run tickets. The other ack point is a user
+        // interrupt AFTER the backend has produced an event for this turn
+        // (#2486); every other exit from a turn hands the tokens back for replay.
         //
         // ACK GATE: only THIS turn's own result may ack. On a backend that
         // DECLARES turn markers, an UNMARKED result is a traceless straggler

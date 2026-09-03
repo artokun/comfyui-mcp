@@ -216,6 +216,154 @@ describe("authenticated panel template relay (#2196)", () => {
     await expect(requestPanelTemplateIndex()).resolves.toBeUndefined();
   });
 
+  function nativeIndex(index: Record<string, unknown>) {
+    const body = JSON.stringify(index);
+    return {
+      operation: "workflow_templates" as const,
+      body,
+      contentType: "application/json",
+      bytes: Buffer.byteLength(body, "utf8"),
+    };
+  }
+
+  it("asks the live panel for the template index when the origin is remote (#2196)", async () => {
+    const seen: Array<{ cmd: string; operation?: string; tabId?: string }> = [];
+    const remoteCalls: string[] = [];
+    const realFetch = globalThis.fetch;
+    vi.spyOn(globalThis, "fetch").mockImplementation((input, init) => {
+      const url = String(input);
+      if (url.startsWith("http://127.0.0.1:")) return realFetch(input, init);
+      remoteCalls.push(url);
+      return Promise.reject(new Error("the orchestrator must not fetch the remote origin"));
+    });
+
+    const relay = await startPanelTemplateRelayServer({
+      bridge: {
+        canReach: () => true,
+        send: async (command, options) => {
+          seen.push({ ...command, tabId: options.tabId });
+          return nativeIndex({ "remote-pack": [{ name: "from-panel" }] });
+        },
+      },
+      resolvePanelAgent: () => ({ agentKey: "shared::codex", secret: SECRET }),
+      resolvePanelTab: () => "tab-1",
+      resolveCurrentTarget: () => ({ url: "https://remote.example/comfyapi", generation: 0 }),
+      resolvePanelUrl: () => {
+        throw new Error("panel-native fetch must not resolve a remote HTTP URL");
+      },
+      resolveAllowedPanelOrigin: () => {
+        throw new Error("panel-native fetch must not authorize a remote HTTP origin");
+      },
+    });
+    servers.push(relay);
+    process.env.COMFYUI_MCP_RELAY_SECRET = SECRET;
+    process.env.COMFYUI_MCP_TEMPLATE_RELAY_URL = relay.endpointUrl;
+
+    await expect(requestPanelTemplateIndex()).resolves.toEqual({
+      "remote-pack": [{ name: "from-panel" }],
+    });
+    expect(seen).toEqual([{ cmd: "fetch_comfyui_read", operation: "workflow_templates", tabId: "tab-1" }]);
+    expect(remoteCalls).toEqual([]);
+  });
+
+  it("asks the live panel when localhost and 127.0.0.1 are a mixed pair (#2196)", async () => {
+    const seen: string[] = [];
+    const relay = await startPanelTemplateRelayServer({
+      bridge: {
+        canReach: () => true,
+        send: async (command) => {
+          seen.push(command.operation);
+          return nativeIndex({ "mixed-pack": [{ name: "from-browser" }] });
+        },
+      },
+      resolvePanelAgent: () => ({ agentKey: "shared::codex", secret: SECRET }),
+      resolvePanelTab: () => "tab-1",
+      resolveCurrentTarget: () => ({ url: "http://127.0.0.1:8188/comfyapi", generation: 0 }),
+      resolvePanelUrl: () => currentPanelTemplateOrigin("http://localhost:8188", "http://127.0.0.1:8188/comfyapi"),
+      resolveAllowedPanelOrigin: () =>
+        currentPanelTemplateOrigin("http://localhost:8188", "http://127.0.0.1:8188/comfyapi"),
+    });
+    servers.push(relay);
+    process.env.COMFYUI_MCP_RELAY_SECRET = SECRET;
+    process.env.COMFYUI_MCP_TEMPLATE_RELAY_URL = relay.endpointUrl;
+
+    await expect(requestPanelTemplateIndex()).resolves.toEqual({
+      "mixed-pack": [{ name: "from-browser" }],
+    });
+    expect(seen).toEqual(["workflow_templates"]);
+  });
+
+  it("rejects a native reply after the ComfyUI target retargets (#2196)", async () => {
+    let generation = 0;
+    let currentTarget = "https://remote.example/comfyapi";
+    let markStarted!: () => void;
+    const started = new Promise<void>((resolve) => {
+      markStarted = resolve;
+    });
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const relay = await startPanelTemplateRelayServer({
+      bridge: {
+        canReach: () => true,
+        send: async () => {
+          markStarted();
+          await held;
+          return nativeIndex({ "stale-pack": [{ name: "too-late" }] });
+        },
+      },
+      resolvePanelAgent: () => ({ agentKey: "shared::codex", secret: SECRET }),
+      resolvePanelTab: () => "tab-1",
+      resolveCurrentTarget: () => ({ url: currentTarget, generation }),
+      resolvePanelUrl: () => undefined,
+      resolveAllowedPanelOrigin: () => undefined,
+    });
+    servers.push(relay);
+    process.env.COMFYUI_MCP_RELAY_SECRET = SECRET;
+    process.env.COMFYUI_MCP_TEMPLATE_RELAY_URL = relay.endpointUrl;
+
+    const pending = requestPanelTemplateIndex();
+    await started;
+    currentTarget = "https://other.example/comfyapi";
+    generation += 1;
+    release();
+    await expect(pending).rejects.toMatchObject<PanelTemplateRelayError>({ code: "STALE_TARGET" });
+  });
+
+  it("falls back to loopback HTTP when the panel does not implement workflow_templates", async () => {
+    let panelRequests = 0;
+    const panel = createServer((_req, res) => {
+      panelRequests += 1;
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({ "fallback-pack": [{ name: "from-http" }] }));
+    });
+    const panelOrigin = await listen(panel);
+    servers.push({ close: () => closeServer(panel) });
+
+    const relay = await startPanelTemplateRelayServer({
+      bridge: {
+        canReach: () => true,
+        send: async () => {
+          throw new Error("fetch_comfyui_read rejected the operation: operation must be one of history, system_stats, logs");
+        },
+      },
+      resolvePanelAgent: () => ({ agentKey: "shared::codex", secret: SECRET }),
+      resolvePanelTab: () => "tab-1",
+      resolveCurrentTarget: () => ({ url: panelOrigin, generation: 0 }),
+      resolvePanelUrl: () => `${panelOrigin}/api/workflow_templates`,
+      resolveAllowedPanelOrigin: () => panelOrigin,
+    });
+    servers.push(relay);
+    process.env.COMFYUI_MCP_RELAY_SECRET = SECRET;
+    process.env.COMFYUI_MCP_TEMPLATE_RELAY_URL = relay.endpointUrl;
+
+    await expect(requestPanelTemplateIndex()).resolves.toEqual({
+      "fallback-pack": [{ name: "from-http" }],
+    });
+    expect(panelRequests).toBe(1);
+  });
+
   it("only authorizes a loopback origin corroborated by the current target", () => {
     expect(currentPanelTemplateOrigin("https://remote.example:443", "https://remote.example/comfyapi")).toBeUndefined();
     expect(currentPanelTemplateOrigin("http://127.0.0.1:8188", "http://127.0.0.1:8188/comfyapi")).toBe("http://127.0.0.1:8188");

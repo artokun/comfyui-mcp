@@ -33,7 +33,7 @@ models:
     local_path: vae/qwen_image_vae.safetensors
 
   # --- Identity Edit LoRA v1.2 ---
-  #     The workflow loads it as `Krea2\krea2_identity_edit_v1_2.safetensors`, so it MUST
+  #     The workflow loads it as `Krea2/krea2_identity_edit_v1_2.safetensors`, so it MUST
   #     land in the Krea2/ subfolder — a flat loras/ install leaves the LoraLoaderModelOnly
   #     pointing at a file that is present but unfindable.
   #     r64 / r128 rank variants exist in the same repo if you want a smaller download.

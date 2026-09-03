@@ -27,7 +27,12 @@ const KEY = "orchestrator::claude";
 /** A tracker over a mutable backend map — mirrors index.ts's wiring exactly:
  *  backendForTab reads the live tabBackends map, backendOfKey splits the
  *  composite key, uuidOfTab reads the live command-stamp map. */
-function makeTracker(opts?: { defaultBackend?: string }) {
+function makeTracker(opts?: {
+  defaultBackend?: string;
+  currentTabOf?: (key: string) => string | undefined;
+  uniqueLiveTabOf?: (key: string) => string | undefined;
+  claimTab?: (tab: string, backend: string) => void;
+}) {
   const tabBackends = new Map<string, string>();
   const tabUuids = new Map<string, string>();
   // Retired id → the live id it currently ROUTES to (mirrors the bridge's
@@ -46,6 +51,12 @@ function makeTracker(opts?: { defaultBackend?: string }) {
     liveTabOf: (tab) => {
       const a = tabAliases.get(tab);
       return a === null ? undefined : (a ?? tab);
+    },
+    currentTabOf: opts?.currentTabOf,
+    uniqueLiveTabOf: opts?.uniqueLiveTabOf,
+    claimTab: (tab, backend) => {
+      tabBackends.set(tab, backend);
+      opts?.claimTab?.(tab, backend);
     },
     warn: (msg) => warnings.push(msg),
   });
@@ -649,28 +660,38 @@ describe("TurnOriginTracker — an ALL-INJECTED multi-origin batch inherits, nev
     expect(tracker.pinOf(KEY)).toBe("tab-a");
   });
 
-  it("a USER message mixed with another tab's injected event still fails BOTH closed — the laundering P0 is untouched", async () => {
+  it("a USER message mixed with another tab's injected event pins the USER tab — notifications are not a second request (#1001)", async () => {
     const { tracker, warnings } = makeTracker();
     tracker.recordForMid("m-user", "uuid-a", "tab-a");
     const e1 = tracker.mintInjectionOrigin("tab-b");
     tracker.onSeen(KEY, "m-user");
     tracker.onSeen(KEY, e1);
     await flushMicrotasks();
-    expect(tracker.pinOf(KEY)).toBeNull();
-    expect(tracker.stampOf(KEY)).toBeUndefined();
-    expect(warnings.join("\n")).toMatch(/mixed\/unknown-origin/);
+    expect(tracker.pinOf(KEY)).toBe("tab-a");
+    expect(tracker.stampOf(KEY)).toBe("uuid-a");
+    expect(warnings.join("\n")).toMatch(/pinning the user tab/);
   });
 
-  it("a mid-less USER message (synthetic mid, userMessage:true) mixed with another tab's event also fails closed", async () => {
+  it("a mid-less USER message (synthetic mid, userMessage:true) mixed with another tab's event also pins the user tab", async () => {
     // index.ts mints a synthetic origin mid for a mid-less user message; the
-    // mid is synthetic but the REQUEST is the user's, so it must count as a
-    // user contribution — otherwise two mid-less user messages from different
-    // tabs would inherit instead of refusing, re-opening the laundering P0.
-    const { tracker, warnings } = makeTracker();
+    // mid is synthetic but the REQUEST is the user's, so it counts as the
+    // unique user origin. Two mid-less user messages from different tabs still
+    // fail closed (the laundering P0) — see the two-user test below.
+    const { tracker } = makeTracker();
     const mUser = tracker.mintInjectionOrigin("tab-a", { userMessage: true });
     const e1 = tracker.mintInjectionOrigin("tab-b");
     tracker.onSeen(KEY, mUser);
     tracker.onSeen(KEY, e1);
+    await flushMicrotasks();
+    expect(tracker.pinOf(KEY)).toBe("tab-a");
+  });
+
+  it("TWO USER messages from different tabs still fail closed when no live bound tab exists", async () => {
+    const { tracker, warnings } = makeTracker();
+    tracker.recordForMid("m-a", "uuid-a", "tab-a");
+    tracker.recordForMid("m-b", "uuid-b", "tab-b");
+    tracker.onSeen(KEY, "m-a");
+    tracker.onSeen(KEY, "m-b");
     await flushMicrotasks();
     expect(tracker.pinOf(KEY)).toBeNull();
     expect(tracker.stampOf(KEY)).toBeUndefined();
@@ -698,6 +719,122 @@ describe("TurnOriginTracker — an ALL-INJECTED multi-origin batch inherits, nev
     await flushMicrotasks();
     expect(tracker.pinOf(KEY)).toBe("tab-c");
     expect(tracker.stampOf(KEY)).toBe("uuid-c");
+  });
+
+  it("with NO established origin, a unique live tab is inherited instead of wedging (#1001 reconnect)", async () => {
+    const { tracker, tabUuids, warnings } = makeTracker({
+      uniqueLiveTabOf: () => "tab-live",
+    });
+    tabUuids.set("tab-live", "uuid-live");
+    const e1 = tracker.mintInjectionOrigin("tab-a");
+    const e2 = tracker.mintInjectionOrigin("tab-b");
+    tracker.onSeen(KEY, e1);
+    tracker.onSeen(KEY, e2);
+    await flushMicrotasks();
+    expect(tracker.pinOf(KEY)).toBe("tab-live");
+    expect(tracker.stampOf(KEY)).toBe("uuid-live");
+    expect(warnings.join("\n")).toMatch(/live bound\/current tab/);
+  });
+
+  it("an unroutable last origin after reconnect inherits the unique live tab, not a dead pin (#1001 cause 2)", async () => {
+    const { tracker, tabBackends, tabAliases, tabUuids } = makeTracker({
+      uniqueLiveTabOf: () => "tab-live",
+    });
+    tabBackends.set("tab-gone", "claude");
+    tabUuids.set("tab-gone", "uuid-gone");
+    tabUuids.set("tab-live", "uuid-live");
+    tracker.recordForMid("m-user", "uuid-gone", "tab-gone");
+    tracker.onSeen(KEY, "m-user");
+    await flushMicrotasks();
+    tracker.turnEnded(KEY);
+    tabAliases.set("tab-gone", null);
+    tabBackends.delete("tab-gone");
+
+    const e1 = tracker.mintInjectionOrigin("tab-a");
+    const e2 = tracker.mintInjectionOrigin("tab-b");
+    tracker.onSeen(KEY, e1);
+    tracker.onSeen(KEY, e2);
+    await flushMicrotasks();
+    expect(tracker.pinOf(KEY)).toBe("tab-live");
+    expect(tracker.stampOf(KEY)).toBe("uuid-live");
+    expect(tracker.resolvedPinOf(KEY)).toBe("tab-live");
+  });
+
+  it("an unroutable last origin inherits the current tab when no unique canvas is named", async () => {
+    const { tracker, tabAliases, tabUuids } = makeTracker({
+      currentTabOf: () => "tab-current",
+    });
+    tabUuids.set("tab-current", "uuid-current");
+    tracker.recordForMid("m-user", "uuid-gone", "tab-gone");
+    tracker.onSeen(KEY, "m-user");
+    await flushMicrotasks();
+    tracker.turnEnded(KEY);
+    tabAliases.set("tab-gone", null);
+
+    const e1 = tracker.mintInjectionOrigin("tab-a");
+    const e2 = tracker.mintInjectionOrigin("tab-b");
+    tracker.onSeen(KEY, e1);
+    tracker.onSeen(KEY, e2);
+    await flushMicrotasks();
+    expect(tracker.pinOf(KEY)).toBe("tab-current");
+    expect(tracker.stampOf(KEY)).toBe("uuid-current");
+  });
+
+  it("TWO live tabs with none bound stay AMBIGUOUS — genuine mixed user origins are not guessed", async () => {
+    const { tracker } = makeTracker({
+      uniqueLiveTabOf: () => undefined,
+      currentTabOf: () => undefined,
+    });
+    tracker.recordForMid("m-a", "uuid-a", "tab-a");
+    tracker.recordForMid("m-b", "uuid-b", "tab-b");
+    tracker.onSeen(KEY, "m-a");
+    tracker.onSeen(KEY, "m-b");
+    await flushMicrotasks();
+    expect(tracker.pinOf(KEY)).toBeNull();
+    expect(tracker.resolvedPinOf(KEY)).toBeNull();
+  });
+
+  it("a Codex unique canvas attributed to the default backend is claimed and inherited (panel#1557 at batch close)", async () => {
+    const KEY_CODEX = "orchestrator::codex";
+    const { tracker, tabBackends, tabUuids } = makeTracker({
+      defaultBackend: "claude",
+      uniqueLiveTabOf: () => "tab-live",
+    });
+    tabBackends.set("tab-live", "claude");
+    tabBackends.set("tab-a", "codex");
+    tabBackends.set("tab-b", "codex");
+    tabUuids.set("tab-live", "uuid-live");
+    const e1 = tracker.mintInjectionOrigin("tab-a");
+    const e2 = tracker.mintInjectionOrigin("tab-b");
+    tracker.onSeen(KEY_CODEX, e1);
+    tracker.onSeen(KEY_CODEX, e2);
+    await flushMicrotasks();
+    expect(tracker.pinOf(KEY_CODEX)).toBe("tab-live");
+    expect(tabBackends.get("tab-live")).toBe("codex");
+    expect(tracker.resolvedPinOf(KEY_CODEX)).toBe("tab-live");
+  });
+
+  it("routing-time adopt recovers a null pin once a unique live tab exists (reconnect after batch close)", async () => {
+    let unique: string | undefined;
+    const { tracker, tabUuids } = makeTracker({
+      uniqueLiveTabOf: () => unique,
+    });
+    tabUuids.set("tab-live", "uuid-live");
+    const e1 = tracker.mintInjectionOrigin("tab-a");
+    const e2 = tracker.mintInjectionOrigin("tab-b");
+    tracker.onSeen(KEY, e1);
+    tracker.onSeen(KEY, e2);
+    await flushMicrotasks();
+    expect(tracker.pinOf(KEY)).toBeNull();
+
+    unique = "tab-live";
+    const resolve = makeScopeTargetResolver({
+      tracker,
+      scopeAgentKeyOf: (id) => (id === "orchestrator" ? KEY : id),
+    });
+    expect(resolve("orchestrator")).toBe("tab-live");
+    expect(tracker.pinOf(KEY)).toBe("tab-live");
+    expect(tracker.stampOf(KEY)).toBe("uuid-live");
   });
 });
 

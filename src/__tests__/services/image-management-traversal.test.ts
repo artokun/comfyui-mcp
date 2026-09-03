@@ -19,6 +19,7 @@ const realpathMock = vi.fn();
 const statMock = vi.fn();
 const resolveInputDirMock = vi.fn();
 const resolveOutputDirMock = vi.fn();
+const resolveTempDirMock = vi.fn();
 vi.mock("node:fs/promises", () => ({
   readFile: (...a: unknown[]) => readFileMock(...a),
   open: (...a: unknown[]) => openMock(...a),
@@ -31,6 +32,7 @@ vi.mock("node:fs/promises", () => ({
 vi.mock("../../services/output-dir.js", () => ({
   resolveInputDir: (...a: unknown[]) => resolveInputDirMock(...a),
   resolveOutputDir: (...a: unknown[]) => resolveOutputDirMock(...a),
+  resolveTempDir: (...a: unknown[]) => resolveTempDirMock(...a),
 }));
 
 const fetchImageMock = vi.fn();
@@ -68,6 +70,7 @@ beforeEach(() => {
   });
   resolveInputDirMock.mockReset().mockResolvedValue(resolve("/comfy", "input"));
   resolveOutputDirMock.mockReset().mockResolvedValue(resolve("/comfy", "output"));
+  resolveTempDirMock.mockReset().mockResolvedValue(resolve("/comfy", "temp"));
 });
 
 beforeEach(() => {
@@ -97,10 +100,88 @@ describe("getOutputImage — happy path (legitimate ComfyUI references)", () => 
     );
   });
 
+  it("accepts a get_history filename that already includes a relative subfolder (#2526)", async () => {
+    // get_history (action:"list") prints media as `subfolder/filename` so
+    // callers paste that combined string into get_image. That is a valid
+    // ComfyUI output reference, not a traversal.
+    await expect(
+      getOutputImage(
+        "out_F/qwen_baseline_face016_2807_00001_.png",
+        "output",
+        "",
+      ),
+    ).resolves.toBeDefined();
+    expect(fetchImageMock).toHaveBeenCalledWith(
+      "qwen_baseline_face016_2807_00001_.png",
+      "output",
+      "out_F",
+    );
+  });
+
+  it("accepts a nested relative prefix in filename and splits it for /view (#2526)", async () => {
+    await expect(
+      getOutputImage("video/clip/frame.png", "output", ""),
+    ).resolves.toBeDefined();
+    expect(fetchImageMock).toHaveBeenCalledWith("frame.png", "output", "video/clip");
+  });
+
+  it("joins a filename prefix with an explicit subfolder (#2526)", async () => {
+    await expect(
+      getOutputImage("clip/frame.png", "output", "video"),
+    ).resolves.toBeDefined();
+    expect(fetchImageMock).toHaveBeenCalledWith("frame.png", "output", "video/clip");
+  });
+
+  it("treats a Windows-style relative prefix as a subfolder too (#2526)", async () => {
+    await expect(
+      getOutputImage("out_F\\face.png", "output", ""),
+    ).resolves.toBeDefined();
+    expect(fetchImageMock).toHaveBeenCalledWith("face.png", "output", "out_F");
+  });
+
   it("accepts an empty subfolder (top-level output)", async () => {
     await expect(
       getOutputImage("a.png", "temp", ""),
     ).resolves.toBeDefined();
+  });
+
+  it("accepts a non-empty allowlisted OBJ attachment served as octet-stream", async () => {
+    const obj = Buffer.from("# mesh\nv 0 0 0\n", "utf8");
+    fetchImageMock.mockResolvedValue({
+      base64: obj.toString("base64"),
+      mimeType: "application/octet-stream",
+    });
+
+    await expect(
+      getOutputImage("mesh.OBJ", "output", "meshes", { allowAttachment: true }),
+    ).resolves.toMatchObject({
+      base64: obj.toString("base64"),
+      mimeType: "application/octet-stream",
+      filename: "mesh.OBJ",
+    });
+  });
+
+  it("does not allow an octet-stream attachment without the explicit opt-in", async () => {
+    fetchImageMock.mockResolvedValue({
+      base64: Buffer.from("mesh", "utf8").toString("base64"),
+      mimeType: "application/octet-stream",
+    });
+
+    await expect(getOutputImage("mesh.obj", "output", "", {})).rejects.toMatchObject({
+      code: "ATTACHMENT_TYPE_UNSUPPORTED",
+    });
+  });
+
+  it.each([
+    ["wrong extension", "mesh.txt", "application/octet-stream", "bWVzaA=="],
+    ["wrong MIME", "mesh.obj", "model/obj", "bWVzaA=="],
+    ["empty body", "mesh.obj", "application/octet-stream", ""],
+  ])("rejects an attachment with %s", async (_label, filename, mimeType, base64) => {
+    fetchImageMock.mockResolvedValue({ base64, mimeType });
+
+    await expect(
+      getOutputImage(filename, "output", "", { allowAttachment: true }),
+    ).rejects.toMatchObject({ code: "IMAGE_NOT_FOUND" });
   });
 });
 
@@ -138,9 +219,46 @@ describe("getOutputImage — local fallback for ComfyUI's 400 rejection (#2194)"
     expect(openMock).toHaveBeenCalledWith(localPath, "r");
   });
 
+  it("preserves image/avif through the local 400 fallback and validates the bytes", async () => {
+    const avifFilename = "frame.avif";
+    const avif = Buffer.from(
+      "AAAAHGZ0eXBhdmlmAAAAAG1pZjFhdmlmbWlhZgAAANRtZXRhAAAAAAAAACFoZGxyAAAAAAAAAABwaWN0AAAAAAAAAAAAAAAAAAAAACJpbG9jAAAAAERAAAEAAQAAAAAA+AABAAAAAAAAACAAAAAjaWluZgAAAAAAAQAAABVpbmZlAgAAAAABAABhdjAxAAAAAA5waXRtAAAAAAABAAAAVGlwcnAAAAA2aXBjbwAAAAxhdjFDgSACAAAAABRpc3BlAAAAAAAAAAIAAAACAAAADnBpeGkAAAAAAQgAAAAWaXBtYQAAAAAAAAABAAEDgQIDAAAAKG1kYXQSAAoHOAA2kBDQaTITGUJjBMAANAAAkEDJHGFCYtTGSg==",
+      "base64",
+    );
+    const root = resolve("/comfy", "input");
+    const localPath = resolve(root, avifFilename);
+    let position = 0;
+    fetchImageMock.mockRejectedValue(
+      new ComfyUIError(
+        `ComfyUI /view returned 400 for "${avifFilename}" (input).`,
+        "VIEW_ERROR",
+        { status: 400, filename: avifFilename, type: "input", subfolder: "" },
+      ),
+    );
+    realpathMock.mockImplementation(async (path: string) => path);
+    statMock.mockResolvedValue({ isFile: () => true, size: avif.length });
+    openMock.mockResolvedValue({
+      read: async (buffer: Buffer, offset: number, length: number) => {
+        const slice = avif.subarray(position, position + length);
+        slice.copy(buffer, offset);
+        position += slice.length;
+        return { bytesRead: slice.length, buffer };
+      },
+      close: async () => undefined,
+    });
+
+    await expect(
+      getOutputImage(avifFilename, "input", "", { requireImageContent: true }),
+    ).resolves.toMatchObject({ base64: avif.toString("base64"), mimeType: "image/avif" });
+    expect(realpathMock).toHaveBeenCalledWith(root);
+    expect(realpathMock).toHaveBeenCalledWith(localPath);
+  });
+
   it.each([
     ["a filename traversal", "../outside.mp4", ""],
     ["a subfolder traversal", "safe.mp4", "../outside"],
+    ["a filename drive-relative path", "C:outside.mp4", ""],
+    ["a subfolder drive-relative path", "safe.mp4", "C:outside"],
   ])("rejects %s before the local fallback can read it", async (_label, name, subfolder) => {
     fetchImageMock.mockRejectedValue(view400());
 
@@ -205,7 +323,7 @@ describe("getOutputImage — path-traversal sanitisation (CWE-22)", () => {
     expect(fetchImageMock).not.toHaveBeenCalled();
   });
 
-  it("rejects a filename containing path separators", async () => {
+  it("still rejects a filename whose separators are traversal, not a subfolder", async () => {
     await expect(
       getOutputImage("../../etc/passwd", "output", ""),
     ).rejects.toBeInstanceOf(ValidationError);
@@ -216,6 +334,14 @@ describe("getOutputImage — path-traversal sanitisation (CWE-22)", () => {
     await expect(
       getOutputImage("..\\..\\windows\\win.ini", "output", ""),
     ).rejects.toBeInstanceOf(ValidationError);
+    expect(fetchImageMock).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["a filename drive-relative path", "C:outside.png", ""],
+    ["a subfolder drive-relative path", "hero.png", "C:outside"],
+  ])("rejects %s before /view is called", async (_label, filename, subfolder) => {
+    await expect(getOutputImage(filename, "output", subfolder)).rejects.toBeInstanceOf(ValidationError);
     expect(fetchImageMock).not.toHaveBeenCalled();
   });
 

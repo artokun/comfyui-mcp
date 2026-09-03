@@ -262,6 +262,12 @@ interface StopResult {
    * what its name says: a relaunch command was BUILT AND VALIDATED before the kill.
    */
   has_restart_info: boolean;
+  /**
+   * The Desktop launcher to spawn on `action:"start"`, when one was observed
+   * (parent process or a known Desktop-2 install path). Distinct from
+   * `restart_hint`, which is the recovery instruction for a human.
+   */
+  launch?: { exe: string };
   /** Present whenever a hand-restart may be needed — always on a refusal. */
   restart_hint?: RecoveryHint;
   /** Why a relaunch could not be validated, when it could not. */
@@ -609,6 +615,29 @@ function findPythonProcessPids(): ProcessListProbe {
   return { pids: [...pids], complete };
 }
 
+/**
+ * Did a kill fail because the target was already gone?
+ *
+ * Windows `taskkill /T` often kills the Python server as a child, then exits
+ * non-zero because a helper PID in the same tree is already absent. The
+ * message is frequently "There is no running instance of the task" — which
+ * does not contain "not found" — so matching only the latter left stop
+ * reporting `stopped:false` after the port had already closed (#2482).
+ */
+function killOutput(err: unknown): string {
+  if (!(err instanceof Error)) return String(err);
+  const chunks = [err.message];
+  if ("stderr" in err && typeof err.stderr === "string") chunks.push(err.stderr);
+  if ("stdout" in err && typeof err.stdout === "string") chunks.push(err.stdout);
+  return chunks.join("\n");
+}
+
+function killErrorLooksAlreadyGone(err: unknown): boolean {
+  return /not found|no such process|does not exist|no running instance|esrch/i.test(
+    killOutput(err),
+  );
+}
+
 function killProcessTree(pid: number): void {
   try {
     if (IS_WIN) {
@@ -634,11 +663,11 @@ function killProcessTree(pid: number): void {
       }
     }
   } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
-    // "not found" / "no such process" are fine — process already dead
-    if (!/not found|no such process|does not exist/i.test(msg)) {
-      throw new ProcessControlError(`Failed to kill process ${pid}: ${msg}`);
-    }
+    // "not found" / "no such process" / a vanished Windows task are fine —
+    // the process is already dead. Callers still re-probe the port (#2482).
+    if (killErrorLooksAlreadyGone(err)) return;
+    const msg = killOutput(err);
+    throw new ProcessControlError(`Failed to kill process ${pid}: ${msg}`);
   }
 }
 
@@ -763,8 +792,146 @@ function isDesktopApp(argv: string[]): boolean {
     // Current branding ("Comfy Desktop\Comfy Desktop.exe", "Comfy Desktop.app")
     // and the electron-era install dir.
     joined.includes("comfy desktop") ||
+    // Desktop-2 data root (`%LOCALAPPDATA%\Comfy-Desktop\…`) and the install
+    // marker `.comfyui-desktop-2` when it appears on argv.
+    joined.includes("comfy-desktop") ||
+    joined.includes("comfyui-desktop-2") ||
     joined.includes("@comfyorgcomfyui-electron")
   );
+}
+
+/**
+ * Parent directory that works for both Windows and POSIX spellings, even when
+ * this process is running on the other OS (tests feed Windows paths on Linux).
+ */
+function parentOfPath(p: string): string {
+  const trimmed = p.replace(/[/\\]+$/, "");
+  const slash = Math.max(trimmed.lastIndexOf("/"), trimmed.lastIndexOf("\\"));
+  if (slash <= 0) return "";
+  return trimmed.slice(0, slash);
+}
+
+function joinOnPath(dir: string, ...parts: string[]): string {
+  const sep = dir.includes("\\") ? "\\" : "/";
+  return [dir.replace(/[/\\]+$/, ""), ...parts].join(sep);
+}
+
+/**
+ * Desktop-2 writes `<install>/.comfyui-desktop-2` and snapshot JSON under
+ * `<install>/.launcher/snapshots/`. Either is enough to identify the layout
+ * when argv has no "Comfy Desktop" token (#2482).
+ */
+function hasDesktop2Markers(dir: string): boolean {
+  if (!dir) return false;
+  if (fileExists(joinOnPath(dir, ".comfyui-desktop-2"))) return true;
+  const snapDir = joinOnPath(dir, ".launcher", "snapshots");
+  try {
+    if (!existsSync(snapDir)) return false;
+    return readdirSync(snapDir).some((name) => name.endsWith(".json"));
+  } catch {
+    return false;
+  }
+}
+
+function looksLikeDesktop2Root(dir: string): boolean {
+  const n = dir.replace(/\\/g, "/").toLowerCase();
+  return (
+    n.includes("/comfyui-installs/") ||
+    n.endsWith("/comfyui-installs") ||
+    n.includes("/comfy-desktop/") ||
+    n.includes("comfyui-desktop-2")
+  );
+}
+
+function looksLikeDesktop2Argv(argv: string[]): boolean {
+  return argv.some((tok) => Boolean(tok && looksLikePath(tok) && looksLikeDesktop2Root(tok)));
+}
+
+function desktop2InstallFromArgv(argv: string[]): boolean {
+  for (const tok of argv) {
+    if (!tok || !looksLikePath(tok)) continue;
+    let dir = /\.[A-Za-z0-9]+$/.test(tok.replace(/[/\\]+$/, "")) ? parentOfPath(tok) : tok;
+    for (let i = 0; i < 6 && dir; i++) {
+      // Only probe markers on a Desktop-2-shaped root. existsSync is stubbed
+      // true in several process-control suites, so a global marker walk would
+      // reclassify ordinary python installs as Desktop.
+      if (looksLikeDesktop2Root(dir) && hasDesktop2Markers(dir)) return true;
+      const next = parentOfPath(dir);
+      if (!next || next === dir) break;
+      dir = next;
+    }
+  }
+  return false;
+}
+
+/** Windows Desktop-2 NSIS layout: `…\Programs\ComfyUI\Comfy Desktop\Comfy Desktop.exe`. */
+function desktop2WindowsExeCandidates(): string[] {
+  const localAppData = process.env.LOCALAPPDATA;
+  const userProfile = process.env.USERPROFILE;
+  const out: string[] = [];
+  if (localAppData) {
+    out.push(`${localAppData}\\Programs\\ComfyUI\\Comfy Desktop\\Comfy Desktop.exe`);
+  }
+  if (userProfile) {
+    out.push(
+      `${userProfile}\\AppData\\Local\\Programs\\ComfyUI\\Comfy Desktop\\Comfy Desktop.exe`,
+    );
+  }
+  return out;
+}
+
+/**
+ * Walk a few ancestors of the backend PID looking for the Electron shell.
+ * Desktop-2's usual tree is `Comfy Desktop.exe` → python → server python (#2482).
+ */
+function desktopExeFromAncestor(pid: number): string | undefined {
+  let current = pid;
+  const seen = new Set<number>();
+  for (let hop = 0; hop < 5; hop++) {
+    if (seen.has(current)) return undefined;
+    seen.add(current);
+    const parent = readParentPid(current);
+    if (parent == null || parent <= 1 || parent === current) return undefined;
+    const identity = resolveProcessIdentity(parent);
+    if (identity && isDesktopSupervisorProcess(identity)) {
+      const exe = identity.executablePath ?? identity.argv?.[0];
+      if (exe) return exe;
+    }
+    current = parent;
+  }
+  return undefined;
+}
+
+function detectDesktopLaunch(
+  pid: number,
+  argv: string[],
+): { isDesktopApp: boolean; desktopExePath?: string } {
+  const fromArgv = isDesktopApp(argv);
+  const fromMarkers = desktop2InstallFromArgv(argv);
+  const desktop2Argv = looksLikeDesktop2Argv(argv);
+  // Walking ancestors calls resolveProcessIdentity. Doing that on every gather
+  // consumes identity-sequence steps, so a later creation-time change is never
+  // seen and a recycled PID is killed (#776). Only walk when THIS argv already
+  // names a Desktop-2 layout.
+  const fromParent =
+    fromMarkers || desktop2Argv ? desktopExeFromAncestor(pid) : undefined;
+  const isDesktop = fromArgv || Boolean(fromParent) || fromMarkers;
+  if (!isDesktop) return { isDesktopApp: false };
+
+  if (fromParent && fileExists(fromParent)) {
+    return { isDesktopApp: true, desktopExePath: fromParent };
+  }
+  // fileExists, not `if exist` / `test -d`: POSIX findDesktopExeFromCommonPaths
+  // treats a stubbed execSync success as "the .app is there".
+  if (fromMarkers || fromParent || desktop2Argv) {
+    const located = desktop2WindowsExeCandidates().find((p) => fileExists(p));
+    if (located) return { isDesktopApp: true, desktopExePath: located };
+    if (fromParent) return { isDesktopApp: true, desktopExePath: fromParent };
+  }
+  return {
+    isDesktopApp: true,
+    desktopExePath: findDesktopExePath(argv),
+  };
 }
 
 /**
@@ -956,11 +1123,19 @@ function expectedDesktopExecutablePaths(): string[] {
       ...(localAppData
         ? [
             `${localAppData}/Programs/Comfy Desktop/Comfy Desktop.exe`,
+            // Desktop-2 NSIS: …\Programs\ComfyUI\Comfy Desktop\Comfy Desktop.exe
+            // MUST outrank the legacy v1 …\Programs\ComfyUI\ComfyUI.exe (#2482).
+            `${localAppData}/Programs/ComfyUI/Comfy Desktop/Comfy Desktop.exe`,
             `${localAppData}/Programs/@comfyorgcomfyui-electron/ComfyUI.exe`,
             `${localAppData}/Programs/ComfyUI/ComfyUI.exe`,
           ]
         : []),
-      ...(userProfile ? [`${userProfile}/Programs/ComfyUI/ComfyUI.exe`] : []),
+      ...(userProfile
+        ? [
+            `${userProfile}/AppData/Local/Programs/ComfyUI/Comfy Desktop/Comfy Desktop.exe`,
+            `${userProfile}/Programs/ComfyUI/ComfyUI.exe`,
+          ]
+        : []),
     ];
   }
   const home = homedir();
@@ -1036,6 +1211,10 @@ function findDesktopExeFromCommonPaths(): string | undefined {
       // Current branding: "Comfy Desktop" (per-machine and per-user installs)
       `C:\\Program Files\\Comfy Desktop\\Comfy Desktop.exe`,
       `${process.env.LOCALAPPDATA}\\Programs\\Comfy Desktop\\Comfy Desktop.exe`,
+      // Desktop-2 NSIS layout. Checked BEFORE legacy ComfyUI.exe — both can
+      // exist after an upgrade, and spawning v1 against the shared Desktop-2
+      // venv downgrades packages and breaks the 0.34+ core (#2482).
+      `${process.env.LOCALAPPDATA}\\Programs\\ComfyUI\\Comfy Desktop\\Comfy Desktop.exe`,
       // Electron-era install dir
       `${process.env.LOCALAPPDATA}\\Programs\\@comfyorgcomfyui-electron\\ComfyUI.exe`,
       // Legacy names
@@ -1081,7 +1260,11 @@ function findDesktopExePath(argv: string[]): string | undefined {
     const match = joined.match(
       /([A-Za-z]:[\\\/].*?[\\\/]Programs[\\\/]ComfyUI)[\\\/]resources/i,
     );
-    if (match) return `${match[1]}\\ComfyUI.exe`;
+    if (match) {
+      const desktop2 = `${match[1]}\\Comfy Desktop\\Comfy Desktop.exe`;
+      if (fileExists(desktop2)) return desktop2;
+      return `${match[1]}\\ComfyUI.exe`;
+    }
   } else {
     // macOS: /Applications/ComfyUI.app/...
     const match = joined.match(/(\/.*?ComfyUI\.app)/);
@@ -3888,8 +4071,13 @@ async function gatherProcessInfo(): Promise<ProcessInfo> {
   // as an ordinary Python install — and would then be KILLED, which is the one thing
   // the Desktop path exists to never do (#400).
   const identifyingArgv = argv.length > 0 ? argv : (osArgv ?? []);
-  const desktop = isDesktopApp(identifyingArgv);
-  const desktopExe = desktop ? findDesktopExePath(identifyingArgv) : undefined;
+  // Desktop-2's python argv often has no "Comfy Desktop" token (core lives
+  // under ~/ComfyUI-Installs, venv under ~/Documents/ComfyUI). Recognise the
+  // parent `Comfy Desktop.exe` and the `.comfyui-desktop-2` / snapshot
+  // markers so stop can record a relaunch path (#2482).
+  const desktopLaunch = detectDesktopLaunch(pid, identifyingArgv);
+  const desktop = desktopLaunch.isDesktopApp;
+  const desktopExe = desktopLaunch.desktopExePath;
   // Capture the live process cwd NOW, while the pid is guaranteed alive — the
   // `/proc/<pid>/cwd` symlink is gone the instant a later stop kills it (#535).
   //
@@ -4192,20 +4380,36 @@ export async function stopComfyUI(preInfo?: ProcessInfo): Promise<StopResult> {
       killProcessTree(info.pid);
     }
   } catch (err) {
-    deliberateStop = false;
     const msg = err instanceof Error ? err.message : String(err);
-    logger.warn("Stop aborted: the kill failed, so nothing was torn down", {
-      pid: info.pid,
-      error: msg,
-    });
-    return {
-      stopped: false,
-      message:
-        `Could not stop ComfyUI (PID ${info.pid}): ${msg}. The server was left as it was — ` +
-        "its crash supervision and launch record are untouched. This is usually a " +
-        "permissions problem: stop it from the launcher/console that owns it.",
-      has_restart_info: false,
-    };
+    // `taskkill /T` can kill the Python server (port closes) and still throw
+    // because a helper PID in the same tree was already gone. Re-probe before
+    // claiming the server was left untouched (#2482).
+    const probe = probePortOwner(info.port);
+    const originalGone = processExists(info.pid) === false;
+    const portFree = probe.state === "free";
+    const portMovedOn = probe.state === "owned" && probe.pid !== info.pid;
+    if (portFree || originalGone || portMovedOn) {
+      logger.warn("Kill command failed but the server is gone", {
+        pid: info.pid,
+        port: info.port,
+        probe: probe.state,
+        error: msg,
+      });
+    } else {
+      deliberateStop = false;
+      logger.warn("Stop aborted: the kill failed, so nothing was torn down", {
+        pid: info.pid,
+        error: msg,
+      });
+      return {
+        stopped: false,
+        message:
+          `Could not stop ComfyUI (PID ${info.pid}): ${msg}. The server was left as it was — ` +
+          "its crash supervision and launch record are untouched. This is usually a " +
+          "permissions problem: stop it from the launcher/console that owns it.",
+        has_restart_info: false,
+      };
+    }
   }
 
   // A KILL THAT RETURNED IS STILL NOT PROOF THE PROCESS DIED (codex gate). On
@@ -4306,6 +4510,7 @@ export async function stopComfyUI(preInfo?: ProcessInfo): Promise<StopResult> {
     // The one claim #767 was about: it now means a relaunch command was built AND
     // validated, not merely that some process info was stored.
     has_restart_info: relaunch.ok,
+    launch: info.desktopExePath ? { exe: info.desktopExePath } : undefined,
     relaunch_blocked: relaunch.ok ? undefined : relaunch.reason,
     restart_hint: hint,
     auto_restart: supervisorResult(info),

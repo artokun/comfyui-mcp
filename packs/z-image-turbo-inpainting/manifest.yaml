@@ -2,6 +2,12 @@
 # Sliced from the z-image-turbo monolith's "Z-IMAGE TURBO INPAINTING" pipeline
 # (un-bypassed standalone). No film-grain / sharpen post-proc, so no librosa pin.
 # Mirror base: https://huggingface.co/Aitrepreneur/FLX/resolve/main  (third-party)
+#
+# Do NOT copy the monolith's custom_nodes list: this standalone graph only uses
+# GGUF loaders, Power Lora Loader, Easy-Use cache/GPU cleanup, and MaskBlur+
+# (#2484). The eight packs dropped here (KJNodes, UltimateSDUpscale, wlsh,
+# vrgamedevgirl, RES4LYF, SeedVarianceEnhancer, Detail-Daemon, controlnet_aux)
+# supply no node in workflow.json.
 
 pip: []
 
@@ -9,15 +15,7 @@ custom_nodes:
   - https://github.com/city96/ComfyUI-GGUF
   - https://github.com/rgthree/rgthree-comfy
   - https://github.com/yolain/ComfyUI-Easy-Use
-  - https://github.com/kijai/ComfyUI-KJNodes
-  - https://github.com/ssitu/ComfyUI_UltimateSDUpscale
   - https://github.com/cubiq/ComfyUI_essentials
-  - https://github.com/wallish77/wlsh_nodes
-  - https://github.com/vrgamegirl19/comfyui-vrgamedevgirl
-  - https://github.com/ClownsharkBatwing/RES4LYF
-  - https://github.com/ChangeTheConstants/SeedVarianceEnhancer
-  - https://github.com/Jonseed/ComfyUI-Detail-Daemon
-  - https://github.com/Fannovel16/comfyui_controlnet_aux
 
 models:
   # UNet (GGUF) — Z-Image-Turbo DiT

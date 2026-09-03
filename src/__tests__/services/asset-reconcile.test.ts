@@ -4,10 +4,14 @@ import { describe, expect, it, beforeEach, vi } from "vitest";
 // payloads. getClient/ensureConnected are imported by job-watcher (same module
 // graph), so the mock must provide them even though reconcile never calls them.
 const getHistoryMock = vi.fn();
+const getOutputImageMock = vi.fn();
 vi.mock("../../comfyui/client.js", () => ({
   getHistory: (...a: unknown[]) => getHistoryMock(...a),
   getClient: vi.fn(),
   ensureConnected: vi.fn(),
+}));
+vi.mock("../../services/image-management.js", () => ({
+  getOutputImage: (...a: unknown[]) => getOutputImageMock(...a),
 }));
 vi.mock("../../config.js", () => ({
   isCloudMode: () => false,
@@ -77,6 +81,8 @@ function historyEntry(opts: EntryOpts) {
 
 beforeEach(() => {
   getHistoryMock.mockReset();
+  getOutputImageMock.mockReset();
+  getOutputImageMock.mockResolvedValue({ base64: "aGk=", mimeType: "image/png", filename: "ok.png" });
   AssetRegistry.configure({ ttlMs: DAY_MS, now: Date.now });
   AssetRegistry.clear();
 });
@@ -90,7 +96,13 @@ describe("reconcileAssetsFromHistory", () => {
 
     const result = await reconcileAssetsFromHistory();
 
-    expect(result).toEqual({ scanned: 1, registered: 1, skippedExisting: 0 });
+    expect(result).toEqual({
+      scanned: 1,
+      registered: 1,
+      skippedExisting: 0,
+      skippedUnavailable: 0,
+      probeLimitReached: false,
+    });
     const [record] = AssetRegistry.list();
     expect(record).toMatchObject({
       promptId: "panel-prompt",
@@ -142,7 +154,13 @@ describe("reconcileAssetsFromHistory", () => {
 
     const result = await reconcileAssetsFromHistory();
 
-    expect(result).toEqual({ scanned: 1, registered: 0, skippedExisting: 1 });
+    expect(result).toEqual({
+      scanned: 1,
+      registered: 0,
+      skippedExisting: 1,
+      skippedUnavailable: 0,
+      probeLimitReached: false,
+    });
     const all = AssetRegistry.list();
     expect(all).toHaveLength(1);
     expect(all[0].assetId).toBe(watched.assetId);
@@ -295,7 +313,13 @@ describe("reconcileAssetsFromHistory", () => {
 
     const result = await reconcileAssetsFromHistory({ maxPrompts: 2 });
 
-    expect(result).toEqual({ scanned: 2, registered: 2, skippedExisting: 0 });
+    expect(result).toEqual({
+      scanned: 2,
+      registered: 2,
+      skippedExisting: 0,
+      skippedUnavailable: 0,
+      probeLimitReached: false,
+    });
     const promptIds = AssetRegistry.list().map((r) => r.promptId).sort();
     expect(promptIds).toEqual(["middle", "newest"]);
   });
@@ -331,5 +355,129 @@ describe("reconcileAssetsFromHistory", () => {
 
     expect(result.registered).toBe(1);
     expect(AssetRegistry.list()).toHaveLength(0);
+  });
+
+  it("uses the guarded consumer and canonicalizes an untrusted history type", async () => {
+    const ts = Date.now() - 1000;
+    getHistoryMock.mockResolvedValue({
+      unsafeType: historyEntry({
+        queue: 1,
+        promptId: "unsafeType",
+        successTs: ts,
+        outputs: {
+          "9": {
+            images: [{ filename: "safe.png", subfolder: "", type: "untrusted-type" }],
+          },
+        },
+      }),
+    });
+
+    await reconcileAssetsFromHistory();
+
+    expect(getOutputImageMock).toHaveBeenCalledWith(
+      "safe.png",
+      "output",
+      "",
+      expect.objectContaining({ requireImageContent: true, signal: expect.any(AbortSignal) }),
+    );
+    expect(AssetRegistry.list()[0]).toMatchObject({
+      filename: "safe.png",
+      type: "output",
+      url: expect.stringContaining("type=output"),
+    });
+  });
+
+  it("stops at the bounded image-probe budget and preserves already validated refs", async () => {
+    const ts = Date.now() - 1000;
+    const images = Array.from({ length: 4 }, (_, i) => ({
+      filename: `many_${i}.png`,
+      subfolder: "",
+      type: "output",
+    }));
+    getHistoryMock.mockResolvedValue({
+      many: historyEntry({
+        queue: 1,
+        promptId: "many",
+        successTs: ts,
+        outputs: { "9": { images } },
+      }),
+    });
+
+    const result = await reconcileAssetsFromHistory({ maxImageProbes: 2 });
+
+    expect(getOutputImageMock).toHaveBeenCalledTimes(2);
+    expect(result).toMatchObject({ registered: 2, probeLimitReached: true });
+    expect(AssetRegistry.list().map((record) => record.filename).sort()).toEqual(["many_0.png", "many_1.png"]);
+  });
+
+  it("does not spend the successful-image budget on failed probes", async () => {
+    const ts = Date.now() - 1000;
+    getHistoryMock.mockResolvedValue({
+      mixed: historyEntry({
+        queue: 1,
+        promptId: "mixed",
+        successTs: ts,
+        outputs: {
+          "9": {
+            images: [
+              { filename: "missing.png", subfolder: "", type: "output" },
+              { filename: "valid_0.png", subfolder: "", type: "output" },
+              { filename: "valid_1.png", subfolder: "", type: "output" },
+            ],
+          },
+        },
+      }),
+    });
+    getOutputImageMock
+      .mockRejectedValueOnce(new Error("IMAGE_NOT_FOUND"))
+      .mockResolvedValue({ base64: "aGk=", mimeType: "image/png", filename: "valid.png" });
+
+    const result = await reconcileAssetsFromHistory({ maxImageProbes: 2, maxFailedProbes: 2 });
+
+    expect(getOutputImageMock).toHaveBeenCalledTimes(3);
+    expect(result).toMatchObject({
+      registered: 2,
+      skippedUnavailable: 1,
+      probeLimitReached: false,
+    });
+    expect(AssetRegistry.list().map((record) => record.filename).sort()).toEqual([
+      "valid_0.png",
+      "valid_1.png",
+    ]);
+  });
+
+  it("stops non-cooperative probes at the whole-reconciliation deadline", async () => {
+    const ts = Date.now() - 1000;
+    getHistoryMock.mockResolvedValue({
+      stalled: historyEntry({
+        queue: 1,
+        promptId: "stalled",
+        successTs: ts,
+        outputs: {
+          "9": {
+            images: Array.from({ length: 10 }, (_, i) => ({
+              filename: `stalled_${i}.png`,
+              subfolder: "",
+              type: "output",
+            })),
+          },
+        },
+      }),
+    });
+    getOutputImageMock.mockImplementation(() => new Promise(() => undefined));
+
+    const result = await reconcileAssetsFromHistory({
+      maxFailedProbes: 10,
+      maxProbeAttempts: 10,
+      deadlineMs: 25,
+      probeTimeoutMs: 1000,
+    });
+
+    expect(getOutputImageMock).toHaveBeenCalledTimes(1);
+    expect(result).toMatchObject({
+      registered: 0,
+      skippedUnavailable: 1,
+      probeLimitReached: true,
+    });
   });
 });

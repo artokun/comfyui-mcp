@@ -33,6 +33,96 @@ export function extraWorkflowPath(graph: unknown): string | null {
   return typeof meta?.workflow_path === "string" && meta.workflow_path ? meta.workflow_path : null;
 }
 
+export function extraWorkflowUuid(graph: unknown): string | null {
+  if (!isPlainObject(graph)) return null;
+  const extra = isPlainObject(graph.extra) ? graph.extra : null;
+  const meta = extra && isPlainObject(extra.comfyui_mcp) ? extra.comfyui_mcp : null;
+  return typeof meta?.workflow_uuid === "string" && meta.workflow_uuid ? meta.workflow_uuid : null;
+}
+
+/**
+ * Exact unsaved routing handle (`tmp:<id>`). OPEN must accept any non-empty
+ * tmp: token panel_list_workflows publishes — not only RFC-uuid suffixes — or an
+ * already-active imported tab cannot rebind (#2503).
+ */
+export function unsavedTmpWorkflowKey(value: unknown): string | null {
+  if (typeof value !== "string" || !value) return null;
+  return /^tmp:\S+$/.test(value) ? value : null;
+}
+
+/**
+ * Saved-file path encoded in a panel tab id. `wf:<path>` (legacy handle) and
+ * `wf:<tabRouteId>:<path>` (current route) both name dest A. `tmp:` and bare
+ * uuids do not — those tabs have no saved identity (#2503).
+ */
+export function savedPathFromTabId(tabId: unknown): string | null {
+  if (typeof tabId !== "string" || !tabId.startsWith("wf:")) return null;
+  const rest = tabId.slice(3);
+  if (!rest) return null;
+  const sep = rest.indexOf(":");
+  const head = sep === -1 ? "" : rest.slice(0, sep);
+  const isRoute = sep > 1 && !/[/\\]/.test(head);
+  const path = isRoute ? rest.slice(sep + 1) : rest;
+  return normalizeWorkflowPath(path);
+}
+
+/**
+ * #2503 — importing/loading onto a new tmp tab must not keep the source graph's
+ * extra.comfyui_mcp.workflow_uuid. Replace it with the tab's assigned uuid.
+ * Leaves workflow_path untouched (#2505).
+ *
+ * Returns a cloned graph when a rewrite is needed; null when dest/graph are
+ * unusable or the stamp already names dest.
+ */
+export function bindImportedTmpWorkflowUuid(
+  graph: unknown,
+  destUuid: string,
+): Record<string, unknown> | null {
+  if (!isPlainObject(graph)) return null;
+  if (typeof destUuid !== "string" || !destUuid) return null;
+  const stamped = extraWorkflowUuid(graph);
+  if (!stamped || stamped === destUuid) return null;
+  const next: Record<string, unknown> = structuredClone(graph);
+  const extra = isPlainObject(next.extra) ? { ...next.extra } : {};
+  const meta = isPlainObject(extra.comfyui_mcp) ? { ...extra.comfyui_mcp } : {};
+  meta.workflow_uuid = destUuid;
+  extra.comfyui_mcp = meta;
+  next.extra = extra;
+  return next;
+}
+
+/**
+ * #2505 — loading a graph onto another tab must not keep the source
+ * extra.comfyui_mcp.workflow_path. Replace path (and uuid when destUuid is
+ * known) with the active dest identity so a later in-place save is not refused
+ * by the #1667 stale-canvas guard.
+ *
+ * Returns a cloned graph when a rewrite is needed; null when dest/graph are
+ * unusable or the stamp already names dest.
+ */
+export function bindLoadedWorkflowIdentity(
+  graph: unknown,
+  destPath: string,
+  destUuid?: string,
+): Record<string, unknown> | null {
+  if (!isPlainObject(graph)) return null;
+  const dest = normalizeWorkflowPath(destPath);
+  if (!dest) return null;
+  const stampedPath = normalizeWorkflowPath(extraWorkflowPath(graph));
+  const stampedUuid = extraWorkflowUuid(graph);
+  const pathNeeds = stampedPath !== dest;
+  const uuidNeeds = Boolean(destUuid) && stampedUuid !== destUuid;
+  if (!pathNeeds && !uuidNeeds) return null;
+  const next: Record<string, unknown> = structuredClone(graph);
+  const extra = isPlainObject(next.extra) ? { ...next.extra } : {};
+  const meta = isPlainObject(extra.comfyui_mcp) ? { ...extra.comfyui_mcp } : {};
+  meta.workflow_path = dest;
+  if (destUuid) meta.workflow_uuid = destUuid;
+  extra.comfyui_mcp = meta;
+  next.extra = extra;
+  return next;
+}
+
 export function extraStampDisagrees(graph: unknown, destPath: string): boolean {
   const stamped = normalizeWorkflowPath(extraWorkflowPath(graph));
   const dest = normalizeWorkflowPath(destPath);
@@ -412,6 +502,144 @@ export function openLiveMatchesDestContent(live: unknown, dest: unknown): boolea
     const liveSg = liveSgs.get(id);
     if (!liveSg) return false;
     if (!openLiveMatchesDestContent(liveSg, destSg)) return false;
+  }
+  return true;
+}
+
+/**
+ * #2501 / #2494 — dest vs live after reconnect or an already-open tab switch,
+ * once identity and node id/type/link topology already agree. The panel's
+ * serialize fills inputs/outputs/properties and rewrites widgets_values /
+ * widgets_values_named (envelopes, extra default slots, named-vs-positional,
+ * ue_properties). Those frontend-derived bags are not a failed load.
+ *
+ * Additive to {@link openLiveMatchesDestContent}: named-first dest bags still
+ * fail that matcher when live only holds positional/envelope widgets. A live
+ * serialize of an already-open tab can omit nested definitions while the root
+ * node set still matches — recurse only when the inner graph is present (#2494).
+ * Fail closed on a missing node, a rewired link, or a dest widget value live
+ * does not hold.
+ */
+type FrontendWidgetAtom = string | number | boolean | null;
+type FrontendWidgetValue =
+  | FrontendWidgetAtom
+  | FrontendWidgetAtom[]
+  | Record<string, unknown>
+  | undefined;
+
+function asFrontendWidgetValue(value: unknown): FrontendWidgetValue {
+  if (value === undefined || value === null) return value;
+  if (typeof value === "string" || typeof value === "number" || typeof value === "boolean") {
+    return value;
+  }
+  if (Array.isArray(value)) {
+    return value.every(
+      (entry) =>
+        entry === null ||
+        typeof entry === "string" ||
+        typeof entry === "number" ||
+        typeof entry === "boolean",
+    )
+      ? value
+      : undefined;
+  }
+  return isPlainObject(value) ? value : undefined;
+}
+
+function frontendWidgetPrimitive(value: unknown): FrontendWidgetValue {
+  if (!isPlainObject(value) || !Object.prototype.hasOwnProperty.call(value, "value")) {
+    return asFrontendWidgetValue(value);
+  }
+  for (const key of Object.keys(value)) {
+    if (key !== "name" && key !== "value" && key !== "type" && key !== "label") {
+      return asFrontendWidgetValue(value);
+    }
+  }
+  if (value.name != null && typeof value.name !== "string") return asFrontendWidgetValue(value);
+  if (value.type != null && typeof value.type !== "string") return asFrontendWidgetValue(value);
+  return asFrontendWidgetValue(value.value);
+}
+
+function frontendWidgetValuesEquivalent(a: unknown, b: unknown): boolean {
+  const left = frontendWidgetPrimitive(a);
+  const right = frontendWidgetPrimitive(b);
+  if (Object.is(left, right)) return true;
+  if (
+    (typeof left === "number" && typeof right === "string") ||
+    (typeof left === "string" && typeof right === "number")
+  ) {
+    const n = Number(left);
+    const m = Number(right);
+    if (Number.isFinite(n) && Number.isFinite(m) && n === m) return true;
+  }
+  return !valuesDiffer(left, right);
+}
+
+function destAuthoredWidgetSequence(node: Record<string, unknown>): unknown[] | null {
+  if (Array.isArray(node.widgets_values)) return node.widgets_values;
+  const named = namedWidgets(node);
+  return named ? Object.values(named) : null;
+}
+
+function liveSerializedWidgetSequence(node: Record<string, unknown>): unknown[] {
+  if (Array.isArray(node.widgets_values)) return node.widgets_values;
+  const named = namedWidgets(node);
+  return named ? Object.values(named) : [];
+}
+
+function frontendStableWidgetsDisagree(
+  destNode: Record<string, unknown>,
+  liveNode: Record<string, unknown>,
+): boolean {
+  const destNamed = namedWidgets(destNode);
+  const liveNamed = namedWidgets(liveNode);
+  if (destNamed && liveNamed && !Array.isArray(destNode.widgets_values)) {
+    for (const [key, destVal] of Object.entries(destNamed)) {
+      if (isEmptyWidgetValue(destVal)) continue;
+      const liveVal = liveNamed[key];
+      if (isEmptyWidgetValue(liveVal) || !frontendWidgetValuesEquivalent(liveVal, destVal)) {
+        return true;
+      }
+    }
+    return false;
+  }
+  const destWv = destAuthoredWidgetSequence(destNode);
+  if (!destWv) return false;
+  const liveWv = liveSerializedWidgetSequence(liveNode);
+  for (let i = 0; i < destWv.length; i++) {
+    if (isEmptyWidgetValue(destWv[i])) continue;
+    if (isEmptyWidgetValue(liveWv[i]) || !frontendWidgetValuesEquivalent(liveWv[i], destWv[i])) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function graphFrontendStableWidgetsDisagree(dest: unknown, live: unknown): boolean {
+  const destById = nodesById(dest);
+  const liveById = nodesById(live);
+  if (!destById || !liveById) return true;
+  for (const [id, destNode] of destById) {
+    const liveNode = liveById.get(id);
+    if (!liveNode || frontendStableWidgetsDisagree(destNode, liveNode)) return true;
+  }
+  return false;
+}
+
+export function openLiveMatchesDestAfterReconnect(live: unknown, dest: unknown): boolean {
+  if (!nodeIdentitiesMatchAllowingRehydration(dest, live)) return false;
+  if (!linkTopologiesMatch(dest, live)) return false;
+  if (graphFrontendStableWidgetsDisagree(dest, live)) return false;
+  const destSgs = subgraphsById(dest);
+  const liveSgs = subgraphsById(live);
+  if (!destSgs || !liveSgs) return false;
+  for (const [id, destSg] of destSgs) {
+    const liveSg = liveSgs.get(id);
+    // Live serialize of an already-open tab can omit nested definitions while
+    // the root node set still matches. Recurse only when the inner graph is
+    // actually present to compare (#2494).
+    if (!liveSg) continue;
+    if (!openLiveMatchesDestAfterReconnect(liveSg, destSg)) return false;
   }
   return true;
 }

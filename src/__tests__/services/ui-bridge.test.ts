@@ -6,6 +6,7 @@ import {
   makeUnknownCommandError,
   panelVersionProvesUnsupported,
   isPanelCmdUnsupportedError,
+  isUnknownCommandReply,
   MIN_PANEL_VERSION_FOR_BRIDGE_COMMANDS,
   minPanelVersionForCmd,
   markDispatched,
@@ -16,6 +17,7 @@ import {
   HEADLESS_RECENCY_MS,
   BRIDGE_READ_DEFAULT_TIMEOUT_MS,
   BRIDGE_READONLY_CMDS,
+  BRIDGE_CMD_MIN_PANEL_VERSION,
   isMutatingGraphCommand,
   requiresWorkflowStampEnforcement,
   BRIDGE_CAPABILITY_MIN_PANEL_VERSION,
@@ -162,7 +164,11 @@ async function startBridgeOnFreePort(
 function connectPanel(
   tabId?: string,
   title = "workflow-a",
-  opts: { tabSessionId?: string } = {},
+  opts: {
+    tabSessionId?: string;
+    expectedNodeIdentityFence?: boolean;
+    panelVersion?: string;
+  } = {},
 ): Promise<WebSocket> {
   return new Promise((resolve, reject) => {
     const sock = new WebSocket(`ws://127.0.0.1:${port}`);
@@ -179,9 +185,11 @@ function connectPanel(
             enforces_workflow_stamp: true,
             enforces_workflow_stamp_at_write: true,
             enforces_expected_node_type_at_write: true,
+            enforces_expected_node_identity_at_write: opts.expectedNodeIdentityFence ?? true,
             enforces_expected_scope_at_write: true,
             enforces_expected_scope_graph_identity_at_write: true,
             enforces_promoted_parent_rail_at_write: true,
+            ...(opts.panelVersion ? { panel_version: opts.panelVersion } : {}),
             // The panel's sessionStorage-backed browser-tab identity: unique per
             // browser tab, stable across a reload (#486/#709).
             ...(opts.tabSessionId ? { tab_session_id: opts.tabSessionId } : {}),
@@ -692,6 +700,52 @@ describe("UiBridge (typed dispatch outcome — panel #442 defect 4)", () => {
     a.close();
   });
 
+  it("clears a cached subgraph identity after a live root viewing (#2518)", async () => {
+    const a = await connectPanel("tab-scope-2518");
+    a.on("message", (buf) => {
+      const msg = JSON.parse(buf.toString());
+      if (msg.rid && msg.cmd === "graph_query") {
+        a.send(
+          JSON.stringify({
+            rid: msg.rid,
+            ok: true,
+            result: {
+              viewing: {
+                scope: "subgraph",
+                owner_node_id: 12,
+                workflow_uuid: "25180000-0000-4000-8000-000000000000",
+                graph_identity: "graph:stale-subgraph",
+              },
+              nodes: [{ id: 53, type: "StringConcatenate" }],
+            },
+          }),
+        );
+      }
+    });
+    await waitFor(() => expect(bridge.connected()).toBe(true));
+    await bridge.send(
+      { cmd: "graph_query", ids: [53], fields: "detail", limit: 1 },
+      { tabId: "tab-scope-2518" },
+    );
+    expect(bridge.promotedScopeFor("tab-scope-2518")).toMatchObject({
+      known: true,
+      scope: "subgraph",
+    });
+    bridge.clearPromotedSubgraphIdentity("tab-scope-2518");
+    expect(bridge.promotedScopeFor("tab-scope-2518").known).toBe(false);
+    bridge.applyLiveRootViewing("tab-scope-2518", {
+      scope: "root",
+      workflow_uuid: "25180000-0000-4000-8000-000000000000",
+      graph_identity: "graph:2518-root",
+    });
+    expect(bridge.promotedScopeFor("tab-scope-2518")).toMatchObject({
+      known: true,
+      scope: "root",
+      graphIdentity: "graph:2518-root",
+    });
+    a.close();
+  });
+
   it("freshly reads the current promoted owner after the cached owner goes stale (#2314)", async () => {
     const a = await connectPanel("tab-scope-read-2314");
     let ownerNodeId = 78;
@@ -1150,6 +1204,30 @@ describe("UiBridge (multi-tab)", () => {
     const a2 = await connectPanel("tab-aaaa-1111");
     autoReply(a2, "A2");
     await expect(promise).resolves.toMatchObject({ from: "A2", cmd: "graph_get_errors" });
+    a2.close();
+  });
+
+  it("does not bridge-resume an identity-sensitive read when its budget is zero", async () => {
+    const a1 = await connectPanel("tab-2478-one-shot");
+    await waitFor(() => expect(bridge.tabs()).toHaveLength(1));
+    const firstFrames: Array<Record<string, unknown>> = [];
+    a1.on("message", (buf) => {
+      const msg = JSON.parse(buf.toString()) as Record<string, unknown>;
+      if (msg.cmd === "graph_get_subgraph") firstFrames.push(msg);
+    });
+    const promise = bridge.send(
+      { cmd: "graph_get_subgraph", node_id: 78 },
+      { tabId: "tab-2478-one-shot", timeoutMs: 1000, maxReconnectRetries: 0 },
+    );
+    await waitFor(() => expect(firstFrames).toHaveLength(1));
+    a1.close();
+
+    const a2 = await connectPanel("tab-2478-one-shot");
+    const replacementFrames: Array<Record<string, unknown>> = [];
+    a2.on("message", (buf) => replacementFrames.push(JSON.parse(buf.toString())));
+    await expect(promise).rejects.toThrow(/disconnected mid-command|genuinely gone/);
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(replacementFrames.some((msg) => msg.cmd === "graph_get_subgraph")).toBe(false);
     a2.close();
   });
 
@@ -3452,6 +3530,73 @@ describe("UiBridge — desktop-tab mirror (multi-viewer fanout)", () => {
     modern.close();
   });
 
+  it("forwards expected_node_identity to a panel advertising the write fence", async () => {
+    const modern = await connectPanel("tmp:node-identity", "identity");
+    const frames: Array<Record<string, unknown>> = [];
+    modern.on("message", (buf) => {
+      const msg = JSON.parse(buf.toString()) as Record<string, unknown>;
+      if (msg.rid && msg.cmd) frames.push(msg);
+    });
+    autoReply(modern, "identity");
+    await waitFor(() =>
+      expect(bridge.tabExpectedNodeIdentityFenceCapability("tmp:node-identity")).toBe(true),
+    );
+
+    await expect(
+      bridge.send(
+        {
+          cmd: "graph_set_widget",
+          node_id: 7,
+          widget: "steps",
+          value: 30,
+          expected_node_identity: "node:7:original",
+        },
+        { tabId: "tmp:node-identity" },
+      ),
+    ).resolves.toMatchObject({ from: "identity" });
+    expect(frames).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          cmd: "graph_set_widget",
+          expected_node_identity: "node:7:original",
+        }),
+      ]),
+    );
+    modern.close();
+  });
+
+  it("FAILS CLOSED when expected_node_identity reaches a panel without its write fence", async () => {
+    const old = await connectPanel("tmp:old-node-identity", "old identity", {
+      expectedNodeIdentityFence: false,
+    });
+    await waitFor(() =>
+      expect(bridge.tabs().some((t) => t.tab_id === "tmp:old-node-identity")).toBe(true),
+    );
+    expect(bridge.tabExpectedNodeIdentityFenceCapability("tmp:old-node-identity")).toBe(false);
+    const caught = await bridge
+      .send(
+        {
+          cmd: "graph_set_widget",
+          node_id: 7,
+          widget: "steps",
+          value: 30,
+          expected_node_identity: "node:7:original",
+        },
+        { tabId: "tmp:old-node-identity" },
+      )
+      .then(
+        () => null,
+        (err) => err,
+      );
+    expect(caught).toBeInstanceOf(Error);
+    expect((caught as Error).message).toMatch(
+      /atomic expected-node-identity write fence/,
+    );
+    expect(isCapabilityRefusal(caught)).toBe(true);
+    expect(dispatchOutcomeOf(caught)).toBe(false);
+    old.close();
+  });
+
   it("FAILS CLOSED when expected_scope reaches a panel without #2314's receiver fence", async () => {
     const old = new WebSocket(`ws://127.0.0.1:${port}`);
     await new Promise<void>((res, rej) => {
@@ -4522,6 +4667,9 @@ describe("makeUnknownCommandError (old-panel version gate)", () => {
     expect(e?.message.toLowerCase()).toContain("update");
     expect(e?.message.toLowerCase()).toContain("latest release");
     expect(e?.message.toLowerCase()).toContain("reconnect");
+    // Missing hello version is still a connected version: name it "unknown"
+    // rather than omitting the parenthetical (#619 recurrence).
+    expect(e?.message).toContain("detected panel unknown");
     // The 0.11.4 fallback baseline is a floor, not this command's minimum — quoting
     // it would fabricate a requirement (#619).
     expect(e?.message).not.toContain(MIN_PANEL_VERSION_FOR_BRIDGE_COMMANDS);
@@ -4728,6 +4876,106 @@ describe("makeUnknownCommandError (old-panel version gate)", () => {
     expect(makeUnknownCommandError('Unknown command "graph_resize_node"', "0.11.32")).toBeNull();
   });
 
+  // #619 recurrence (2026-08-29): a legacy/cached sidebar with NO panel_version
+  // replied `unknown graph_outline` (no "command" word, no quotes). The mapper
+  // only recognized `Unknown command "…"`, so the raw error leaked and skipped
+  // the upgrade remedy. Both spellings, with the version absent, must rewrite.
+  it("rewrites a bare unknown <cmd> with no panel_version into actionable skew guidance (#619 recurrence)", () => {
+    for (const raw of [
+      "unknown graph_outline",
+      "Unknown graph_outline",
+      'unknown "graph_outline"',
+      "Error: unknown graph_outline",
+    ]) {
+      const e = makeUnknownCommandError(raw);
+      expect(e, raw).not.toBeNull();
+      expect(e?.message, raw).toContain("graph_outline");
+      expect(e?.message, raw).toContain("detected panel unknown");
+      expect(e?.message, raw).toContain("0.4.6");
+      expect(e?.message.toLowerCase(), raw).toContain("does not implement");
+      expect(e?.message.toLowerCase(), raw).toContain("update");
+      expect(e?.message, raw).not.toBe(raw);
+      expect(e?.message.toLowerCase(), raw).not.toMatch(/^unknown /);
+    }
+  });
+
+  it("rewrites a bare unknown refresh_nodes with no panel_version, quoting ≥0.11.28 (#619 recurrence)", () => {
+    const e = makeUnknownCommandError("unknown refresh_nodes");
+    expect(e).not.toBeNull();
+    expect(e?.message).toContain("refresh_nodes");
+    expect(e?.message).toContain("detected panel unknown");
+    expect(e?.message).toContain("0.11.28");
+    expect(e?.message.toLowerCase()).toContain("update");
+    expect(e?.message).not.toBe("unknown refresh_nodes");
+  });
+
+  it("still names panel unknown for Unknown-command spelling when the hello omitted the version (#619 recurrence)", () => {
+    const e = makeUnknownCommandError('Unknown command "refresh_nodes"');
+    expect(e).not.toBeNull();
+    expect(e?.message).toContain("refresh_nodes");
+    expect(e?.message).toContain("detected panel unknown");
+    expect(e?.message).toContain("0.11.28");
+    expect(e?.message).toMatch(/, mcp \d+\.\d+\.\d+/);
+  });
+
+  it("does NOT rewrite a bare unknown <cmd> from a panel that advertises a new-enough version (#352)", () => {
+    expect(makeUnknownCommandError("unknown graph_outline", "0.11.21")).toBeNull();
+    expect(makeUnknownCommandError("unknown graph_outline", "0.4.6")).toBeNull();
+    expect(makeUnknownCommandError("Error: unknown graph_outline", "0.11.21")).toBeNull();
+  });
+
+  it("does NOT rewrite English 'unknown <word>' that is not a bridge command", () => {
+    expect(makeUnknownCommandError("unknown node")).toBeNull();
+    expect(makeUnknownCommandError("unknown backend")).toBeNull();
+    expect(makeUnknownCommandError("unknown prompt")).toBeNull();
+  });
+
+  it("does NOT rewrite a bare unknown <cmd> that continues with an explanation (smoke-mock shape)", () => {
+    expect(
+      makeUnknownCommandError(
+        "unknown graph_outline — this tab is the knowledge-parity SMOKE MOCK, not a real panel",
+      ),
+    ).toBeNull();
+  });
+
+  it("isUnknownCommandReply accepts both dispatcher spellings (#619 recurrence)", () => {
+    expect(isUnknownCommandReply('Unknown command "refresh_nodes"')).toBe(true);
+    expect(isUnknownCommandReply("unknown graph_outline")).toBe(true);
+    expect(isUnknownCommandReply("Error: unknown graph_outline")).toBe(true);
+    expect(isUnknownCommandReply("unknown node")).toBe(false);
+    expect(isUnknownCommandReply("node 5 not found")).toBe(false);
+  });
+
+  it("does not classify inherited object keys as bridge commands (#619 follow-up)", () => {
+    expect(Object.getPrototypeOf(BRIDGE_CMD_MIN_PANEL_VERSION)).toBeNull();
+    for (const cmd of ["toString", "constructor"]) {
+      // These names are inherited from Object.prototype, not entries in the
+      // bridge minimum table. They must remain ordinary unknown dispatcher text.
+      expect(minPanelVersionForCmd(cmd)).toBe(MIN_PANEL_VERSION_FOR_BRIDGE_COMMANDS);
+      expect(panelVersionProvesUnsupported(cmd, "0.0.1")).toBe(false);
+      for (const raw of [`unknown ${cmd}`, `Error: unknown ${cmd}`]) {
+        expect(isUnknownCommandReply(raw), raw).toBe(false);
+        expect(makeUnknownCommandError(raw), raw).toBeNull();
+        // Supplying a parseable panel version must not send an inherited
+        // function to compareSemver or fabricate a supported-command verdict.
+        expect(makeUnknownCommandError(raw, "0.11.21"), raw).toBeNull();
+      }
+    }
+  });
+
+  it("keeps the bare unknown-command rewrite version-aware for normal commands (#619)", () => {
+    const withoutVersion = makeUnknownCommandError("unknown graph_query");
+    expect(withoutVersion?.message).toMatch(/does not implement "graph_query"/i);
+    expect(withoutVersion?.message).toContain("detected panel unknown");
+    expect(withoutVersion?.message).toContain("0.7.0");
+
+    const oldPanel = makeUnknownCommandError("unknown graph_query", "0.6.8");
+    expect(oldPanel?.message).toMatch(/too old for "graph_query"/i);
+    expect(oldPanel?.message).toContain("detected panel 0.6.8");
+    expect(oldPanel?.message).toContain("0.7.0");
+    expect(makeUnknownCommandError("unknown graph_query", "0.7.0")).toBeNull();
+  });
+
 });
 
 describe("panelVersionProvesUnsupported (#392 proactive version gate)", () => {
@@ -4814,6 +5062,19 @@ describe("isPanelCmdUnsupportedError (#413 structured unsupported-command detect
     ).toBe(false);
   });
 
+  it("matches the bare unknown <cmd> spelling (#619 recurrence)", () => {
+    expect(isPanelCmdUnsupportedError(new Error("unknown graph_outline"))).toBe(true);
+    expect(isPanelCmdUnsupportedError(new Error("unknown graph_outline"), "graph_outline")).toBe(
+      true,
+    );
+    expect(isPanelCmdUnsupportedError(new Error("unknown graph_outline"), "refresh_nodes")).toBe(
+      false,
+    );
+    expect(isPanelCmdUnsupportedError(new Error("Error: unknown refresh_nodes"), "refresh_nodes")).toBe(
+      true,
+    );
+  });
+
   it("matches the rewritten 'too old for' text even without the tag", () => {
     const raw = new Error('This ComfyUI-MCP panel is too old for "graph_serialize" — update…');
     expect(isPanelCmdUnsupportedError(raw)).toBe(true);
@@ -4840,6 +5101,29 @@ describe("isPanelCmdUnsupportedError (#413 structured unsupported-command detect
 });
 
 describe("UiBridge.send (graceful gate end-to-end)", () => {
+  it("passes inherited object keys through as raw unknown-command errors (#619 follow-up)", async () => {
+    const sock = await connectPanel("prototype-command-tab", "wf", { panelVersion: "0.11.21" });
+    const dispatched: string[] = [];
+    sock.on("message", (buf) => {
+      const msg = JSON.parse(buf.toString());
+      if (msg.rid && msg.cmd) {
+        dispatched.push(msg.cmd);
+        sock.send(JSON.stringify({ rid: msg.rid, ok: false, error: `unknown ${msg.cmd}` }));
+      }
+    });
+    await waitFor(() =>
+      expect(bridge.tabs().some((t) => t.tab_id === "prototype-command-tab")).toBe(true),
+    );
+
+    for (const cmd of ["toString", "constructor"]) {
+      await expect(bridge.send({ cmd }, { tabId: "prototype-command-tab" })).rejects.toThrow(
+        `unknown ${cmd}`,
+      );
+    }
+    expect(dispatched).toEqual(["toString", "constructor"]);
+    sock.close();
+  });
+
   it("surfaces an actionable message (with panel version) when an old panel rejects a bridge command", async () => {
     const sock = await connectPanel(undefined);
     // Old panel: advertises its version, then rejects unknown bridge commands.
@@ -4857,6 +5141,49 @@ describe("UiBridge.send (graceful gate end-to-end)", () => {
     await expect(bridge.send({ cmd: "graph_query" }, { tabId: "old-tab" })).rejects.toThrow(
       /too old for "graph_query".*0\.6\.8.*update/is,
     );
+  });
+
+  // #619 recurrence: a cached sidebar hello omits panel_version and the
+  // dispatcher answers `unknown graph_outline` (not `Unknown command "…"`).
+  // The send path must still rewrite to the upgrade remedy, naming the command,
+  // connected panel "unknown", and the command's minimum.
+  it("rewrites a bare unknown <cmd> from a no-version tab into actionable skew guidance (#619 recurrence)", async () => {
+    const sock = await connectPanel("legacy-cached");
+    sock.on("message", (buf) => {
+      const msg = JSON.parse(buf.toString());
+      if (msg.rid && msg.cmd) {
+        sock.send(JSON.stringify({ rid: msg.rid, ok: false, error: `unknown ${msg.cmd}` }));
+      }
+    });
+    await new Promise((r) => setTimeout(r, 50));
+
+    const outline = await bridge
+      .send({ cmd: "graph_outline" }, { tabId: "legacy-cached" })
+      .then(
+        () => {
+          throw new Error("graph_outline should have been rejected");
+        },
+        (e: Error) => e,
+      );
+    expect(outline.message).toMatch(/does not implement "graph_outline"/i);
+    expect(outline.message).toContain("detected panel unknown");
+    expect(outline.message).toContain("0.4.6");
+    expect(outline.message.toLowerCase()).toContain("update");
+    expect(outline.message).not.toBe("unknown graph_outline");
+
+    const refresh = await bridge
+      .send({ cmd: "refresh_nodes" }, { tabId: "legacy-cached" })
+      .then(
+        () => {
+          throw new Error("refresh_nodes should have been rejected");
+        },
+        (e: Error) => e,
+      );
+    expect(refresh.message).toMatch(/does not implement "refresh_nodes"/i);
+    expect(refresh.message).toContain("detected panel unknown");
+    expect(refresh.message).toContain("0.11.28");
+    expect(refresh.message.toLowerCase()).toContain("update");
+    expect(refresh.message).not.toBe("unknown refresh_nodes");
   });
 
   // #236 — for a command with NO changelog-verified per-command minimum (so the
@@ -5833,25 +6160,34 @@ describe("UiBridge (late MUTATION outcome — #694)", () => {
 
   it("asks the FILTER, not the mutating flag — the #778 commands stay out", async () => {
     // ctx.mutating is !BRIDGE_READONLY_CMDS.has(cmd), which this file documents
-    // as misclassifying graph_screenshot &c. The first cut of #694 gated on it
-    // and retained seven reads under a comment claiming reads were excluded.
-    // graph_screenshot is mutating:true AND not retainable — the exact pair that
-    // tells the two discriminators apart.
+    // as misclassifying graph_canvas &c. The first cut of #694 gated on it and
+    // retained seven reads under a comment claiming reads were excluded.
+    //
+    // The fixture must be a command that is mutating:true AND not retainable —
+    // that pair is the only thing that tells the two discriminators apart. This
+    // test used `graph_screenshot` until panel#2191 admitted it to
+    // BRIDGE_READONLY_CMDS; it would still have PASSED afterwards, on
+    // mutating:false, proving nothing. `graph_canvas` is the durable choice and
+    // is deliberately, permanently out of that set: `pan` is a dx/dy DELTA, so
+    // replaying it after a reconnect pans twice (graph-command-effect.test.ts
+    // pins exactly that). It is not retainable either — it is absent from
+    // RETRY_TOKEN_CMD_BY_TOOL, which is what the filter is built from.
+    expect(BRIDGE_READONLY_CMDS.has("graph_canvas"), "fixture must be mutating:true").toBe(false);
     const sock = await connectPanel("tab-778", "wf");
     await waitFor(() => expect(bridge.tabs().some((t) => t.tab_id === "tab-778")).toBe(true));
     let rid = "";
     sock.on("message", (buf) => {
       const msg = JSON.parse(buf.toString());
-      if (msg.rid && msg.cmd === "graph_screenshot") {
+      if (msg.rid && msg.cmd === "graph_canvas") {
         rid = msg.rid;
         setTimeout(() => sock.send(JSON.stringify({ rid: msg.rid, ok: true })), 80);
       }
     });
     await expect(
-      bridge.send({ cmd: "graph_screenshot" }, { tabId: "tab-778", timeoutMs: 30 }),
+      bridge.send({ cmd: "graph_canvas" }, { tabId: "tab-778", timeoutMs: 30 }),
     ).rejects.toThrow(/did not reply/i);
     await new Promise((r) => setTimeout(r, 140));
-    expect(rid, "graph_screenshot should have been dispatched").toBeTruthy();
+    expect(rid, "graph_canvas should have been dispatched").toBeTruthy();
     expect(bridge.takeLateMutation(rid)).toBeUndefined();
     sock.close();
   });

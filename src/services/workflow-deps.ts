@@ -16,6 +16,7 @@ import {
   MANAGER_CATALOGUE_CURRENCY_CAVEAT,
   managerCatalogueCurrencyUnverified,
 } from "./manager-catalogue-currency.js";
+import { extractWorkflowClassTypes } from "./api-nodes.js";
 
 /**
  * Workflow dependency analysis & installation.
@@ -290,25 +291,15 @@ export function defaultWorkflowDepsDeps(): WorkflowDepsDeps {
  * Collect the distinct, sorted class_types referenced by a workflow. Handles
  * both the API format (object keyed by node id, each `{ class_type }`) and the
  * UI/"full" format (a `nodes` array whose entries carry a `type` field).
+ *
+ * Subgraph-aware via extractWorkflowClassTypes: a UI node whose `type` is a
+ * subgraph definition id is an instance, not a class_type, and inner nodes
+ * from `definitions.subgraphs[].nodes` are walked instead.
  */
 export function collectClassTypes(
   workflow: WorkflowJSON | { nodes?: unknown },
 ): string[] {
-  const set = new Set<string>();
-  const uiNodes = (workflow as { nodes?: unknown }).nodes;
-  if (Array.isArray(uiNodes)) {
-    for (const node of uiNodes) {
-      const t = (node as { type?: unknown } | null)?.type;
-      if (typeof t === "string" && t) set.add(t);
-    }
-    return [...set].sort();
-  }
-  for (const node of Object.values(workflow as WorkflowJSON)) {
-    if (node && typeof node.class_type === "string" && node.class_type) {
-      set.add(node.class_type);
-    }
-  }
-  return [...set].sort();
+  return extractWorkflowClassTypes(workflow).sort();
 }
 
 /**

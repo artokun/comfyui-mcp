@@ -290,6 +290,49 @@ function parsePid(raw: string | undefined): number | undefined {
   return Number.isFinite(parsed) && parsed > 0 ? parsed : undefined;
 }
 
+/**
+ * Convert the platform-native process creation stamp to filesystem epoch
+ * milliseconds. The raw `startedAt` value stays untouched because other callers
+ * compare it only with another reading from the same platform; this normalized
+ * value is for the launch-state config freshness check only.
+ */
+function processStartTimeMs(startedAt: string | undefined): number | undefined {
+  if (!startedAt) return undefined;
+  if (IS_WIN) {
+    // WMI returns FILETIME: 100-ns intervals since 1601-01-01 UTC.
+    const fileTime = Number(startedAt);
+    if (!Number.isFinite(fileTime) || fileTime <= 0) return undefined;
+    const epochMs = fileTime / 10_000 - 11_644_473_600_000;
+    return Number.isFinite(epochMs) && epochMs > 0 ? epochMs : undefined;
+  }
+  if (platform() === "linux") {
+    // Linux /proc/PID/stat reports starttime in clock ticks since boot. Read the
+    // kernel boot epoch and the host clock frequency rather than assuming the
+    // common-but-not-contractual 100 Hz value.
+    const ticks = Number(startedAt);
+    if (!Number.isFinite(ticks) || ticks < 0) return undefined;
+    try {
+      const bootSeconds = Number(
+        readFileSync("/proc/stat", "utf-8").match(/^btime\s+(\d+)$/m)?.[1],
+      );
+      const hz = Number(
+        execFileSync("getconf", ["CLK_TCK"], { encoding: "utf-8", timeout: 8000 }).trim(),
+      );
+      if (!Number.isFinite(bootSeconds) || !Number.isFinite(hz) || hz <= 0) return undefined;
+      const epochMs = bootSeconds * 1000 + (ticks * 1000) / hz;
+      return Number.isFinite(epochMs) && epochMs > 0 ? epochMs : undefined;
+    } catch {
+      return undefined;
+    }
+  }
+  // macOS `ps lstart` is a local-time ctime-style string. The filesystem mtime
+  // used alongside it is on the same host, so Date.parse is the appropriate
+  // conversion; its second-level precision intentionally fails closed for a
+  // config that cannot be ordered confidently.
+  const epochMs = Date.parse(startedAt);
+  return Number.isFinite(epochMs) && epochMs > 0 ? epochMs : undefined;
+}
+
 export function readProcessIdentity(pid: number): ProcessIdentity | undefined {
   try {
     if (IS_WIN) {
@@ -821,6 +864,9 @@ export interface LiveServerProcess {
    * not replace it with an interpreter-based root anchor.
    */
   launchScriptInvalid?: boolean;
+  /** Process creation time in filesystem epoch milliseconds, when the OS stamp
+   * could be normalized. Only used to bind a config read to launch state. */
+  startedAtMs?: number;
 }
 
 /**
@@ -873,6 +919,11 @@ export function observeLiveServerProcess(opts: ResolveOptions): LiveServerProces
     identity = undefined;
   }
 
+  const launchStateFields = (() => {
+    const startedAtMs = processStartTimeMs(identity?.startedAt);
+    return startedAtMs === undefined ? {} : { startedAtMs };
+  })();
+
   // The OS's own record of the image, normalized: Windows reports it verbatim from
   // the launch, so a relative spelling comes back as an absolute path that still
   // contains the `..` it was written with (measured: `…\ComfyUI\..\python_embeded\
@@ -921,7 +972,7 @@ export function observeLiveServerProcess(opts: ResolveOptions): LiveServerProces
         pid,
         image,
       };
-      return { ...result, ...launchEvidenceFields };
+      return { ...result, ...launchEvidenceFields, ...launchStateFields };
     }
     // Same PID, different (or unreadable) start time → this is NOT our process, or
     // we cannot prove it is. Fall through to tier 2 rather than trust the record.
@@ -958,12 +1009,12 @@ export function observeLiveServerProcess(opts: ResolveOptions): LiveServerProces
     : identity?.venvPython;
   if (fromEnv && isAbsolute(fromEnv) && existsSync(fromEnv)) {
     const result = { python: fromEnv, source: "process-table" as const, pid, image };
-    return { ...result, ...launchEvidenceFields };
+    return { ...result, ...launchEvidenceFields, ...launchStateFields };
   }
 
   if (argv0) {
     const result = { python: argv0, source: "process-table" as const, pid, image };
-    return { ...result, ...launchEvidenceFields };
+    return { ...result, ...launchEvidenceFields, ...launchStateFields };
   }
-  return { pid, image, ...launchEvidenceFields };
+  return { pid, image, ...launchEvidenceFields, ...launchStateFields };
 }

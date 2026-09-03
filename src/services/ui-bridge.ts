@@ -34,7 +34,7 @@ import {
 import { primePanelBase, verifiedPanelDiskVersion } from "./panel-workspace.js";
 import { compareSemver, detectInstallMode } from "./self-update.js";
 import { SHARED_SESSION_SCOPE, isScopeAddress } from "./session-scope.js";
-import type { ScopeRepinOutcome } from "../orchestrator/turn-origins.js";
+import type { ScopeRepinOutcome, ScopeRepinRequest } from "../orchestrator/turn-origins.js";
 import {
   QUEUE_BUSY_READ_TOOLS,
   panelToolForGraphCmd,
@@ -91,8 +91,8 @@ export interface PanelTab {
 
 /** Shared per-send context that survives a re-dispatch (idempotent read retried
  *  onto a fresh socket after a mid-command reconnect). Carries the caller's
- *  resolve/reject, the original command, and an absolute deadline so retries are
- *  always bounded. */
+ *  resolve/reject, the original command, an absolute deadline, and a finite
+ *  reconnect retry budget. */
 type SendCtx = {
   resolve: (v: unknown) => void;
   reject: (e: Error) => void;
@@ -106,6 +106,8 @@ type SendCtx = {
   mutating: boolean;
   /** Absolute ms after which even an idempotent read stops waiting for reconnect. */
   deadline: number;
+  /** Remaining bridge-owned reconnect re-dispatches for this send. */
+  reconnectRetriesRemaining: number;
   /** #570 — the trusted per-instance workflow uuid this command was ISSUED FOR (the
    *  caller's intended tab), stamped onto the outgoing frame so the panel can refuse to
    *  EXECUTE it against a DIFFERENT workflow it has since switched to. Undefined for a tab
@@ -222,6 +224,11 @@ interface Conn {
    * ignore the field and leave the node-replacement fence unenforced. */
   enforcesExpectedNodeTypeAtWrite: boolean;
   /** True only when THIS hello advertises that the panel validates an optional
+   * opaque expected_node_identity at the synchronous graph_set_widget write
+   * boundary. A same-type, same-id replacement must not satisfy a stale
+   * promoted-write preflight. */
+  enforcesExpectedNodeIdentityAtWrite: boolean;
+  /** True only when THIS hello advertises that the panel validates an optional
    * expected_scope (promoted owner/workflow witness) at the synchronous
    * graph_set_widget write boundary. Re-read per hello and fail closed when
    * absent: an older panel would silently ignore receiver identity and could
@@ -316,44 +323,46 @@ export const MIN_PANEL_VERSION_FOR_BRIDGE_COMMANDS = "0.11.4";
  *  graph_outline has existed since panel 0.4.6, so a "too old — update to ≥0.11.4"
  *  verdict for it is a false, inflated requirement (#352). Anything not listed
  *  falls back to MIN_PANEL_VERSION_FOR_BRIDGE_COMMANDS (the full-set baseline). */
-export const BRIDGE_CMD_MIN_PANEL_VERSION: Readonly<Record<string, string>> = {
-  graph_outline: "0.4.6",
-  graph_find_nodes: "0.4.6",
-  graph_query: "0.7.0",
-  graph_serialize: "0.8.2",
-  // #1006 — the panel serving its OWN /object_info first shipped in panel 0.13.0. An
-  // AUTHORITATIVE entry, because without one the command falls back to the bridge
-  // baseline and an older panel answers the raw dispatch error `Unknown command
-  // "graph_get_object_info"`, which reads like a broken ComfyUI rather than an old panel.
-  //
-  // Established from the release commit, not from tags: this repo does not tag its
-  // releases (`git tag --contains` finds nothing), so ancestry would have pointed at the
-  // first tag that happens to exist and named a version four releases too late.
-  graph_get_object_info: "0.13.0",
-  // #608 forced-refresh executor shipped in panel 0.11.28. Older panels (e.g. the
-  // 0.11.20 in #619) register no `refresh_nodes` handler and reply with the raw
-  // dispatch error `Unknown command "refresh_nodes"`. Without this AUTHORITATIVE
-  // entry the command falls back to the 0.11.4 baseline, which a 0.11.20 panel
-  // already exceeds — so makeUnknownCommandError's false-negative guard mistook it
-  // for "new enough" and leaked the opaque raw error instead of an actionable
-  // "update your panel to ≥0.11.28" verdict. Listing it here also lets the #392
-  // PROACTIVE gate reject the very first call on a <0.11.28 panel before dispatch.
-  refresh_nodes: "0.11.28",
-  // #619 recurrence — panel_resize_node's bridge executor shipped in panel 0.11.25
-  // (panel CHANGELOG: "panel_resize_node resizes a node on the live canvas", #530).
-  // The reporter's 0.11.21 panel predates it, but untabled the command inherited the
-  // 0.11.4 baseline, producing the self-contradictory verdict `too old for
-  // "graph_resize_node" (detected 0.11.21) — update … to ≥0.11.4`. Tabled, it quotes
-  // the true minimum and the #392 proactive gate rejects the first call pre-dispatch.
-  graph_resize_node: "0.11.25",
-  // #1400 — the panel serving its frontend's VIRTUAL-type registry ships in the
-  // panel release carrying the `graph_get_virtual_types` executor. The entry is
-  // deliberately on the LOW side of whatever that release turns out to be: the
-  // only caller (the orchestrator's hello-time pull) degrades silently on an
-  // unknown-command reply, so a too-low floor can never produce a wrong verdict —
-  // it just lets an old panel answer "Unknown command", which the pull swallows.
-  graph_get_virtual_types: "0.15.11",
-};
+export const BRIDGE_CMD_MIN_PANEL_VERSION: Readonly<Record<string, string>> = Object.freeze(
+  Object.assign(Object.create(null) as Record<string, string>, {
+    graph_outline: "0.4.6",
+    graph_find_nodes: "0.4.6",
+    graph_query: "0.7.0",
+    graph_serialize: "0.8.2",
+    // #1006 — the panel serving its OWN /object_info first shipped in panel 0.13.0. An
+    // AUTHORITATIVE entry, because without one the command falls back to the bridge
+    // baseline and an older panel answers the raw dispatch error `Unknown command
+    // "graph_get_object_info"`, which reads like a broken ComfyUI rather than an old panel.
+    //
+    // Established from the release commit, not from tags: this repo does not tag its
+    // releases (`git tag --contains` finds nothing), so ancestry would have pointed at the
+    // first tag that happens to exist and named a version four releases too late.
+    graph_get_object_info: "0.13.0",
+    // #608 forced-refresh executor shipped in panel 0.11.28. Older panels (e.g. the
+    // 0.11.20 in #619) register no `refresh_nodes` handler and reply with the raw
+    // dispatch error `Unknown command "refresh_nodes"`. Without this AUTHORITATIVE
+    // entry the command falls back to the 0.11.4 baseline, which a 0.11.20 panel
+    // already exceeds — so makeUnknownCommandError's false-negative guard mistook it
+    // for "new enough" and leaked the opaque raw error instead of an actionable
+    // "update your panel to ≥0.11.28" verdict. Listing it here also lets the #392
+    // PROACTIVE gate reject the very first call on a <0.11.28 panel before dispatch.
+    refresh_nodes: "0.11.28",
+    // #619 recurrence — panel_resize_node's bridge executor shipped in panel 0.11.25
+    // (panel CHANGELOG: "panel_resize_node resizes a node on the live canvas", #530).
+    // The reporter's 0.11.21 panel predates it, but untabled the command inherited the
+    // 0.11.4 baseline, producing the self-contradictory verdict `too old for
+    // "graph_resize_node" (detected 0.11.21) — update … to ≥0.11.4`. Tabled, it quotes
+    // the true minimum and the #392 proactive gate rejects the first call pre-dispatch.
+    graph_resize_node: "0.11.25",
+    // #1400 — the panel serving its frontend's VIRTUAL-type registry ships in the
+    // panel release carrying the `graph_get_virtual_types` executor. The entry is
+    // deliberately on the LOW side of whatever that release turns out to be: the
+    // only caller (the orchestrator's hello-time pull) degrades silently on an
+    // unknown-command reply, so a too-low floor can never produce a wrong verdict —
+    // it just lets an old panel answer "Unknown command", which the pull swallows.
+    graph_get_virtual_types: "0.15.11",
+  }),
+);
 
 /**
  * The panel version each non-command bridge capability was ACTUALLY introduced
@@ -999,9 +1008,11 @@ function buildPanelTooOldError(
           // would be a claim nothing here supports.
           ` (this connection advertised no panel version; an earlier connection for this tab ` +
           `reported ${reading.inherited}, which may be out of date${mcpTail})`
-        : mcpVersion
-          ? ` (detected mcp ${mcpVersion})`
-          : "";
+        // No advertised version at all (legacy/cached sidebar that predates
+        // `panel_version` in hello — #619 recurrence). Still name the connected
+        // panel as unknown so the skew message is complete; do not omit the
+        // parenthetical and skip the upgrade remedy.
+        : ` (detected panel unknown${mcpTail})`;
   const min = BRIDGE_CMD_MIN_PANEL_VERSION[cmd];
   // "TOO OLD" IS AN AGE VERDICT, and it may only be reached from an age
   // OBSERVATION: a version that parsed AND compares below the command's known
@@ -1051,9 +1062,10 @@ export function isPanelCmdUnsupportedError(err: unknown, cmd?: string): boolean 
     ?.panelCmdUnsupported;
   if (typeof tag === "string") return cmd == null || tag === cmd;
   const msg = err instanceof Error ? err.message : String(err ?? "");
+  const parsed = parseUnknownCommandReply(msg);
+  if (parsed) return cmd == null || parsed === cmd;
   const cmdPat = cmd ? cmd.replace(/[.*+?^${}()|[\]\\]/g, "\\$&") : "[\\w.-]+";
   return (
-    new RegExp(`unknown command\\s*["“']?${cmdPat}`, "i").test(msg) ||
     new RegExp(`too old for\\s*["“']?${cmdPat}`, "i").test(msg) ||
     new RegExp(`does not implement\\s*["“']?${cmdPat}`, "i").test(msg)
   );
@@ -1069,18 +1081,43 @@ export function isPanelCmdUnsupportedError(err: unknown, cmd?: string): boolean 
  * into an actionable "update your panel" message instead of surfacing the opaque
  * internal command name to the agent/user. Returns null when `error` is anything
  * else (a genuine command failure), so the happy/normal-error path is untouched.
+ *
+ * Also matches the legacy/cached spelling `unknown <cmd>` (no "command" word,
+ * no quotes) that a sidebar tab predating the current dispatcher used — the
+ * #619 recurrence on 0.52.147 leaked `Error: unknown graph_outline` because
+ * only the `Unknown command "…"` shape was recognized.
  */
-/** The panel dispatcher's raw "Unknown command" reply shape (anchored, quote- and
- *  case-tolerant). Shared by makeUnknownCommandError and isUnknownCommandReply so the
- *  reactive rewrite and the #422 veto-revocation agree on exactly one definition. */
+/** Current dispatcher: `Unknown command "graph_query"` (quotes optional). */
 const UNKNOWN_COMMAND_RE = /^unknown command\s*["“']?([\w.-]+)["”']?/i;
+/** Legacy/cached dispatcher: the entire message is `unknown graph_outline`. */
+const UNKNOWN_BARE_CMD_RE = /^unknown\s+["“']?([\w.-]+)["”']?\s*$/i;
+
+/** True when `token` is a bridge command name, not English (`unknown node`). */
+function looksLikeBridgeCommand(cmd: string): boolean {
+  if (BRIDGE_CMD_MIN_PANEL_VERSION[cmd]) return true;
+  return /^(?:graph|ui|workflow|refresh|nodes)_[\w.-]+$/.test(cmd);
+}
+
+/** Extract the command from either dispatcher spelling. Shared so the rewrite,
+ *  the #422 veto-revocation, and the tagless unsupported detector agree. */
+function parseUnknownCommandReply(error: string): string | null {
+  const text = String(error ?? "")
+    .trim()
+    .replace(/^error:\s+/i, "")
+    .trim();
+  const withCommand = UNKNOWN_COMMAND_RE.exec(text);
+  if (withCommand) return withCommand[1];
+  const bare = UNKNOWN_BARE_CMD_RE.exec(text);
+  if (!bare) return null;
+  return looksLikeBridgeCommand(bare[1]) ? bare[1] : null;
+}
 
 /** True when `error` is the panel's own "Unknown command" dispatch reply — proof this
  *  build does NOT implement the command, INDEPENDENT of any advertised-version guard
  *  (#422). Used to revoke a stale proven-supported veto even when the version is new
  *  enough to suppress the "too old" rewrite, so a genuine downgrade always re-gates. */
 export function isUnknownCommandReply(error: string): boolean {
-  return UNKNOWN_COMMAND_RE.test(String(error ?? "").trim());
+  return parseUnknownCommandReply(error) != null;
 }
 
 export function makeUnknownCommandError(
@@ -1090,14 +1127,11 @@ export function makeUnknownCommandError(
   panelVersion?: string | PanelVersionReading,
   mcpVersion?: string,
 ): Error | null {
-  // Match the panel's exact shape: `Unknown command "graph_query"` (quotes
-  // optional/variable). ANCHORED at the start of the (trimmed) message so an
-  // unrelated error that merely QUOTES an unknown-command phrase somewhere in its
-  // text is never rewritten — only the panel dispatcher's own reply, which is
-  // exactly this string. Case-insensitive, tolerant of straight or smart quotes.
-  const m = UNKNOWN_COMMAND_RE.exec(error.trim());
-  if (!m) return null;
-  const cmd = m[1];
+  // Current shape: `Unknown command "graph_query"`. Recurrence shape: `unknown
+  // graph_outline` (and the MCP-prefixed `Error: unknown graph_outline`). Start-
+  // anchored so an error that merely quotes the phrase mid-message is not rewritten.
+  const cmd = parseUnknownCommandReply(error);
+  if (!cmd) return null;
   // #352 FALSE-NEGATIVE GUARD: if the panel advertised a version that already
   // meets this command's real minimum, the panel is NOT too old — an "Unknown
   // command" reply here means something else (a genuinely retired/renamed command,
@@ -1177,6 +1211,51 @@ export const BRIDGE_READONLY_CMDS: ReadonlySet<string> = new Set<string>([
   "graph_get_subgraph",
   "graph_view_selected",
   "graph_view_nodes_in_viewport",
+  // panel#2191 — a capture, and nothing else. The frontend handler saves
+  // ds.scale / ds.offset, LiteGraph.vueNodesMode and the active (sub)graph, fits
+  // the whole graph, draws, encodes a PNG, and restores all four in a `finally`.
+  // Re-dispatching it after a reconnect re-takes the same picture; it is strictly
+  // SAFER to replay than the two entries above it, which move the user's viewport
+  // and do not put it back.
+  //
+  // Its absence here was not a judgement, it was an omission — and it was the
+  // whole of panel#2191. `ctx.mutating` is `!READONLY_CMDS.has(cmd)`, so a
+  // reply-timeout on a screenshot told the reporter their screenshot "MUTATES and
+  // was already delivered to the tab … a blind retry can apply it twice", about a
+  // command GRAPH_CMD_EFFECT (thirty lines below) already classifies as `inert`
+  // and the panel's own READ_ONLY_GRAPH_COMMANDS already classifies as a read.
+  // Two ledgers said read; the one that writes the message said mutation.
+  //
+  // THE CONSEQUENCE, written down because it is NOT free and a reviewer should
+  // not have to reconstruct it. Membership here also makes a command eligible
+  // for handleMidCommandDisconnect's park-and-resume, and that resume keys on
+  // `ctx.tabId` ALONE: `resumeAwaitingReconnect` looks up `conns.get(tabId)` and
+  // re-dispatches, without consulting the connection's incarnation.
+  //
+  // A route key RECURS. The hello handler says so itself (#486): "a `wf:` route
+  // key recurs, so a DIFFERENT tab opening the same saved workflow takes it
+  // over … Same key is not the same tab; only the same incarnation coming back
+  // is a proven return." It fires `onTabTakenOver` on exactly that, so the
+  // bridge already knows how to tell an occupant change from a reconnect — the
+  // resume path just does not ask. A parked read can therefore be handed to the
+  // stranger and its reply resolve the departed caller's promise.
+  //
+  // That hole is the SET'S and predates this entry: the park branch is gated on
+  // `!ctx.mutating`, so graph_serialize, graph_outline, graph_query,
+  // graph_get_errors and graph_view_selected have all resumed this way for as
+  // long as they have been listed — and a wrong-tab SERIALIZE is worse than a
+  // wrong-tab picture, because it drives edits. Fixing it means teaching the
+  // resume the incarnation rule without breaking panels that legitimately have
+  // no proven identity (#2104: a refused or unreadable lock manager omits
+  // `tab_session_id`, so every reconnect looks like a new occupant). That is its
+  // own change, with its own blast radius, and is tracked in #2761.
+  //
+  // So this entry takes the half it needs and declines the half it does not: the
+  // panel_screenshot call site passes `maxReconnectRetries: 0`, which keeps the
+  // command out of the park branch entirely. A screenshot that drops mid-capture
+  // fails honestly and is free to re-ask; it is never answered with a picture of
+  // someone else's canvas.
+  "graph_screenshot",
   "graph_prompt_director_audit",
   "graph_query",
   "civitai_results",
@@ -1213,7 +1292,10 @@ export const BRIDGE_READONLY_CMDS: ReadonlySet<string> = new Set<string>([
  * workflow content at all. `graph_find_nodes` (#778) was the reported instance;
  * `graph_list_subgraphs`, `graph_screenshot`, `graph_canvas`,
  * `graph_select_nodes`, `graph_enter_subgraph`, `graph_exit_subgraph` and
- * `graph_copy_nodes` were the same defect, unreported. The orchestrator already
+ * `graph_copy_nodes` were the same defect, unreported. (`graph_screenshot` was
+ * later reported on its own — panel#2191, where the mutation reading reached the
+ * user as "this command MUTATES … a blind retry can apply it twice" — and is now
+ * in BRIDGE_READONLY_CMDS as well as here.) The orchestrator already
  * knew they were reads — RETRY_TOKEN_CMD_BY_TOOL's doc names them one by one as
  * "view/read-only" and "reads in spirit" — but that knowledge lived in a third
  * list, so the gate could not see it.
@@ -1625,6 +1707,10 @@ function expectedNodeTypeFenceRefusal(tabId: string): Error {
   return fenceRefusal(tabId, "expected-node-type", "enforces_expected_node_type_at_write");
 }
 
+function expectedNodeIdentityFenceRefusal(tabId: string): Error {
+  return fenceRefusal(tabId, "expected-node-identity", "enforces_expected_node_identity_at_write");
+}
+
 function expectedScopeFenceRefusal(tabId: string): Error {
   return fenceRefusal(tabId, "promoted-scope", "enforces_expected_scope_at_write");
 }
@@ -1839,6 +1925,32 @@ function usesGraphCommandLane(cmd: string): boolean {
 }
 
 /**
+ * Whether the per-tab graph lane must wait for this command's ACK before
+ * dispatching the next graph frame.
+ *
+ * Reads still wait (#2069): concurrent graph frames share the panel's main
+ * thread and /object_info coalescer, and graph_get_errors is the one that
+ * then misses its reply. Targeted mutations apply on the canvas immediately
+ * and only then await schema work; holding the lane until that ACK is what
+ * stranded concurrent panel_set_widget (#2559) — the frontend applied every
+ * write, then waited for a sibling mutation the lane would not dispatch, so
+ * none of the MCP promises settled.
+ */
+function graphLaneWaitsForReply(cmd: string): boolean {
+  return GRAPH_CMD_EFFECT[cmd] !== "targeted";
+}
+
+/** True when a panel reply body is a graph_set_widget success (`set: {…}`). */
+function isSetWidgetReplyResult(result: unknown): boolean {
+  return (
+    !!result &&
+    typeof result === "object" &&
+    !Array.isArray(result) &&
+    Object.prototype.hasOwnProperty.call(result, "set")
+  );
+}
+
+/**
  * A mutation the panel acknowledged AFTER its reply timeout (#694, #1175).
  *
  * `result` is the panel's own reply body, present only when it was retained (see
@@ -1852,6 +1964,30 @@ export type LateMutation = {
   tabId: string;
   lateByMs: number;
   result?: unknown;
+};
+
+/**
+ * A mutation that was written to the panel and has not yet been acknowledged
+ * (#2527). Keyed by the dispatched rid so a late frontend reply, a graph read,
+ * or a retry_of can reconcile the exact delivered command instead of racing a
+ * stale snapshot.
+ */
+export type DeliveredMutationReceipt = {
+  rid: string;
+  cmd: string;
+  tabId: string;
+  ts: number;
+  frame: Record<string, unknown>;
+  status: "in_flight" | "timed_out";
+};
+
+/** Peek of a delivered mutation, including one that already settled late. */
+export type PeekedDeliveredMutation = {
+  rid: string;
+  cmd: string;
+  tabId: string;
+  frame: Record<string, unknown>;
+  status: "in_flight" | "timed_out" | "settled";
 };
 
 /** A prompt id captured by the Panel after the graph_run reply window (#1728). */
@@ -1906,6 +2042,19 @@ function retainableLateResult(result: unknown): { result?: unknown } {
   } catch {
     return {};
   }
+}
+
+/** Clone the dispatched command minus rid so a later retry can replay it. */
+function cloneDeliveredMutationFrame(frame: Record<string, unknown>): Record<string, unknown> {
+  let cloned: Record<string, unknown>;
+  try {
+    const json = JSON.stringify(frame);
+    cloned = typeof json === "string" ? (JSON.parse(json) as Record<string, unknown>) : { ...frame };
+  } catch {
+    cloned = { ...frame };
+  }
+  delete cloned.rid;
+  return cloned;
 }
 
 /** Tag an error as a reply-timeout and return it (for throw/reject). */
@@ -2079,7 +2228,13 @@ export class UiBridge {
    *  in-flight turn onto the tab that is active now (the documented
    *  panel_set_workflow_target({mode:"current"}) consent). Returns the tab it
    *  repinned to, or undefined when nothing is resolvable. */
-  private scopeRepinHandler: ((scopeId: string, preferredWorkflowPath?: string) => ScopeRepinOutcome) | null = null;
+  private scopeRepinHandler:
+    | ((
+        scopeId: string,
+        preferredWorkflowPath?: string,
+        request?: ScopeRepinRequest,
+      ) => ScopeRepinOutcome)
+    | null = null;
   /**
    * panel#1292 — an in-flight `mode:"current"` bind that is recovering a null
    * turn pin. Same-batch siblings (`panel_graph_outline`, `panel_set_todo`)
@@ -2188,11 +2343,14 @@ export class UiBridge {
   private static readonly MAX_MISSED_FRAMES = 100;
   private pending = new Map<string, Pending>();
   /**
-   * #2069 — per-tab chain of `graph_*` dispatches. The panel's WS listener is
-   * async-per-message, so concurrent graph frames share the main thread and the
-   * /object_info coalescer; graph_get_errors is the one that then misses its
-   * reply window while query/outline/screenshot succeed. Timeout clocks start
-   * at dispatch (after the predecessor settles), not at enqueue.
+   * #2069 / #2559 — per-tab chain of `graph_*` dispatches. The panel's WS
+   * listener is async-per-message, so concurrent READ frames share the main
+   * thread and the /object_info coalescer; graph_get_errors is the one that
+   * then misses its reply window. Targeted mutations release the lane once
+   * the frame is on the wire: they apply immediately, and waiting for their
+   * ACK before the next dispatch deadlocks when the frontend coalesces
+   * several widget writes (#2559). Timeout clocks start at dispatch, not at
+   * enqueue.
    */
   private graphLane = new Map<string, Promise<unknown>>();
   /** ask_user card sends (rid → {ask_id, ts}): lets a reply that validates AFTER
@@ -2271,22 +2429,23 @@ export class UiBridge {
   /** TTL for a BUFFERED late ask answer — see the exported LATE_ASK_TTL_MS. */
   private static readonly LATE_ASK_TTL_MS = LATE_ASK_TTL_MS;
   /**
-   * Mutations whose reply timer fired (rid -> what it was), so a reply arriving
-   * afterwards can be RECOGNISED as the late completion of a known write rather
-   * than an unknown rid to drop (#694).
+   * Mutations written to the panel and not yet acknowledged (#2527 / #694).
    *
-   * Deliberately narrow, and the negatives matter more than the positive:
-   *  - MUTATIONS only. A read that is abandoned costs nothing because you just
-   *    retry it (#1154's asymmetry); retaining reads would make this unbounded
-   *    noise for no recoverable information.
-   *  - populated when we STOP WAITING for a reply we already wrote — the reply
-   *    timer firing (#694), OR a mid-command disconnect of a filtered mutation
-   *    (panel#1524). A mutation that replies in time resolves its caller directly
-   *    and has nothing to report later. Without the disconnect arm, the panel's
-   *    lost-reply replay of a `graph_run` that already queued is an unknown rid
-   *    and is dropped — the caller is stuck with OUTCOME UNKNOWN for a paid render.
+   * Populated at dispatch (not only at timeout) so a graph read or retry_of can
+   * still name the exact delivered command while the frontend is settling.
+   * Status becomes `timed_out` when we STOP WAITING — the reply timer firing
+   * (#694) or a mid-command disconnect of a filtered mutation (panel#1524).
+   * A mutation that replies in time is forgotten: the caller already has the
+   * outcome. Without the disconnect arm, the panel's lost-reply replay of a
+   * `graph_run` that already queued is an unknown rid and is dropped.
+   *
+   * Deliberately mutations only. A read that is abandoned costs a retry
+   * (#1154's asymmetry); retaining reads would make this unbounded noise.
    */
-  private timedOutMutations = new Map<string, { cmd: string; tabId: string; ts: number }>();
+  private deliveredMutations = new Map<
+    string,
+    { cmd: string; tabId: string; ts: number; frame: Record<string, unknown>; status: "in_flight" | "timed_out" }
+  >();
   /** Installed by the retry-token layer; see setLateMutationFilter. Null means
    *  retain nothing. */
   private lateMutationFilter: ((cmdName: string) => boolean) | null = null;
@@ -2294,8 +2453,18 @@ export class UiBridge {
    *  takeLateMutation(). Success only: see the recordLateMutation comment. */
   private lateMutations = new Map<
     string,
-    { ok: true; cmd: string; tabId: string; ts: number; lateByMs: number; result?: unknown }
+    {
+      ok: true;
+      cmd: string;
+      tabId: string;
+      ts: number;
+      lateByMs: number;
+      result?: unknown;
+      frame: Record<string, unknown>;
+    }
   >();
+  /** Waiters blocked on a tab's outcome-unknown mutations settling (#2527). */
+  private mutationSettleWaiters: Array<{ tabId: string; finish: () => void }> = [];
   /** Exact prompt receipts sent by the Panel after its graph_run command returned. */
   private lateRunReceipts = new Map<
     string,
@@ -2351,6 +2520,9 @@ export class UiBridge {
   /** How long a dropped idempotent read waits for its tab to re-hello before we
    *  declare the panel genuinely gone. Bounded so a caller never hangs. */
   private static readonly RECONNECT_GRACE_MS = 4000;
+  /** No single bridge send may be re-dispatched more than once by reconnect
+   *  handling. Callers can lower this to zero for identity-sensitive probes. */
+  private static readonly MAX_RECONNECT_RETRIES = 1;
   /** Bridge commands with no side effect — safe to re-dispatch after a reconnect.
    *  Everything else is treated as mutating (no auto-retry) so a render/edit is
    *  never silently double-applied. Single source of truth at module scope
@@ -2846,10 +3018,29 @@ export class UiBridge {
           cb(false, 401, "Unauthorized");
         },
       });
-      wss.on("connection", (sock) => {
+      wss.on("connection", (sock, req) => {
         this.missedPongs.set(sock, 0);
         sock.on("pong", () => this.missedPongs.set(sock, 0));
-        this.handleConnection(sock);
+        // #2757/#2752 — READ THE HANDSHAKE `Origin`, exactly as the primary
+        // listener does. This callback used to take `(sock)` alone and throw the
+        // upgrade request away, so every connection arriving here had
+        // `serverOrigin === undefined`.
+        //
+        // That is not an edge case: this is the listener the cloudflared
+        // quick-tunnel is put in front of (`ensureSecureBridge` calls
+        // `addListener("0.0.0.0", tunnelPort, tunnelToken)`), so it carries EVERY
+        // remote-pod panel tab. cloudflared forwards the browser's `Origin`
+        // header on the upgrade untouched — the orchestrator simply never looked.
+        // The consequence is the reported wedge: `workflowIdentityParts()` gates
+        // on an origin being PRESENT, so no tunnel-fronted tab could ever adopt a
+        // workflow fence, and `panel_set_workflow_target({mode:"current"})`
+        // applied the mode while refusing the rebind — permanently, for the whole
+        // session.
+        //
+        // `local` stays false. This listener is token-gated and reachable off the
+        // machine; the origin is identity/diagnostic metadata, never a
+        // trusted-local or authorization signal (see handleConnection's doc).
+        this.handleConnection(sock, false, normalizeHandshakeOrigin(req?.headers?.origin));
       });
       wss.on("listening", () => {
         settled = true;
@@ -3117,6 +3308,9 @@ export class UiBridge {
             (msg as { enforces_workflow_stamp_at_write?: unknown }).enforces_workflow_stamp_at_write === true,
           enforcesExpectedNodeTypeAtWrite:
             (msg as { enforces_expected_node_type_at_write?: unknown }).enforces_expected_node_type_at_write === true,
+          enforcesExpectedNodeIdentityAtWrite:
+            (msg as { enforces_expected_node_identity_at_write?: unknown })
+              .enforces_expected_node_identity_at_write === true,
           enforcesExpectedScopeAtWrite:
             (msg as { enforces_expected_scope_at_write?: unknown }).enforces_expected_scope_at_write === true,
           enforcesExpectedScopeGraphIdentityAtWrite:
@@ -3361,61 +3555,21 @@ export class UiBridge {
               }
             }
           }
+          // #2559 — a concurrent widget write can land its ACK under a rid the
+          // bridge is no longer waiting on (rewritten, coalesced, or already
+          // recorded as late) while a sibling graph_set_widget on THIS socket
+          // is still blocked. Deliver the result to that waiter instead of
+          // stranding the MCP tool call.
+          const fifo = this.findFifoPendingForSetWidgetReply(sock, msg);
+          if (fifo) {
+            this.askRidToId.delete(rid);
+            this.settlePendingReply(fifo.rid, fifo.pending, msg, sock);
+            return;
+          }
           this.recordLateMutation(rid, msg);
           return;
         }
-        clearTimeout(p.timer);
-        this.pending.delete(rid);
-        this.askRidToId.delete(rid);
-        if (msg.ok) {
-          // #422 — the panel DEMONSTRABLY served this command. Record it on the LIVE
-          // connection (following a same-socket tmp:→wf: migration whose reply landed
-          // after the id change), so a later re-hello advertising an undercutting
-          // version can never re-gate it as "too old". Scoped to THIS reply's socket so
-          // an unrelated tab reusing the id can never be granted the veto.
-          const served = this.liveConnForTab(p.ctx.tabId, sock);
-          served?.provenSupportedCmds.add(p.cmd);
-          this.notePromotedScope(p.ctx.tabId, msg.result);
-          this.noteSiblingSuccess(p.ctx, rid);
-          p.resolve(msg.result);
-        } else {
-          // #1529 — carry the panel's STRUCTURED refusal onto the error.
-          //
-          // `msg.error` is arbitrary text, and the retry path needs one fact it
-          // cannot get from text: did the executor run? The panel states that in a
-          // field (panel 0.14.35), and dropping it here is why the first attempt at
-          // the retry had to match wording — which was reverted as a P0, because a
-          // genuine mid-write failure can contain the same sentence and the cost of
-          // being wrong is a re-applied mutation.
-          //
-          // Validated before it is attached, so only a complete pre-executor claim
-          // travels; anything else leaves the error exactly as it was.
-          // #1560 — and record the fact that this reply EXISTS, structurally.
-          // `ctx.call` flattens every failure into `isError`, so a command the panel
-          // SERVED and refused arrives indistinguishable from one the tab never
-          // answered — and a caller that reports "the channel is not answering" then
-          // says it about a panel that is demonstrably talking. This branch is the
-          // one place that knows the difference: a reply was received.
-          const err = attachPanelAnswered(new Error(String(msg.error ?? "panel reported an error")));
-          // OWN property on the WIRE message too (review, P0). A polluted
-          // Object.prototype.refusal would otherwise give every ordinary panel
-          // error — including a genuine mid-write one carrying no refusal of its
-          // own — the authority to have a mutation re-issued.
-          const refusal = hasOwnField(msg, "refusal")
-            ? readPanelRefusal((msg as { refusal?: unknown }).refusal)
-            : null;
-          const workflowListReadiness =
-            p.cmd === "workflow_list" && hasOwnField(msg, "workflow_list_readiness")
-              ? readWorkflowListReadiness(
-                  (msg as { workflow_list_readiness?: unknown }).workflow_list_readiness,
-                )
-              : null;
-          let rejected = refusal ? attachPanelRefusal(err, refusal) : err;
-          if (workflowListReadiness) {
-            rejected = attachWorkflowListReadiness(rejected, workflowListReadiness);
-          }
-          p.reject(rejected);
-        }
+        this.settlePendingReply(rid, p, msg, sock);
         return;
       }
 
@@ -3777,6 +3931,16 @@ export class UiBridge {
     }
   }
 
+  /** Whether THIS connected panel enforces graph_set_widget's optional opaque
+   * expected-node-identity fence at the actual mutation boundary. */
+  tabExpectedNodeIdentityFenceCapability(tabId: string): boolean {
+    try {
+      return this.resolveTarget(tabId).enforcesExpectedNodeIdentityAtWrite === true;
+    } catch {
+      return false;
+    }
+  }
+
   /** Whether THIS connected panel publishes the complete renamed-promotion
    * terminal witness required for alias-independent promoted-write preflight. */
   tabPromotedTerminalWitnessCapability(tabId: string): boolean {
@@ -4115,6 +4279,34 @@ export class UiBridge {
     return this.promotedScopes.get(key) ?? unknown;
   }
 
+  /** Overwrite a stale subgraph witness with a live root viewing. */
+  applyLiveRootViewing(tabId: string, viewing: unknown): void {
+    const parsed = this.parsePromotedScopeResult({ viewing });
+    if (!parsed || parsed.known !== true || parsed.scope !== "root") return;
+    let key = tabId;
+    try {
+      key = this.resolveTarget(tabId).tabId;
+    } catch {
+      key = tabId;
+    }
+    this.promotedScopes.set(key, parsed);
+  }
+
+  /** Drop a cached subgraph/promoted current-view identity after a root read
+   * or a successful mode:current rebind. */
+  clearPromotedSubgraphIdentity(tabId: string): void {
+    let key = tabId;
+    try {
+      key = this.resolveTarget(tabId).tabId;
+    } catch {
+      key = tabId;
+    }
+    const current = this.promotedScopes.get(key);
+    if (current?.known === true && current.scope === "subgraph") {
+      this.promotedScopes.delete(key);
+    }
+  }
+
   /** Read the current panel view from the live graph immediately before a
    *  promoted write. `promotedScopeFor` is intentionally only a cached witness
    *  for synchronous dispatch fences; this method performs the authoritative
@@ -4151,7 +4343,13 @@ export class UiBridge {
   }
 
   /** #884 — inject the explicit-repin recovery handler (see the field doc). */
-  setScopeRepinHandler(fn: (scopeId: string, preferredWorkflowPath?: string) => ScopeRepinOutcome): void {
+  setScopeRepinHandler(
+    fn: (
+      scopeId: string,
+      preferredWorkflowPath?: string,
+      request?: ScopeRepinRequest,
+    ) => ScopeRepinOutcome,
+  ): void {
     this.scopeRepinHandler = fn;
   }
 
@@ -4171,14 +4369,23 @@ export class UiBridge {
    * of "the active one".
    *
    * Same handler, so the P0 gate is shared by construction: a pin that still
-   * reaches a live tab of this conversation is never displaced, however explicit
-   * the request. What a NAME adds is recovery in the state where "current" is
-   * legitimately refused — several eligible tabs and no active one among them —
-   * which is precisely the state that refusal already tells the agent to escape
-   * by naming a workflow. Until now nothing made the pin follow the name.
+   * reaches a live tab of this conversation is never displaced onto a
+   * background tab, however explicit the request. What a NAME adds is recovery
+   * in the state where "current" is legitimately refused — several eligible
+   * tabs and no active one among them — which is precisely the state that
+   * refusal already tells the agent to escape by naming a workflow.
+   *
+   * #2531 — `alignLiveCanvas` is extra consent from a successful
+   * panel_open_workflow / verified-active pin: rewrite lastOrigin onto THIS
+   * canvas's live id rather than reporting pin success while the next
+   * origin-less turn still inherits the pre-switch workflow.
    */
-  repinScopeToWorkflow(scopeId: string, workflowPath: string): ScopeRepinOutcome {
-    return this.scopeRepinHandler?.(scopeId, workflowPath);
+  repinScopeToWorkflow(
+    scopeId: string,
+    workflowPath: string,
+    request?: ScopeRepinRequest,
+  ): ScopeRepinOutcome {
+    return this.scopeRepinHandler?.(scopeId, workflowPath, request);
   }
 
   /**
@@ -4514,10 +4721,13 @@ export class UiBridge {
    * caller does not already have.
    */
   private recordLateMutation(rid: string, msg: { ok?: unknown; result?: unknown }): void {
-    const started = this.timedOutMutations.get(rid);
+    const started = this.deliveredMutations.get(rid);
     if (!started) return;
-    this.timedOutMutations.delete(rid);
-    if (msg.ok !== true) return;
+    this.deliveredMutations.delete(rid);
+    if (msg.ok !== true) {
+      this.notifyMutationSettled(started.tabId);
+      return;
+    }
     const now = Date.now();
     this.pruneLateMutations();
     this.lateMutations.set(rid, {
@@ -4526,11 +4736,13 @@ export class UiBridge {
       tabId: started.tabId,
       ts: now,
       lateByMs: now - started.ts,
+      frame: started.frame,
       ...retainableLateResult(msg.result),
     });
     logger.debug(
       `[ui-bridge] "${started.cmd}" on tab ${started.tabId} completed ${now - started.ts} ms AFTER its reply timeout — retained for the caller (#694)`,
     );
+    this.notifyMutationSettled(started.tabId);
   }
 
   /**
@@ -4574,6 +4786,81 @@ export class UiBridge {
       lateByMs: hit.lateByMs,
       ...("result" in hit ? { result: hit.result } : {}),
     };
+  }
+
+  /**
+   * Outcome-unknown (timed-out, not yet settled) mutations on `tabId` (#2527).
+   * Graph reads wait on these, or disclose them when the frontend has not
+   * acknowledged yet.
+   */
+  listOutstandingMutations(tabId: string): DeliveredMutationReceipt[] {
+    this.pruneLateMutations();
+    const out: DeliveredMutationReceipt[] = [];
+    for (const [rid, e] of this.deliveredMutations) {
+      if (e.tabId !== tabId || e.status !== "timed_out") continue;
+      out.push({ rid, cmd: e.cmd, tabId: e.tabId, ts: e.ts, frame: e.frame, status: e.status });
+    }
+    return out;
+  }
+
+  /** Look up a delivered mutation by rid without draining a late completion. */
+  peekDeliveredMutation(rid: string): PeekedDeliveredMutation | undefined {
+    this.pruneLateMutations();
+    const settled = this.lateMutations.get(rid);
+    if (settled) {
+      return {
+        rid,
+        cmd: settled.cmd,
+        tabId: settled.tabId,
+        frame: settled.frame,
+        status: "settled",
+      };
+    }
+    const live = this.deliveredMutations.get(rid);
+    if (!live) return undefined;
+    return { rid, cmd: live.cmd, tabId: live.tabId, frame: live.frame, status: live.status };
+  }
+
+  /**
+   * Wait until every timed-out mutation on `tabId` has a frontend settlement,
+   * or `budgetMs` elapses (#2527). Resolves without throwing.
+   */
+  waitForOutstandingMutations(tabId: string, budgetMs: number): Promise<void> {
+    this.pruneLateMutations();
+    if (this.listOutstandingMutations(tabId).length === 0) return Promise.resolve();
+    const budget = Number.isFinite(budgetMs) ? Math.max(0, Math.floor(budgetMs)) : 0;
+    if (budget <= 0) return Promise.resolve();
+    return new Promise((resolve) => {
+      let done = false;
+      const finish = () => {
+        if (done) return;
+        done = true;
+        clearTimeout(timer);
+        this.mutationSettleWaiters = this.mutationSettleWaiters.filter((w) => w !== waiter);
+        resolve();
+      };
+      const waiter = { tabId, finish };
+      const timer = setTimeout(finish, budget);
+      this.mutationSettleWaiters.push(waiter);
+      if (this.listOutstandingMutations(tabId).length === 0) finish();
+    });
+  }
+
+  private outstandingTimedOutCount(tabId: string): number {
+    let n = 0;
+    for (const e of this.deliveredMutations.values()) {
+      if (e.tabId === tabId && e.status === "timed_out") n += 1;
+    }
+    return n;
+  }
+
+  private notifyMutationSettled(tabId: string): void {
+    if (this.mutationSettleWaiters.length === 0) return;
+    if (this.outstandingTimedOutCount(tabId) > 0) return;
+    const waiters = this.mutationSettleWaiters.filter((w) => w.tabId === tabId);
+    if (waiters.length === 0) return;
+    this.mutationSettleWaiters = this.mutationSettleWaiters.filter((w) => w.tabId !== tabId);
+    for (const waiter of waiters) waiter.finish();
   }
 
   /** Record one exact prompt id from the Panel's late graph_run capture. */
@@ -4705,8 +4992,12 @@ export class UiBridge {
   /** TTL + cardinality bound for both #694 maps. */
   private pruneLateMutations(): void {
     const now = Date.now();
-    for (const [rid, e] of this.timedOutMutations) {
-      if (now - e.ts > UiBridge.LATE_MUTATION_TTL_MS) this.timedOutMutations.delete(rid);
+    const prunedTabs = new Set<string>();
+    for (const [rid, e] of this.deliveredMutations) {
+      if (now - e.ts > UiBridge.LATE_MUTATION_TTL_MS) {
+        this.deliveredMutations.delete(rid);
+        prunedTabs.add(e.tabId);
+      }
     }
     for (const [rid, e] of this.lateMutations) {
       if (now - e.ts > UiBridge.LATE_MUTATION_TTL_MS) this.lateMutations.delete(rid);
@@ -4721,13 +5012,18 @@ export class UiBridge {
     // oldest. Quiet, unlike the ask-mapping overflow: losing one of 256 late
     // completions costs the caller a notice they can still get by looking, where
     // losing an ask mapping loses a user's answer outright.
-    for (const map of [this.timedOutMutations, this.lateMutations, this.lateRunReceipts, this.lateRunReceiptHandoffs]) {
+    for (const map of [this.deliveredMutations, this.lateMutations, this.lateRunReceipts, this.lateRunReceiptHandoffs]) {
       while (map.size > UiBridge.MAX_LATE_MUTATIONS) {
         const oldest = map.keys().next();
         if (oldest.done) break;
+        const dropped = map.get(oldest.value);
+        if (dropped && "tabId" in dropped && typeof dropped.tabId === "string") {
+          prunedTabs.add(dropped.tabId);
+        }
         map.delete(oldest.value);
       }
     }
+    for (const tabId of prunedTabs) this.notifyMutationSettled(tabId);
   }
 
   private pruneLateAsk(): void {
@@ -4808,9 +5104,10 @@ export class UiBridge {
    * The bridge cannot answer this itself, and the first attempt at this proved
    * why. It gated on `ctx.mutating`, i.e. `!BRIDGE_READONLY_CMDS.has(cmd)` --
    * the discriminator this very file documents (see BRIDGE_READONLY_CMDS) as
-   * misclassifying graph_find_nodes, graph_list_subgraphs, graph_screenshot,
-   * graph_canvas, graph_select_nodes, graph_enter/exit_subgraph and
-   * graph_copy_nodes. That is #778, and re-asking it retained seven reads under
+   * misclassifying graph_find_nodes, graph_list_subgraphs, graph_canvas,
+   * graph_select_nodes, graph_enter/exit_subgraph and graph_copy_nodes
+   * (graph_screenshot was in that list too until panel#2191 admitted it to the
+   * set). That is #778, and re-asking it retained seven reads under
    * a comment claiming reads were excluded. The real question is not "does this
    * mutate" but "can this rid ever come back to us as a retry token", which only
    * the retry-token layer knows. So it tells us.
@@ -4984,14 +5281,108 @@ export class UiBridge {
     result: unknown,
     sock: BridgeSocket,
   ): void {
+    this.settlePendingReply(rid, pending, { ok: true, result }, sock);
+  }
+
+  /**
+   * #2559 — oldest in-flight graph_set_widget on this socket, used when a
+   * mutation ACK misses its rid (coalesced / rewritten) while the waiter is
+   * still blocked. Never steals a non-widget pending.
+   */
+  private findFifoPendingForSetWidgetReply(
+    sock: BridgeSocket,
+    msg: Record<string, unknown>,
+  ): { rid: string; pending: Pending } | undefined {
+    if (msg.ok === true && !isSetWidgetReplyResult(msg.result)) return undefined;
+    const set =
+      msg.ok === true && isSetWidgetReplyResult(msg.result)
+        ? (msg.result as { set: Record<string, unknown> }).set
+        : undefined;
+    let oldest: { rid: string; pending: Pending } | undefined;
+    let widgetPending = 0;
+    for (const [rid, pending] of this.pending) {
+      if (pending.sock !== sock) continue;
+      if (pending.cmd !== "graph_set_widget") {
+        if (msg.ok !== true) return undefined;
+        continue;
+      }
+      widgetPending += 1;
+      const cmd = pending.ctx.command;
+      if (
+        set &&
+        cmd.node_id != null &&
+        set.node_id != null &&
+        String(cmd.node_id) !== String(set.node_id)
+      ) {
+        continue;
+      }
+      oldest ??= { rid, pending };
+    }
+    if (msg.ok !== true && widgetPending !== 1) return undefined;
+    return oldest;
+  }
+
+  /** Resolve or reject one in-flight command from a panel `{ rid, ok, … }` reply. */
+  private settlePendingReply(
+    rid: string,
+    pending: Pending,
+    msg: Record<string, unknown>,
+    sock: BridgeSocket,
+  ): void {
     clearTimeout(pending.timer);
     this.pending.delete(rid);
     this.askRidToId.delete(rid);
-    const served = this.liveConnForTab(pending.ctx.tabId, sock);
-    served?.provenSupportedCmds.add(pending.cmd);
-    this.notePromotedScope(pending.ctx.tabId, result);
-    this.noteSiblingSuccess(pending.ctx, rid);
-    pending.resolve(result);
+    this.forgetDeliveredMutation(rid);
+    if (msg.ok) {
+      // #422 — the panel DEMONSTRABLY served this command. Record it on the LIVE
+      // connection (following a same-socket tmp:→wf: migration whose reply landed
+      // after the id change), so a later re-hello advertising an undercutting
+      // version can never re-gate it as "too old". Scoped to THIS reply's socket so
+      // an unrelated tab reusing the id can never be granted the veto.
+      const served = this.liveConnForTab(pending.ctx.tabId, sock);
+      served?.provenSupportedCmds.add(pending.cmd);
+      this.notePromotedScope(pending.ctx.tabId, msg.result);
+      this.noteSiblingSuccess(pending.ctx, rid);
+      pending.resolve(msg.result);
+      return;
+    }
+    // #1529 — carry the panel's STRUCTURED refusal onto the error.
+    //
+    // `msg.error` is arbitrary text, and the retry path needs one fact it
+    // cannot get from text: did the executor run? The panel states that in a
+    // field (panel 0.14.35), and dropping it here is why the first attempt at
+    // the retry had to match wording — which was reverted as a P0, because a
+    // genuine mid-write failure can contain the same sentence and the cost of
+    // being wrong is a re-applied mutation.
+    //
+    // Validated before it is attached, so only a complete pre-executor claim
+    // travels; anything else leaves the error exactly as it was.
+    // #1560 — and record the fact that this reply EXISTS, structurally.
+    // `ctx.call` flattens every failure into `isError`, so a command the panel
+    // SERVED and refused arrives indistinguishable from one the tab never
+    // answered — and a caller that reports "the channel is not answering" then
+    // says it about a panel that is demonstrably talking. This branch is the
+    // one place that knows the difference: a reply was received.
+    const p = pending;
+    const err = attachPanelAnswered(new Error(String(msg.error ?? "panel reported an error")));
+    // OWN property on the WIRE message too (review, P0). A polluted
+    // Object.prototype.refusal would otherwise give every ordinary panel
+    // error — including a genuine mid-write one carrying no refusal of its
+    // own — the authority to have a mutation re-issued.
+    const refusal = hasOwnField(msg, "refusal")
+      ? readPanelRefusal((msg as { refusal?: unknown }).refusal)
+      : null;
+    const workflowListReadiness =
+      p.cmd === "workflow_list" && hasOwnField(msg, "workflow_list_readiness")
+        ? readWorkflowListReadiness(
+            (msg as { workflow_list_readiness?: unknown }).workflow_list_readiness,
+          )
+        : null;
+    let rejected = refusal ? attachPanelRefusal(err, refusal) : err;
+    if (workflowListReadiness) {
+      rejected = attachWorkflowListReadiness(rejected, workflowListReadiness);
+    }
+    p.reject(rejected);
   }
 
   /** The incarnation currently holding `tabId` — the identity every structure
@@ -5231,6 +5622,15 @@ export class UiBridge {
     }
   }
 
+  /** The tab the user last talked from, if that tab is still connected.
+   *  Unlike {@link resolveActiveScopeTab}, this does NOT fall back to the most
+   *  recently connected canvas — that fallback is a guess among 2+ tabs and
+   *  must not auto-clear an AMBIGUOUS pin (#1001). */
+  liveLastActiveTabId(): string | undefined {
+    if (this.lastActiveTabId && this.conns.has(this.lastActiveTabId)) return this.lastActiveTabId;
+    return undefined;
+  }
+
   /** The LIVE connection for a (possibly RETIRED) canonical tab id, scoped to the SOCKET
    *  that produced the reply. Returns the conn under `tabId` when it is STILL that exact
    *  socket, else the socket-scoped migration target it was renamed to (tmp:→wf:). Used
@@ -5453,6 +5853,9 @@ export class UiBridge {
       onDispatchedRid?: (rid: string) => void;
       /** Synchronous fence at the final live-connection dispatch boundary. */
       beforeDispatch?: () => void;
+      /** Maximum bridge-owned reconnect re-dispatches for this send. The bridge
+       * clamps this to its finite global bound; zero makes a read one-shot. */
+      maxReconnectRetries?: number;
     } = {},
   ): Promise<unknown> {
     // #357: read (idempotent) ops get a more tolerant default so a busy-but-alive
@@ -5537,6 +5940,17 @@ export class UiBridge {
     ) {
       const refusal = markDispatched(
         expectedNodeTypeFenceRefusal(conn.tabId),
+        false,
+      );
+      return Promise.reject(markCapabilityRefusal(refusal));
+    }
+    if (
+      cmd.cmd === "graph_set_widget" &&
+      Object.prototype.hasOwnProperty.call(cmd, "expected_node_identity") &&
+      !conn.enforcesExpectedNodeIdentityAtWrite
+    ) {
+      const refusal = markDispatched(
+        expectedNodeIdentityFenceRefusal(conn.tabId),
         false,
       );
       return Promise.reject(markCapabilityRefusal(refusal));
@@ -5954,7 +6368,7 @@ export class UiBridge {
         markDispatched(new Error(`Panel tab ${conn.tabId.slice(0, 8)} is not open`), false),
       );
     }
-    const launch = (): Promise<unknown> => {
+    const launch = (releaseLane: () => void): Promise<unknown> => {
       // Re-resolve after a graph-lane wait: the tab may have migrated while a
       // predecessor occupied the lane. Gates above already ran against `conn`.
       let live: Conn;
@@ -5976,6 +6390,15 @@ export class UiBridge {
       ) {
         return Promise.reject(
           markCapabilityRefusal(markDispatched(expectedNodeTypeFenceRefusal(live.tabId), false)),
+        );
+      }
+      if (
+        cmd.cmd === "graph_set_widget" &&
+        Object.prototype.hasOwnProperty.call(cmd, "expected_node_identity") &&
+        !live.enforcesExpectedNodeIdentityAtWrite
+      ) {
+        return Promise.reject(
+          markCapabilityRefusal(markDispatched(expectedNodeIdentityFenceRefusal(live.tabId), false)),
         );
       }
       if (
@@ -6031,6 +6454,19 @@ export class UiBridge {
         );
       }
       return new Promise((resolve, reject) => {
+        const requestedReconnectRetries = opts.maxReconnectRetries;
+        const reconnectRetriesRemaining =
+          requestedReconnectRetries === undefined
+            ? UiBridge.MAX_RECONNECT_RETRIES
+            : Number.isFinite(requestedReconnectRetries)
+              ? Math.max(
+                  0,
+                  Math.min(
+                    UiBridge.MAX_RECONNECT_RETRIES,
+                    Math.floor(requestedReconnectRetries),
+                  ),
+                )
+              : 0;
         const ctx: SendCtx = {
           resolve,
           reject,
@@ -6044,6 +6480,7 @@ export class UiBridge {
           // Timeout starts at DISPATCH, not enqueue: waiting for a sibling graph
           // read cannot itself produce the reporter's 30 s false timeout (#2069).
           deadline: Date.now() + timeoutMs,
+          reconnectRetriesRemaining,
           // #570 — graph ops resolve from the CALLER'S intended tab (opts.tabId), NOT
           // the canonical conn.tabId: after a same-socket switch the two differ, and
           // we must stamp the workflow the command was ISSUED FOR (so the panel, now
@@ -6059,26 +6496,53 @@ export class UiBridge {
           workflowUuid:
             this.resolveTabWorkflowUuid?.(commandStampAddress(cmd, opts.tabId, live.tabId)) ??
             undefined,
-          onDispatchedRid: opts.onDispatchedRid,
+          onDispatchedRid: (rid) => {
+            releaseLane();
+            opts.onDispatchedRid?.(rid);
+          },
         };
         this.dispatch(live, ctx);
       });
     };
     if (usesGraphCommandLane(cmd.cmd)) {
-      return this.enqueueGraphLane(conn.tabId, launch);
+      return this.enqueueGraphLane(conn.tabId, launch, graphLaneWaitsForReply(cmd.cmd));
     }
-    return launch();
+    return launch(() => {});
   }
 
   /** Serialize `graph_*` dispatches per tab so concurrent reads cannot occupy
-   *  the panel at once (#2069). Failures still release the lane. */
-  private enqueueGraphLane<T>(tabId: string, run: () => Promise<T>): Promise<T> {
+   *  the panel at once (#2069). Targeted mutations release once the frame is
+   *  written so a sibling widget write can dispatch while the first awaits its
+   *  schema ACK (#2559). Failures still release the lane. */
+  private enqueueGraphLane<T>(
+    tabId: string,
+    run: (releaseLane: () => void) => Promise<T>,
+    waitForReply: boolean,
+  ): Promise<T> {
     const prev = this.graphLane.get(tabId) ?? Promise.resolve();
-    const next = prev.then(run, run);
-    const tail: Promise<unknown> = next.then(
-      () => undefined,
-      () => undefined,
+    let releaseLane = () => {};
+    const gate = waitForReply
+      ? null
+      : new Promise<void>((resolve) => {
+          releaseLane = resolve;
+        });
+    const next = prev.then(
+      () => run(releaseLane),
+      () => run(releaseLane),
     );
+    const tail: Promise<unknown> =
+      waitForReply || !gate
+        ? next.then(
+            () => undefined,
+            () => undefined,
+          )
+        : Promise.race([
+            gate,
+            next.then(
+              () => undefined,
+              () => undefined,
+            ),
+          ]);
     this.graphLane.set(tabId, tail);
     void tail.then(() => {
       if (this.graphLane.get(tabId) === tail) this.graphLane.delete(tabId);
@@ -6312,13 +6776,21 @@ export class UiBridge {
       // key on it). Previously `{ rid, ...cmd }` let a caller cmd.rid clobber the
       // minted rid, silently breaking reply correlation for that command.
       const frame: Record<string, unknown> = { ...cmd, rid };
+      // #2559 — the panel bounds duplicate-rid waits from THIS number. Use the
+      // caller-requested timeout, not the remaining clamp: retry_of fingerprints
+      // exclude only rid/retry_of, so a shrinking remainder would make a retry
+      // look like a different command. Always overwrite after the spread (same
+      // rule as rid).
+      frame.timeout_ms = ctx.timeoutMs;
       if (ctx.workflowUuid) frame.workflow_uuid = ctx.workflowUuid;
       else delete frame.workflow_uuid;
       conn.sock.send(JSON.stringify(frame));
+      this.rememberDeliveredMutation(rid, cmd.cmd, ctx.tabId, frame);
       try { ctx.onDispatchedRid?.(rid); } catch { /* observer faults are non-fatal */ }
     } catch (err) {
       clearTimeout(timer);
       this.pending.delete(rid);
+      this.forgetDeliveredMutation(rid);
       // The write to the socket FAILED — the command was NEVER transmitted, so nothing
       // was dispatched (distinct from a POST-write mid-command drop). Surface that
       // explicitly so callers don't mistake it for an in-flight/accepted command (a
@@ -6339,6 +6811,34 @@ export class UiBridge {
   }
 
   /**
+   * Remember a mutation the moment it is written, so a graph read or retry_of
+   * can name the exact delivered command until the frontend settles (#2527).
+   */
+  private rememberDeliveredMutation(
+    rid: string,
+    cmd: string,
+    tabId: string,
+    frame: Record<string, unknown>,
+  ): void {
+    if (!rid || !this.lateMutationFilter?.(cmd)) return;
+    this.pruneLateMutations();
+    this.deliveredMutations.set(rid, {
+      cmd,
+      tabId,
+      ts: Date.now(),
+      frame: cloneDeliveredMutationFrame(frame),
+      status: "in_flight",
+    });
+  }
+
+  private forgetDeliveredMutation(rid: string): void {
+    const hit = this.deliveredMutations.get(rid);
+    if (!hit) return;
+    this.deliveredMutations.delete(rid);
+    if (hit.status === "timed_out") this.notifyMutationSettled(hit.tabId);
+  }
+
+  /**
    * Remember that we stopped waiting for `rid` so a later reply — a frozen tab
    * catching up, or a lost-reply replay after reconnect — is retained instead of
    * dropped as an unknown rid (#694, panel#1524).
@@ -6346,7 +6846,19 @@ export class UiBridge {
   private retainAbandonedMutation(rid: string, cmd: string, tabId: string): void {
     if (!rid || !this.lateMutationFilter?.(cmd)) return;
     this.pruneLateMutations();
-    this.timedOutMutations.set(rid, { cmd, tabId, ts: Date.now() });
+    const prior = this.deliveredMutations.get(rid);
+    if (prior) {
+      prior.status = "timed_out";
+      prior.ts = Date.now();
+      return;
+    }
+    this.deliveredMutations.set(rid, {
+      cmd,
+      tabId,
+      ts: Date.now(),
+      frame: { cmd },
+      status: "timed_out",
+    });
   }
 
   /** A pending command's socket died before its reply arrived. Decide, WITHOUT
@@ -6358,19 +6870,25 @@ export class UiBridge {
     // Idempotent read, still within its deadline → park it for a bounded grace and
     // re-dispatch if the same tab re-hellos. Safe: re-running a read has no side
     // effect, and it was in `pending` (un-acked), so no reply was lost.
-    if (!ctx.mutating && Date.now() < ctx.deadline) {
+    if (
+      !ctx.mutating &&
+      ctx.reconnectRetriesRemaining > 0 &&
+      Date.now() < ctx.deadline
+    ) {
       // A replacement socket for this tab is ALREADY live (a reload/supersede whose
       // hello landed before this dead socket's close handler ran — so resume already
       // fired and won't fire again). Re-dispatch straight onto it instead of parking
       // and expiring as "gone". Safe: idempotent read, un-acked.
       const live = this.conns.get(ctx.tabId);
       if (live && live.sock !== pend.sock && live.sock.readyState === WebSocket.OPEN) {
+        ctx.reconnectRetriesRemaining -= 1;
         logger.info(
           `[ui-bridge] tab ${short} already reconnected — resuming "${cmd}" on the live socket`,
         );
         this.dispatch(live, ctx);
         return;
       }
+      ctx.reconnectRetriesRemaining -= 1;
       const list = this.awaitingReconnect.get(ctx.tabId) ?? [];
       const graceMs = Math.max(0, Math.min(UiBridge.RECONNECT_GRACE_MS, ctx.deadline - Date.now()));
       const entry = {
@@ -6593,10 +7111,13 @@ export class UiBridge {
    * rather than only to stderr.
    *
    * It matters here more than a diagnostic usually would, because one of those
-   * gates can be structurally unsatisfiable: a relay-backend connection carries
-   * no server Origin (attachRelayConnection has none to pass), so
+   * gates can be structurally unsatisfiable: without a server Origin,
    * workflowIdentityParts can NEVER validate and the fence can never be adopted,
-   * no matter how many times the user refreshes the tab.
+   * no matter how many times the user refreshes the tab. The two transports that
+   * used to land there have both been given one — the relay derives it from
+   * COMFYUI_URL (#1077/#1240) and the token-gated tunnel/pairing listener now
+   * reads it off the upgrade (#2757) — so what is left here is a genuinely
+   * origin-less client: a non-browser one, or a proxy that strips the header.
    */
   lastFenceRefusal(tabId: string): string | undefined {
     return this.fenceRefusals.get(tabId);

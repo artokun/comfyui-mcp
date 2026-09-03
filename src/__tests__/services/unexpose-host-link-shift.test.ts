@@ -18,7 +18,11 @@ import {
   type ToolResult,
 } from "../../orchestrator/panel-tools.js";
 import {
+  hostLinksAlreadyReindexed,
   isLandedUnexpose,
+  laterSlotsAfterUnexpose,
+  laterSlotsFromRails,
+  laterSlotsFromUnexposePayload,
   unexposeHostLinkShiftNote,
 } from "../../services/unexpose-host-link-shift.js";
 
@@ -52,12 +56,14 @@ function jsonResult(payload: unknown, isError = false): ToolResult {
   };
 }
 
-function makeCtx(reply: ToolResult): { ctx: PanelToolCtx; calls: Record<string, unknown>[] } {
+function makeCtx(
+  reply: ToolResult | ((cmd: Record<string, unknown>) => ToolResult),
+): { ctx: PanelToolCtx; calls: Record<string, unknown>[] } {
   const calls: Record<string, unknown>[] = [];
   const ctx: PanelToolCtx = {
     call: async (cmd) => {
       calls.push(cmd);
-      return reply;
+      return typeof reply === "function" ? reply(cmd) : reply;
     },
     confirm: async () => "yes" as const,
     bridge: {} as PanelToolCtx["bridge"],
@@ -66,13 +72,40 @@ function makeCtx(reply: ToolResult): { ctx: PanelToolCtx; calls: Record<string, 
   return { ctx, calls };
 }
 
+/** #2491 — reporter removed value_3 at index 3 of 4, then value_2 at the new last index. */
+const LAST_SLOT_REMOVED = {
+  removed: {
+    side: "input",
+    name: "value_3",
+    type: "INT",
+    slot: 3,
+    interior_links_dropped: 1,
+    host_links_dropped: 0,
+    host_links_reindexed: true,
+  },
+};
+
+const LAST_SLOT_REMAINING_RAILS = {
+  rails: {
+    input: {
+      provides_outputs: [
+        { index: 0, name: "value" },
+        { index: 1, name: "value_1" },
+        { index: 2, name: "value_2" },
+      ],
+    },
+  },
+};
+
 function allText(res: ToolResult): string {
   return res.content.map((c) => (c.type === "text" ? c.text ?? "" : "")).join("\n");
 }
 
 describe("unexposeHostLinkShiftNote (#2437)", () => {
   it("the unexpose handlers attach the shipped note, not a copy", () => {
-    expect(SRC).toMatch(/unexposeHostLinkShiftNote\(parseToolResultJson\(res\)\)/);
+    expect(SRC).toMatch(
+      /unexposeHostLinkShiftNote\(payload, laterSlotsAfterUnexpose\(payload, remainingGraph\)\)/,
+    );
     expect(SRC).toMatch(/cmd: "graph_unexpose_subgraph_input"/);
     expect(SRC).toMatch(/cmd: "graph_unexpose_subgraph_output"/);
   });
@@ -115,6 +148,43 @@ describe("unexposeHostLinkShiftNote (#2437)", () => {
     ).toBeNull();
   });
 
+  it("#2491 is silent when the removed index is last — no later slot exists", () => {
+    expect(unexposeHostLinkShiftNote(LAST_SLOT_REMOVED)).toBeNull();
+    expect(
+      unexposeHostLinkShiftNote({
+        removed: { side: "input", name: "value_3", slot: 3, remaining_count: 3 },
+      }),
+    ).toBeNull();
+    expect(
+      unexposeHostLinkShiftNote(
+        { removed: { side: "input", name: "value_3", slot: 3 } },
+        [],
+      ),
+    ).toBeNull();
+    expect(laterSlotsFromUnexposePayload({
+      removed: { side: "input", name: "value_3", slot: 3, remaining_count: 3 },
+    })).toEqual([]);
+    expect(
+      laterSlotsFromRails(LAST_SLOT_REMAINING_RAILS.rails, "input", 3),
+    ).toEqual([]);
+    expect(
+      laterSlotsAfterUnexpose(
+        { removed: { side: "input", name: "value_3", slot: 3 } },
+        LAST_SLOT_REMAINING_RAILS,
+      ),
+    ).toEqual([]);
+  });
+
+  it("#2491 still warns when a remaining later slot exists and was not reindexed", () => {
+    const payload = {
+      removed: { side: "input", name: "value_1", slot: 1, remaining_count: 3 },
+    };
+    expect(laterSlotsFromUnexposePayload(payload)).toBeUndefined();
+    const note = unexposeHostLinkShiftNote(payload, ["value_2", "value_3"]);
+    expect(note).toMatch(/#2437/);
+    expect(note).toContain('"value_2"');
+  });
+
   it("is silent on a refusal / missing removed (nothing landed)", () => {
     expect(isLandedUnexpose({ error: "unknown slot" })).toBe(false);
     expect(unexposeHostLinkShiftNote({ error: "unknown slot" })).toBeNull();
@@ -148,9 +218,36 @@ describe("panel_unexpose_subgraph_input attaches the #2437 note", () => {
 
   it("#2473 a panel that reindexed does not get the stale remaining-piece note", async () => {
     const payload = { removed: { ...REPORTER_REMOVED.removed, host_links_reindexed: true } };
-    const { ctx } = makeCtx(jsonResult(payload));
+    const { ctx, calls } = makeCtx(jsonResult(payload));
     const res = await defByName("panel_unexpose_subgraph_input").handler({ name: "text" }, ctx);
     expect(res.isError).toBeUndefined();
+    expect(res.content).toHaveLength(1);
+    expect(allText(res)).not.toMatch(/#2437/);
+    expect(calls).toHaveLength(1);
+    expect(hostLinksAlreadyReindexed(payload)).toBe(true);
+  });
+
+  it("#2491 THE REPORTED CASE: last-slot unexpose with host_links_reindexed does not warn", async () => {
+    const { ctx, calls } = makeCtx(jsonResult(LAST_SLOT_REMOVED));
+    const res = await defByName("panel_unexpose_subgraph_input").handler({ name: "value_3" }, ctx);
+    expect(calls[0]).toMatchObject({ cmd: "graph_unexpose_subgraph_input", name: "value_3" });
+    expect(calls).toHaveLength(1);
+    expect(res.isError).toBeUndefined();
+    expect(res.content).toHaveLength(1);
+    expect(JSON.parse(res.content[0]!.text!)).toEqual(LAST_SLOT_REMOVED);
+    expect(allText(res)).not.toMatch(/#2437/);
+    expect(allText(res)).not.toMatch(/were not reindexed/);
+  });
+
+  it("#2491 last-slot on an older panel is proven by remaining rails, not warned", async () => {
+    const payload = {
+      removed: { side: "input", name: "value_3", type: "INT", slot: 3, host_links_dropped: 0 },
+    };
+    const { ctx, calls } = makeCtx((cmd) =>
+      jsonResult(cmd.cmd === "graph_query" ? LAST_SLOT_REMAINING_RAILS : payload),
+    );
+    const res = await defByName("panel_unexpose_subgraph_input").handler({ name: "value_3" }, ctx);
+    expect(calls.map((c) => c.cmd)).toEqual(["graph_unexpose_subgraph_input", "graph_query"]);
     expect(res.content).toHaveLength(1);
     expect(allText(res)).not.toMatch(/#2437/);
   });

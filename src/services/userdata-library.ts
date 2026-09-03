@@ -13,6 +13,7 @@
 // for #202) while get_workflow (action:"list") did not, which is exactly the drift a shared helper
 // removes.
 import { getClient } from "../comfyui/client.js";
+import { connectedPanelOriginsNow } from "../comfyui/fetch.js";
 import { getComfyUIBasePath } from "../config.js";
 import { describeFetchFailure } from "../utils/errors.js";
 
@@ -66,10 +67,14 @@ export const WORKFLOW_LIBRARY_LISTING_ROUTE =
  * #1845 — a confirmed ComfyUI restart can still leave the next userdata GET
  * racing the listener (ECONNREFUSED on 127.0.0.1:8188 while the panel tab is
  * already talking to the same server). Transient connection failures retry a
- * bounded number of times. When a connected panel origin is supplied AND its
- * spelling differs from the headless client URL (localhost vs 127.0.0.1, a
- * different port), that origin is tried after the headless URL is exhausted —
- * the browser's origin is the one that just proved reachable.
+ * bounded number of times. After the headless URL is exhausted, the live
+ * connected-panel origins are tried: the optional tab origin, then the
+ * published reconnect set (`connectedPanelOriginsNow`), then the loopback
+ * alias (127.0.0.1 ↔ localhost). Those are different TCP endpoints on Windows
+ * even when they name one ComfyUI, and the browser origin is the one that just
+ * proved reachable. The #1850 pass only retried `opts.panelOrigin` when its
+ * string differed from the headless URL, so a same-spelling 8188 or a missing
+ * tab origin after restart never left the dead default.
  */
 export async function userdataFetch(
   route: string,
@@ -77,21 +82,29 @@ export async function userdataFetch(
 ): Promise<Response> {
   const client = getClient();
   const headers = client.apiHeaders();
-  const primary = client.apiURL(route);
-  const urls = [primary];
-  const origin = opts?.panelOrigin?.trim();
-  if (origin) {
-    const alt = userdataUrlAtOrigin(origin, route);
-    if (alt && alt !== primary) urls.push(alt);
-  }
+  const urls = userdataRetryUrls(client.apiURL(route), route, opts?.panelOrigin);
 
   let lastErr: unknown;
-  for (const url of urls) {
+  const alias = loopbackAliasUrl(urls[0] ?? "");
+  for (let i = 0; i < urls.length; i++) {
+    const url = urls[i];
+    if (!url) continue;
+    // Alternates are one-shot with a short ceiling. The headless URL already
+    // spent the restart-race retries; re-waiting 200/600/1500ms per alias
+    // (and letting localhost sit on the 120s comfyuiFetch ceiling) is what
+    // hung GRAPH_CMD_EFFECT's tool-surface probe on Windows after #1850 —
+    // 127.0.0.1 refuses immediately, then ::1/localhost black-holes.
+    const fallback = i > 0;
+    const ceilingMs = url === alias ? LOOPBACK_ALIAS_TIMEOUT_MS : FALLBACK_TIMEOUT_MS;
     for (let attempt = 0; ; attempt++) {
       try {
-        return await client.fetch(url, { headers });
+        return await client.fetch(url, {
+          headers,
+          ...(fallback ? { signal: AbortSignal.timeout(ceilingMs) } : {}),
+        });
       } catch (err) {
         lastErr = err;
+        if (fallback) break;
         if (!isTransientUnreachable(err)) throw err;
         if (attempt >= retryDelaysMs.length) break;
         await sleepImpl(retryDelaysMs[attempt]!);
@@ -99,6 +112,28 @@ export async function userdataFetch(
     }
   }
   throw lastErr;
+}
+
+/** Headless URL first, then every distinct live-origin spelling of the same route. */
+function userdataRetryUrls(
+  primary: string,
+  route: string,
+  panelOrigin: string | undefined,
+): string[] {
+  const urls: string[] = [];
+  const seen = new Set<string>();
+  const add = (url: string | undefined): void => {
+    if (!url || seen.has(url)) return;
+    seen.add(url);
+    urls.push(url);
+  };
+  add(primary);
+  add(panelOrigin?.trim() ? userdataUrlAtOrigin(panelOrigin.trim(), route) : undefined);
+  for (const origin of connectedPanelOriginsNow()) {
+    add(userdataUrlAtOrigin(origin, route));
+  }
+  add(loopbackAliasUrl(primary));
+  return urls;
 }
 
 /** Connection-level failures that a just-restarted listener commonly produces. */
@@ -120,7 +155,33 @@ function userdataUrlAtOrigin(origin: string, route: string): string {
   return `${origin.replace(/\/$/, "")}${basePath}${path}`;
 }
 
+/**
+ * 127.0.0.1 and localhost are one ComfyUI by origin identity, and different
+ * sockets on Windows (IPv4 vs IPv6). After a restart the browser often reaches
+ * the live spelling while the headless client is still pinned to 8188's other
+ * form. A relative apiURL (tests, misconfigured client) is not a URL, so there
+ * is no alias to try.
+ */
+function loopbackAliasUrl(url: string): string | undefined {
+  try {
+    const parsed = new URL(url);
+    const host = parsed.hostname.toLowerCase();
+    if (host === "127.0.0.1") parsed.hostname = "localhost";
+    else if (host === "localhost") parsed.hostname = "127.0.0.1";
+    else return undefined;
+    return parsed.href;
+  } catch {
+    return undefined;
+  }
+}
+
 const DEFAULT_RETRY_DELAYS_MS: readonly number[] = [200, 600, 1500];
+/** Published/tab origin GET. A live listener answers in milliseconds. */
+const FALLBACK_TIMEOUT_MS = 2_000;
+/** Dual-stack localhost can black-hole for the full comfyuiFetch ceiling.
+ *  Keep this tight: several panel tools reach userdataFetch, and 2s each
+ *  stacked past the 30s GRAPH_CMD_EFFECT probe. */
+const LOOPBACK_ALIAS_TIMEOUT_MS = 400;
 let retryDelaysMs: readonly number[] = DEFAULT_RETRY_DELAYS_MS;
 let sleepImpl = (ms: number): Promise<void> =>
   new Promise((resolve) => setTimeout(resolve, ms));

@@ -10,7 +10,17 @@ import {
   isRemoteMode,
 } from "../config.js";
 import { getClient, getLogs, getSystemStats, comfyApiFetch } from "../comfyui/client.js";
-import { getExtraModelRoots, getLiveExtraModelRoots } from "./extra-paths.js";
+import { isComfyTransportFailure } from "../comfyui/fetch.js";
+import {
+  requestPanelComfyUIRead,
+  type PanelComfyUIReadOperation,
+  type PanelComfyUIReadSuccess,
+} from "./panel-image-relay.js";
+import {
+  getExtraModelRoots,
+  getLaunchStateExtraModelRoots,
+  getLiveExtraModelRoots,
+} from "./extra-paths.js";
 import {
   liveRootFromArgv,
   resolveEffectiveComfyUIBase,
@@ -390,6 +400,56 @@ function makeModelDeduper(): { add: (category: string, name: string) => boolean 
   };
 }
 
+const MODELS_TRANSPORT_CODES = new Set([
+  "EHOSTUNREACH",
+  "ENETUNREACH",
+  "ECONNREFUSED",
+  "ENOTFOUND",
+  "EAI_AGAIN",
+  "ECONNRESET",
+]);
+
+function isModelsTransportFailure(err: unknown): boolean {
+  if (isComfyTransportFailure(err)) return true;
+  const seen = new Set<unknown>();
+  let current: unknown = err;
+  while (current instanceof Error && !seen.has(current)) {
+    const code = "code" in current ? current.code : undefined;
+    if (typeof code === "string" && MODELS_TRANSPORT_CODES.has(code)) return true;
+    if (/\b(EHOSTUNREACH|ENETUNREACH|ECONNREFUSED)\b/.test(current.message)) return true;
+    seen.add(current);
+    current = "cause" in current ? current.cause : undefined;
+  }
+  return false;
+}
+
+function modelsReadOperationFor(path: string): PanelComfyUIReadOperation | undefined {
+  if (path === "/models") return "models";
+  const match = /^\/models\/([A-Za-z0-9][A-Za-z0-9._-]{0,63})$/.exec(path);
+  if (!match) return undefined;
+  return `models/${match[1]}`;
+}
+
+function panelModelsResponse(read: PanelComfyUIReadSuccess): Response {
+  const headers = new Headers();
+  if (read.contentType) headers.set("content-type", read.contentType);
+  return new Response(read.body, { status: 200, headers });
+}
+
+/** Headless `/models` first; on transport failure, the #2283 panel read relay. */
+async function fetchModelsRoute(path: string): Promise<Response> {
+  try {
+    return await comfyApiFetch(path);
+  } catch (err) {
+    if (!isModelsTransportFailure(err)) throw err;
+    const operation = modelsReadOperationFor(path);
+    if (!operation) throw err;
+    const relayed = await requestPanelComfyUIRead(operation);
+    if (!relayed) throw err;
+    return panelModelsResponse(relayed);
+  }
+}
+
 /**
  * Weight-file extensions. The gate that makes discovering the WHOLE registry
  * safe (#962).
@@ -423,7 +483,7 @@ async function discoverExtraCategories(
   client: ReturnType<typeof getClient>,
 ): Promise<string[]> {
   try {
-    const res = await comfyApiFetch("/models");
+    const res = await fetchModelsRoute("/models");
     if (!res.ok) return [];
     const json = (await res.json()) as unknown;
     if (!Array.isArray(json)) return [];
@@ -669,7 +729,7 @@ export async function listLocalModelsWithCoverage(
  */
 async function otherRegisteredCategories(asked: string): Promise<string[] | undefined> {
   try {
-    const res = await comfyApiFetch("/models");
+    const res = await fetchModelsRoute("/models");
     if (!res.ok) return undefined;
     const json = (await res.json()) as unknown;
     if (!Array.isArray(json)) return undefined;
@@ -733,7 +793,7 @@ async function collectLocalModels(
     const dedup = makeModelDeduper();
     for (const dir of dirsToScan) {
       try {
-        const res = await comfyApiFetch(`/models/${dir}`);
+        const res = await fetchModelsRoute(`/models/${dir}`);
         if (refuseStaleModelListing(target, coverage)) return [];
         // A non-OK status or a non-array body means we did NOT learn what this
         // category holds. Recording the reason is the whole point: continuing
@@ -760,6 +820,15 @@ async function collectLocalModels(
         // listing can still say which categories this server does not register.
         if (res.status === 404) {
           (coverage.absent ??= []).push(dir);
+          // #2480 — a filtered unet (or clip) 404 is not "look under the rename".
+          // ComfyUI-GGUF still serves those files via unet_gguf / clip_gguf, and
+          // extra_model_paths can still register the original folder. Probe the
+          // alias view on a FILTERED call; unfiltered listing already discovers it.
+          if (modelType) {
+            for (const view of ggufViewsAliasing(dir)) {
+              if (!dirsToScan.includes(view)) dirsToScan.push(view);
+            }
+          }
           continue;
         }
         if (!res.ok) {
@@ -868,37 +937,60 @@ async function collectLocalModels(
   }
   coverage.usedFilesystem = true;
   const modelsRoot = join(config.comfyuiPath, "models");
+  // extra_model_paths can register unet (and other categories) at a directory
+  // that is NOT `{comfyuiPath}/models/<dir>` — Desktop's extra_models_config
+  // is the usual case. REST 404 must still list that configured directory (#2480).
+  let extraRoots: Awaited<ReturnType<typeof getExtraModelRoots>> = [];
+  try {
+    extraRoots = await getExtraModelRoots();
+  } catch {
+    extraRoots = [];
+  }
+  if (refuseStaleModelListing(target, coverage)) return [];
   const dedup = makeModelDeduper();
   for (const dir of dirsToScan) {
-    const dirPath = join(modelsRoot, dir);
-    let entries: string[];
-    try {
-      entries = await readdir(dirPath, { recursive: true });
-    } catch {
-      if (refuseStaleModelListing(target, coverage)) return [];
-      continue;
+    const primary = join(modelsRoot, dir);
+    const extraForDir = extraRoots
+      .filter((er) => er.category.trim().toLowerCase() === dir.toLowerCase())
+      .map((er) => er.dir);
+    const scanRoots: string[] = [];
+    const seenRoots = new Set<string>();
+    for (const dirPath of [primary, ...extraForDir]) {
+      const key = resolve(dirPath);
+      if (seenRoots.has(key)) continue;
+      seenRoots.add(key);
+      scanRoots.push(dirPath);
     }
-    if (refuseStaleModelListing(target, coverage)) return [];
-    for (const entry of entries) {
-      // Same `.gguf`-only guard as the HTTP path for `*_gguf` categories (e.g. an
-      // explicit `listLocalModels("unet_gguf")`): never list non-gguf files here.
-      if (isGgufCategory(dir) && !entry.toLowerCase().endsWith(".gguf")) continue;
-      const filePath = join(dirPath, entry);
+    for (const dirPath of scanRoots) {
+      let entries: string[];
       try {
-        const info = await stat(filePath);
-        if (refuseStaleModelListing(target, coverage)) return [];
-        if (!info.isFile()) continue;
-        if (!dedup.add(dir, entry)) continue; // same file already surfaced elsewhere
-        results.push({
-          name: entry,
-          path: filePath,
-          size: info.size,
-          modified: info.mtime.toISOString(),
-          type: dir,
-        });
+        entries = await readdir(dirPath, { recursive: true });
       } catch {
         if (refuseStaleModelListing(target, coverage)) return [];
-        // Skip files we can't stat
+        continue;
+      }
+      if (refuseStaleModelListing(target, coverage)) return [];
+      for (const entry of entries) {
+        // Same `.gguf`-only guard as the HTTP path for `*_gguf` categories (e.g. an
+        // explicit `listLocalModels("unet_gguf")`): never list non-gguf files here.
+        if (isGgufCategory(dir) && !entry.toLowerCase().endsWith(".gguf")) continue;
+        const filePath = join(dirPath, entry);
+        try {
+          const info = await stat(filePath);
+          if (refuseStaleModelListing(target, coverage)) return [];
+          if (!info.isFile()) continue;
+          if (!dedup.add(dir, entry)) continue; // same file already surfaced elsewhere
+          results.push({
+            name: entry,
+            path: filePath,
+            size: info.size,
+            modified: info.mtime.toISOString(),
+            type: dir,
+          });
+        } catch {
+          if (refuseStaleModelListing(target, coverage)) return [];
+          // Skip files we can't stat
+        }
       }
     }
   }
@@ -1127,6 +1219,72 @@ export async function liveCategoryListing(
     const json = (await res.json()) as unknown;
     if (!Array.isArray(json)) return undefined;
     return json.filter((n): n is string => typeof n === "string");
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Combo option strings from a ComfyUI /object_info input spec (V1 `[[...], cfg]`
+ * or V3 `["COMBO", {options:[...]}]`). Undefined when this spec is not a
+ * single-select combo we can search.
+ */
+function comboOptionStrings(spec: unknown): string[] | undefined {
+  if (!Array.isArray(spec) || spec.length === 0) return undefined;
+  const cfgRaw = spec[1];
+  const cfg =
+    cfgRaw && typeof cfgRaw === "object" && !Array.isArray(cfgRaw)
+      ? (cfgRaw as Record<string, unknown>)
+      : null;
+  if (cfg?.multiselect) return undefined;
+  const type = spec[0];
+  if (Array.isArray(type)) return type.filter((v) => typeof v === "string");
+  if (typeof type !== "string" || !/COMBO/i.test(type) || /DYNAMIC/i.test(type)) {
+    return undefined;
+  }
+  if (!cfg) return undefined;
+  const opts = cfg.options;
+  if (!Array.isArray(opts)) return undefined;
+  const strings = opts.filter((v) => typeof v === "string");
+  return strings.length === opts.length ? strings : undefined;
+}
+
+function objectInfoHasFilename(info: unknown, filename: string): boolean {
+  if (!info || typeof info !== "object" || Array.isArray(info)) return false;
+  const defs = info as Record<string, unknown>;
+  const wanted = basename(filename.replace(/\\/g, "/"));
+  for (const def of Object.values(defs)) {
+    if (!def || typeof def !== "object" || Array.isArray(def)) continue;
+    const input = "input" in def ? def.input : undefined;
+    if (!input || typeof input !== "object" || Array.isArray(input)) continue;
+    const groups: unknown[] = [];
+    if ("required" in input) groups.push(input.required);
+    if ("optional" in input) groups.push(input.optional);
+    for (const group of groups) {
+      if (!group || typeof group !== "object" || Array.isArray(group)) continue;
+      const rec = group as Record<string, unknown>;
+      for (const spec of Object.values(rec)) {
+        const options = comboOptionStrings(spec);
+        if (!options) continue;
+        if (options.some((o) => basename(o.replace(/\\/g, "/")) === wanted)) return true;
+      }
+    }
+  }
+  return false;
+}
+
+/**
+ * Does any loader combo on /object_info list this filename? Used when
+ * `/models/<category>` 404s (#2480 — UnetLoaderGGUF still names GGUFs under
+ * unet even though core REST dropped that route). `undefined` = could not ask.
+ */
+async function objectInfoListsFilename(filename: string): Promise<boolean | undefined> {
+  if (!filename) return undefined;
+  try {
+    const res = await comfyApiFetch("/object_info");
+    if (!res.ok) return undefined;
+    const json: unknown = await res.json();
+    return objectInfoHasFilename(json, filename);
   } catch {
     return undefined;
   }
@@ -2013,12 +2171,14 @@ export async function verifyLandedModel(
     };
   }
 
+  const listingCats = await listingCategoriesFor(targetSubfolder, basename(targetPath));
   let sawListing = false;
   for (let i = 0; i < attempts; i++) {
-    const listing = await liveCategoryListing(category);
-    if (listing !== undefined) {
+    for (const cat of listingCats) {
+      const listing = await liveCategoryListing(cat);
+      if (listing === undefined) continue;
       sawListing = true;
-      if (listing.some((n) => normRel(n) === wanted)) {
+      if (!listing.some((n) => normRel(n) === wanted)) continue;
         // RE-CHECK membership AFTER the listing. The root check and the listing are
         // two separate observations; a ComfyUI restart onto a DIFFERENT install
         // between them would otherwise let the NEW server's own same-named model
@@ -2052,7 +2212,7 @@ export async function verifyLandedModel(
           verifiedPath,
           liveVisible: "unknown",
           note:
-            `The connected ComfyUI (${getComfyUIBaseUrl()}) lists "${wanted}" under "${category}", ` +
+            `The connected ComfyUI (${getComfyUIBaseUrl()}) lists "${wanted}" under "${cat}", ` +
             "but this destination was not named by the running server — it came from local " +
             "configuration, or was inferred from where the server's interpreter lives — so that " +
             "listing cannot be tied to the file just written to " +
@@ -2065,19 +2225,70 @@ export async function verifyLandedModel(
             ". " +
             unverifiableDestinationRemedy(),
         };
-      }
     }
     if (i < attempts - 1 && retryMs > 0) {
       await new Promise((r) => setTimeout(r, retryMs));
     }
   }
   if (!sawListing) {
+    // #2480 — /models/unet 404s on current ComfyUI even when extra_model_paths
+    // and UnetLoaderGGUF still use that folder. Ask /object_info before treating
+    // the REST miss as "could not confirm".
+    const comboListed = await objectInfoListsFilename(basename(targetPath));
+    if (comboListed === true) {
+      const still = await isUnderLiveModelRoots(resolve(targetPath), category);
+      if (still.inRoots === false) {
+        return {
+          verifiedPath,
+          verifiedAgainstRoot: still.liveRoot,
+          liveVisible: "not-visible",
+          note:
+            `The file IS on disk at ${landed}, but the connected ComfyUI ` +
+            `(${getComfyUIBaseUrl()}) changed while this was being checked and no longer ` +
+            "reads from that location — the entry it lists is its OWN file of the same name. " +
+            "Re-download now that the correct server is connected.",
+        };
+      }
+      if (!ambiguous) {
+        return {
+          verifiedPath,
+          verifiedAgainstRoot: still.liveRoot ?? membership.liveRoot,
+          liveVisible: "visible",
+          note:
+            `The connected ComfyUI (${getComfyUIBaseUrl()}) answered 404 for /models/${category}, ` +
+            `but /object_info lists "${wanted}" on a loader combo, so a custom loader can select it.`,
+        };
+      }
+      return {
+        verifiedPath,
+        liveVisible: "unknown",
+        note:
+          `The connected ComfyUI (${getComfyUIBaseUrl()}) lists "${wanted}" on a loader combo, ` +
+          "but this destination was not named by the running server — it came from local " +
+          "configuration, or was inferred from where the server's interpreter lives — so that " +
+          "listing cannot be tied to the file just written to " +
+          `${verifiedPath} — it may be the server's own copy elsewhere` +
+          (opts?.listedBefore === true
+            ? " (it already listed that name before this download)"
+            : opts?.listedBefore === undefined
+              ? " (whether it listed that name before this download could not be checked)"
+              : "") +
+          ". " +
+          unverifiableDestinationRemedy(),
+      };
+    }
     return {
       verifiedPath,
       liveVisible: "unknown",
       note:
-        `The connected ComfyUI (${getComfyUIBaseUrl()}) did not answer for the ` +
-        `"${category}" model folder, so it could not be confirmed that it reads from this location.`,
+        category.toLowerCase() === "unet"
+          ? `The file IS on disk at ${verifiedPath}. The connected ComfyUI answered 404 for ` +
+            `/models/unet, which does not prove the file is missing or that it lives under ` +
+            `diffusion_models. extra_model_paths and custom loaders (UnetLoaderGGUF) can still ` +
+            `use a configured unet directory. Check list_local_models (action:"list_paths") ` +
+            `for unet roots, or list with no model_type to see unet_gguf.`
+          : `The connected ComfyUI (${getComfyUIBaseUrl()}) did not answer for the ` +
+            `"${category}" model folder, so it could not be confirmed that it reads from this location.`,
     };
   }
   // A CORE category's listing enumerates only ComfyUI's own weight extensions
@@ -2316,6 +2527,125 @@ export function isUnderRoot(
   return f === r || f.startsWith(`${r}/`);
 }
 
+/** YAML / extra-paths key for a generic models tree (not a per-category folder). */
+const GENERIC_MODELS_CATEGORY = "models";
+
+interface KnownDownloadModelRoot {
+  dir: string;
+  category: string;
+}
+
+function rootsEqual(a: string, b: string): boolean {
+  return isUnderRoot(a, b) && isUnderRoot(b, a);
+}
+
+function isCodeExtraCategory(category: string): boolean {
+  return NON_MODEL_EXTRA_CATEGORIES.has(category.trim().toLowerCase());
+}
+
+/**
+ * Roots a download may land in: the primary models dir this resolution already
+ * computed, plus every extra-model directory list_paths / the resolver can name.
+ * `custom_nodes` is never a download destination. Does not invent paths.
+ */
+async function listKnownDownloadModelRoots(
+  primaryModelsDir: string,
+  snapshot: LiveServerSnapshot,
+): Promise<KnownDownloadModelRoot[]> {
+  const known: KnownDownloadModelRoot[] = [
+    { dir: resolve(primaryModelsDir), category: GENERIC_MODELS_CATEGORY },
+  ];
+  const seen = new Set<string>([`${known[0].dir}\0${known[0].category}`]);
+  const add = (dir: string, category: string): void => {
+    const cat = category.trim();
+    if (!cat || isCodeExtraCategory(cat)) return;
+    const resolved = resolve(dir);
+    const key = `${resolved}\0${cat}`;
+    if (seen.has(key)) return;
+    seen.add(key);
+    known.push({ dir: resolved, category: cat });
+  };
+  try {
+    for (const er of await getExtraModelRoots()) add(er.dir, er.category);
+  } catch {
+    // Extra roots are additive; an unreadable config just contributes none.
+  }
+  if (snapshot.reachable && !isRemoteMode()) {
+    try {
+      const live = await getLiveExtraModelRoots(snapshot);
+      for (const er of live.roots) add(er.dir, er.category);
+    } catch {
+      // Live extras are optional; static/list_paths roots still constrain the selector.
+    }
+  }
+  return known;
+}
+
+function formatKnownDownloadRoots(roots: readonly KnownDownloadModelRoot[]): string {
+  const unique = new Map<string, KnownDownloadModelRoot>();
+  for (const r of roots) {
+    if (!unique.has(r.dir)) unique.set(r.dir, r);
+  }
+  return [...unique.values()].map((r) => `${r.dir} (${r.category})`).join(", ");
+}
+
+/**
+ * Bind a caller-selected absolute model_root to a write destination. The path
+ * must already be one of the known roots (primary models/ or an extra root from
+ * list_paths / the resolver). Generic `models` roots take the full subfolder;
+ * a category extra root must match the target category and takes only the
+ * remainder. Invented paths are refused.
+ */
+function applySelectedModelRoot(
+  modelRoot: string,
+  normalizedSub: string,
+  rawSub: string,
+  known: readonly KnownDownloadModelRoot[],
+): { modelsRoot: string; targetDir: string } {
+  const raw = modelRoot.trim();
+  if (!isAbsolute(raw) && !/^[a-zA-Z]:[\\/]/.test(raw) && !raw.startsWith("\\\\")) {
+    throw new ModelError(
+      `model_root must be an absolute directory already listed by list_local_models ` +
+        `action:"list_paths", not relative: ${raw}`,
+    );
+  }
+  const selected = resolve(raw);
+  const matches = known.filter((k) => rootsEqual(k.dir, selected));
+  if (matches.length === 0) {
+    throw new ModelError(
+      `model_root is not a known model root: ${raw}. Known roots (from ` +
+        `list_local_models action:"list_paths" / the resolver): ` +
+        `${formatKnownDownloadRoots(known)}. Do not invent a path.`,
+    );
+  }
+  const category = categoryOf(normalizedSub).toLowerCase();
+  const remainder = subfolderRemainder(normalizedSub);
+  const catMatch = matches.find((m) => m.category.trim().toLowerCase() === category);
+  const genericMatch = matches.find(
+    (m) => m.category.trim().toLowerCase() === GENERIC_MODELS_CATEGORY,
+  );
+  const chosen = catMatch ?? genericMatch;
+  if (!chosen) {
+    const served = matches.map((m) => m.category).join(", ");
+    throw new ModelError(
+      `model_root ${selected} serves categor${matches.length === 1 ? "y" : "ies"} ` +
+        `"${served}", not "${category}". Pick a known root for "${category}" ` +
+        `(or a generic models root) from list_local_models action:"list_paths".`,
+    );
+  }
+  const modelsRoot = chosen.dir;
+  const targetDir =
+    chosen.category.trim().toLowerCase() === GENERIC_MODELS_CATEGORY
+      ? resolve(modelsRoot, rawSub)
+      : remainder
+        ? resolve(modelsRoot, remainder)
+        : modelsRoot;
+  if (targetDir !== modelsRoot && !targetDir.startsWith(modelsRoot + sep)) {
+    throw new ModelError(`Refusing to write outside the models directory: ${rawSub}`);
+  }
+  return { modelsRoot, targetDir };
+}
+
 /**
  * Like resolveModelSubfolder, but roots the destination at the CONNECTED
  * server's real models directory (its `--base-directory`/models, read from
@@ -2324,12 +2654,14 @@ export function isUnderRoot(
  * lands somewhere the live server never reads — reported success, model
  * invisible (issues #346/#369). Falls back to `<COMFYUI_PATH>/models` when the
  * server is unreachable or was not launched with `--base-directory`. Applies the
- * same containment guard as the sync variant.
+ * same containment guard as the sync variant. `modelRoot` is an optional
+ * explicit extra/primary root already known from list_paths (#2499).
  */
 export async function resolveModelSubfolderPreferServer(
   targetSubfolder: string,
+  modelRoot?: string,
 ): Promise<string> {
-  return (await resolveModelSubfolderWithLiveRoot(targetSubfolder)).targetDir;
+  return (await resolveModelSubfolderWithLiveRoot(targetSubfolder, modelRoot)).targetDir;
 }
 
 /**
@@ -2344,6 +2676,7 @@ export async function resolveModelSubfolderPreferServer(
  */
 export async function resolveModelSubfolderWithLiveRoot(
   targetSubfolder: string,
+  modelRoot?: string,
 ): Promise<{ targetDir: string; liveRootAtResolve?: string }> {
   const raw = (targetSubfolder ?? "").trim();
   if (!raw) {
@@ -2381,6 +2714,12 @@ export async function resolveModelSubfolderWithLiveRoot(
   if (targetDir !== modelsRoot && !targetDir.startsWith(modelsRoot + sep)) {
     throw new ModelError(`Refusing to write outside the models directory: ${raw}`);
   }
+  const primaryRoot = modelsRoot;
+  // #2499 — an explicit model_root, constrained to roots list_paths / the resolver
+  // already know, lets a download land in a configured extra-model tree even when
+  // the live server is unreachable (the auto-redirect below requires snapshot.reachable
+  // AND an absolute --extra-model-paths-config). Invented paths are refused.
+  const selectedRoot = (modelRoot ?? "").trim();
   // #369 (the 0.52.1 reports) — a root the SERVER NAMED beats our best inference.
   //
   // When the primary root came from local configuration or from an INFERRED live
@@ -2401,7 +2740,13 @@ export async function resolveModelSubfolderWithLiveRoot(
   // resolution and its corroboration guards untouched.
   const serverNamedPrimary = modelsDirNamedByServer(source);
   let redirectedToExtraRoot = false;
-  if (!serverNamedPrimary && snapshot.reachable && !isRemoteMode()) {
+  if (selectedRoot) {
+    const known = await listKnownDownloadModelRoots(primaryRoot, snapshot);
+    const applied = applySelectedModelRoot(selectedRoot, normalizedSub, raw, known);
+    modelsRoot = applied.modelsRoot;
+    targetDir = applied.targetDir;
+    redirectedToExtraRoot = !rootsEqual(modelsRoot, primaryRoot);
+  } else if (!serverNamedPrimary && snapshot.reachable && !isRemoteMode()) {
     const category = categoryOf(normalizedSub).toLowerCase();
     const argvNamesConfig = parseExtraModelPathsConfigsFromArgvRaw(snapshot.argv).some(
       (p) => isAbsolute(p),
@@ -2720,9 +3065,10 @@ export async function resolveDownloadTarget(
   url: string,
   targetSubfolder: string,
   filename?: string,
+  modelRoot?: string,
 ): Promise<ResolvedDownloadTarget> {
   const { targetDir, liveRootAtResolve } =
-    await resolveModelSubfolderWithLiveRoot(targetSubfolder);
+    await resolveModelSubfolderWithLiveRoot(targetSubfolder, modelRoot);
   const rawFilename =
     filename ?? (basename(new URL(url).pathname) || "model.safetensors");
   const resolvedFilename = basename(rawFilename);
@@ -2814,14 +3160,58 @@ export interface ResolvedModelFile {
   info: Stats;
 }
 
+export interface ResolveExistingModelFileOptions {
+  /** `remove` enables the stricter live launch-state deletion authorization. */
+  mode?: "read" | "remove";
+}
+
+async function getAuthorizedModelRootsForRemoval(configuredModelsRoot: string) {
+  if (isRemoteMode()) {
+    return { primaryRoots: [configuredModelsRoot], extraRoots: [] };
+  }
+
+  // This is the same live resolution used by download destinations. A reachable
+  // server's configured-base fallback is not deletion authority: it can be a
+  // different install from the one answering /system_stats. The server-named
+  // predicate is deliberately narrower than the write-side observed-root
+  // predicate: an OS-inferred portable bundle is not proof of the primary root.
+  const resolved = await resolveModelsDirWithBases();
+  if (resolved.snapshot.reachable) {
+    const primaryRoots = modelsDirNamedByServer(resolved.source)
+      ? [resolve(resolved.modelsDir)]
+      : [];
+    let extraRoots: Awaited<ReturnType<typeof getLaunchStateExtraModelRoots>> = {
+      authoritative: false,
+      roots: [],
+    };
+    try {
+      // This is deletion-specific. It uses the SAME snapshot, but rejects a
+      // current config that cannot be proven unchanged since the connected
+      // process started. The generic live helper remains current-config based
+      // for downloads and symlink authorization.
+      extraRoots = await getLaunchStateExtraModelRoots(resolved.snapshot);
+    } catch {
+      extraRoots = { authoritative: false, roots: [] };
+    }
+    return {
+      primaryRoots,
+      extraRoots: extraRoots.authoritative ? extraRoots.roots : [],
+    };
+  }
+
+  // Removal has no safe offline fallback: the configured path may belong to a
+  // stale install, and current extra-path config is not proof of what a server
+  // loaded. Refuse before stat() so an unreachable target cannot authorize a
+  // local deletion by accident.
+  return { primaryRoots: [], extraRoots: [] };
+}
+
 /**
  * Locate an existing model file given a path relative to ComfyUI's models/
- * directory, searching ACROSS every configured root: the primary
- * `<COMFYUI_PATH>/models` AND every directory declared in
- * extra_model_paths.yaml / extra_models_config.yaml (e.g. models stored on
- * another drive such as E:\). This mirrors the set of roots ComfyUI itself
- * loads from, so a model installed under an extra root can be found (and
- * removed) the same way as one under the primary install.
+ * directory. Read-only callers retain the configured primary and extra-root
+ * lookup. The explicit `mode:"remove"` path instead searches only connected
+ * server-named/launch-state-proven roots, so deletion cannot inherit read-only
+ * visibility from mutable local configuration.
  *
  * Resolution rules:
  *  - The primary root is searched with the full relative path.
@@ -2837,6 +3227,7 @@ export interface ResolvedModelFile {
  */
 export async function resolveExistingModelFile(
   relativePath: string,
+  options: ResolveExistingModelFileOptions = {},
 ): Promise<ResolvedModelFile> {
   if (!resolveComfyUIBase()) {
     throw new ModelError(
@@ -2864,17 +3255,23 @@ export async function resolveExistingModelFile(
   const searched: string[] = [];
   let dirHit: ResolvedModelFile | undefined;
 
-  // Primary root: <COMFYUI_PATH>/models/<relativePath>. containWithinRoot throws
-  // on traversal/escape, preserving the existing security behavior.
-  const modelsRoot = resolve(getModelsRoot());
-  const primaryTarget = containWithinRoot(modelsRoot, raw);
-  searched.push(modelsRoot);
-  try {
-    const info = await stat(primaryTarget);
-    if (info.isFile()) return { path: primaryTarget, root: modelsRoot, info };
-    dirHit = { path: primaryTarget, root: modelsRoot, info };
-  } catch {
-    // Not present under the primary root; fall through to extra roots.
+  const configuredModelsRoot = resolve(getModelsRoot());
+  const rootResolution = options.mode === "remove"
+    ? await getAuthorizedModelRootsForRemoval(configuredModelsRoot)
+    : { primaryRoots: [configuredModelsRoot], extraRoots: undefined };
+
+  // Primary roots are searched in authority order. Each candidate remains
+  // containment-checked, preserving the absolute/traversal guard.
+  for (const modelsRoot of rootResolution.primaryRoots) {
+    const primaryTarget = containWithinRoot(modelsRoot, raw);
+    searched.push(modelsRoot);
+    try {
+      const info = await stat(primaryTarget);
+      if (info.isFile()) return { path: primaryTarget, root: modelsRoot, info };
+      if (!dirHit) dirHit = { path: primaryTarget, root: modelsRoot, info };
+    } catch {
+      // Not present under this primary root; keep searching authorized roots.
+    }
   }
 
   // Extra roots are declared per category, so peel off the first path segment
@@ -2883,7 +3280,7 @@ export async function resolveExistingModelFile(
   const category = segments[0];
   const remainder = segments.slice(1).join("/");
   if (category && remainder) {
-    const extraRoots = await getExtraModelRoots();
+    const extraRoots = rootResolution.extraRoots ?? (await getExtraModelRoots());
     for (const er of extraRoots) {
       if (er.category !== category) continue;
       const rootDir = resolve(er.dir);
@@ -2908,12 +3305,10 @@ export async function resolveExistingModelFile(
 
   if (dirHit) return dirHit;
 
-  // #1474 — say WHY only these roots were searched. `list_paths` may display roots
-  // this resolver refused to enumerate (it backs DELETION, so it uses only roots
-  // provable from the running server's launch arguments), and the caller was left
-  // holding two tools that disagreed with nothing to reconcile them.
+  // #1474 — removal says WHY only its authorized roots were searched. Read-only
+  // callers use the normal configured-root lookup and do not inherit this policy.
   throw new ModelError(
-    modelNotFoundMessage({ relativePath, searched }),
+    modelNotFoundMessage({ relativePath, searched, deletion: options.mode === "remove" }),
     { path: relativePath, searched },
   );
 }
@@ -3713,6 +4108,8 @@ export async function downloadModel(
   onDownloadRoute?: (route: DownloadRoute) => void,
   /** Reports the exact cache partial selected by the local writer. */
   onStagedPartialPath?: (partialPath: string) => void,
+  /** Optional explicit model-root directory already known from list_paths (#2499). */
+  modelRoot?: string,
 ): Promise<string> {
   // Cancelled before we did anything — never start a transfer (local OR server-side).
   if (signal?.aborted) throw new DOMException("The download was cancelled.", "AbortError");
@@ -3787,7 +4184,12 @@ export async function downloadModel(
     // must be live-authoritative to compare; when either is unknown there is nothing
     // to bind, and the (already never-confirmed) non-authoritative path applies.
     liveRootAtResolve: rootAtResolve,
-  } = await resolveDownloadTarget(localIdentity.rewrittenUrl, targetSubfolder, filename);
+  } = await resolveDownloadTarget(
+    localIdentity.rewrittenUrl,
+    targetSubfolder,
+    filename,
+    modelRoot,
+  );
 
   // Ensure target directory exists
   await mkdir(targetDir, { recursive: true });

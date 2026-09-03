@@ -201,6 +201,9 @@ describe("sessions are orchestrator-scoped, never workflow-scoped (#884)", () =>
     // ever names A) — is caught too.
     expect((src.match(/turnOrigins\.tabChangedBackend\(panelTab\);/g) ?? []).length).toBe(2);
     expect(src).toContain("liveTabOf: (tab) => bridge.liveTabIdFor(tab),");
+    expect(src).toContain("currentTabOf:");
+    expect(src).toContain("uniqueLiveTabOf:");
+    expect(src).toContain("bridge.liveLastActiveTabId()");
     // A cancelled queued message's origin dies with it.
     expect(src).toContain("turnOrigins.cancelMid(mid);");
     // The panel MCP servers bind the backend-QUALIFIED scope address so the
@@ -209,10 +212,10 @@ describe("sessions are orchestrator-scoped, never workflow-scoped (#884)", () =>
     // and the callback is the join that promotes a fast completion arm when
     // panel_run opens its journal ticket (#2021).
     expect(src).toMatch(
-      /createPanelMcpServer\(\s*bridge,\s*key,\s*workflowTargets,\s*\(promptIds\)\s*=>\s*runCompletionWatchdog\?\.markTicketed\(promptIds\),\s*\)/s,
+      /createPanelMcpServer\(\s*bridge,\s*key,\s*workflowTargets,\s*\(promptIds\)\s*=>\s*runCompletionWatchdog\?\.markTicketed\(promptIds\),\s*\(\)\s*=>\s*manifestOutcomeTarget,\s*\)/s,
     );
     expect(src).toMatch(
-      /startPanelMcpHttpServer\(\s*bridge,\s*panelMcpPort,\s*"127\.0\.0\.1",\s*workflowTargets,\s*\(promptIds\)\s*=>\s*runCompletionWatchdog\?\.markTicketed\(promptIds\),\s*\)/s,
+      /startPanelMcpHttpServer\(\s*bridge,\s*panelMcpPort,\s*"127\.0\.0\.1",\s*workflowTargets,\s*\(promptIds\)\s*=>\s*runCompletionWatchdog\?\.markTicketed\(promptIds\),[\s\S]*?\(agentKey\)\s*=>\s*agentKey,\s*\(\)\s*=>\s*manifestOutcomeTarget,\s*\)/s,
     );
     expect(src.match(/runCompletionWatchdog\?\.markTicketed\(promptIds\)/g) ?? []).toHaveLength(2);
 

@@ -193,7 +193,7 @@ const useCmCliSchema = z
   .boolean()
   .optional()
   .describe(
-    'Prefer the official comfy-cli subprocess instead of the ComfyUI-Manager HTTP API. Local operations use comfy-cli by default; set false to force Manager HTTP. Requires a local ComfyUI install — for actions "install"/"disable"/"enable"/"uninstall", an unavailable CLI falls back to Manager HTTP automatically (disclosed in the result); "update"/"reinstall"/"fix"/"list" do not fall back.',
+    'Prefer the official comfy-cli subprocess instead of the ComfyUI-Manager HTTP API. Local operations use comfy-cli by default; set false to force Manager HTTP. Requires a local ComfyUI install — for actions "install"/"disable"/"enable"/"uninstall"/"list", an unavailable or unsupported CLI falls back to Manager HTTP automatically (disclosed in the result); "update"/"reinstall"/"fix" do not fall back.',
   );
 
 const channelSchema = z
@@ -238,9 +238,11 @@ const IMPORTED_MODE_DISCLOSURE =
  *  entirely rather than degrading it. Silently returning the live on-disk list
  *  under a mode that was never sent is the same misreport in a second costume. */
 const CM_CLI_MODE_DROPPED =
-  'NOTE — `mode` was NOT applied: useCmCli:true reads `cm-cli show installed`, which has ' +
-  'no mode parameter, so this is the current on-disk pack list regardless of the mode ' +
-  'requested.';
+  'NOTE — if a usable comfy-cli handled this request, `mode` was NOT applied: `cm-cli show ' +
+  'installed` has no mode parameter, so that result is the current on-disk pack list ' +
+  'regardless of the mode requested. If comfy-cli was absent or its version was ' +
+  'unrecognized/unsupported, this read-only request fell back to Manager HTTP and `mode` ' +
+  'was applied there.';
 
 function formatInstalledNodes(nodes: InstalledNode[]): string {
   if (nodes.length === 0) return "No custom nodes installed.";
@@ -311,7 +313,7 @@ export function registerNodeManagementTools(server: McpServer): void {
       '- action:"uninstall" — Uninstall a pack (removes it). IRREVERSIBLE through this tool — for a cleanup audit prefer action:"disable", which is reversible. The pack must be one ComfyUI-Manager tracks: an id that resolves nowhere is REFUSED before anything is queued (a drained queue would otherwise read exactly like a success), and a pack that is on disk but unmanaged is named so you can remove its directory yourself. After the queue drains the installed-pack list is re-read and the pack must be GONE before anything claims \'uninstalled\'. A ComfyUI restart is required to unload it fully. REFUSES the sidebar panel pack.\n' +
       '- action:"disable" — Disable an installed pack WITHOUT removing it — the reversible first step of a cleanup (re-enable with action:"enable"; action:"uninstall" removes a pack outright). Uses the ComfyUI-Manager HTTP API (works against remote instances) or official comfy-cli locally, and re-reads the installed-pack list afterwards so a Manager no-op is reported as NOT disabled rather than as success. A ComfyUI restart is required for the change to take effect. REFUSES the sidebar panel pack.\n' +
       '- action:"enable" — Re-enable a pack previously disabled with action:"disable". Same Manager/comfy-cli mechanics and the same post-op re-read, so a Manager no-op is reported as NOT enabled rather than as success. A ComfyUI restart is required for the change to take effect. REFUSES the sidebar panel pack.\n' +
-      '- action:"list" — List installed packs with their version and enabled/disabled state. Uses the ComfyUI-Manager HTTP API (works against remote instances); the cm-cli fallback returns names only. Read-only.\n' +
+      '- action:"list" — List installed packs with their version and enabled/disabled state. Uses the ComfyUI-Manager HTTP API (works against remote instances); useCmCli:true uses cm-cli when its installed version is supported, otherwise falls back to Manager HTTP, while the cm-cli path returns names only. Read-only.\n' +
       '- action:"sync_deps" — Reconcile the Python dependencies of ALL installed packs through official `comfy node restore-dependencies`. Requires a local ComfyUI install and comfy-cli; takes no other parameters.',
     {
       action: z
@@ -498,10 +500,11 @@ export function registerNodeManagementTools(server: McpServer): void {
           case "fix": {
             const id = requireId("fix", "the registry id / module name to repair, or 'all'");
             const mode = managerMode("fix"); // before the panel branch — see action:"install"
-            // `fix` has no verified equivalent (it reports success off the Manager
-            // queue, which proves nothing — #639), so a panel target is refused
-            // rather than redirected. Bulk "all" is handled by the pin guard inside
-            // the service.
+            // `fix` has no verified on-disk equivalent (a drained queue is not a
+            // repair — #639/#2490; the HTTP path now fails closed on Manager's
+            // per-task not-found/error, but still cannot prove the pack moved),
+            // so a panel target is refused rather than redirected. Bulk "all"
+            // is handled by the pin guard inside the service.
             if (targetsPanelPackExactly(id)) {
               assertPanelNotTargetedUnverifiable('install_custom_node action:"fix"', id);
             }

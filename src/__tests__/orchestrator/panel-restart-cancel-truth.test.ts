@@ -54,6 +54,12 @@ import { WorkflowTargetStore } from "../../services/workflow-target-store.js";
 // The orchestrator's immutable boot endpoint — what the decline-probe and the
 // refuse-safe preflight bind to when the tab provably fronts our boot instance.
 const BOOT_BASE = (getBootLocalComfyUIBaseUrl() ?? "http://127.0.0.1:8188").replace(/\/+$/, "");
+const dynamicTargetUrl = new URL(BOOT_BASE);
+dynamicTargetUrl.port = String(
+  Number(dynamicTargetUrl.port || (dynamicTargetUrl.protocol === "https:" ? 443 : 80)) + 1,
+);
+dynamicTargetUrl.pathname = "";
+const DYNAMIC_PANEL_BASE = dynamicTargetUrl.toString().replace(/\/+$/, "");
 
 const text = (res: ToolResult): string =>
   res.content.find((c) => c.type === "text")!.text as string;
@@ -151,6 +157,7 @@ afterEach(() => {
   __panelToolsTestHooks.setPanelRebootTiming(null);
   __panelToolsTestHooks.setHealthProbe(null);
   __panelToolsTestHooks.setLocalRestartPreflight(null);
+  __panelToolsTestHooks.setVerifiedProxyRestartTarget(null);
   __panelToolsTestHooks.setDeclineProbeTiming(null);
   __processControlTestHooks.reset();
   hoistedConfig.configBase.value = null;
@@ -952,6 +959,50 @@ describe("panel_restart_comfyui — identity is resolved BEFORE the confirmation
     expect(out.rebooting).toBe(false);
     expect(out.confirmed_cycle).toBe(false);
     expect(String(out.note)).toMatch(/cannot tell which server the restart would stop/i);
+  });
+
+  it("#2068 authorizes a concrete local dynamic-port target through the Panel path", async () => {
+    // The Panel has already passed the hello target-resolution gate, so the
+    // mutable target and the server-observed WebSocket Origin identify the same
+    // concrete loopback instance. The immutable MCP boot endpoint is different;
+    // this must permit only the authenticated relative Panel reboot, without
+    // inventing a health-probe or headless-restart binding.
+    hoistedConfig.configBase.value = DYNAMIC_PANEL_BASE;
+    __panelToolsTestHooks.setVerifiedProxyRestartTarget(async () => undefined);
+    const preflight = vi.fn(async () => ({ ok: true }));
+    const healthProbe = vi.fn(async () => "healthy" as const);
+    __panelToolsTestHooks.setLocalRestartPreflight(preflight);
+    __panelToolsTestHooks.setHealthProbe(healthProbe);
+    const { ctx, sends } = makeCtx({ confirm: "yes", serverOrigin: DYNAMIC_PANEL_BASE });
+    const confirm = vi.fn(async () => "yes" as const);
+    ctx.confirm = confirm;
+
+    const out = parse(await restartTool().handler({}, ctx));
+    expect(confirm).toHaveBeenCalledOnce();
+    expect(preflight).toHaveBeenCalledOnce();
+    expect(healthProbe).not.toHaveBeenCalled();
+    expect(sends.filter((cmd) => cmd.cmd === "comfy_reboot")).toHaveLength(1);
+    expect(out.rebooting).toBe(true);
+    expect(out.ready).toBe(false);
+    expect(out.confirmed_cycle).toBe(false);
+    expect(out.note).toMatch(/no local boot endpoint/i);
+  });
+
+  it("#2068 keeps the dynamic exception fail-closed when the server Origin differs", async () => {
+    hoistedConfig.configBase.value = DYNAMIC_PANEL_BASE;
+    __panelToolsTestHooks.setVerifiedProxyRestartTarget(async () => undefined);
+    const preflight = vi.fn(async () => ({ ok: true }));
+    __panelToolsTestHooks.setLocalRestartPreflight(preflight);
+    const { ctx, sends } = makeCtx({ confirm: "yes", serverOrigin: BOOT_BASE });
+    const confirm = vi.fn(async () => "yes" as const);
+    ctx.confirm = confirm;
+
+    const out = parse(await restartTool().handler({}, ctx));
+
+    expect(confirm).not.toHaveBeenCalled();
+    expect(preflight).not.toHaveBeenCalled();
+    expect(sends).toEqual([]);
+    expect(out.refused).toBe(true);
   });
 
   it("a refused restart keeps the live tab and reports one terminal state, not a reconnect", async () => {

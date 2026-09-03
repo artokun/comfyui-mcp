@@ -89,6 +89,77 @@ describe("AssetRegistry", () => {
     expect(first.assetId).toBe(second.assetId);
   });
 
+  it("canonicalizes raw types before identity and URL publication", () => {
+    const records = AssetRegistry.register({
+      promptId: "p1",
+      workflow: sampleWorkflow(),
+      source: "history-reconcile",
+      outputs: [
+        {
+          node_id: "9",
+          images: [
+            {
+              filename: "same.png",
+              subfolder: "",
+              type: "history-specific-tag",
+              url: "http://localhost:8188/view?filename=same.png&subfolder=&type=history-specific-tag",
+            },
+            {
+              filename: "same.png",
+              subfolder: "",
+              type: "output",
+              url: "http://localhost:8188/view?filename=same.png&subfolder=&type=output",
+            },
+          ],
+        },
+      ],
+    });
+
+    expect(records).toHaveLength(1);
+    expect(records[0]).toMatchObject({
+      type: "output",
+      url: expect.stringContaining("type=output"),
+    });
+    expect(AssetRegistry.find("p1", {
+      filename: "same.png",
+      subfolder: "",
+      type: "history-specific-tag",
+    })?.assetId).toBe(records[0].assetId);
+  });
+
+  it("gives watched provenance precedence over history reconciliation", () => {
+    const [history] = AssetRegistry.register({
+      promptId: "p1",
+      workflow: sampleWorkflow(),
+      source: "history-reconcile",
+      createdAt: now - 500,
+      outputs: sampleOutputs(),
+    });
+    const [watched] = AssetRegistry.register({
+      promptId: "p1",
+      workflow: { "3": { class_type: "WatchedWorkflow", inputs: {} } },
+      source: "watched",
+      createdAt: now,
+      outputs: sampleOutputs(),
+    });
+
+    expect(watched.assetId).toBe(history.assetId);
+    expect(AssetRegistry.get(history.assetId)).toMatchObject({
+      source: "watched",
+      createdAt: now,
+      workflow: { "3": { class_type: "WatchedWorkflow" } },
+    });
+
+    expect(AssetRegistry.register({
+      promptId: "p1",
+      workflow: sampleWorkflow(),
+      source: "history-reconcile",
+      createdAt: now + 100,
+      outputs: sampleOutputs(),
+    })).toEqual([]);
+    expect(AssetRegistry.get(history.assetId)?.source).toBe("watched");
+  });
+
   it("generates distinct ids for different prompts even with same filename", () => {
     const [a] = AssetRegistry.register({
       promptId: "p1",

@@ -22,7 +22,13 @@ import {
   deliveryDoubt,
   isTimeoutAbort,
 } from "./fetch.js";
-import { bodyPrefixOf, describeStatus } from "./json-guard.js";
+import {
+  BoundedResponseError,
+  MAX_HISTORY_RESPONSE_BYTES,
+  MAX_VIEW_RESPONSE_BYTES,
+  readResponseBodyBounded,
+} from "./bounded-response.js";
+import { bodyPrefixOf, describeStatus, readComfyJson } from "./json-guard.js";
 import { splitUploadTarget } from "./upload-target.js";
 import { ComfyUIError, ConnectionError, describeFetchFailure } from "../utils/errors.js";
 import { logger } from "../utils/logger.js";
@@ -112,11 +118,15 @@ export interface CloudJobStatus {
 export async function enqueuePrompt(
   workflow: Record<string, unknown>,
   extraData?: Record<string, unknown>,
+  opts?: { partialExecutionTargets?: readonly string[] },
 ): Promise<{ prompt_id: string; queue_remaining?: number }> {
   logger.info("Cloud: submitting workflow to Comfy Cloud");
   const body: Record<string, unknown> = { prompt: workflow };
   if (extraData && Object.keys(extraData).length > 0) {
     body.extra_data = extraData;
+  }
+  if (opts?.partialExecutionTargets?.length) {
+    body.partial_execution_targets = [...opts.partialExecutionTargets];
   }
   const res = await cloudFetch("/api/prompt", {
     method: "POST",
@@ -129,13 +139,20 @@ export async function enqueuePrompt(
 
 export async function getHistory(
   promptId?: string,
+  options: { signal?: AbortSignal } = {},
 ): Promise<Record<string, HistoryEntry>> {
   if (!promptId) {
     logger.warn("Cloud: getHistory() without prompt_id returns {} (no global history endpoint)");
     return {};
   }
-  const res = await cloudFetch(`/api/history_v2/${promptId}`);
-  const data = await res.json();
+  const path = `/api/history_v2/${promptId}`;
+  const res = await cloudFetch(path, options.signal ? { signal: options.signal } : {});
+  const data = await readComfyJson<unknown>(res, {
+    url: path,
+    maxBytes: MAX_HISTORY_RESPONSE_BYTES,
+    bodyTimeoutMs: Math.round(comfyHttpTimeoutSeconds() * 1000),
+    signal: options.signal,
+  });
   if (data && typeof data === "object") {
     if ((data as Record<string, unknown>)[promptId]) {
       return data as Record<string, HistoryEntry>;
@@ -312,6 +329,7 @@ export async function fetchImage(
   filename: string,
   type: "output" | "input" | "temp" = "output",
   subfolder = "",
+  options: { signal?: AbortSignal } = {},
 ): Promise<{ base64: string; mimeType: string }> {
   const params = new URLSearchParams({ filename, type, subfolder });
   const url = cloudUrl(`/api/view?${params.toString()}`);
@@ -325,7 +343,7 @@ export async function fetchImage(
     res = await fetch(url, {
       headers: authHeaders(),
       redirect: "follow",
-      signal: defaultComfyTimeoutSignal(),
+      signal: options.signal ?? defaultComfyTimeoutSignal(),
     });
   } catch (err) {
     if (isTimeoutAbort(err)) {
@@ -353,8 +371,35 @@ export async function fetchImage(
   }
   const contentType = res.headers.get("content-type") ?? "image/png";
   const mimeType = contentType.split(";")[0].trim();
-  const arrayBuffer = await res.arrayBuffer();
-  const base64 = Buffer.from(arrayBuffer).toString("base64");
+  let bytes: Buffer;
+  try {
+    // Cloud /api/view is reached by every automatic history availability probe.
+    // Read it through the same bounded stream consumer as the headless client;
+    // arrayBuffer() would let one oversized response become an oversized base64
+    // tool result before the caller can reject it.
+    bytes = await readResponseBodyBounded(
+      res,
+      Math.round(comfyHttpTimeoutSeconds() * 1000),
+      MAX_VIEW_RESPONSE_BYTES,
+      options.signal,
+    );
+  } catch (error) {
+    if (error instanceof BoundedResponseError) {
+      if (error.kind === "too-large") {
+        throw new ComfyUIError(
+          `Cloud /api/view response for "${filename}" exceeds the ${MAX_VIEW_RESPONSE_BYTES / 1024 ** 2} MB safety limit.`,
+          "VIEW_TOO_LARGE",
+          { filename, maxBytes: MAX_VIEW_RESPONSE_BYTES },
+        );
+      }
+      throw new ConnectionError(
+        `No reply from Comfy Cloud within ${comfyHttpTimeoutSeconds()}s while downloading ` +
+          `"${filename}" — the response body did not finish in time.`,
+      );
+    }
+    throw error;
+  }
+  const base64 = bytes.toString("base64");
   return { base64, mimeType };
 }
 

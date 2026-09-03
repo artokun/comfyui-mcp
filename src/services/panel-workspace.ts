@@ -404,9 +404,20 @@ function targetGeneration(): number {
  * The already-resolved panel ComfyUI base, or undefined when nothing is cached.
  * Sync on purpose: panel_load_workflow's local fallback must not issue HTTP
  * after the userdata library has just been unreachable (#1845).
+ *
+ * Same-URL generation bumps are ignored here on purpose. `setComfyuiTarget`
+ * increments generation on a restart even when the address did not change,
+ * and dropping the last-known tree in that window is what made the fallback
+ * claim "COMFYUI_PATH not set" while install_comfyui environment still named
+ * that workspace. Mutation callers still go through `cachedResolution()`,
+ * which keeps the generation fence. A different URL still invalidates via
+ * `targetKey()`.
  */
 export function peekResolvedPanelBase(): string | undefined {
-  return cachedResolution()?.base;
+  if (!cached) return undefined;
+  if (cached.target !== targetKey()) return undefined;
+  if (Date.now() - cached.at > PANEL_BASE_TTL_MS) return undefined;
+  return cached.resolution.base;
 }
 
 function cachedResolution(): PanelBaseResolution | undefined {

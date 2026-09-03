@@ -37,6 +37,15 @@ vi.mock("node:fs/promises", () => ({
 }));
 
 const downloadModelMock = vi.fn();
+const resolveModelsDirWithBasesMock = vi.hoisted(() => vi.fn());
+vi.mock("../../services/output-dir.js", async (importOriginal) => {
+  const actual = await importOriginal() as typeof import("../../services/output-dir.js");
+  return {
+    ...actual,
+    resolveModelsDirWithBases: (...a: unknown[]) => resolveModelsDirWithBasesMock(...a),
+  };
+});
+
 vi.mock("../../services/model-resolver.js", async () => {
   const actual = await vi.importActual<typeof import("../../services/model-resolver.js")>(
     "../../services/model-resolver.js",
@@ -132,6 +141,12 @@ beforeEach(() => {
   fetchCivitaiTopCreatorsMock.mockReset();
   config.comfyuiPath = "/comfy";
   config.civitaiApiToken = undefined;
+  resolveModelsDirWithBasesMock.mockReset().mockResolvedValue({
+    modelsDir: MODELS_ROOT,
+    baseDirs: [],
+    snapshot: { reachable: true, argv: ["python", "main.py"] },
+    source: "live-root",
+  });
 });
 
 describe('list_local_models action:"remove" path safety', () => {
@@ -254,6 +269,7 @@ describe('download_model action:"download_civitai"', () => {
       expect.any(Function), // onLanded callback — commits done synchronously at the destination rename (#515)
       expect.any(Function), // onDownloadRoute callback — records the download-only network route
       expect.any(Function), // onStagedPartialPath callback — persists the writer's cache identity (#2356)
+      undefined, // modelRoot — optional explicit extra/primary root (#2499)
     );
     expect(res.isError).toBeFalsy();
     expect(res.content[0].text).toContain("Cool Model");
@@ -284,6 +300,7 @@ describe('download_model action:"download_civitai"', () => {
       expect.any(Function), // onLanded callback — commits done synchronously at the destination rename (#515)
       expect.any(Function), // onDownloadRoute callback — records the download-only network route
       expect.any(Function), // onStagedPartialPath callback — persists the writer's cache identity (#2356)
+      undefined, // modelRoot — optional explicit extra/primary root (#2499)
     );
     expect(res.isError).toBeFalsy();
   });
@@ -328,6 +345,7 @@ describe('download_model action:"download_civitai"', () => {
       expect.any(Function), // onLanded callback — commits done synchronously at the destination rename (#515)
       expect.any(Function), // onDownloadRoute callback — records the download-only network route
       expect.any(Function), // onStagedPartialPath callback — persists the writer's cache identity (#2356)
+      undefined, // modelRoot — optional explicit extra/primary root (#2499)
     );
   });
 
@@ -357,6 +375,7 @@ describe('download_model action:"download_civitai"', () => {
       expect.any(Function), // onLanded callback — commits done synchronously at the destination rename (#515)
       expect.any(Function), // onDownloadRoute callback — records the download-only network route
       expect.any(Function), // onStagedPartialPath callback — persists the writer's cache identity (#2356)
+      undefined, // modelRoot — optional explicit extra/primary root (#2499)
     );
   });
 

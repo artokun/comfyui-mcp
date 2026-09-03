@@ -36,6 +36,8 @@ const h = vi.hoisted(() => ({
    *  extra_model_paths config location IS knowable, which is what lets the
    *  "empty tree + no extra roots" refusal conclude anything at all. */
   snapshotArgv: [] as string[],
+  /** GET /object_info body. undefined → 404. */
+  objectInfo: undefined as unknown,
 }));
 
 vi.mock("../../config.js", () => ({
@@ -57,6 +59,10 @@ vi.mock("../../comfyui/client.js", () => {
   // fine to close over — it is `vi.hoisted`.
   const listingFetch = async (path: string) => {
     h.fetchCalls.push(path);
+    if (path === "/object_info" || path === "/object_info/") {
+      if (h.objectInfo === undefined) return { ok: false, status: 404, json: async () => null };
+      return { ok: true, status: 200, json: async () => h.objectInfo };
+    }
     const category = path.replace(/^\/models\//, "");
     const listing = h.liveListings[category];
     if (listing === undefined) return { ok: false, status: 404, json: async () => null };
@@ -150,6 +156,7 @@ beforeEach(() => {
   h.liveExtraRoots = { authoritative: false, roots: [] };
   h.modelsRootExists = true;
   h.destModelsDir = "/comfy/models";
+  h.objectInfo = undefined;
   // Absolute argv main.py: the live install root resolves, so the server's
   // extra_model_paths config location is knowable.
   h.snapshotArgv = [resolve("/live/ComfyUI/main.py")];
@@ -1262,6 +1269,47 @@ describe("post-write: the reported path is VERIFIED, not intended (#369)", () =>
     h.liveListings["diffusion_models"] = ["new.gguf"];
     const res = await verifyLandedModel(gTarget, "diffusion_models", { attempts: 1, retryMs: 0 });
     expect(res.liveVisible).toBe("visible");
+  });
+
+  it("#2480: a GGUF under unet is visible via unet_gguf when /models/unet 404s", async () => {
+    const gTarget = resolve("/live/ComfyUI/models/unet/z_image_turbo-Q8_0.gguf");
+    h.modelsDirSource = "live-root";
+    h.destModelsDir = "/live/ComfyUI/models";
+    h.liveListings["unet_gguf"] = ["z_image_turbo-Q8_0.gguf"];
+    const res = await verifyLandedModel(gTarget, "unet", { attempts: 1, retryMs: 0 });
+    expect(res.liveVisible).toBe("visible");
+    expect(res.verifiedPath).toBe(gTarget);
+    expect(res.note ?? "").not.toMatch(/almost certainly/);
+  });
+
+  it("#2480: a GGUF under unet is visible via UnetLoaderGGUF combo when REST 404s", async () => {
+    const gTarget = resolve("/live/ComfyUI/models/unet/z_image_turbo-Q8_0.gguf");
+    h.modelsDirSource = "live-root";
+    h.destModelsDir = "/live/ComfyUI/models";
+    h.objectInfo = {
+      UnetLoaderGGUF: {
+        input: {
+          required: {
+            unet_name: [["z_image_turbo-Q8_0.gguf"], {}],
+          },
+        },
+      },
+    };
+    const res = await verifyLandedModel(gTarget, "unet", { attempts: 1, retryMs: 0 });
+    expect(res.liveVisible).toBe("visible");
+    expect(res.note).toMatch(/object_info|loader combo/i);
+    expect(res.note).not.toMatch(/almost certainly/);
+  });
+
+  it("#2480: unet REST 404 does not claim the GGUF lives under diffusion_models", async () => {
+    const gTarget = resolve("/live/ComfyUI/models/unet/z_image_turbo-Q8_0.gguf");
+    h.modelsDirSource = "live-root";
+    h.destModelsDir = "/live/ComfyUI/models";
+    const res = await verifyLandedModel(gTarget, "unet", { attempts: 1, retryMs: 0 });
+    expect(res.liveVisible).toBe("unknown");
+    expect(res.note).not.toMatch(/almost certainly/);
+    expect(res.note).toMatch(/404/);
+    expect(res.note).toMatch(/configured unet|extra_model_paths|UnetLoaderGGUF/);
   });
 
   it("prescribes REFRESH, not a move, when a junctioned destination realpaths outside the live root (#369/#870)", async () => {

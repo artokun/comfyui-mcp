@@ -311,7 +311,9 @@ function assertNoWindowsHazards(raw: string): void {
         `Refusing reserved Windows device name "${seg}".`,
       );
     }
-    if (/[ .]$/.test(seg)) {
+    // `.` and `..` are traversal operators, not Windows filenames with a
+    // trailing dot. Containment checks below still decide whether they escape.
+    if (seg !== "." && seg !== ".." && /[ .]$/.test(seg)) {
       throw new NodeDevError(
         `Refusing path segment "${seg}": trailing dot or space is unsafe on Windows.`,
       );
@@ -1077,21 +1079,241 @@ export interface PatchResult {
   stderr: string;
 }
 
-/** Extract every file path a unified diff touches (from ---/+++ headers). */
+const APPLY_PATCH_FILE =
+  /^\*{3} (Update|Add|Delete) File:\s*(.+)$/;
+const APPLY_PATCH_MOVE = /^\*{3} Move to:\s*(.+)$/;
+
+/**
+ * Apply-patch markers sit at column 0 (optional indent). A unified-diff body
+ * line is prefixed with ' ', '+', or '-' — never treat those as headers.
+ */
+function applyPatchMarkerText(line: string): string | undefined {
+  if (line.startsWith("+") || line.startsWith("-")) return undefined;
+  const trimmedStart = line.trimStart();
+  if (line.startsWith(" ") && line.length - trimmedStart.length === 1) {
+    return undefined;
+  }
+  const t = trimmedStart.trimEnd();
+  return t.startsWith("***") ? t : undefined;
+}
+
+/** Strip timestamps and a/ b/ prefixes from a diff path header. */
+function normalizeDiffPath(raw: string): string | undefined {
+  let p = raw.trim();
+  if (!p || p === "/dev/null") return undefined;
+  p = p.replace(/\t.*$/, "");
+  p = p.replace(/^[ab]\//, "");
+  p = p.replace(/\\/g, "/");
+  return p || undefined;
+}
+
+function recordPatchPath(paths: Set<string>, raw: string): void {
+  const p = normalizeDiffPath(raw);
+  if (p) paths.add(p);
+}
+
+/**
+ * Extract every file path a patch touches. Accepts unified-diff ---/+++ headers
+ * and the apply-patch / simplified-diff markers (`*** Update/Add/Delete File`,
+ * `*** Move to`) so a documented `*** Begin Patch` body is not rejected before
+ * git apply ever runs (#2496).
+ */
 export function parsePatchPaths(patch: string): string[] {
   const paths = new Set<string>();
   for (const line of patch.split(/\r?\n/)) {
-    const m = /^(?:---|\+\+\+) (.+)$/.exec(line);
-    if (!m) continue;
-    let p = m[1].trim();
-    if (p === "/dev/null") continue;
-    // Strip a trailing tab-prefixed timestamp some diff tools append.
-    p = p.replace(/\t.*$/, "");
-    // Strip a/ or b/ prefix.
-    p = p.replace(/^[ab]\//, "");
-    if (p) paths.add(p);
+    const unified = /^(?:---|\+\+\+) (.+)$/.exec(line);
+    if (unified?.[1]) {
+      recordPatchPath(paths, unified[1]);
+      continue;
+    }
+    const marker = applyPatchMarkerText(line);
+    if (!marker) continue;
+    const apply = APPLY_PATCH_FILE.exec(marker);
+    if (apply?.[2]) {
+      recordPatchPath(paths, apply[2]);
+      continue;
+    }
+    const move = APPLY_PATCH_MOVE.exec(marker);
+    if (move?.[1]) recordPatchPath(paths, move[1]);
   }
   return [...paths];
+}
+
+function looksLikeApplyPatch(patch: string): boolean {
+  let hasApply = false;
+  let hasUnified = false;
+  for (const line of patch.split(/\r?\n/)) {
+    if (/^(?:---|\+\+\+) /.test(line)) hasUnified = true;
+    const marker = applyPatchMarkerText(line);
+    if (marker === "*** Begin Patch" || (marker !== undefined && APPLY_PATCH_FILE.test(marker))) {
+      hasApply = true;
+    }
+  }
+  return hasApply && !hasUnified;
+}
+
+/** Prefix an unprefixed context line; keep already-valid unified body lines. */
+function asDiffBodyLine(raw: string): string {
+  if (
+    raw.startsWith("+") ||
+    raw.startsWith("-") ||
+    raw.startsWith(" ") ||
+    raw.startsWith("\\")
+  ) {
+    return raw;
+  }
+  return ` ${raw}`;
+}
+
+function countHunkSides(lines: string[]): { oldCount: number; newCount: number } {
+  let oldCount = 0;
+  let newCount = 0;
+  for (const line of lines) {
+    if (line.startsWith("\\")) continue;
+    if (line.startsWith("-")) oldCount += 1;
+    else if (line.startsWith("+")) newCount += 1;
+    else {
+      oldCount += 1;
+      newCount += 1;
+    }
+  }
+  return { oldCount, newCount };
+}
+
+function emitCountedHunk(header: string, body: string[]): string[] {
+  if (/^@@\s+-\d+/.test(header)) return [header, ...body];
+  const hint = header.replace(/^@@\s?/, "").trim();
+  const firstText = body[0]?.replace(/^[-+ ]/, "") ?? "";
+  const lines = hint && hint !== firstText ? [` ${hint}`, ...body] : body;
+  const { oldCount, newCount } = countHunkSides(lines);
+  const oldStart = oldCount === 0 ? 0 : 1;
+  const newStart = newCount === 0 ? 0 : 1;
+  return [`@@ -${oldStart},${oldCount} +${newStart},${newCount} @@`, ...lines];
+}
+
+function updateBodyToHunks(body: string[]): string[] {
+  const hunks: { header: string; lines: string[] }[] = [];
+  let current: { header: string; lines: string[] } | undefined;
+  const start = (header: string) => {
+    if (current) hunks.push(current);
+    current = { header, lines: [] };
+  };
+  for (const raw of body) {
+    if (raw.startsWith("@@")) {
+      start(raw);
+      continue;
+    }
+    if (!current) start("@@");
+    if (current) current.lines.push(asDiffBodyLine(raw));
+  }
+  if (current) hunks.push(current);
+  return hunks.flatMap((h) => emitCountedHunk(h.header, h.lines));
+}
+
+function deleteHunkFromDisk(
+  relPath: string,
+  deps: NodeDevDeps,
+  resolvedBase?: string,
+): string[] {
+  const { abs } = resolveInJail(relPath, deps, resolvedBase);
+  if (!deps.existsSync(abs) || !deps.isFile(abs)) return [];
+  const text = deps.readFileText(abs);
+  const hasNl = text.endsWith("\n");
+  const lines = text.split(/\n/).map((l) => l.replace(/\r$/, ""));
+  const fileLines = hasNl ? lines.slice(0, -1) : lines;
+  if (fileLines.length === 0) return [];
+  const hunk = [
+    `@@ -1,${fileLines.length} +0,0 @@`,
+    ...fileLines.map((l) => `-${l}`),
+  ];
+  if (!hasNl) hunk.push("\\ No newline at end of file");
+  return hunk;
+}
+
+/**
+ * Convert apply-patch / V4A (`*** Begin Patch` / `*** Update File`) into a
+ * git-applyable unified diff. Unified input is returned unchanged.
+ */
+function toUnifiedDiff(
+  patch: string,
+  deps: NodeDevDeps,
+  resolvedBase?: string,
+): string {
+  if (!looksLikeApplyPatch(patch)) return patch;
+
+  const lines = patch.split(/\r?\n/);
+  const files: string[] = [];
+  let i = 0;
+  while (i < lines.length) {
+    const line = lines[i] ?? "";
+    const marker = applyPatchMarkerText(line);
+    const file = marker ? APPLY_PATCH_FILE.exec(marker) : undefined;
+    if (!file) {
+      i += 1;
+      continue;
+    }
+    i += 1;
+    const kind = file[1] === "Add" ? "add" : file[1] === "Delete" ? "delete" : "update";
+    const rawPath = file[2] ?? "";
+    const path = normalizeDiffPath(rawPath) ?? rawPath.trim();
+    let moveTo: string | undefined;
+    if (i < lines.length) {
+      const nextMarker = applyPatchMarkerText(lines[i] ?? "");
+      const move = nextMarker ? APPLY_PATCH_MOVE.exec(nextMarker) : undefined;
+      if (move?.[1]) {
+        moveTo = normalizeDiffPath(move[1]) ?? move[1].trim();
+        i += 1;
+      }
+    }
+    const body: string[] = [];
+    while (i < lines.length) {
+      const raw = lines[i] ?? "";
+      const bodyMarker = applyPatchMarkerText(raw);
+      if (bodyMarker === "*** End Patch" || bodyMarker === "***") break;
+      if (bodyMarker === "*** End of File") {
+        i += 1;
+        break;
+      }
+      if (bodyMarker) break;
+      body.push(raw);
+      i += 1;
+    }
+
+    if (kind === "add") {
+      const plus = body
+        .filter((l) => l.length > 0 && l.trim() !== "*** End of File")
+        .map((l) => (l.startsWith("+") ? l : `+${l}`));
+      files.push(
+        [
+          "--- /dev/null",
+          `+++ b/${path}`,
+          `@@ -0,0 +${plus.length === 0 ? 0 : 1},${plus.length} @@`,
+          ...plus,
+        ].join("\n"),
+      );
+      continue;
+    }
+    if (kind === "delete") {
+      const minus = body
+        .filter((l) => l.trim() !== "" && l.trim() !== "*** End of File")
+        .map((l) => (l.startsWith("-") ? l : `-${l}`));
+      const hunk =
+        minus.length > 0
+          ? [
+              `@@ -1,${minus.length} +0,0 @@`,
+              ...minus,
+            ]
+          : deleteHunkFromDisk(path, deps, resolvedBase);
+      files.push([`--- a/${path}`, "+++ /dev/null", ...hunk].join("\n"));
+      continue;
+    }
+
+    const dest = moveTo ?? path;
+    files.push(
+      [`--- a/${path}`, `+++ b/${dest}`, ...updateBodyToHunks(body)].join("\n"),
+    );
+  }
+  return files.length > 0 ? files.join("\n") + "\n" : patch;
 }
 
 /**
@@ -1117,7 +1339,8 @@ export function applyNodePatch(
   const touched = parsePatchPaths(patch);
   if (touched.length === 0) {
     throw new NodeDevError(
-      "Could not find any file headers (---/+++) in the patch. Provide a unified diff.",
+      "Could not find any file headers (---/+++ or *** Update/Add/Delete File) in the patch. " +
+        "Provide a unified diff or an apply-patch diff (*** Begin Patch / *** Update File).",
     );
   }
   for (const p of touched) {
@@ -1126,6 +1349,11 @@ export function applyNodePatch(
       throw new NodeDevError(`Patch would touch the custom_nodes root itself ("${p}").`);
     }
   }
+
+  // Apply-patch / V4A (`*** Begin Patch`) is not git-applyable as-is. Convert
+  // after the jail-check so a Delete File with no body can read the jailed
+  // target, and so git apply still sees a ---/+++ unified diff (#2496).
+  const unified = toUnifiedDiff(patch, deps, resolvedBase);
 
   // #2422 — what the touched files hold BEFORE the apply. `git apply`'s exit code is
   // the ONLY thing this used to report, and a 0 from it was taken to mean the content
@@ -1144,7 +1372,7 @@ export function applyNodePatch(
     before.set(p, readIfPresent(abs, deps));
   }
 
-  const input = patch.endsWith("\n") ? patch : patch + "\n";
+  const input = unified.endsWith("\n") ? unified : unified + "\n";
 
   // Phase 2a: git apply --check (dry run).
   const check = deps.runGit(["apply", "--check"], {
@@ -1250,19 +1478,119 @@ export function gitWritesEnabled(): boolean {
   return v === "1" || v === "true";
 }
 
-/** Jail-check a caller-supplied path and return it relative to the pack dir. */
+/**
+ * #2716: before this fix, the pack-name-prefixed spelling was the ONLY one that reached
+ * git, so callers learned it. Anchored at the pack it now names `MyPack/MyPack/nodes.py`
+ * — and git answers a pathspec that matches nothing with an EMPTY result, not an error,
+ * so the workaround would fail silently. Refuse it instead, naming the correction.
+ *
+ * The refusal rests on ONE disk fact: whether the pack contains a child named like the
+ * pack. If it does not, the prefixed reading names a directory that is not there — which
+ * decides a wildcard (`MyPack/*.py`) as well as a literal path, and needs no probe of the
+ * de-prefixed path. That last part matters: `git diff`/`git add` are exactly how a DELETED
+ * file is inspected and staged, so a path absent from the worktree is a legitimate
+ * pathspec, and probing it would refuse the deletion.
+ *
+ * Where the fact is not conclusive, the refusal must stay escapable, so it fires only on
+ * the AMBIGUOUS spelling:
+ *   • Only a RELATIVE entry can be the prefix mistake. An absolute entry spells the whole
+ *     path out, so it is honoured as written — and it is therefore the escape hatch for
+ *     the one shape the disk cannot settle: a same-named child that is TRACKED but deleted
+ *     from the worktree, where git can still match `MyPack/gone.py`. The message says so.
+ *   • A head carrying a wildcard is not a literal reference to the pack, even when it
+ *     matches the pack's own name — `assertSafeRepoName` allows `*` in a folder name, and
+ *     on a POSIX filesystem a pack really can be called `Pack*`.
+ *
+ * `pack` reaches here two ways — the caller's spelling and the real directory name — and
+ * they differ when custom_nodes/<name> is a symlink or junction to a differently-named
+ * directory, since `packDir` is the REALPATH. Match either, or an aliased pack silently
+ * loses the correction.
+ */
+function assertNotPackPrefixed(
+  packDir: string,
+  packName: string,
+  original: string,
+  rel: string,
+  deps: NodeDevDeps,
+): void {
+  const segs = rel.split("/");
+  const head = segs[0];
+  if (/[*?]/.test(head)) return;
+  const lower = head.toLowerCase();
+  if (lower !== basename(packDir).toLowerCase() && lower !== packName.toLowerCase()) return;
+  // A deeper entry needs the head to be a traversable DIRECTORY; a bare "<pack>" only
+  // needs something of that name to exist, since it names the match itself.
+  const headPath = join(packDir, head);
+  if (segs.length > 1 ? deps.isDirectory(headPath) : deps.existsSync(headPath)) return;
+  const stripped = segs.slice(1).join("/");
+  throw new NodeDevError(
+    `Path "${original}" is resolved relative to the pack, so it names ` +
+      `custom_nodes/${basename(packDir)}/${rel} — and ` +
+      `custom_nodes/${basename(packDir)}/${head} is not in the working tree. ` +
+      `\`paths\` entries are pack-relative: ` +
+      (stripped
+        ? `drop the "${head}/" prefix and pass "${stripped}"`
+        : `omit \`paths\` to scope the whole pack, or pass "."`) +
+      `. If you did mean that path — a tracked file whose directory was deleted, say — ` +
+      `pass it as an absolute path, which is taken as written.`,
+  );
+}
+
+/**
+ * Jail-check one caller-supplied `paths` entry and return it relative to the pack dir.
+ *
+ * #2716: `paths` is documented as "pack-relative paths to stage/scope", and the pack is
+ * already chosen by `pack` — but a relative entry went to `resolveInJail()` as-is, and
+ * that anchors a relative input at the custom_nodes/ ROOT. So the documented form
+ * ("preset_core.py") landed BESIDE the pack and every such call was refused as "outside
+ * the target pack", leaving an undocumented pack-name prefix as the only spelling that
+ * worked. Anchor a relative entry at the pack instead.
+ *
+ * The anchor is applied to the jail-relative STRING (`<pack>/<entry>`) rather than by
+ * joining onto the resolved `packDir`, for two reasons: the resolver's Windows-hazard
+ * scan then still sees only caller-controlled segments (joining onto an absolute base
+ * would drag the install path's own segments through it), and an install whose
+ * custom_nodes/ is a junction keeps working — `packDir` is the REALPATH'd directory, so
+ * an absolute join would fail the resolver's lexical containment check against the
+ * un-resolved root. Containment itself is unchanged: the single auditable resolver still
+ * decides it (lexical + realpath, so the custom_nodes/ jail and its symlink/junction
+ * check are intact), and the result must still land inside the selected pack.
+ *
+ * One deliberate consequence: `join()` collapses `..` BEFORE the resolver's hazard scan
+ * sees the string, so an INTERIOR climb that stays in the pack ("sub/../nodes.py") is now
+ * accepted as the file it names, where the old anchor refused it. Nothing escapes on that
+ * path — a climb that leaves the pack still fails the containment check below, and one
+ * that leaves custom_nodes/ still fails the resolver's — and git receives the same
+ * normalised pathspec we decided on, so there is no second interpretation.
+ */
 function packRelativePath(
   packDir: string,
+  packName: string,
   p: string,
   deps: NodeDevDeps,
   resolvedBase?: string,
 ): string {
-  const { abs } = resolveInJail(p, deps, resolvedBase);
+  const raw = (p ?? "").trim();
+  // An empty entry would resolve to the pack itself and silently widen the command's
+  // scope to every file in it, which is what omitting `paths` already means.
+  if (!raw) throw new NodeDevError("A path is required (received an empty string).");
+
+  const spelledOut = isAbsolute(raw);
+  // Check the caller's spelling before joining it to the pack name. In particular,
+  // path.join("Pack", "\\\\server\\share\\file.py") can erase the leading UNC marker
+  // on Windows (and POSIX does not consider it absolute), turning a Windows hazard
+  // into an apparently harmless pack-relative path.
+  assertNoWindowsHazards(raw);
+  const { abs } = resolveInJail(spelledOut ? raw : join(packName, raw), deps, resolvedBase);
   const rel = relative(packDir, abs);
   if (rel.startsWith("..") || isAbsolute(rel)) {
     throw new NodeDevError(`Path "${p}" is outside the target pack.`);
   }
-  return rel.split(/[\\/]/).join("/") || ".";
+  const posix = rel.split(/[\\/]/).join("/") || ".";
+  // Only a relative entry can be the pack-name-prefix mistake; an absolute one already
+  // says exactly which file it means, so it is honoured as written.
+  if (!spelledOut) assertNotPackPrefixed(packDir, packName, p, posix, deps);
+  return posix;
 }
 
 /** #809: the git action's real ceiling is READ_MAX_CHARS (24000) — a CODE clamp the
@@ -1289,7 +1617,9 @@ export function nodePackGit(
     READ_MAX_CHARS,
   );
 
-  const relPaths = (options.paths ?? []).map((p) => packRelativePath(packDir, p, deps, resolvedBase));
+  const relPaths = (options.paths ?? []).map((p) =>
+    packRelativePath(packDir, name, p, deps, resolvedBase),
+  );
 
   let argv: string[];
   let timeoutMs = GIT_TIMEOUT_MS;

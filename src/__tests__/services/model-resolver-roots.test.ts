@@ -31,6 +31,19 @@ vi.mock("../../services/workspace-env.js", () => ({
     h.config.comfyuiPath ?? (h.isRemoteMode() ? undefined : h.getSaved()),
 }));
 
+const resolveModelsDirWithBasesMock = vi.hoisted(() => vi.fn());
+vi.mock("../../services/output-dir.js", async (importOriginal) => {
+  const real = (await importOriginal()) as typeof import("../../services/output-dir.js");
+  return {
+    resolveModelsDirWithBases: (...a: unknown[]) => resolveModelsDirWithBasesMock(...a),
+    isLiveAuthoritativeModelsDir: real.isLiveAuthoritativeModelsDir,
+    modelsDirNamedByServer: real.modelsDirNamedByServer,
+    parseModelsDirFromArgv: real.parseModelsDirFromArgv,
+    parseExtraModelPathsConfigsFromArgvRaw: real.parseExtraModelPathsConfigsFromArgvRaw,
+    hasUnresolvableRelativeModelDirFlag: real.hasUnresolvableRelativeModelDirFlag,
+  };
+});
+
 // node:fs/promises is mocked so stat answers per-path from a fixture map.
 const statMock = vi.fn();
 vi.mock("node:fs/promises", () => ({
@@ -47,8 +60,12 @@ vi.mock("node:fs/promises", () => ({
 
 // Extra roots are injected; no real config file is read.
 const getExtraModelRootsMock = vi.fn();
+const getLiveExtraModelRootsMock = vi.fn();
+const getLaunchStateExtraModelRootsMock = vi.fn();
 vi.mock("../../services/extra-paths.js", () => ({
   getExtraModelRoots: (...a: unknown[]) => getExtraModelRootsMock(...a),
+  getLiveExtraModelRoots: (...a: unknown[]) => getLiveExtraModelRootsMock(...a),
+  getLaunchStateExtraModelRoots: (...a: unknown[]) => getLaunchStateExtraModelRootsMock(...a),
 }));
 
 import { config, isRemoteMode } from "../../config.js";
@@ -57,6 +74,10 @@ import { ModelError, ValidationError } from "../../utils/errors.js";
 
 const MODELS_ROOT = resolve("/comfy", "models");
 const EXTRA_LORAS = "E:/extra-drive/loras";
+const LIVE_SHARED_MODELS_ROOT = resolve("/ComfyUI-Shared/models");
+
+const resolveForRemoval = (path: string) =>
+  resolveExistingModelFile(path, { mode: "remove" });
 
 /** stat() resolves to a file for paths in `files`, a dir for `dirs`, else ENOENT. */
 function fsFixture(files: string[], dirs: string[] = []) {
@@ -74,6 +95,17 @@ beforeEach(() => {
   statMock.mockReset();
   getExtraModelRootsMock.mockReset();
   getExtraModelRootsMock.mockResolvedValue([]);
+  getLiveExtraModelRootsMock.mockReset();
+  getLiveExtraModelRootsMock.mockResolvedValue({ authoritative: false, roots: [] });
+  getLaunchStateExtraModelRootsMock.mockReset();
+  getLaunchStateExtraModelRootsMock.mockResolvedValue({ authoritative: false, roots: [] });
+  resolveModelsDirWithBasesMock.mockReset();
+  resolveModelsDirWithBasesMock.mockResolvedValue({
+    modelsDir: MODELS_ROOT,
+    baseDirs: [],
+    snapshot: { reachable: false },
+    source: "configured-base",
+  });
   config.comfyuiPath = "/comfy";
   vi.mocked(isRemoteMode).mockReturnValue(false);
   getSavedDefaultWorkspaceSyncMock.mockReset();
@@ -106,6 +138,174 @@ describe("resolveExistingModelFile — multi-root resolution", () => {
     expect(res.root).toBe(resolve(EXTRA_LORAS));
     expect(res.info.isFile()).toBe(true);
     expect(getExtraModelRootsMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps read-only lookup on configured roots when a reachable seam has no launch evidence", async () => {
+    const sharedRoot = resolve("/ComfyUI-Shared/models/diffusion_models");
+    resolveModelsDirWithBasesMock.mockResolvedValueOnce({
+      modelsDir: MODELS_ROOT,
+      baseDirs: [],
+      snapshot: { reachable: true },
+      source: "configured-base",
+    });
+    getExtraModelRootsMock.mockResolvedValueOnce([
+      { category: "diffusion_models", dir: sharedRoot, group: "current-config" },
+    ]);
+    fsFixture([resolve(sharedRoot, "Chroma/chroma.safetensors")]);
+
+    const res = await resolveExistingModelFile("diffusion_models/Chroma/chroma.safetensors");
+
+    expect(res.path).toBe(resolve(sharedRoot, "Chroma/chroma.safetensors"));
+    expect(getExtraModelRootsMock).toHaveBeenCalledTimes(1);
+    expect(resolveModelsDirWithBasesMock).not.toHaveBeenCalled();
+    expect(getLaunchStateExtraModelRootsMock).not.toHaveBeenCalled();
+  });
+
+  it("prefers a connected live primary root over a stale local primary root", async () => {
+    const snapshot = {
+      reachable: true,
+      argv: ["python", "ComfyUI/main.py"],
+    };
+    const liveModel = resolve(
+      LIVE_SHARED_MODELS_ROOT,
+      "diffusion_models/Chroma/chroma.safetensors",
+    );
+    const staleModel = resolve(
+      MODELS_ROOT,
+      "diffusion_models/Chroma/chroma.safetensors",
+    );
+    resolveModelsDirWithBasesMock.mockResolvedValueOnce({
+      modelsDir: LIVE_SHARED_MODELS_ROOT,
+      baseDirs: [],
+      snapshot,
+      source: "live-root",
+    });
+    fsFixture([liveModel, staleModel]);
+
+    const res = await resolveForRemoval("diffusion_models/Chroma/chroma.safetensors");
+
+    expect(res.path).toBe(liveModel);
+    expect(res.root).toBe(LIVE_SHARED_MODELS_ROOT);
+    expect(statMock).toHaveBeenCalledWith(liveModel);
+    expect(getLaunchStateExtraModelRootsMock).toHaveBeenCalledWith(snapshot);
+    expect(getLiveExtraModelRootsMock).not.toHaveBeenCalled();
+    expect(getExtraModelRootsMock).not.toHaveBeenCalled();
+  });
+
+  it("finds a category-relative model in a launch-named shared extra root", async () => {
+    const sharedRoot = resolve("/ComfyUI-Shared/models/diffusion_models");
+    const snapshot = {
+      reachable: true,
+      argv: [
+        "python",
+        "ComfyUI/main.py",
+        "--extra-model-paths-config",
+        "/live/shared_model_paths.yaml",
+      ],
+      processStartedAtMs: 1_000,
+    };
+    resolveModelsDirWithBasesMock.mockResolvedValueOnce({
+      modelsDir: resolve("/stale/ComfyUI", "models"),
+      baseDirs: [],
+      snapshot,
+      source: "configured-base",
+    });
+    getLaunchStateExtraModelRootsMock.mockResolvedValueOnce({
+      authoritative: true,
+      roots: [{ category: "diffusion_models", dir: sharedRoot, group: "desktop" }],
+    });
+    fsFixture([resolve(sharedRoot, "Chroma/chroma.safetensors")]);
+
+    const res = await resolveForRemoval("diffusion_models/Chroma/chroma.safetensors");
+
+    expect(res.path).toBe(resolve(sharedRoot, "Chroma/chroma.safetensors"));
+    expect(res.root).toBe(sharedRoot);
+    expect(getLaunchStateExtraModelRootsMock).toHaveBeenCalledWith(snapshot);
+    expect(getLiveExtraModelRootsMock).not.toHaveBeenCalled();
+    expect(getExtraModelRootsMock).not.toHaveBeenCalled();
+  });
+
+  it("does not unlink from a stale configured primary or mutable current extra root", async () => {
+    const staleExtraRoot = resolve("/mutable/current/diffusion_models");
+    const snapshot = {
+      reachable: true,
+      argv: ["python", "ComfyUI/main.py", "--extra-model-paths-config", "/live/launch.yaml"],
+      processStartedAtMs: 1_000,
+    };
+    resolveModelsDirWithBasesMock.mockResolvedValueOnce({
+      modelsDir: MODELS_ROOT,
+      baseDirs: [],
+      snapshot,
+      source: "configured-base",
+    });
+    getExtraModelRootsMock.mockResolvedValueOnce([
+      { category: "diffusion_models", dir: staleExtraRoot, group: "mutable-current-config" },
+    ]);
+    getLaunchStateExtraModelRootsMock.mockResolvedValueOnce({ authoritative: false, roots: [] });
+    fsFixture([
+      resolve(MODELS_ROOT, "diffusion_models/Chroma/chroma.safetensors"),
+      resolve(staleExtraRoot, "Chroma/chroma.safetensors"),
+    ]);
+
+    await expect(
+      resolveForRemoval("diffusion_models/Chroma/chroma.safetensors"),
+    ).rejects.toThrow(/Searched 0 root\(s\)/);
+    expect(getLaunchStateExtraModelRootsMock).toHaveBeenCalledWith(snapshot);
+    expect(getExtraModelRootsMock).not.toHaveBeenCalled();
+  });
+
+  it("does not treat an OS-observed root as deletion authority", async () => {
+    const observedRootModel = resolve(
+      LIVE_SHARED_MODELS_ROOT,
+      "diffusion_models/Chroma/chroma.safetensors",
+    );
+    const snapshot = {
+      reachable: true,
+      argv: ["python", "ComfyUI/main.py"],
+      processStartedAtMs: 1_000,
+    };
+    resolveModelsDirWithBasesMock.mockResolvedValueOnce({
+      modelsDir: LIVE_SHARED_MODELS_ROOT,
+      baseDirs: [],
+      snapshot,
+      source: "observed-root",
+    });
+    fsFixture([observedRootModel]);
+
+    await expect(
+      resolveForRemoval("diffusion_models/Chroma/chroma.safetensors"),
+    ).rejects.toThrow(/Searched 0 root\(s\)/);
+    expect(statMock).not.toHaveBeenCalledWith(observedRootModel);
+    expect(getLaunchStateExtraModelRootsMock).toHaveBeenCalledWith(snapshot);
+  });
+
+  it("refuses removal when the server is unreachable, even if configured roots contain the file", async () => {
+    const staleExtraRoot = resolve("/stale/current/diffusion_models");
+    const stalePrimaryModel = resolve(
+      MODELS_ROOT,
+      "diffusion_models/Chroma/chroma.safetensors",
+    );
+    const staleExtraModel = resolve(
+      staleExtraRoot,
+      "Chroma/chroma.safetensors",
+    );
+    resolveModelsDirWithBasesMock.mockResolvedValueOnce({
+      modelsDir: MODELS_ROOT,
+      baseDirs: [],
+      snapshot: { reachable: false },
+      source: "configured-base",
+    });
+    getExtraModelRootsMock.mockResolvedValueOnce([
+      { category: "diffusion_models", dir: staleExtraRoot, group: "current-config" },
+    ]);
+    fsFixture([stalePrimaryModel, staleExtraModel]);
+
+    await expect(
+      resolveForRemoval("diffusion_models/Chroma/chroma.safetensors"),
+    ).rejects.toThrow(/Searched 0 root\(s\)/);
+    expect(statMock).not.toHaveBeenCalled();
+    expect(getExtraModelRootsMock).not.toHaveBeenCalled();
+    expect(getLaunchStateExtraModelRootsMock).not.toHaveBeenCalled();
   });
 
   it("ignores extra roots for a different category", async () => {

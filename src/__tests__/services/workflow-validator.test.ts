@@ -295,3 +295,98 @@ describe("validateWorkflow — UI graph with serialized action buttons (#1869)",
     ).toHaveLength(1);
   });
 });
+
+// A graph-health finding is only worth anything if the PRODUCTION entry point
+// surfaces it. create_workflow (action:"validate") calls validateWorkflow, which
+// merges analyzeGraphHealth findings when `health` is on (default true) -- these
+// assert that path end to end rather than the helper in isolation (#2678).
+describe("validateWorkflow -- partial denoise over an empty latent reaches the caller", () => {
+  const SAMPLER_INFO = {
+    CheckpointLoaderSimple: {
+      input: { required: { ckpt_name: [["sd_xl_base.safetensors"], {}] } },
+      output: ["MODEL", "CLIP", "VAE"],
+    },
+    EmptyLatentImage: {
+      input: { required: { width: ["INT"], height: ["INT"], batch_size: ["INT"] } },
+      output: ["LATENT"],
+    },
+    VAEEncode: {
+      input: { required: { pixels: ["IMAGE"], vae: ["VAE"] } },
+      output: ["LATENT"],
+    },
+    LoadImage: { input: { required: { image: [["ref.png"], {}] } }, output: ["IMAGE", "MASK"] },
+    KSampler: {
+      input: {
+        required: {
+          model: ["MODEL"],
+          positive: ["CONDITIONING"],
+          negative: ["CONDITIONING"],
+          latent_image: ["LATENT"],
+          seed: ["INT"],
+          steps: ["INT"],
+          cfg: ["FLOAT"],
+          sampler_name: [["euler"], {}],
+          scheduler: [["simple"], {}],
+          denoise: ["FLOAT"],
+        },
+      },
+      output: ["LATENT"],
+    },
+    VAEDecode: { input: { required: { samples: ["LATENT"], vae: ["VAE"] } }, output: ["IMAGE"] },
+    SaveImage: { input: { required: { images: ["IMAGE"] } }, output: [], output_node: true },
+  } as const;
+
+  // The #2678 graph: EmptyLatentImage into a KSampler at denoise 0.65.
+  const badGraph = (latentSource: Record<string, { class_type: string; inputs: Record<string, unknown> }>) =>
+    wf({
+      "4": { class_type: "CheckpointLoaderSimple", inputs: { ckpt_name: "sd_xl_base.safetensors" } },
+      "5": { class_type: "LoadImage", inputs: { image: "ref.png" } },
+      ...latentSource,
+      "9": {
+        class_type: "KSampler",
+        inputs: {
+          model: ["4", 0], positive: ["4", 1], negative: ["4", 1], latent_image: ["8", 0],
+          seed: 42, steps: 50, cfg: 4, sampler_name: "euler", scheduler: "simple", denoise: 0.65,
+        },
+      },
+      "10": { class_type: "VAEDecode", inputs: { samples: ["9", 0], vae: ["4", 2] } },
+      "11": { class_type: "SaveImage", inputs: { images: ["10", 0] } },
+    });
+
+  const EMPTY_LATENT = {
+    "8": { class_type: "EmptyLatentImage", inputs: { width: 1024, height: 1024, batch_size: 1 } },
+  };
+  const VAE_ENCODE = {
+    "8": { class_type: "VAEEncode", inputs: { pixels: ["5", 0], vae: ["4", 2] } },
+  };
+
+  beforeEach(() => {
+    getObjectInfoMock.mockResolvedValue(SAMPLER_INFO);
+  });
+
+  it("surfaces the finding as a warning issue carrying the kind, without flipping `valid`", async () => {
+    const r = await validateWorkflow(badGraph(EMPTY_LATENT));
+    const issue = r.issues.find((i) => i.kind === "partial_denoise_empty_latent");
+    expect(issue).toBeDefined();
+    expect(issue?.severity).toBe("warning");
+    expect(issue?.health).toBe(true);
+    expect(issue?.node_id).toBe("9");
+    expect(issue?.node_type).toBe("KSampler");
+    expect(issue?.message).toMatch(/VAEEncode/);
+    // Health findings never make a runnable graph invalid -- ComfyUI WILL execute this.
+    expect(r.valid).toBe(true);
+    expect(r.health?.findings.some((f) => f.kind === "partial_denoise_empty_latent")).toBe(true);
+  });
+
+  it("stays silent on the corrected graph -- same sampler, latent from VAEEncode", async () => {
+    const r = await validateWorkflow(badGraph(VAE_ENCODE));
+    expect(r.issues.some((i) => i.kind === "partial_denoise_empty_latent")).toBe(false);
+    expect(r.valid).toBe(true);
+  });
+
+  it("is suppressed with health:false, like every other health finding", async () => {
+    const r = await validateWorkflow(badGraph(EMPTY_LATENT), { health: false });
+    expect(r.issues.some((i) => i.kind === "partial_denoise_empty_latent")).toBe(false);
+    expect(r.health).toBeUndefined();
+  });
+});

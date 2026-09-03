@@ -59,6 +59,34 @@ const WORKFLOW = {
   },
 };
 
+// Production-shaped V1 /object_info combos for the core loaders. The API
+// workflow carries the class_type alongside the named input value; the shared
+// `clip_name` spelling is intentional here.
+const CLIP_LOADER_OBJECT_INFO = {
+  CLIPVisionLoader: {
+    input: { required: { clip_name: [["installed-vision.safetensors"], {}] } },
+  },
+  CLIPLoader: {
+    input: {
+      required: {
+        clip_name: [["installed-text.safetensors"], {}],
+        type: [["stable_diffusion"], {}],
+      },
+      optional: { device: [["default", "cpu"], {}] },
+    },
+  },
+  DualCLIPLoader: {
+    input: {
+      required: {
+        clip_name1: [["installed-primary.safetensors"], {}],
+        clip_name2: [["installed-secondary.safetensors"], {}],
+        type: [["flux"], {}],
+      },
+      optional: { device: [["default", "cpu"], {}] },
+    },
+  },
+};
+
 beforeEach(() => {
   providers.civitaiDown = true;
   providers.hfDown = true;
@@ -140,5 +168,45 @@ describe('action:"resolve_missing" reports unavailable custom-node LoRA combos',
     }
     expect(text).toMatch(/DonutLoRAStack · lora_name_/);
     expect(text).toMatch(/models\/loras\//);
+  });
+});
+
+// #2604 — `clip_name` is shared by the text and vision CLIP loaders, but
+// ComfyUI resolves the former from models/text_encoders and the latter from
+// models/clip_vision. Keep this assertion at the production action boundary so
+// both the API workflow shape and object-info combo parsing are covered.
+describe('action:"resolve_missing" gives CLIPVisionLoader the class-aware directory hint', () => {
+  it("uses clip_vision only for CLIPVisionLoader and keeps ordinary CLIP loaders in text_encoders", async () => {
+    objectInfo.current = structuredClone(CLIP_LOADER_OBJECT_INFO);
+    const workflow = {
+      "1": {
+        class_type: "CLIPVisionLoader",
+        inputs: { clip_name: "dino_v3_vit_h.safetensors" },
+      },
+      "2": {
+        class_type: "CLIPLoader",
+        inputs: { clip_name: "clip_l.safetensors", type: "stable_diffusion" },
+      },
+      "3": {
+        class_type: "DualCLIPLoader",
+        inputs: {
+          clip_name1: "clip_g.safetensors",
+          clip_name2: "t5xxl_fp16.safetensors",
+          type: "flux",
+        },
+      },
+    };
+
+    const res = await captureHandler()({ workflow });
+    const text = res.content[0]!.text as string;
+
+    expect(text).toMatch(/4 missing model/);
+    expect(text).toContain(
+      "node 1 (CLIPVisionLoader · clip_name) → installs to `models/clip_vision/`",
+    );
+    expect(text).toContain("node 2 (CLIPLoader · clip_name) → installs to `models/text_encoders/`");
+    expect(text).toContain("node 3 (DualCLIPLoader · clip_name1) → installs to `models/text_encoders/`");
+    expect(text).toContain("node 3 (DualCLIPLoader · clip_name2) → installs to `models/text_encoders/`");
+    expect(text).not.toContain("CLIPVisionLoader · clip_name) → installs to `models/text_encoders/`");
   });
 });

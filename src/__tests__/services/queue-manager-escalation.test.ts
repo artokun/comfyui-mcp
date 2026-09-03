@@ -29,7 +29,9 @@ const queueBehavior = vi.hoisted(() => ({
     | "gapped-then-wedged"
     | "gapped-final-wedged"
     | "target-clears-other-starts"
-    | "stops-on-interrupt",
+    | "stops-on-interrupt"
+    | "idle"
+    | "idle-with-pending",
   calls: 0,
   freeFails: false,
   clearFails: false,
@@ -121,6 +123,16 @@ vi.mock("../../comfyui/client.js", () => ({
     // /free escalation went out between the two.
     if (queueBehavior.mode === "clears-after-free" && queueBehavior.calls >= 4) {
       return { queue_running: [], queue_pending: [] };
+    }
+    // Idle at EVERY read: nothing running, nothing pending (#2517 — cancel
+    // with clear_pending against this queue, and the clear request fails).
+    if (queueBehavior.mode === "idle") {
+      return { queue_running: [], queue_pending: [] };
+    }
+    // Nothing running, but pending jobs ARE queued and the clear cannot
+    // remove them — the case where a failed clear IS a real failure.
+    if (queueBehavior.mode === "idle-with-pending") {
+      return { queue_running: [], queue_pending: [[2, "prompt-abc"]] };
     }
     return { queue_running: [[1, "prompt-xyz"]], queue_pending: [] };
   },
@@ -328,6 +340,49 @@ describe("cancel escalation never folds a dead queue into a wedge verdict", () =
       queueBehavior.clearFails = true;
       const res = await cancelRunningJobEscalating({ clear_pending: true });
       expect(res.unverified).toBe(true);
+      expect(res.pending_cleared).toBeUndefined();
+      expect(res.message).toMatch(/Clearing pending jobs FAILED/);
+      expect(res.message).not.toMatch(/Pending jobs were cleared/);
+    },
+  );
+
+  it(
+    "an idle queue is not told pending jobs FAILED to clear when the request fails (#2517)",
+    { timeout: 20000 },
+    async () => {
+      // Nothing running, nothing pending — and the clear REQUEST still fails.
+      // The queue the same call just read holds no pending jobs, so "they may
+      // still be queued" is a contradiction, not a caution: the goal the clear
+      // was for is verifiably settled, and the result must read as a clean
+      // no-op rather than an unsettled failure.
+      queueBehavior.mode = "idle";
+      queueBehavior.clearFails = true;
+      const res = await cancelRunningJobEscalating({ clear_pending: true });
+      expect(res.target_state).toBe("stopped");
+      expect(res.pending_clear_failed).toBeUndefined();
+      expect(res.pending_cleared).toBeUndefined();
+      expect(res.message).toMatch(/No job is running\./);
+      // The failed request is still disclosed — honestly, and in present tense.
+      expect(res.message).toMatch(/clear request failed/);
+      expect(res.message).toMatch(/no pending jobs/);
+      expect(res.message).not.toMatch(/FAILED/);
+      expect(res.message).not.toMatch(/may still be queued/);
+      expect(res.message).not.toMatch(/Pending jobs were cleared/);
+    },
+  );
+
+  it(
+    "a clear that fails with pending jobs STILL queued is still a failure (control)",
+    { timeout: 20000 },
+    async () => {
+      // The inverse, which is how the #2517 fix could overshoot: nothing is
+      // running, but the pending backlog IS there and the clear did not
+      // remove it. That remains a real failure.
+      queueBehavior.mode = "idle-with-pending";
+      queueBehavior.clearFails = true;
+      const res = await cancelRunningJobEscalating({ clear_pending: true });
+      expect(res.target_state).toBe("stopped");
+      expect(res.pending_clear_failed).toBe(true);
       expect(res.pending_cleared).toBeUndefined();
       expect(res.message).toMatch(/Clearing pending jobs FAILED/);
       expect(res.message).not.toMatch(/Pending jobs were cleared/);

@@ -167,6 +167,49 @@ describe("poll() /history tail diff (#259)", () => {
     expect(QueueMonitor.drainCompletions()[0]?.status).toBe("interrupted");
   });
 
+  it("#2512 completed:true + execution_interrupted is interrupted, not success", async () => {
+    mockFetch({ queue: emptyQueue, history: {} });
+    await QueueMonitor.poll();
+    mockFetch({
+      queue: emptyQueue,
+      history: {
+        "h-int": {
+          status: {
+            status_str: "error",
+            completed: true,
+            messages: [["execution_interrupted", { prompt_id: "h-int" }]],
+          },
+        },
+      },
+    });
+    await QueueMonitor.poll();
+    expect(QueueMonitor.drainCompletions()[0]?.status).toBe("interrupted");
+  });
+
+  it("#2512 a running prompt already in the history tail still records interrupt when the queue empties", async () => {
+    priv.historyPrimed = true;
+    priv.historySeen = new Set(["p-int"]);
+    priv.state.runningPromptId = "p-int";
+    priv.state.lastActivityTs = Date.now() - 1_000;
+    mockFetch({
+      queue: emptyQueue,
+      history: {
+        "p-int": {
+          status: {
+            status_str: "error",
+            completed: true,
+            messages: [["execution_interrupted", { prompt_id: "p-int", timestamp: 1 }]],
+          },
+        },
+      },
+    });
+    await QueueMonitor.poll();
+    expect(QueueMonitor.drainCompletions()[0]).toMatchObject({
+      promptId: "p-int",
+      status: "interrupted",
+    });
+  });
+
   it("completing the tracked running prompt also clears the run state", async () => {
     mockFetch({ queue: { queue_running: [[1, "p-run", {}, {}, []]], queue_pending: [] }, history: {} });
     await QueueMonitor.poll();

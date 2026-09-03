@@ -26,7 +26,14 @@ export interface NodeSearchResult {
   query?: string;
   reason?: string;
   message?: string;
+  source?: "host_http";
+  note?: string;
 }
+
+export const HOST_HTTP_SEARCH_NOTE =
+  "Searched via ComfyUI-Manager HTTP because the panel's browser request to " +
+  "Manager getmappings did not complete. Live canvas reads still work; this is a " +
+  "panel-origin transport failure, not a Manager outage or a missing pack.";
 
 export type FetchMappings = (mode: MappingsMode) => Promise<unknown>;
 
@@ -67,6 +74,56 @@ function extractText(value: unknown): string {
 export function isManagerMappingsServerError(value: unknown): boolean {
   const text = extractText(value);
   return /getmappings/i.test(text) && /HTTP\s*5\d\d\b/.test(text);
+}
+
+/**
+ * Panel wrap from comfyui-mcp-panel#1130 / comfyui-mcp#1472: the browser's
+ * Manager `fetch` never completed, so there is no HTTP status or body.
+ *
+ * Anchored on the wrap + a transport cause at the START of that cause.
+ * A Manager-originated rejection that merely mentions "Failed to fetch" or
+ * "NetworkError" mid-sentence is not this. AbortError is the caller's own
+ * cancellation. Mutating Manager routes (install/queue) do not inherit the
+ * read-only host-HTTP fallback this predicate gates.
+ */
+export function isManagerTransportFetchFailure(value: unknown): boolean {
+  const text = extractText(value).replace(/^(?:Error:\s*)+/i, "").trim();
+  if (!text) return false;
+  const match = /^ComfyUI-Manager request to (\S+) did not complete:\s*([\s\S]+)$/i.exec(text);
+  if (!match) return false;
+  const path = match[1] ?? "";
+  const cause = (match[2] ?? "").trim();
+  if (!/\/(?:v2\/)?customnode\/(?:getmappings|installed)(?:\?|$)/i.test(path)) return false;
+  if (/^AbortError\b/i.test(cause)) return false;
+  if (/\bHTTP\s*\d{3}\b/.test(cause)) return false;
+  return (
+    /^(?:TypeError:\s*)?Failed to fetch\b/i.test(cause) ||
+    /^fetch failed\.?$/i.test(cause) ||
+    /^NetworkError\b/i.test(cause)
+  );
+}
+
+export function dualCauseSearchFailure(
+  query: string,
+  panelErr: unknown,
+  hostErr: unknown,
+): NodeSearchResult {
+  const panel = extractText(panelErr) || "panel Manager request did not complete";
+  const host = extractText(hostErr) || "host Manager HTTP failed";
+  return {
+    supported: false,
+    count: 0,
+    results: [],
+    query: query == null ? "" : String(query),
+    reason: panel,
+    message:
+      "Node-registry search could not complete: the panel's ComfyUI-Manager request " +
+      "did not complete (Failed to fetch), and host Manager HTTP mappings also failed. " +
+      `Panel: ${panel} Host: ${host} ` +
+      "That is not a Manager outage inferred from a transport-only fetch failure, and " +
+      "not proof the pack is missing. Retry after Manager recovers, or search with " +
+      'search_custom_nodes action:"search" (queries api.comfy.org directly, not through Manager).',
+  };
 }
 
 export function catalogueSize(data: unknown): number {
@@ -215,9 +272,38 @@ export async function searchNodesViaMappings(opts: {
   };
 }
 
+async function hostSearchAfterTransport(
+  opts: {
+    query: string;
+    limit?: number;
+    fetchMappings?: FetchMappings;
+  },
+  panelErr: unknown,
+): Promise<NodeSearchResult> {
+  try {
+    const parsed = await searchNodesViaMappings(opts);
+    if (parsed.manager_outage) {
+      return {
+        ...dualCauseSearchFailure(opts.query, panelErr, parsed.reason ?? parsed.message),
+        manager_outage: true,
+      };
+    }
+    return { ...parsed, source: "host_http", note: HOST_HTTP_SEARCH_NOTE };
+  } catch (hostErr) {
+    return dualCauseSearchFailure(opts.query, panelErr, hostErr);
+  }
+}
+
+function shouldHostSearch(value: unknown): boolean {
+  return isManagerTransportFetchFailure(value) || isManagerMappingsServerError(value);
+}
+
 /**
  * Panel nodes_search first. If the panel surfaces a mappings HTTP 5xx
  * (throw or fail() ToolResult), degrade to searchNodesViaMappings.
+ * If the panel's Manager fetch never completed (`Failed to fetch` wrap),
+ * the same host-HTTP search is used — that is a panel-origin transport
+ * failure, not a Manager outage and not a missing pack.
  */
 export async function searchPanelNodes(opts: {
   panelSearch: () => Promise<unknown>;
@@ -227,10 +313,16 @@ export async function searchPanelNodes(opts: {
 }): Promise<{ via: "panel"; value: unknown } | { via: "fallback"; value: NodeSearchResult }> {
   try {
     const value = await opts.panelSearch();
-    if (!isManagerMappingsServerError(value)) return { via: "panel", value };
+    if (!shouldHostSearch(value)) return { via: "panel", value };
+    if (isManagerTransportFetchFailure(value)) {
+      return { via: "fallback", value: await hostSearchAfterTransport(opts, value) };
+    }
     return { via: "fallback", value: await searchNodesViaMappings(opts) };
   } catch (err) {
-    if (!isManagerMappingsServerError(err)) throw err;
+    if (!shouldHostSearch(err)) throw err;
+    if (isManagerTransportFetchFailure(err)) {
+      return { via: "fallback", value: await hostSearchAfterTransport(opts, err) };
+    }
     return { via: "fallback", value: await searchNodesViaMappings(opts) };
   }
 }

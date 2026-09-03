@@ -90,6 +90,32 @@ export function historyCompletionTimeMs(
   return ms;
 }
 
+/** Terminal history message: error wins over interrupt, interrupt over success. */
+export function historyTerminalMessage(
+  entry: HistoryEntry,
+): HistoryStatusMessage | undefined {
+  const messages = normalizeHistoryMessages(entry);
+  return (
+    messages.find((m) => m[0] === "execution_error") ??
+    messages.find((m) => m[0] === "execution_interrupted") ??
+    messages.find((m) => m[0] === "execution_success")
+  );
+}
+
+/**
+ * Real finish time from any terminal history message (success, error, or
+ * interrupt). `historyCompletionTimeMs` stays success-only for asset
+ * registration; interrupt/error timing is a display/duration fact (#2512).
+ */
+export function historyTerminalTimeMs(
+  entry: HistoryEntry,
+  now: number,
+): number | undefined {
+  const ms = normalizeEpochMs(historyTerminalMessage(entry)?.[1]?.timestamp);
+  if (ms === undefined || ms > now + 60_000) return undefined;
+  return ms;
+}
+
 const executionErrorSchema = z.object({
   node_id: z.union([z.string(), z.number()]).optional(),
   node_type: z.string().optional(),
@@ -211,10 +237,7 @@ export function extractExecutionStats(
 ): ExecutionStats | undefined {
   const messages = normalizeHistoryMessages(entry);
   const startTs = timestamp(messageData(entry, "execution_start"));
-  const endMsg = messages.find(
-    (m) => m[0] === "execution_success" || m[0] === "execution_error",
-  );
-  const endTs = timestamp(endMsg?.[1]);
+  const endTs = timestamp(historyTerminalMessage(entry)?.[1]);
   const nodes: ExecutionStats["nodes"] = {};
 
   let previousTs = startTs;

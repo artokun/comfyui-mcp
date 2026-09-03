@@ -32,12 +32,13 @@ import { join, sep } from "node:path";
 // the client's headers are still applied.
 const fetchApi = vi.fn();
 const fetchInit = vi.fn();
+const clientApi = vi.hoisted(() => ({ prefix: "" }));
 vi.mock("../../comfyui/client.js", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../../comfyui/client.js")>();
   return {
     ...actual,
     getClient: () => ({
-      apiURL: (route: string) => route,
+      apiURL: (route: string) => `${clientApi.prefix}${route}`,
       apiHeaders: () => ({ "Comfy-User": "default", Accept: "*/*" }),
       fetch: (url: string, init?: unknown) => {
         fetchInit(init);
@@ -55,6 +56,8 @@ const { WORKFLOW_LIBRARY_LISTING_ROUTE, __userdataLibraryTestHooks } = await imp
 );
 import type { PanelToolCtx } from "../../orchestrator/panel-tools.js";
 import { config } from "../../config.js";
+import { setConnectedPanelOrigins } from "../../comfyui/fetch.js";
+import { __resetPanelBaseCache, __setPanelBaseForTests } from "../../services/panel-workspace.js";
 
 type Forwarded = Record<string, unknown>;
 function makeCtx(opts?: { panelOrigin?: string }): { ctx: PanelToolCtx; calls: Forwarded[] } {
@@ -93,6 +96,7 @@ let savedConfigPath: string | undefined;
 beforeEach(() => {
   fetchApi.mockReset();
   fetchInit.mockReset();
+  clientApi.prefix = "";
   savedComfyPath = process.env.COMFYUI_PATH;
   savedConfigPath = config.comfyuiPath;
   // No local COMFYUI_PATH → the guessed workflows dirs are empty, so a relative
@@ -109,6 +113,8 @@ afterEach(() => {
   config.comfyuiPath = savedConfigPath;
   __userdataLibraryTestHooks.setRetryDelays(null);
   __userdataLibraryTestHooks.setSleep(null);
+  setConnectedPanelOrigins(null);
+  __resetPanelBaseCache();
 });
 
 describe("panel_load_workflow: userdata fallback for a custom --user-directory (#202)", () => {
@@ -1285,6 +1291,92 @@ describe("panel_load_workflow after a confirmed restart (#1845)", () => {
       expect(res.isError).toBeUndefined();
       expect(calls.filter((c) => c.cmd === "graph_load")).toHaveLength(1);
     expect(graphLoadCall(calls).graph).toMatchObject(staged);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("retries the live loopback alias instead of staying on a dead 127.0.0.1:8188", async () => {
+    // Production-shaped client: apiURL is the full headless URL, not a relative
+    // route. After a confirmed restart 8188 stays refused; the browser's
+    // localhost spelling is the live origin. #1850 only retried opts.panelOrigin
+    // when the string differed, so this path never left 8188.
+    clientApi.prefix = "http://127.0.0.1:8188";
+    const graph = { nodes: [{ id: 3, type: "LoopbackAliasLoad" }], links: [] };
+    fetchApi.mockImplementation(async (url: string) => {
+      if (String(url).startsWith("http://localhost:8188/")) {
+        return { ok: true, status: 200, text: async () => JSON.stringify(graph) };
+      }
+      throw Object.assign(new Error("connect ECONNREFUSED 127.0.0.1:8188"), { code: "ECONNREFUSED" });
+    });
+
+    const { ctx, calls } = makeCtx();
+    const res = await loadWorkflow().handler(
+      { path: "workflows/minimaxH3InfiniteVideoRef2va9Img3_v2Turbo.json" },
+      ctx,
+    );
+
+    expect(res.isError).toBeUndefined();
+    expect(fetchApi).toHaveBeenCalledWith(
+      `http://localhost:8188/api/userdata/${encodeURIComponent("workflows/minimaxH3InfiniteVideoRef2va9Img3_v2Turbo.json")}`,
+    );
+    expect(calls.filter((c) => c.cmd === "graph_load")).toHaveLength(1);
+    expect(graphLoadCall(calls).graph).toMatchObject(graph);
+  });
+
+  it("retries a published live panel origin when the tab origin is still the dead 8188", async () => {
+    clientApi.prefix = "http://127.0.0.1:8188";
+    setConnectedPanelOrigins(() => ["http://127.0.0.1:8000"]);
+    const graph = { nodes: [{ id: 4, type: "PublishedOriginLoad" }], links: [] };
+    fetchApi.mockImplementation(async (url: string) => {
+      if (String(url).startsWith("http://127.0.0.1:8000/")) {
+        return { ok: true, status: 200, text: async () => JSON.stringify(graph) };
+      }
+      throw Object.assign(new Error("connect ECONNREFUSED 127.0.0.1:8188"), { code: "ECONNREFUSED" });
+    });
+
+    const { ctx, calls } = makeCtx({ panelOrigin: "http://127.0.0.1:8188" });
+    const res = await loadWorkflow().handler(
+      { path: "workflows/minimaxH3InfiniteVideoRef2va9Img3_v2Turbo.json" },
+      ctx,
+    );
+
+    expect(res.isError).toBeUndefined();
+    expect(fetchApi).toHaveBeenCalledWith(
+      `http://127.0.0.1:8000/api/userdata/${encodeURIComponent("workflows/minimaxH3InfiniteVideoRef2va9Img3_v2Turbo.json")}`,
+    );
+    expect(calls.filter((c) => c.cmd === "graph_load")).toHaveLength(1);
+    expect(graphLoadCall(calls).graph).toMatchObject(graph);
+  });
+
+  it("does not claim COMFYUI_PATH is unset when the primed panel workspace is known", async () => {
+    const root = mkdtempSync(join(tmpdir(), "cmcp-primed-ws-"));
+    try {
+      const defaultDir = join(root, "user", "default", "workflows");
+      mkdirSync(defaultDir, { recursive: true });
+      const staged = { nodes: [{ id: 11, type: "PrimedWorkspaceNode" }], links: [] };
+      writeFileSync(
+        join(defaultDir, "minimaxH3InfiniteVideoRef2va9Img3_v2Turbo.json"),
+        JSON.stringify(staged),
+        "utf8",
+      );
+      // Env and config both unset — the same shape as the reporter, where
+      // install_comfyui environment had already named this tree via the panel.
+      __setPanelBaseForTests(root);
+      fetchApi.mockRejectedValue(
+        Object.assign(new Error("connect ECONNREFUSED 127.0.0.1:8188"), { code: "ECONNREFUSED" }),
+      );
+
+      const { ctx, calls } = makeCtx();
+      const res = await loadWorkflow().handler(
+        { path: "workflows/minimaxH3InfiniteVideoRef2va9Img3_v2Turbo.json" },
+        ctx,
+      );
+
+      expect(res.isError).toBeUndefined();
+      expect(JSON.stringify(res)).not.toMatch(/COMFYUI_PATH not set/);
+      expect(calls.filter((c) => c.cmd === "graph_load")).toHaveLength(1);
+      expect(graphLoadCall(calls).graph).toMatchObject(staged);
     } finally {
       rmSync(root, { recursive: true, force: true });
     }

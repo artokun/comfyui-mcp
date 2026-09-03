@@ -121,9 +121,18 @@ afterEach(async () => {
   writeConfig(SERVER);
 });
 
-async function callListMcpOverHttp(): Promise<ListMcpReply> {
+async function callListMcpOverHttp(
+  manifestOutcomeScopeForTab?: (tabId: string) => string | undefined,
+): Promise<ListMcpReply> {
   // Ephemeral port so a developer's live orchestrator on 9181 is never disturbed.
-  httpServer = await startPanelMcpHttpServer(bridge, 0);
+  httpServer = await startPanelMcpHttpServer(
+    bridge,
+    0,
+    "127.0.0.1",
+    undefined,
+    undefined,
+    manifestOutcomeScopeForTab,
+  );
   const url = httpServer.urlFor(TAB);
   const init = await fetch(url, {
     method: "POST",
@@ -210,6 +219,18 @@ describe("a CLI-lane session is not told it has the user's Claude-config MCP ser
   it("still reports the servers this lane genuinely was handed", async () => {
     const reply = await callListMcpOverHttp();
     expect(reply.builtin).toEqual(["comfyui", "panel"]);
+  });
+
+  it("preserves the backend-qualified agent key at the HTTP outcome-scope boundary", async () => {
+    let receivedTabId: string | undefined;
+    await callListMcpOverHttp((tabId) => {
+      receivedTabId = tabId;
+      return tabId;
+    });
+    // The production Codex/Gemini URL is addressed by the composite agent key,
+    // not by a real panel tab. The callback must receive that exact key so the
+    // queue-status reader can find the child outcome under the same scope.
+    expect(receivedTabId).toBe(TAB);
   });
 });
 
@@ -548,7 +569,7 @@ describe("the wiring that makes the above reachable in production", () => {
   it("the loopback HTTP lane declares itself non-inheriting when it builds its ctx", () => {
     const src = read("../../orchestrator/panel-mcp-http.ts");
     expect(src).toMatch(
-      /registerPanelTools\(\s*server,\s*makePanelToolCtx\(bridge, tabId, workflowTargets, onRunTicketOpened, \{\s*inheritsUserMcpServers: false,\s*\}\),\s*\)/,
+      /registerPanelTools\(\s*server,\s*makePanelToolCtx\(bridge, tabId, workflowTargets, onRunTicketOpened, \{\s*inheritsUserMcpServers: false,[\s\S]*?\}\),\s*\)/,
     );
   });
 

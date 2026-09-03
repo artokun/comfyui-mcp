@@ -219,6 +219,24 @@ describe("buildCompletionNotification", () => {
       },
     ]);
   });
+
+  it("#2512 interrupted duration/finished-at come from execution_interrupted, not delivery time", () => {
+    const interruptAt = START + 21 * 60 * 1000 + 8 * 1000;
+    const notification = buildCompletionNotification(
+      PROMPT_ID,
+      historyEntry(
+        [
+          ["execution_start", { prompt_id: PROMPT_ID, timestamp: START }],
+          ["execution_interrupted", { prompt_id: PROMPT_ID, timestamp: interruptAt }],
+        ],
+        "error",
+      ),
+      START,
+    );
+    expect(notification.status).toBe("interrupted");
+    expect(notification.duration_ms).toBe(interruptAt - START);
+    expect(Date.parse(notification.timestamp)).toBe(interruptAt);
+  });
 });
 
 function sampleWorkflow(): WorkflowJSON {
@@ -326,6 +344,30 @@ describe("watched-path asset registration (#751 r3 gate)", () => {
       promptId: "watched-success",
       filename: "watched_00001_.png",
       source: "watched",
+    });
+  });
+
+  it("canonicalizes an unsupported history type on the watched production path", async () => {
+    const ts = Date.now() - 1000;
+    await runWatchedCompletion(
+      "watched-raw-type",
+      completionEntry({
+        statusStr: "success",
+        outputs: {
+          "9": {
+            images: [{ filename: "watched-raw-type.png", subfolder: "", type: "legacy-output-tag" }],
+          },
+        },
+        messages: [
+          ["execution_start", { prompt_id: "watched-raw-type", timestamp: ts - 1 }],
+          ["execution_success", { prompt_id: "watched-raw-type", timestamp: ts }],
+        ],
+      }),
+    );
+
+    expect(AssetRegistry.list()[0]).toMatchObject({
+      type: "output",
+      url: expect.stringContaining("type=output"),
     });
   });
 });

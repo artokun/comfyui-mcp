@@ -82,6 +82,8 @@ import { tmpdir } from "node:os";
 import {
   updateComfyUICore,
   updateAllCustomNodes,
+  isStaleRemoteRefLock,
+  isDetachedPullFailure,
 } from "../../services/update-comfyui.js";
 import { resetManagerApiCacheForTests } from "../../services/node-management.js";
 
@@ -423,6 +425,233 @@ describe("updateComfyUICore", () => {
       throw new Error("no uv");
     });
     await expect(updateComfyUICore()).rejects.toThrow(/Command failed: git pull/);
+  });
+
+  // #2524 — install_comfyui(action:"update") used a bare `git pull`. A checkout
+  // pinned at a detached release tag first failed because stale origin/dev
+  // conflicted with new origin/dev/* refs, then (after a manual prune) failed
+  // again because HEAD was detached. The tool threw PROCESS_CONTROL_ERROR with
+  // raw git output instead of recovering or returning a structured action.
+  describe("#2524: stale origin refs and detached version-tag checkouts", () => {
+    const STALE_REF_LOCK =
+      "error: cannot lock ref 'refs/remotes/origin/dev/Combo-RemoteOptions': " +
+      "'refs/remotes/origin/dev' exists; cannot create " +
+      "'refs/remotes/origin/dev/Combo-RemoteOptions'\n" +
+      "error: some local refs could not be updated; try running\n" +
+      " 'git remote prune origin' to remove any old, conflicting branches";
+    const DETACHED_PULL =
+      "You are not currently on a branch.\n" +
+      "Please specify which branch you want to merge with.\n" +
+      "See git-pull(1) for details.";
+
+    it("classifies the reported ref-lock and detached-pull texts, and no others", () => {
+      expect(isStaleRemoteRefLock(STALE_REF_LOCK)).toBe(true);
+      expect(
+        isStaleRemoteRefLock(
+          "cannot lock ref refs/remotes/origin/dev/Combo-RemoteOptions: refs/remotes/origin/dev exists",
+        ),
+      ).toBe(true);
+      expect(
+        isStaleRemoteRefLock("fatal: Unable to create '/x/.git/index.lock': File exists."),
+      ).toBe(false);
+      expect(isStaleRemoteRefLock("fatal: not a git repository")).toBe(false);
+      expect(isDetachedPullFailure(DETACHED_PULL)).toBe(true);
+      expect(isDetachedPullFailure(STALE_REF_LOCK)).toBe(false);
+    });
+
+    const gitFail = (stderr: string): never => {
+      const err = new Error("exit 1") as Error & { stderr: string };
+      err.stderr = stderr;
+      throw err;
+    };
+
+    const scriptGit = (probe: (args: string[]) => string | undefined) => {
+      mockedExists.mockImplementation((p: string) => {
+        if (p === "/fake/ComfyUI") return true;
+        if (p.endsWith("requirements.txt")) return true;
+        return false;
+      });
+      mockedExec.mockImplementation((file: string, args: string[]) => {
+        if (file === "uv" || file === "uv.exe") throw new Error("uv not found");
+        if (file === "git") {
+          const out = probe(args);
+          if (out === undefined) throw new Error(`git ${args.join(" ")} failed`);
+          return out;
+        }
+        return "ok";
+      });
+    };
+
+    const gitCalls = (name: string) =>
+      mockedExec.mock.calls.filter(
+        (c) => c[0] === "git" && Array.isArray(c[1]) && c[1][0] === name,
+      );
+
+    it("prunes origin once on a stale origin/dev ref-lock and retries the pull", async () => {
+      let pulls = 0;
+      scriptGit((args) => {
+        if (args[0] === "pull") {
+          pulls += 1;
+          if (pulls === 1) gitFail(STALE_REF_LOCK);
+          return "Updating dec5d94..2eb6079";
+        }
+        if (args[0] === "remote" && args[1] === "prune") return "Pruning origin";
+        if (args[0] === "rev-parse" && args[1] === "HEAD") {
+          return pulls >= 2 ? "2eb60796bbbb" : "dec5d945aaaa";
+        }
+        if (args[0] === "symbolic-ref") return "master";
+        if (args[0] === "rev-parse" && args[1] === "--abbrev-ref") return "origin/master";
+        if (args[0] === "rev-parse" && args[1] === "origin/master") return "2eb60796bbbb";
+        return undefined;
+      });
+
+      const r = await updateComfyUICore();
+      expect(r.updated).toBe(true);
+      expect(gitCalls("pull")).toHaveLength(2);
+      expect(gitCalls("remote").map((c) => c[1])).toEqual([["remote", "prune", "origin"]]);
+      expect(gitCalls("checkout")).toHaveLength(0);
+    });
+
+    it("does not prune-retry a second ref-lock (recovery is once)", async () => {
+      scriptGit((args) => {
+        if (args[0] === "pull") gitFail(STALE_REF_LOCK);
+        if (args[0] === "remote" && args[1] === "prune") return "Pruning origin";
+        if (args[0] === "rev-parse" && args[1] === "HEAD") return "dec5d945aaaa";
+        if (args[0] === "symbolic-ref") return "master";
+        return undefined;
+      });
+
+      await expect(updateComfyUICore()).rejects.toThrow(/cannot lock ref/);
+      expect(gitCalls("pull")).toHaveLength(2);
+      expect(gitCalls("remote")).toHaveLength(1);
+    });
+
+    it("attaches a clean detached tag checkout to local master, then recovers a stale ref-lock", async () => {
+      // THE reported sequence: detached at v0.16.4, stale origin/dev, local
+      // master present. Workaround was prune + checkout master + retry.
+      let onMaster = false;
+      let pulls = 0;
+      scriptGit((args) => {
+        if (args[0] === "symbolic-ref") return onMaster ? "master" : undefined;
+        if (args[0] === "show-ref" && args.includes("refs/heads/master")) {
+          return "dec5d945aaaa refs/heads/master";
+        }
+        if (args[0] === "status" && args.includes("--porcelain")) return "";
+        if (args[0] === "checkout" && args[1] === "master") {
+          onMaster = true;
+          return "Switched to branch 'master'";
+        }
+        if (args[0] === "pull") {
+          pulls += 1;
+          if (pulls === 1) gitFail(STALE_REF_LOCK);
+          return "Updating dec5d94..2eb6079";
+        }
+        if (args[0] === "remote" && args[1] === "prune") return "Pruning origin";
+        if (args[0] === "rev-parse" && args[1] === "HEAD") {
+          return pulls >= 2 ? "2eb60796bbbb" : "dec5d945aaaa";
+        }
+        if (args[0] === "rev-parse" && args[1] === "--abbrev-ref") {
+          return onMaster ? "origin/master" : undefined;
+        }
+        if (args[0] === "rev-parse" && args[1] === "origin/master") return "2eb60796bbbb";
+        return undefined;
+      });
+
+      const r = await updateComfyUICore();
+      expect(r.updated).toBe(true);
+      expect(r.revision?.branch).toBe("master");
+      expect(gitCalls("checkout").map((c) => c[1])).toEqual([["checkout", "master"]]);
+      expect(gitCalls("remote")).toHaveLength(1);
+      expect(gitCalls("pull")).toHaveLength(2);
+      const mutating = mockedExec.mock.calls
+        .filter(
+          (c) =>
+            c[0] === "git" &&
+            Array.isArray(c[1]) &&
+            (c[1][0] === "checkout" || c[1][0] === "pull" || c[1][0] === "remote"),
+        )
+        .map((c) => (Array.isArray(c[1]) ? c[1].join(" ") : ""));
+      expect(mutating).toEqual([
+        "checkout master",
+        "pull",
+        "remote prune origin",
+        "pull",
+      ]);
+    });
+
+    it("returns a structured DETACHED action instead of PROCESS_CONTROL_ERROR when pull has no branch", async () => {
+      scriptGit((args) => {
+        if (args[0] === "pull") gitFail(DETACHED_PULL);
+        if (args[0] === "rev-parse" && args[1] === "HEAD") return "dec5d945aaaa";
+        if (args[0] === "symbolic-ref") return undefined;
+        return undefined;
+      });
+
+      const r = await updateComfyUICore();
+      expect(r.updated).toBe(false);
+      expect(r.message).toMatch(/DETACHED/);
+      expect(r.message).toMatch(/git checkout master/);
+      expect(r.message).not.toMatch(/Command failed: git pull/);
+      expect(r.revision?.branch).toBeNull();
+      expect(gitCalls("checkout")).toHaveLength(0);
+    });
+
+    it("does not switch a dirty detached checkout onto local master", async () => {
+      scriptGit((args) => {
+        if (args[0] === "symbolic-ref") return undefined;
+        if (args[0] === "show-ref" && args.includes("refs/heads/master")) {
+          return "dec5d945aaaa refs/heads/master";
+        }
+        if (args[0] === "status" && args.includes("--porcelain")) {
+          return " M main.py";
+        }
+        if (args[0] === "pull") gitFail(DETACHED_PULL);
+        if (args[0] === "rev-parse" && args[1] === "HEAD") return "dec5d945aaaa";
+        return undefined;
+      });
+
+      const r = await updateComfyUICore();
+      expect(r.updated).toBe(false);
+      expect(r.message).toMatch(/not clean/);
+      expect(r.message).toMatch(/git checkout master/);
+      expect(gitCalls("checkout")).toHaveLength(0);
+    });
+
+    it("does not treat an index.lock collision as a stale origin ref", async () => {
+      scriptGit((args) => {
+        if (args[0] === "pull") {
+          gitFail("fatal: Unable to create '/fake/ComfyUI/.git/index.lock': File exists.");
+        }
+        if (args[0] === "rev-parse" && args[1] === "HEAD") return "dec5d945aaaa";
+        if (args[0] === "symbolic-ref") return "master";
+        return undefined;
+      });
+
+      await expect(updateComfyUICore()).rejects.toThrow(/index\.lock/);
+      expect(gitCalls("pull")).toHaveLength(1);
+      expect(gitCalls("remote")).toHaveLength(0);
+    });
+
+    it("after prune, a still-detached pull is a structured refusal not a raw git dump", async () => {
+      let pulls = 0;
+      scriptGit((args) => {
+        if (args[0] === "pull") {
+          pulls += 1;
+          gitFail(pulls === 1 ? STALE_REF_LOCK : DETACHED_PULL);
+        }
+        if (args[0] === "remote" && args[1] === "prune") return "Pruning origin";
+        if (args[0] === "rev-parse" && args[1] === "HEAD") return "dec5d945aaaa";
+        if (args[0] === "symbolic-ref") return undefined;
+        return undefined;
+      });
+
+      const r = await updateComfyUICore();
+      expect(r.updated).toBe(false);
+      expect(r.message).toMatch(/DETACHED/);
+      expect(r.message).not.toMatch(/Command failed: git pull/);
+      expect(gitCalls("pull")).toHaveLength(2);
+      expect(gitCalls("remote")).toHaveLength(1);
+    });
   });
 
   it("refuses before git pull when the running server's interpreter cannot be verified (#651)", async () => {

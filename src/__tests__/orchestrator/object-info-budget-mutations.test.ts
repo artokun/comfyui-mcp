@@ -18,7 +18,7 @@
 // acknowledged #2202 stale-combo timeout where the panel has already
 // retired its schema snapshot.
 
-import { beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
   __resetPanelSchemaReadinessForTest,
@@ -30,6 +30,8 @@ import {
 import { WorkflowTargetStore } from "../../services/workflow-target-store.js";
 
 const TAB = "wf:workflows/a.json";
+const RECONNECT_TAB = "wf:workflows/refresh-reconnect.json";
+const STALE_TAB = "wf:workflows/refresh-stale.json";
 
 /** The reporter's exact panel_add_node refusal (issue #2007). */
 const ADD_UNAVAILABLE =
@@ -90,6 +92,20 @@ function bridge(send: (cmd: Record<string, unknown>) => Promise<unknown>) {
     tabGraphMutationCapability: () => ({ known: true, canMutate: true }),
   } as unknown as PanelToolCtx["bridge"];
   return { b, calls };
+}
+
+type RefreshIdentityBridge = PanelToolCtx["bridge"] & {
+  tabConnectionGeneration: (tabId: string) => number;
+  tabIncarnation: (tabId: string) => string;
+};
+
+function setRefreshIdentity(
+  bridge: PanelToolCtx["bridge"],
+  generation: () => number,
+): void {
+  const identified = bridge as RefreshIdentityBridge;
+  identified.tabConnectionGeneration = () => generation();
+  identified.tabIncarnation = () => "same-browser-tab";
 }
 
 async function callTool(
@@ -205,6 +221,117 @@ describe("panel_add_node retries a schema-budget refusal without refresh_nodes (
 });
 
 describe("panel_set_widget shares schema refresh recovery (#2007, #2274)", () => {
+  it("clears a terminal success so the next explicit refresh starts a new request", async () => {
+    let refreshes = 0;
+    const { b, calls } = bridge(async (cmd) => {
+      if (cmd.cmd === "refresh_nodes") {
+        refreshes += 1;
+        return { refreshed: true, refresh: refreshes };
+      }
+      return { ok: true };
+    });
+    const ctx = makePanelToolCtx(b, TAB, new WorkflowTargetStore());
+    const refreshNodes = buildPanelToolDefs().find((d) => d.name === "panel_refresh_nodes");
+    if (!refreshNodes) throw new Error("panel_refresh_nodes is not registered");
+
+    const first = await refreshNodes.handler({} as never, ctx);
+    const second = await refreshNodes.handler({} as never, ctx);
+
+    expect(first.isError).toBeFalsy();
+    expect(second.isError).toBeFalsy();
+    expect(calls).toEqual(["refresh_nodes", "refresh_nodes"]);
+  });
+
+  it("clears a terminal failure, including refresh_still_running, before a later retry", async () => {
+    let refreshes = 0;
+    const { b, calls } = bridge(async (cmd) => {
+      if (cmd.cmd === "refresh_nodes") {
+        refreshes += 1;
+        return refreshes === 1
+          ? { refreshed: false, reason: "refresh_still_running" }
+          : { refreshed: true };
+      }
+      return { ok: true };
+    });
+    const ctx = makePanelToolCtx(b, TAB, new WorkflowTargetStore());
+    const refreshNodes = buildPanelToolDefs().find((d) => d.name === "panel_refresh_nodes");
+    if (!refreshNodes) throw new Error("panel_refresh_nodes is not registered");
+
+    const first = await refreshNodes.handler({} as never, ctx);
+    const second = await refreshNodes.handler({} as never, ctx);
+
+    expect(first.isError).toBeFalsy();
+    expect(textOf(first)).toMatch(/refresh_still_running/);
+    expect(second.isError).toBeFalsy();
+    expect(JSON.parse(second.content[0].text!).refreshed).toBe(true);
+    expect(calls).toEqual(["refresh_nodes", "refresh_nodes"]);
+  });
+
+  it("keeps joining an active refresh across a reconnect generation", async () => {
+    let generation = 1;
+    let resolveRefresh!: (value: unknown) => void;
+    const refresh = new Promise((resolve) => {
+      resolveRefresh = resolve;
+    });
+    const { b, calls } = bridge(
+      async (cmd) => (cmd.cmd === "refresh_nodes" ? refresh : { ok: true }),
+    );
+    setRefreshIdentity(b, () => generation);
+    const ctx = makePanelToolCtx(b, RECONNECT_TAB, new WorkflowTargetStore());
+    const refreshNodes = buildPanelToolDefs().find((d) => d.name === "panel_refresh_nodes");
+    if (!refreshNodes) throw new Error("panel_refresh_nodes is not registered");
+
+    const first = refreshNodes.handler({} as never, ctx);
+    await Promise.resolve();
+    generation = 2;
+    const second = refreshNodes.handler({} as never, ctx);
+    await Promise.resolve();
+
+    expect(calls).toEqual(["refresh_nodes"]);
+    resolveRefresh({ refreshed: true });
+    const results = await Promise.all([first, second]);
+    expect(results.every((result) => !result.isError)).toBe(true);
+  });
+
+  it("reclaims only an over-bound refresh with a known current generation", async () => {
+    vi.useFakeTimers();
+    try {
+      let generation = 7;
+      const resolvers: Array<(value: unknown) => void> = [];
+      const { b, calls } = bridge(async (cmd) => {
+        if (cmd.cmd !== "refresh_nodes") return { ok: true };
+        return new Promise((resolve) => resolvers.push(resolve));
+      });
+      setRefreshIdentity(b, () => generation);
+      const ctx = makePanelToolCtx(b, STALE_TAB, new WorkflowTargetStore());
+      const refreshNodes = buildPanelToolDefs().find((d) => d.name === "panel_refresh_nodes");
+      if (!refreshNodes) throw new Error("panel_refresh_nodes is not registered");
+
+      const first = refreshNodes.handler({} as never, ctx);
+      await Promise.resolve();
+      expect(calls).toEqual(["refresh_nodes"]);
+
+      vi.advanceTimersByTime(90_001);
+      generation = 8;
+      const second = refreshNodes.handler({} as never, ctx);
+      await Promise.resolve();
+      expect(calls).toEqual(["refresh_nodes", "refresh_nodes"]);
+
+      // The old request settling must not clear the replacement record.
+      resolvers[0]({ refreshed: false, reason: "refresh_still_running" });
+      await first;
+      const third = refreshNodes.handler({} as never, ctx);
+      await Promise.resolve();
+      expect(calls).toEqual(["refresh_nodes", "refresh_nodes"]);
+
+      resolvers[1]({ refreshed: true });
+      const results = await Promise.all([second, third]);
+      expect(results.every((result) => !result.isError)).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("THE REPORTED CASE: share-timeout write then succeeds on the retry", async () => {
     let writes = 0;
     const { res, calls, text } = await callTool(

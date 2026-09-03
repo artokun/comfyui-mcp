@@ -232,9 +232,12 @@ export interface JournalEntry {
    *  ack. Bounds the replay loop — see release(). */
   carriedReleases?: number;
   /** An identical completion was delivered recently, so this may be the same
-   *  frame re-sent. The scheduling fence consumes this marker before a second
-   *  agent turn; it is retained here so the journal's verdict cannot be lost. */
+   *  frame re-sent. Kept as a delivery hint for the agent-facing payload. */
   possibleRepeat?: boolean;
+  /** This identified completion belongs to the current ticket generation, and
+   *  that exact run was already acknowledged. The production ingress consumes
+   *  this stronger verdict before scheduling another agent turn. */
+  alreadyDelivered?: boolean;
   /** This entry's prompt id was queued AGAIN while it was still undelivered, so
    *  it belongs to the older run. Still delivered, but it can no longer be merged
    *  into, settle a ticket, or memoize a delivery. */
@@ -859,9 +862,9 @@ export class RunCompletionJournalImpl {
    *
    * DEDUPE, in both directions:
    *  • IDENTIFIED (matched or foreign) — collapses onto any existing undelivered
-   *    entry for the same key + prompt id, and is suppressed outright once that
-   *    (tab, run) has been acked. One run can never produce two deliveries,
-   *    however many times the panel re-sends it.
+   *    entry for the same key + prompt id. A matched completion for the current
+   *    ticket generation that was already acked is marked for the production
+   *    ingress to suppress; foreign and unprovable completions remain deliverable.
    *  • ID-LESS — there is no run identity, so it dedupes on a CONTENT
    *    fingerprint within IDLESS_DEDUPE_WINDOW_MS. That is enough to stop a
    *    re-sent frame producing two turns (the agent double-reporting, or acting
@@ -981,7 +984,7 @@ export class RunCompletionJournalImpl {
       // Both cases fall back to the standing rule: duplicate over loss, each
       // delivered on its own and labelled UNDETERMINED.
       idUnprovable = idReused || gen === 0;
-      // ALREADY-DELIVERED IS A JOURNAL VERDICT, NOT THE SCHEDULING VETO.
+      // ALREADY-DELIVERED IS A JOURNAL VERDICT FOR THE PRODUCTION INGRESS.
       //
       // This used to `return null` — suppressing the completion outright — and
       // that single decision produced defect after defect, because every proof it
@@ -991,9 +994,11 @@ export class RunCompletionJournalImpl {
       // swallowed: exactly the failure this whole file exists to prevent, and the
       // one the project's rules call worse than a duplicate.
       //
-      // The journal records it FLAGGED as a possible repeat. The orchestrator's
-      // scheduling boundary consumes that flag before creating another turn;
-      // this journal still retains the entry until that boundary handles it.
+      // The journal records it FLAGGED as a possible repeat and carries the
+      // stronger verdict separately. The production ingress consumes that
+      // verdict before creating another turn; generic journal callers still
+      // retain the duplicate-over-loss behavior for entries they cannot prove
+      // are from this exact acknowledged run.
       if (
         !idUnprovable &&
         (this.delivered.has(deliveredKey(ownerOf(key, conversation), correlation.promptId, gen)) ||
@@ -1095,6 +1100,7 @@ export class RunCompletionJournalImpl {
       // One flag, both paths: an identified run whose completion was already
       // delivered, or an id-less one whose content matches a recent delivery.
       ...(idlessRepeat || alreadyDelivered ? { possibleRepeat: true } : {}),
+      ...(alreadyDelivered ? { alreadyDelivered: true } : {}),
       // Freeze the ambiguity onto the entry — see JournalEntry.ambiguousId.
       ...(idUnprovable ? { ambiguousId: true } : {}),
       // …and the GENERATION this completion belongs to, for EVERY identified
@@ -1444,6 +1450,23 @@ export class RunCompletionJournalImpl {
       this.dropped.set(entry.key, (this.dropped.get(entry.key) ?? 0) + entry.disclose!);
     }
     this.entries.delete(token);
+  }
+
+  /**
+   * Consume a duplicate that `record()` proved belongs to an already-acked
+   * current ticket generation, before the production delivery flush can offer
+   * it to the agent again. This is intentionally separate from `suppress()`:
+   * the latter is called from inside `deliverPending()` by the durable fence and
+   * must preserve its in-flush disclosure bookkeeping.
+   */
+  suppressAlreadyDelivered(token: string): boolean {
+    const entry = this.entries.get(token);
+    if (!entry?.alreadyDelivered) return false;
+    // The prior delivery is the proof that this duplicate was consumed. Using
+    // the normal ack path also records a newly supplied completion_key when an
+    // older client first delivered the same run without one.
+    this.ack(token);
+    return true;
   }
 
   /** Move every entry AND every open run ticket from `from` onto `to` — a panel

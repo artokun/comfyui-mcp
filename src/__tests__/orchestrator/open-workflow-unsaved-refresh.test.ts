@@ -46,20 +46,32 @@ let stamps: string[];
 
 const textOf = (res: ToolResult): string => (res.content[0] as { text: string }).text;
 
-function openReply(opts: { routingKey: string; withUuid: boolean }): Record<string, unknown> {
-  return {
+function openReply(opts: {
+  routingKey: string;
+  withUuid: boolean;
+  /** #2477 — some successful replies nest the key under `opened` only. */
+  nestRoutingKey?: boolean;
+  /** Synthetic saved-looking path the live panel can publish for an unsaved tab. */
+  openedPath?: string | null;
+}): Record<string, unknown> {
+  const opened: Record<string, unknown> = {
     // An UNSAVED workflow has no real path — the panel's own reply shape, per
     // web/js/comfyui-mcp-panel.js: `opened: { path: target.path, filename }`
     // with `target.path` undefined for a tmp: tab.
-    opened: { path: null, filename: null },
-    routing_key: opts.routingKey,
+    path: opts.openedPath === undefined ? null : opts.openedPath,
+    filename: opts.openedPath ? "Unsaved Workflow" : null,
+  };
+  if (opts.nestRoutingKey) opened.routing_key = opts.routingKey;
+  return {
+    opened,
+    ...(opts.nestRoutingKey ? {} : { routing_key: opts.routingKey }),
     ...(opts.withUuid ? { workflow_uuid: OPENED_UUID } : {}),
     modified: false,
     open_seq: 3,
   };
 }
 
-function bridgeFor(reply: Record<string, unknown>) {
+function bridgeFor(reply: Record<string, unknown>, list?: Record<string, unknown>) {
   return {
     send: async (cmd: Record<string, unknown>) => {
       sent.push(cmd);
@@ -68,6 +80,7 @@ function bridgeFor(reply: Record<string, unknown>) {
       // creation. The fix must not depend on this call succeeding, or ever
       // being made at all for the unsaved path — asserted explicitly below.
       if (cmd.cmd === "workflow_list") {
+        if (list) return list;
         throw new Error(
           "workflow instance mismatch: this command targets a different workflow than the active canvas",
         );
@@ -203,5 +216,68 @@ describe("#812 end to end — the reporter's exact sequence", () => {
     // The fence is now the NEW tab's instance — every subsequent panel_* call
     // this session sends will carry the correct stamp.
     expect(fence).toBe(OPENED_UUID);
+  });
+});
+
+describe("#2477 nested opened.routing_key is still unsaved-target proof", () => {
+  it("adopts the reply uuid when routing_key lives only under opened", async () => {
+    const res = await openWorkflow().handler(
+      { path: TAB_TOKEN },
+      ctxWith(bridgeFor(openReply({ routingKey: TAB_TOKEN, withUuid: true, nestRoutingKey: true }))),
+    );
+
+    expect(res.isError).toBeFalsy();
+    expect(fence).toBe(OPENED_UUID);
+    expect(sent.map((c) => c.cmd)).not.toContain("workflow_list");
+  });
+
+  it("does not reject a proven tmp: open as an unresolved filename when opened.path looks saved", async () => {
+    // Reporter shape: workflow_open applied, routing_key only under opened, and
+    // opened.path is the live synthetic unsaved path. The #1639 filename-alias
+    // guard then asked workflow_list, whose unsaved active record has no
+    // canonical saved identity, and the tool failed with UNKNOWN canvas.
+    const list = {
+      active_confirmed: true,
+      active: {
+        path: null,
+        filename: null,
+        title: "Unsaved Workflow",
+        routing_key: TAB_TOKEN,
+        workflow_uuid: OPENED_UUID,
+      },
+    };
+    const res = await openWorkflow().handler(
+      { path: TAB_TOKEN },
+      ctxWith(
+        bridgeFor(
+          openReply({
+            routingKey: TAB_TOKEN,
+            withUuid: true,
+            nestRoutingKey: true,
+            openedPath: "workflows/Unsaved Workflow.json",
+          }),
+          list,
+        ),
+      ),
+    );
+
+    expect(res.isError).toBeFalsy();
+    expect(textOf(res)).not.toMatch(/unconfirmed active workflow after resolving this filename/i);
+    expect(textOf(res)).not.toMatch(/active canvas is UNKNOWN/i);
+    expect(fence).toBe(OPENED_UUID);
+    expect(sent.map((c) => c.cmd)).not.toContain("workflow_list");
+  });
+
+  it("adopts nothing when the nested key names a different unsaved tab", async () => {
+    const res = await openWorkflow().handler(
+      { path: TAB_TOKEN },
+      ctxWith(
+        bridgeFor(openReply({ routingKey: OTHER_TAB_TOKEN, withUuid: true, nestRoutingKey: true })),
+      ),
+    );
+
+    expect(res.isError).toBeFalsy();
+    expect(stamps).toEqual([]);
+    expect(fence).toBe(PRIOR_UUID);
   });
 });

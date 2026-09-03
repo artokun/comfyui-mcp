@@ -1,4 +1,5 @@
 import { dispatchOutcomeOf } from "./ui-bridge.js";
+import { isManagerTransportFetchFailure } from "./manager-node-search.js";
 import { listInstalledNodes, type InstalledNode } from "./node-management.js";
 
 export type ListInstalledFn = () => Promise<InstalledNode[]>;
@@ -20,6 +21,11 @@ export interface ListedNodesHostResult {
 export const HOST_HTTP_LIST_NOTE =
   "Listed from ComfyUI-Manager HTTP because this session's panel tab was not connected. " +
   "This is the host pack inventory, not a Manager outage.";
+
+export const HOST_HTTP_TRANSPORT_NOTE =
+  "Listed from ComfyUI-Manager HTTP because the panel's browser request to Manager " +
+  "installed-packs did not complete. Live canvas reads still work; this is a " +
+  "panel-origin transport failure, not a Manager outage.";
 
 let listInstalledOverride: ListInstalledFn | undefined;
 
@@ -85,8 +91,17 @@ export function installedNodesToPanelMap(
 }
 
 export function dualCauseListFailure(tabErr: unknown, hostErr: unknown): string {
-  const tab = textFromUnknown(tabErr) || "panel tab was not connected";
   const host = textFromUnknown(hostErr) || "host Manager HTTP failed";
+  if (isManagerTransportFetchFailure(tabErr)) {
+    const panel = textFromUnknown(tabErr) || "panel Manager request did not complete";
+    return (
+      `nodes_list reached the panel tab, but the panel's ComfyUI-Manager request ` +
+      `did not complete, and the host Manager HTTP pack listing also failed. ` +
+      `Panel: ${panel} Host: ${host} ` +
+      `This is not a Manager outage inferred from a transport-only fetch failure.`
+    );
+  }
+  const tab = textFromUnknown(tabErr) || "panel tab was not connected";
   return (
     `nodes_list could not be dispatched to this session's panel tab, and the host ` +
     `Manager HTTP pack listing also failed. Tab: ${tab} Host: ${host} ` +
@@ -94,15 +109,24 @@ export function dualCauseListFailure(tabErr: unknown, hostErr: unknown): string 
   );
 }
 
+function shouldHostList(value: unknown): boolean {
+  return isPanelTabDispatchFailure(value) || isManagerTransportFetchFailure(value);
+}
+
+function hostListNote(panelErr: unknown): string {
+  return isManagerTransportFetchFailure(panelErr) ? HOST_HTTP_TRANSPORT_NOTE : HOST_HTTP_LIST_NOTE;
+}
+
 function resolveListInstalled(fn?: ListInstalledFn): ListInstalledFn {
   return fn ?? listInstalledOverride ?? listInstalledNodes;
 }
 
 /**
- * Panel `nodes_list` first. On pre-dispatch tab loss, serve the pack listing
- * from host Manager HTTP (`listInstalledNodes`) instead of dying as a
- * dispatch-only error. A live tab's Manager/object_info result is passed
- * through unchanged.
+ * Panel `nodes_list` first. On pre-dispatch tab loss, or when the live tab's
+ * Manager fetch never completed (`Failed to fetch` wrap), serve the pack
+ * listing from host Manager HTTP (`listInstalledNodes`) instead of dying as a
+ * dispatch-only or transport-only error. A live tab's Manager/object_info
+ * result is passed through unchanged.
  */
 export async function listPanelNodes<T>(opts: {
   panelList: () => Promise<T>;
@@ -112,7 +136,7 @@ export async function listPanelNodes<T>(opts: {
   | { via: "fallback"; value: ListedNodesHostResult }
   | { via: "failed"; message: string }
 > {
-  const runHost = async (tabErr: unknown) => {
+  const runHost = async (panelErr: unknown) => {
     try {
       const nodes = await resolveListInstalled(opts.listInstalled)();
       return {
@@ -120,20 +144,20 @@ export async function listPanelNodes<T>(opts: {
         value: {
           installed: installedNodesToPanelMap(nodes),
           source: "host_http" as const,
-          note: HOST_HTTP_LIST_NOTE,
+          note: hostListNote(panelErr),
         },
       };
     } catch (hostErr) {
-      return { via: "failed" as const, message: dualCauseListFailure(tabErr, hostErr) };
+      return { via: "failed" as const, message: dualCauseListFailure(panelErr, hostErr) };
     }
   };
 
   try {
     const value = await opts.panelList();
-    if (!isPanelTabDispatchFailure(value)) return { via: "panel", value };
+    if (!shouldHostList(value)) return { via: "panel", value };
     return await runHost(value);
   } catch (err) {
-    if (!isPanelTabDispatchFailure(err)) throw err;
+    if (!shouldHostList(err)) throw err;
     return await runHost(err);
   }
 }

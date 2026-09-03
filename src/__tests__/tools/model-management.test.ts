@@ -135,6 +135,7 @@ describe("download_model tool", () => {
       expect.any(Function), // onLanded callback — commits done synchronously at the destination rename (#515)
       expect.any(Function), // onDownloadRoute callback — records the download-only network route
       expect.any(Function), // onStagedPartialPath callback — records the exact cache identity
+      undefined, // modelRoot — optional explicit extra/primary root (#2499)
     );
     expect(res.isError).toBeFalsy();
   });

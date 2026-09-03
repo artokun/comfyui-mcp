@@ -52,6 +52,8 @@ import {
 import { extname, isAbsolute, join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { comfyuiFetch } from "../comfyui/fetch.js";
+import { settleUntilStable } from "../services/vram-settle.js";
+import type { SettledRead } from "../services/vram-settle.js";
 import { assertPanelNotTargetedUnverifiable } from "../services/panel-pin-guard.js";
 import {
   findPackOnDisk,
@@ -64,8 +66,9 @@ import {
 import { sanitizePanelUpdateNodeResult } from "../services/manager-update-error.js";
 import {
   formatQueueStatusPartialNote,
-  getManifestPartialLeftover,
+  readManifestPartials,
 } from "../services/manifest-partial.js";
+import { readPublishedManifestOutcomes } from "../services/manifest-outcome-channel.js";
 import { searchPanelNodes } from "../services/manager-node-search.js";
 import { listPanelNodes } from "../services/manager-node-list.js";
 import { isPanelAnsweredError } from "../services/panel-answered.js";
@@ -75,7 +78,25 @@ import {
   type WorkflowListReadinessRefusal,
 } from "../services/panel-workflow-readiness.js";
 import { isPreExecutorRefusal } from "../services/panel-refusal.js";
-import { unexposeHostLinkShiftNote } from "../services/unexpose-host-link-shift.js";
+import {
+  hostLinksAlreadyReindexed,
+  isLandedUnexpose,
+  laterSlotsAfterUnexpose,
+  laterSlotsFromUnexposePayload,
+  unexposeHostLinkShiftNote,
+} from "../services/unexpose-host-link-shift.js";
+import { retryConnectAgainstLiveGraph } from "../services/connect-live-graph.js";
+import { verifyPrimitiveForceInputAfterConnect } from "../services/primitive-force-input-connect.js";
+import { retryWildcardSlotConnect } from "../services/wildcard-slot-connect.js";
+import { retryExposeSubgraphInput } from "../services/expose-ae-wildcard.js";
+import {
+  applyLiveRootViewing,
+  callAndRememberViewing,
+  callWithRememberedSubgraph,
+  clearStaleSubgraphIdentity,
+  noteConfirmedViewingFromToolResult,
+  parseViewingScope,
+} from "../services/subgraph-viewing-scope.js";
 import {
   assertScreenshotPersistAllowed,
   decodePngBase64,
@@ -143,13 +164,17 @@ import {
   addressedNodeMatchesPersistRemedy,
   parseAmbiguousPromotedWidgetRefusal,
   parseContradictoryPromotedWidgetRefusal,
+  parseLinkDrivenPromotedWriteWarning,
   parseSubgraphScopeRefusal,
   parseUnpromotedControlPersistRemedy,
   promotedScopeWitnessFromEnvelope,
   promotedViewingMatchesScope,
   resolveLegacyInnerPromotedTarget,
+  promotedInnerWidgetIsLinkDriven,
   resolveInnerPromotedTarget,
-  validatePromotedSubgraphEnvelope,
+  describePromotedSubgraphEnvelope,
+  isInnerLinkDrivenWriteWarning,
+  shapeParentAuthoritativePromotedWrite,
   type PromotedParentRailWitness,
   type PromotedScopeWitness,
   type PromotedTerminalWitness,
@@ -162,13 +187,24 @@ import {
   isFastGroupsFilterProperty,
 } from "./rgthree-fast-groups-property.js";
 import {
+  bindImportedTmpWorkflowUuid,
+  bindLoadedWorkflowIdentity,
   isPlainObject,
   isStampMismatchSaveRefusal,
+  openLiveMatchesDestAfterReconnect,
   openLiveMatchesDestContent,
   patchOpenIdentity,
+  savedPathFromTabId,
   shouldRebindOpenIdentity,
+  unsavedTmpWorkflowKey,
   workflowFromSerializeReply,
 } from "./open-identity-normalization.js";
+import {
+  contentOnlyRootShapeReadNote,
+  isContentOnlyRootShapeMismatch,
+  recoverContentOnlyGraphQuery,
+} from "./root-shape-mismatch.js";
+import type { GraphQueryOptions } from "../services/graph-query.js";
 import {
   clearSwitchHold,
   describeSwitchHold,
@@ -358,12 +394,14 @@ import {
   requiresWorkflowStampEnforcement,
 } from "../services/ui-bridge.js";
 import {
+  GRAPH_READ_CMD_BY_TOOL,
   PANEL_TOOL_BY_GRAPH_CMD,
   QUEUE_BUSY_READ_TOOLS,
   RETRY_TOKEN_CMD_BY_TOOL,
   panelToolForGraphCmd,
 } from "../services/panel-graph-cmd-tools.js";
 export {
+  GRAPH_READ_CMD_BY_TOOL,
   PANEL_TOOL_BY_GRAPH_CMD,
   QUEUE_BUSY_READ_TOOLS,
   RETRY_TOKEN_CMD_BY_TOOL,
@@ -391,7 +429,13 @@ import {
 } from "../services/panel-secrets.js";
 import { flattenUiWorkflow } from "../services/flatten-workflow.js";
 import { describeUnappliedFilters } from "./civitai-filter-guard.js";
-import { recordTodo, normalizeTodoItems, TODO_STATUS_INPUTS } from "./todo-state.js";
+import {
+  recordTodo,
+  normalizeTodoItems,
+  TODO_STATUS_INPUTS,
+  canonicalTodoEntries,
+  todoListsMatch,
+} from "./todo-state.js";
 import { applyCapturedWidgetValues } from "../services/live-widget-overlay.js";
 import { listWorkflowLibraryKeys, userdataFetch } from "../services/userdata-library.js";
 import {
@@ -399,7 +443,9 @@ import {
   resolveEffectiveComfyUIBase,
 } from "../services/workspace-env.js";
 import { getNsfwConsent, setNsfwConsent } from "../services/panel-settings.js";
-import { QueueMonitor } from "../services/queue-monitor.js";
+import { QueueMonitor, RUNNING_UNCONFIRMED_MS } from "../services/queue-monitor.js";
+import type { QueueSnapshot } from "../services/queue-monitor.js";
+import { stallThresholdMs } from "../services/stall-threshold.js";
 import { RunCompletions } from "./run-completion-journal.js";
 import {
   AskAnswers,
@@ -410,12 +456,18 @@ import {
 } from "./ask-answer-journal.js";
 import {
   getClient,
+  getLogs,
   getQueueVerified,
   resetClient,
   resetObjectInfoCache,
 } from "../comfyui/client.js";
 import { convertUiToApi, collectNodeTypes } from "../services/workflow-converter.js";
 import type { ObjectInfo } from "../comfyui/types.js";
+import {
+  outputNodeObjectInfoForPanel,
+  recoverOutputNodeScopedRun,
+  stampOutputNodeFlagsOnToolResult,
+} from "../services/output-node.js";
 import {
   captureComfyUITargetFence,
   restartComfyUI,
@@ -578,11 +630,27 @@ export function appendReplyNote(res: ToolResult, note: string): ToolResult {
  * #2437 — remaining host links after unexpose are positional and not re-pointed.
  * A post-removal snapshot of `node.inputs[i].link` cannot see the bug, so this
  * attaches the a-priori repair (reconnect by name) to a landed `removed` reply.
- * Refusals and unparseable bodies are left alone.
+ * Refusals, reindexed replies (#2473), and a last-slot removal (#2491) are
+ * left alone. An unknown later list still warns — skipping on "we did not look"
+ * is how the original reporter queued a broken graph.
  */
-function withUnexposeHostLinkShiftNote(res: ToolResult): ToolResult {
+async function withUnexposeHostLinkShiftNote(
+  res: ToolResult,
+  ctx: PanelToolCtx,
+): Promise<ToolResult> {
   if (res.isError) return res;
-  const note = unexposeHostLinkShiftNote(parseToolResultJson(res));
+  const payload = parseToolResultJson(res);
+  let remainingGraph: Record<string, unknown> | null = null;
+  if (
+    isLandedUnexpose(payload) &&
+    !hostLinksAlreadyReindexed(payload) &&
+    laterSlotsFromUnexposePayload(payload) === undefined
+  ) {
+    // Cheapest graph_query still carries `rails` while inside a subgraph.
+    const probe = await ctx.call({ cmd: "graph_query", fields: "ids", limit: 1 }, 8000);
+    if (!probe.isError) remainingGraph = parseToolResultJson(probe);
+  }
+  const note = unexposeHostLinkShiftNote(payload, laterSlotsAfterUnexpose(payload, remainingGraph));
   return note ? appendReplyNote(res, note) : res;
 }
 
@@ -1274,6 +1342,10 @@ export const __panelToolsTestHooks = {
   setRunLateAckGraceMs(ms: number | null): void {
     runLateAckGraceMsOverride = ms;
   },
+  /** Shrink the #2527 graph-read wait for an outstanding timed-out mutation. */
+  setOutstandingMutationReadSettleMs(ms: number | null): void {
+    outstandingMutationReadSettleMsOverride = ms;
+  },
   /** Mark a synthetic graph_run result as the bridge's authoritative reply timeout. */
   markRunReplyTimeout(res: ToolResult): ToolResult {
     Object.defineProperty(res, REPLY_TIMEOUT_RESULT, {
@@ -1380,6 +1452,81 @@ const OBJECT_INFO_REFRESH_ACK_TIMEOUT_MS = 90_000;
  *  probe budget the graph_query / graph_serialize probes in this file already use. */
 const GET_ERRORS_COMPLETION_BUDGET_MS = 8_000;
 
+// #2527 — after a mutating graph command times out, the frontend may still be
+// applying it. An immediate graph read can then echo the pre-write value, and a
+// later write reports the timed-out value as `previous`. Graph reads wait this
+// long for that settlement, then disclose any still-outstanding receipt.
+const OUTSTANDING_MUTATION_READ_SETTLE_MS = 8_000;
+let outstandingMutationReadSettleMsOverride: number | null = null;
+function outstandingMutationReadSettleMs(): number {
+  return outstandingMutationReadSettleMsOverride ?? OUTSTANDING_MUTATION_READ_SETTLE_MS;
+}
+
+const GRAPH_READ_SETTLE_CMDS: ReadonlySet<string> = new Set([
+  ...Object.values(GRAPH_READ_CMD_BY_TOOL),
+  "graph_get_subgraph",
+  "graph_get_state",
+  "graph_serialize",
+]);
+
+function isGraphReadSettleCmd(cmd: Record<string, unknown>): boolean {
+  return typeof cmd.cmd === "string" && GRAPH_READ_SETTLE_CMDS.has(cmd.cmd);
+}
+
+function sameMutationScalar(a: unknown, b: unknown): boolean {
+  if (a === b) return true;
+  if (a == null || b == null) return a == null && b == null;
+  return String(a) === String(b);
+}
+
+/**
+ * Semantic identity of a delivered mutation vs a retry, ignoring bridge-owned
+ * stamps (`rid`, `retry_of`, `timeout_ms`, `workflow_uuid`) and write-fence
+ * witnesses that a later probe may reconstruct (`expected_*`).
+ */
+function mutationIdentityMatches(
+  retryCmd: Record<string, unknown>,
+  delivered: Record<string, unknown>,
+): boolean {
+  if (retryCmd.cmd !== delivered.cmd) return false;
+  if (retryCmd.cmd === "graph_set_widget") {
+    return (
+      sameMutationScalar(retryCmd.node_id, delivered.node_id) &&
+      sameMutationScalar(retryCmd.widget, delivered.widget) &&
+      sameMutationScalar(retryCmd.value, delivered.value)
+    );
+  }
+  if ("node_id" in delivered) return sameMutationScalar(retryCmd.node_id, delivered.node_id);
+  return true;
+}
+
+async function awaitOutstandingMutationSettle(
+  bridge: PanelToolCtx["bridge"],
+  tabId: string,
+): Promise<void> {
+  const wait = bridge.waitForOutstandingMutations;
+  if (typeof wait !== "function") return;
+  await wait.call(bridge, tabId, outstandingMutationReadSettleMs());
+}
+
+function discloseOutstandingMutations(
+  bridge: PanelToolCtx["bridge"],
+  tabId: string,
+  res: ToolResult,
+): ToolResult {
+  const list = bridge.listOutstandingMutations?.(tabId);
+  if (!list?.length) return res;
+  const named = list
+    .map((m) => `"${m.cmd}" retry_of:"${m.rid}"`)
+    .join(", ");
+  return appendReplyNote(
+    res,
+    `OUTCOME UNKNOWN: ${list.length} delivered mutation(s) still unsettled on this tab (${named}). ` +
+      `This graph read may show values from before those writes applied. Do not treat this snapshot ` +
+      `as proof the write failed; wait, or retry the named mutation with its retry_of token.`,
+  );
+}
+
 // #1639 — while a ComfyUI prompt is running the frontend main thread often
 // cannot service graph_* at all. Waiting out the 20/90 s ack bound only
 // surfaces "tab may be backgrounded or frozen" with an unknown mutation
@@ -1429,6 +1576,75 @@ function queueBusySnapshotNote(): string {
   const node = snap.currentNode ? `, currently at node ${snap.currentNode}` : "";
   const close = snap.runningPromptId ? ")" : "";
   return `${prompt}${node}${close}`;
+}
+
+/**
+ * #2684 — how long the believed running prompt has gone with NO evidence from
+ * the monitored ComfyUI, or null while that belief is still fresh.
+ *
+ * `QueueSnapshot.running` is last-known state, not a live reading. When the
+ * monitored target stops answering, `fetchJson` returns null, `applyQueue`
+ * returns before the empty-queue clear can run, and `runningPromptId` persists
+ * unbounded — so every message built from it goes on asserting a run the server
+ * never confirmed. That is what the reporter hit: a `queue` read showed
+ * `running: 0, pending: 0` while these notes still named a specific prompt as
+ * present-tense fact.
+ *
+ * `sinceMs` is null in the one case where we cannot even date the belief: the
+ * server has never answered here at all. That is MORE unverified, not less, so
+ * it must not read as fresh — hence a null age inside an unconfirmed result,
+ * never a null result.
+ */
+function unconfirmedRun(snap: QueueSnapshot): { sinceMs: number | null } | null {
+  if (!snap.running) return null;
+  if (snap.lastServerContactTs === null) return { sinceMs: null };
+  const sinceMs = Date.now() - snap.lastServerContactTs;
+  return sinceMs >= unconfirmedAfterMs() ? { sinceMs } : null;
+}
+
+/**
+ * #2684 — the silence past which a believed run stops being stated as fact.
+ *
+ * `min` of the two, and the direction matters. `report()` calls the server dead
+ * at `stallThresholdMs()` — that is when the STALLED notice fires. If this note
+ * downgraded LATER than that, the reported contradiction survives verbatim for
+ * any threshold under 30 s, and both are reachable: `COMFYUI_MCP_STALL_S` takes
+ * any value above zero, and the live panel setting floors at 15 s. Taking the
+ * min means the busy note is never more confident than the stall note about the
+ * same server, whatever the threshold is configured to.
+ *
+ * It can only ever downgrade EARLIER, never later, which is the safe direction:
+ * the cost is a note that says "unconfirmed" a little sooner, and the fence it
+ * annotates does not move either way.
+ */
+function unconfirmedAfterMs(): number {
+  return Math.min(RUNNING_UNCONFIRMED_MS, stallThresholdMs());
+}
+
+/**
+ * #2684 — the queue-busy subject clause, in the tense the evidence supports.
+ *
+ * Returns "" when nothing is believed in flight, so a caller can only ever
+ * embed a claim the monitor actually holds. The fence decisions upstream are
+ * untouched: a stale belief still fences exactly as before (fail-closed is
+ * correct — an unverified run is not a verified idle). Only what we SAY about
+ * it changes, because the previous wording folded "could not determine" into
+ * "determined not" (#796's shape).
+ */
+function queueBusyRunClause(still: boolean): string {
+  const snap = QueueMonitor.snapshot();
+  if (!snap.running) return "";
+  const detail = queueBusySnapshotNote();
+  const un = unconfirmedRun(snap);
+  if (!un) return `a ComfyUI prompt is ${still ? "still " : ""}running${detail}`;
+  const age =
+    un.sinceMs === null
+      ? "the ComfyUI server has never answered this orchestrator"
+      : `the ComfyUI server has not answered this orchestrator for ~${Math.round(un.sinceMs / 1000)}s`;
+  return (
+    `a ComfyUI prompt was last seen running${detail}, but ${age}, so that run is ` +
+    `UNCONFIRMED — it may already have finished, failed, or been cancelled`
+  );
 }
 
 /**
@@ -1536,8 +1752,8 @@ function graphCmdBlockedByRunningPrompt(cmd: Record<string, unknown>): string | 
       return (
         `${deferSubject} was NOT sent — nothing was applied. You asked to park this ` +
         `edit until the queue is idle (defer_until_idle:true), but the request does ` +
-        `not qualify: ${gap}. QUEUE BUSY: a ComfyUI prompt is running` +
-        `${queueBusySnapshotNote()}, so the edit was fenced as an ordinary mutation. ` +
+        `not qualify: ${gap}. QUEUE BUSY: ${queueBusyRunClause(false)}, ` +
+        `so the edit was fenced as an ordinary mutation. ` +
         `Fix the request above and retry — or drop defer_until_idle and retry after ` +
         `queue (action:"list") shows running: 0.`
       );
@@ -1554,8 +1770,8 @@ function graphCmdBlockedByRunningPrompt(cmd: Record<string, unknown>): string | 
   // fixed here, not a smaller version of it.
   const subject = panelToolForGraphCmd(name) ?? "This edit";
   return (
-    `${subject} was NOT sent — nothing was applied. QUEUE BUSY: a ComfyUI prompt is running` +
-    `${queueBusySnapshotNote()}. ${subject} MUTATES the workflow, and the panel tab often ` +
+    `${subject} was NOT sent — nothing was applied. QUEUE BUSY: ${queueBusyRunClause(false)}. ` +
+    `${subject} MUTATES the workflow, and the panel tab often ` +
     `cannot service a graph edit while a prompt is executing — delivering it would only ` +
     `surface a generic "tab may be backgrounded or frozen" timeout with an unknown ` +
     `outcome, leaving you unable to say whether the edit applied. Read-only graph calls ` +
@@ -1565,12 +1781,36 @@ function graphCmdBlockedByRunningPrompt(cmd: Record<string, unknown>): string | 
 }
 
 function queueBusyTimeoutNote(): string {
-  if (!QueueMonitor.snapshot().running) return "";
+  const snap = QueueMonitor.snapshot();
+  if (!snap.running) return "";
+  const un = unconfirmedRun(snap);
+  if (!un) {
+    return (
+      `\n\nQUEUE BUSY: a ComfyUI prompt is still running${queueBusySnapshotNote()}, which is the ` +
+      `most likely reason the tab did not answer in time — a render can occupy the panel's main ` +
+      `thread. Retry after queue (action:"list") shows running: 0; if it still does not answer ` +
+      `once the queue is idle, THEN treat the tab as backgrounded or frozen.`
+    );
+  }
+  // #2684 — the branch above offers the running prompt as the CAUSE of the ack
+  // timeout. Reusing it on an unverified belief is how this note misexplained a
+  // dead render: the reporter's `queue (action:"list")` read `running: 0` at the
+  // very moment this text named a specific prompt as "still running", so "retry
+  // once the queue is idle" was advice against a queue that was ALREADY idle.
+  //
+  // The same lapsed heartbeat that makes the run unconfirmed is itself the more
+  // likely story — an unreachable ComfyUI, or one this orchestrator is polling
+  // at a different target than the tab is bound to (#1593). So state the age of
+  // the belief and hand over the check that can actually settle it, instead of
+  // folding "could not determine" into "determined not".
   return (
-    `\n\nQUEUE BUSY: a ComfyUI prompt is still running${queueBusySnapshotNote()}, which is the ` +
-    `most likely reason the tab did not answer in time — a render can occupy the panel's main ` +
-    `thread. Retry after queue (action:"list") shows running: 0; if it still does not answer ` +
-    `once the queue is idle, THEN treat the tab as backgrounded or frozen.`
+    `\n\nQUEUE STATE UNCONFIRMED: ${queueBusyRunClause(false)}. Do NOT treat that run as the ` +
+    `reason the tab did not answer — it is last-known state this orchestrator has been unable ` +
+    `to re-verify, not a live reading. Settle it with queue (action:"list"), which reads the ` +
+    `server directly: if that reports running: 0 the run is already over and the tab's silence ` +
+    `has another cause; if it cannot reach the server either, ComfyUI is down or this ` +
+    `orchestrator is polling a different target than the tab is bound to — compare ` +
+    `get_system_stats (action:"health").`
   );
 }
 
@@ -1624,7 +1864,7 @@ function isWorkerTransportRetrySafeCmd(cmd: Record<string, unknown>): boolean {
 // This is an EXPLICIT ALLOWLIST, deliberately NOT "everything not read-only":
 // several genuine reads/probes/views that flow through ctx.call are absent from
 // BRIDGE_READONLY_CMDS (e.g. graph_list_subgraphs, training_get_state,
-// graph_canvas, graph_screenshot), so an exclusion rule would wrongly make THOSE
+// graph_canvas), so an exclusion rule would wrongly make THOSE
 // wait out the reconnect budget. Under-inclusion here is at worst an unfixed edge
 // (a command keeps today's behavior); over-inclusion would regress a read — so we
 // list only commands that unambiguously mutate the graph. Keep in sync when new
@@ -3194,6 +3434,30 @@ function proxyTargetBindsPanel(
   );
 }
 
+/**
+ * A live local Panel can safely own a Manager reboot even when the MCP process
+ * started before the Panel selected a different loopback port (for example,
+ * ComfyUI Desktop's dynamic port). This is a DISPATCH-ONLY binding:
+ *
+ *  - the target must be a concrete loopback URL;
+ *  - the socket must have arrived on the server-trusted local listener; and
+ *  - the server-observed WebSocket Origin must identify the current target.
+ *
+ * The result must never be used as the MCP health-probe or headless-restart
+ * target. Those paths still require the immutable boot target from
+ * captureRebootHealthBase/configuredBootRestartBase. The Panel's own
+ * authenticated relative Manager request is the only reboot authority this
+ * exception grants (#2068).
+ */
+function currentPanelRestartTarget(ctx: PanelToolCtx): string | null {
+  if (ctx.bridge?.tabIsLocal?.(ctx.tabId) !== true) return null;
+  const target = getComfyUIBaseUrl().replace(/\/+$/, "");
+  if (!target || !isLoopbackOrigin(target)) return null;
+  const observedOrigin = ctx.bridge?.tabServerOrigin?.(ctx.tabId);
+  if (!sameHttpBase(observedOrigin, target)) return null;
+  return target;
+}
+
 /** Test injection for the #742 decline-probe recheck window, so tests don't
  *  wait the real ~6s. null → the DECLINE_PROBE_* constants. */
 let declineProbeTimingOverride: {
@@ -3482,8 +3746,15 @@ async function awaitTabWhileContinuingRecovery(args: {
  * workflow matching …") comes back as a normal error REPLY the bridge received
  * and relayed, NOT a timeout, so it is never treated as a candidate for recovery
  * and still fails clearly. Defensive: non-error results are never a timeout.
+ *
+ * #2705 — `cmd` is a PARAMETER, not a widened pattern. The command name stays
+ * INSIDE the anchored form, so `workflow_new`'s recovery cannot be opened by a
+ * `workflow_open` timeout and vice versa; the union type is what keeps a caller
+ * from passing a name the bridge never writes. The two accepted values contain no
+ * regex metacharacters, so they are interpolated as-is — a `RegExp` built from an
+ * arbitrary string would be the thing to avoid here, and the type forbids it.
  */
-function isAckTimeout(res: ToolResult): boolean {
+function isAckTimeout(res: ToolResult, cmd: "workflow_open" | "workflow_new" = "workflow_open"): boolean {
   if (!res?.isError) return false;
   const text = res?.content?.find((c) => c.type === "text")?.text ?? "";
   // Match the CANONICAL bridge ack-timeout SPECIFICALLY (ui-bridge.ts): a
@@ -3517,7 +3788,10 @@ function isAckTimeout(res: ToolResult): boolean {
   // isReplyTimeoutError documents). The bridge message never carries leading
   // whitespace, so trimming buys nothing and only lets a whitespace/newline-
   // prefixed acked error reach the receipt-recovery path.
-  return /^(?:Error: )?Panel tab .+? did not reply to "workflow_open" within \d+\s*ms/i.test(text);
+  return new RegExp(
+    `^(?:Error: )?Panel tab .+? did not reply to "${cmd}" within \\d+\\s*ms`,
+    "i",
+  ).test(text);
 }
 
 /**
@@ -3766,6 +4040,675 @@ async function settleExitSubgraphAfterAckTimeout(
   return timedOut;
 }
 
+// ---- panel_set_todo settle-after-ack-timeout (#2481) ----------------------
+// set_todo was delivered but the tab did not ACK. The generic mutating
+// disclosure then leaves the caller guessing and warns that a retry may
+// duplicate — even though set_todo is a full-replace. Take ONE get_todo
+// read on the same tab and report applied / not-applied, or return the
+// original timeout WITH a mutation receipt when the read cannot answer.
+
+/** Same elective probe budget as the graph_query / graph_serialize reads. */
+const SET_TODO_RECONCILE_MS = 8_000;
+
+function setTodoAppliedNote(): string {
+  return (
+    `CHECKED FOR YOU: the tab did not ACKNOWLEDGE the checklist write within the window, but a ` +
+    `todo read taken immediately afterwards, on that same tab, reports the exact list this call ` +
+    `delivered. No recovery step is needed and a retry would be wasted work. A missing ` +
+    `acknowledgement is not evidence the write failed; here it is evidence the tab was too busy ` +
+    `to answer in time. set_todo is a full-replace, so re-issuing this same list is a no-op.`
+  );
+}
+
+function setTodoNotAppliedNote(): string {
+  return (
+    `CHECKED FOR YOU: a todo read taken immediately after the missing acknowledgement does NOT ` +
+    `show the list this call delivered. The write has not applied (or was overwritten). ` +
+    `Re-issuing the same list is safe — set_todo is a full-replace, not an append.`
+  );
+}
+
+function setTodoUnknownNote(): string {
+  return (
+    `The tray could not be read after the missing acknowledgement, so this result cannot say ` +
+    `whether the write applied. mutation_id is the delivery receipt for this attempt; requested ` +
+    `is the list that was sent. set_todo is a full-replace: re-issuing that exact list cannot ` +
+    `duplicate it. Do not guess.`
+  );
+}
+
+function todoItemsFromProbe(res: ToolResult): unknown[] | null {
+  const parsed = parseToolResultValue(res);
+  if (Array.isArray(parsed)) return parsed;
+  if (!parsed || typeof parsed !== "object") return null;
+  const rec = parsed as Record<string, unknown>;
+  if (Array.isArray(rec.items)) return rec.items;
+  if (Array.isArray(rec.todos)) return rec.todos;
+  return null;
+}
+
+async function readTodoFromTab(ctx: PanelToolCtx, tabId: string): Promise<ToolResult> {
+  if (tabId === ctx.tabId) return ctx.call({ cmd: "get_todo" }, SET_TODO_RECONCILE_MS);
+  return dispatchToTab(ctx, tabId, { cmd: "get_todo" }, SET_TODO_RECONCILE_MS);
+}
+
+function setTodoTimeoutUnknown(
+  timedOut: ToolResult,
+  sentItems: unknown,
+  mutationId: string | undefined,
+): ToolResult {
+  return appendReplyNote(
+    timedOut,
+    JSON.stringify(
+      {
+        applied: "unknown",
+        acknowledged: false,
+        mutation_id: mutationId ?? null,
+        requested: canonicalTodoEntries(sentItems) ?? sentItems,
+        note: setTodoUnknownNote(),
+      },
+      null,
+      2,
+    ),
+  );
+}
+
+/**
+ * After an ack timeout on `set_todo`, take ONE todo read and report whether the
+ * tray holds the list that was delivered. Returns the original timeout plus a
+ * mutation receipt when the read cannot answer — #1473's rule: an unknown
+ * answer claims nothing in either direction.
+ */
+async function settleSetTodoAfterAckTimeout(
+  ctx: PanelToolCtx,
+  timedOut: ToolResult,
+  sentItems: unknown,
+  mutationId: string | undefined,
+  dispatchTab: string,
+): Promise<ToolResult> {
+  // Probe the tab the write was DISPATCHED to. A desktop redirect writes to a
+  // different tab than ctx.tabId; a silent rebind of an unpinned session would
+  // otherwise let a different tab's tray certify this write.
+  const probeOnSessionTab = ctx.tabId === dispatchTab;
+  const probe = await readTodoFromTab(ctx, dispatchTab);
+  if (probeOnSessionTab && ctx.tabId !== dispatchTab) {
+    return setTodoTimeoutUnknown(timedOut, sentItems, mutationId);
+  }
+  const observed = todoItemsFromProbe(probe);
+  if (observed === null) return setTodoTimeoutUnknown(timedOut, sentItems, mutationId);
+  const requested = canonicalTodoEntries(sentItems) ?? sentItems;
+  const observedCanonical = canonicalTodoEntries(observed);
+  if (todoListsMatch(sentItems, observed)) {
+    return ok({
+      ok: true,
+      applied: true,
+      acknowledged: false,
+      mutation_id: mutationId ?? null,
+      items: observedCanonical ?? observed,
+      confirmed_by: "todo read after ack timeout",
+      note: setTodoAppliedNote(),
+    });
+  }
+  return {
+    isError: true,
+    content: [
+      {
+        type: "text",
+        text: JSON.stringify(
+          {
+            applied: false,
+            acknowledged: false,
+            mutation_id: mutationId ?? null,
+            requested,
+            items: observedCanonical ?? observed,
+            confirmed_by: "todo read after ack timeout",
+            note: setTodoNotAppliedNote(),
+          },
+          null,
+          2,
+        ),
+      },
+    ],
+  };
+}
+
+// ---- panel_set_widget Power Lora row settle-after-ack-timeout (#2495) ------
+// Creating lora_1 on a freshly added Power Lora Loader can apply the row and
+// then wait out a frontend refresh that never ACKs inside the 90s transport
+// bound. The next lora_2 write and a graph read both succeed, so the caller
+// was handed outcome-unknown for a mutation that landed. Take ONE detail
+// graph_query on the same tab and report applied / not-applied, or return the
+// original timeout WITH a mutation receipt when the read cannot answer.
+
+const POWER_LORA_RECONCILE_MS = 8_000;
+const POWER_LORA_ROW_WIDGET = /^lora_\d+$/i;
+
+function isPowerLoraDynamicRowWidget(widget: string): boolean {
+  return POWER_LORA_ROW_WIDGET.test(widget);
+}
+
+function powerLoraAppliedNote(widget: string): string {
+  return (
+    `CHECKED FOR YOU: the tab did not ACKNOWLEDGE the "${widget}" write within the window, but a ` +
+    `graph_query taken immediately afterwards, on that same tab, reports the requested row ` +
+    `object. No recovery step is needed and a retry would be wasted work. A missing ` +
+    `acknowledgement is not evidence the write failed; here it is evidence the tab was still ` +
+    `busy with a frontend refresh after the row was already inserted. refresh_pending:true ` +
+    `means that refresh may still be running — do not wait it out, and do not treat this as a ` +
+    `schema-ready signal.`
+  );
+}
+
+function powerLoraNotAppliedNote(widget: string): string {
+  return (
+    `CHECKED FOR YOU: a graph_query taken immediately after the missing acknowledgement does NOT ` +
+    `show the requested "${widget}" row. The write has not applied (or was overwritten). ` +
+    `Re-issuing the same named row is a merge, not a second row.`
+  );
+}
+
+function powerLoraUnknownNote(widget: string): string {
+  return (
+    `The node could not be read after the missing acknowledgement, so this result cannot say ` +
+    `whether "${widget}" applied. mutation_id is the delivery receipt for this attempt; ` +
+    `requested is the value that was sent. Re-issuing that exact named row cannot create a ` +
+    `duplicate widget. Do not guess.`
+  );
+}
+
+/** JSON-parse a whole-row string so a delivered object can be compared to the live widget. */
+function coercePowerLoraWidgetValue(value: unknown) {
+  if (typeof value !== "string") return value;
+  const trimmed = value.trim();
+  if (!trimmed || (trimmed[0] !== "{" && trimmed[0] !== "[")) return value;
+  try {
+    return JSON.parse(trimmed);
+  } catch {
+    return value;
+  }
+}
+
+function powerLoraValuesMatch(requested: unknown, observed: unknown): boolean {
+  const want = coercePowerLoraWidgetValue(requested);
+  const got = coercePowerLoraWidgetValue(observed);
+  if (want !== null && typeof want === "object") {
+    if (got === null || typeof got !== "object") return false;
+    if (Array.isArray(want)) return JSON.stringify(want) === JSON.stringify(got);
+    if (Array.isArray(got)) return false;
+    const wantRec = want as Record<string, unknown>;
+    const gotRec = got as Record<string, unknown>;
+    for (const [key, value] of Object.entries(wantRec)) {
+      if (!powerLoraValuesMatch(value, gotRec[key])) return false;
+    }
+    return true;
+  }
+  return Object.is(want, got);
+}
+
+function powerLoraWidgetsFromProbe(
+  res: ToolResult,
+  nodeId: unknown,
+): { type: string; widgets: Record<string, unknown> } | null {
+  const payload = normalizeGraphQueryResult(res);
+  if (
+    Object.prototype.hasOwnProperty.call(payload, "truncated") &&
+    payload.truncated !== false
+  ) {
+    return null;
+  }
+  const requestedId = canonicalQueriedNodeId(nodeId);
+  const detail = parseVerifiedQueriedNodeDetail(payload);
+  if (
+    detail &&
+    requestedId &&
+    detail.id === requestedId &&
+    detail.widgets &&
+    /\bPower Lora Loader\b/i.test(detail.type)
+  ) {
+    return { type: detail.type, widgets: detail.widgets };
+  }
+  if (!Array.isArray(payload.nodes) || payload.nodes.length !== 1) return null;
+  const identity = parseQueriedNodeIdentityRow(payload.nodes[0]);
+  if (!identity || !requestedId || identity.id !== requestedId) return null;
+  const widgets = (payload.nodes[0] as Record<string, unknown>).widgets;
+  if (!widgets || typeof widgets !== "object" || Array.isArray(widgets)) return null;
+  if (!/\bPower Lora Loader\b/i.test(identity.type)) return null;
+  return { type: identity.type, widgets: widgets as Record<string, unknown> };
+}
+
+async function readPowerLoraNodeFromTab(
+  ctx: PanelToolCtx,
+  tabId: string,
+  nodeId: unknown,
+): Promise<ToolResult> {
+  const cmd = {
+    cmd: "graph_query",
+    ids: [nodeId],
+    fields: "detail",
+    limit: 1,
+    max_chars: DYNAMIC_COMBO_PROBE_MAX_CHARS,
+  };
+  if (tabId === ctx.tabId) return ctx.call(cmd, POWER_LORA_RECONCILE_MS);
+  return dispatchToTab(ctx, tabId, cmd, POWER_LORA_RECONCILE_MS);
+}
+
+function powerLoraTimeoutUnknown(
+  timedOut: ToolResult,
+  widget: string,
+  requested: unknown,
+  mutationId: string | undefined,
+): ToolResult {
+  return appendReplyNote(
+    timedOut,
+    JSON.stringify(
+      {
+        applied: "unknown",
+        acknowledged: false,
+        refresh_pending: true,
+        mutation_id: mutationId ?? null,
+        widget,
+        requested,
+        note: powerLoraUnknownNote(widget),
+      },
+      null,
+      2,
+    ),
+  );
+}
+
+/**
+ * After an ack timeout on a Power Lora `lora_N` write, take ONE detail read and
+ * report whether the requested row is on the node. Returns the original timeout
+ * plus a mutation receipt when the read cannot answer — #1473's rule.
+ */
+async function settlePowerLoraWidgetAfterAckTimeout(
+  ctx: PanelToolCtx,
+  timedOut: ToolResult,
+  nodeId: unknown,
+  widget: string,
+  requested: unknown,
+  mutationId: string | undefined,
+  dispatchTab: string,
+): Promise<ToolResult> {
+  const probeOnSessionTab = ctx.tabId === dispatchTab;
+  const probe = await readPowerLoraNodeFromTab(ctx, dispatchTab, nodeId);
+  if (probeOnSessionTab && ctx.tabId !== dispatchTab) {
+    return powerLoraTimeoutUnknown(timedOut, widget, requested, mutationId);
+  }
+  const node = powerLoraWidgetsFromProbe(probe, nodeId);
+  if (node === null || !Object.prototype.hasOwnProperty.call(node.widgets, widget)) {
+    if (probe.isError || node === null) {
+      return powerLoraTimeoutUnknown(timedOut, widget, requested, mutationId);
+    }
+    return {
+      isError: true,
+      content: [
+        {
+          type: "text",
+          text: JSON.stringify(
+            {
+              applied: false,
+              acknowledged: false,
+              refresh_pending: true,
+              mutation_id: mutationId ?? null,
+              widget,
+              requested,
+              confirmed_by: "graph_query after ack timeout",
+              note: powerLoraNotAppliedNote(widget),
+            },
+            null,
+            2,
+          ),
+        },
+      ],
+    };
+  }
+  const observed = node.widgets[widget];
+  if (!powerLoraValuesMatch(requested, observed)) {
+    return {
+      isError: true,
+      content: [
+        {
+          type: "text",
+          text: JSON.stringify(
+            {
+              applied: false,
+              acknowledged: false,
+              refresh_pending: true,
+              mutation_id: mutationId ?? null,
+              widget,
+              requested,
+              value: observed,
+              confirmed_by: "graph_query after ack timeout",
+              note: powerLoraNotAppliedNote(widget),
+            },
+            null,
+            2,
+          ),
+        },
+      ],
+    };
+  }
+  return ok({
+    ok: true,
+    applied: true,
+    acknowledged: false,
+    refresh_pending: true,
+    mutation_id: mutationId ?? null,
+    created_widget: widget,
+    set: { node_id: nodeId, widget, value: observed },
+    confirmed_by: "graph_query after ack timeout",
+    note: powerLoraAppliedNote(widget),
+  });
+}
+
+// ---- panel_set_widget settle-after-ack-timeout (#2489) ---------------------
+// A value read from the requested node is evidence only when the read also
+// names the graph view that was fenced before the write. A same-tab navigation
+// can otherwise reuse both the node id and the value and produce a false
+// applied verdict.
+const SET_WIDGET_RECONCILE_MS = 8_000;
+
+type SetWidgetReadbackScope = {
+  activeView: "root" | "subgraph";
+  ownerNodeId?: string;
+  graphIdentity: string;
+  workflowUuid?: string;
+};
+
+type SetWidgetReadbackConnection = {
+  generation: number;
+  tabSessionId: string;
+};
+
+function setWidgetAppliedNote(widget: string): string {
+  return (
+    `CHECKED FOR YOU: the tab did not ACKNOWLEDGE the widget write within the window, but a ` +
+    `graph read taken immediately afterwards, on that same tab and graph view, reports "${widget}" ` +
+    `holding the value this call delivered. No recovery step is needed and a retry would be wasted ` +
+    `work. A missing acknowledgement is not evidence the write failed; here it is evidence the tab ` +
+    `was too busy to answer in time. Stated precisely: what is established is THE LIVE WIDGET VALUE, ` +
+    `not that this command is what put it there — a concurrent canvas edit while the tab was ` +
+    `unresponsive would read identically. Both leave you where you asked to be, so the distinction ` +
+    `changes nothing you would do next.`
+  );
+}
+
+function setWidgetNotAppliedNote(widget: string): string {
+  return (
+    `CHECKED FOR YOU: a graph read taken immediately after the missing acknowledgement, on the ` +
+    `fenced graph view, does NOT show "${widget}" holding the value this call delivered. The write ` +
+    `has not applied (or was overwritten). Re-issuing the same write is safe — setting that widget ` +
+    `to this value again cannot duplicate a different change.`
+  );
+}
+
+function setWidgetUnknownNote(): string {
+  return (
+    `The live widget could not be read on the fenced graph view after the missing acknowledgement, ` +
+    `so this result cannot say whether the write applied. mutation_id is the delivery receipt for ` +
+    `this attempt; requested is the node, widget, and value that were sent. Re-issuing that exact ` +
+    `write cannot duplicate a different change. Do not guess.`
+  );
+}
+
+/** The panel uses this exact scalar placeholder when a live widget value is
+ * too heavy or otherwise unsafe to serialize/read back (#2003). It is not a
+ * user value that can establish the result of a timed-out mutation. */
+const PANEL_UNREADABLE_WIDGET_VALUE = "[binary]";
+
+function isReadableWidgetScalar(value: unknown): boolean {
+  if (typeof value === "string") return value !== PANEL_UNREADABLE_WIDGET_VALUE;
+  if (typeof value === "number") return Number.isFinite(value);
+  return typeof value === "boolean";
+}
+
+function widgetValuesMatch(requested: unknown, observed: unknown): boolean {
+  if (!isReadableWidgetScalar(requested) || !isReadableWidgetScalar(observed)) return false;
+  if (Object.is(requested, observed)) return true;
+  if (typeof requested === "number" && typeof observed === "number") {
+    return Number.isFinite(requested) && Number.isFinite(observed) && requested === observed;
+  }
+  if (typeof requested === "string" && typeof observed === "string") return requested === observed;
+  if (typeof requested === "boolean" && typeof observed === "boolean") return requested === observed;
+  return false;
+}
+
+/** The panel appends this Unicode marker when a widget value or assembled line
+ * is clipped by its serialized-size budget. A marker can be present even when
+ * the requested value is not a string (objects are serialized before clipping),
+ * so inspect the observed value before narrowing the requested type. */
+const PANEL_CLIPPED_VALUE_MARKER = /…\(\+\d+\s+chars\s+(?:cut|over)\b/u;
+
+/** A clipped read-back cannot prove either a hit or a miss: the live value may
+ * still be the full requested value behind the panel's cap. */
+function widgetValuePossiblyClipped(requested: unknown, observed: unknown): boolean {
+  if (typeof observed !== "string") return false;
+  if (PANEL_CLIPPED_VALUE_MARKER.test(observed)) return true;
+  if (typeof requested !== "string") return false;
+  if (observed.length === 0 || observed.length >= requested.length) return false;
+  return requested.startsWith(observed);
+}
+
+function widgetRowFromGraphQuery(payload: Record<string, unknown> | null): Record<string, unknown> | null {
+  if (!payload) return null;
+  if (
+    Object.prototype.hasOwnProperty.call(payload, "truncated") &&
+    payload.truncated !== false
+  ) {
+    return null;
+  }
+
+  let row: unknown;
+  if (Object.prototype.hasOwnProperty.call(payload, "nodes")) {
+    if (!Array.isArray(payload.nodes) || payload.nodes.length !== 1) return null;
+    row = payload.nodes[0];
+  } else if (typeof payload.text === "string") {
+    let headerSeen = false;
+    for (const line of payload.text.split(/\r?\n/)) {
+      const trimmed = line.trim();
+      if (!trimmed) continue;
+      if (!headerSeen && /^\d+ match\(es\) of \d+ in scope/.test(trimmed)) {
+        headerSeen = true;
+        continue;
+      }
+      if (!trimmed.startsWith("{")) {
+        if (row !== undefined) continue;
+        return null;
+      }
+      if (row !== undefined) return null;
+      try {
+        row = JSON.parse(trimmed) as unknown;
+      } catch {
+        return null;
+      }
+      headerSeen = true;
+    }
+  }
+
+  if (!row || typeof row !== "object" || Array.isArray(row)) return null;
+  return row as Record<string, unknown>;
+}
+
+function setWidgetReadbackScopeMatches(
+  payload: Record<string, unknown> | null,
+  expected: SetWidgetReadbackScope | undefined,
+): boolean {
+  if (!expected) return true;
+  const viewing = payload?.viewing;
+  if (!viewing || typeof viewing !== "object" || Array.isArray(viewing)) return false;
+  const current = viewing as Record<string, unknown>;
+  if (current.scope !== expected.activeView) return false;
+  if (current.graph_identity !== expected.graphIdentity) return false;
+  if (expected.activeView === "subgraph") {
+    const ownerNodeId = canonicalQueriedNodeId(current.owner_node_id);
+    if (!expected.ownerNodeId || ownerNodeId !== expected.ownerNodeId) return false;
+  }
+  return expected.workflowUuid === undefined || current.workflow_uuid === expected.workflowUuid;
+}
+
+function observedWidgetFromQuery(
+  res: ToolResult,
+  nodeId: unknown,
+  widget: string,
+  expectedScope?: SetWidgetReadbackScope,
+  expectedNodeIdentity?: string,
+): { status: "value"; value: unknown } | { status: "unknown" } {
+  if (res.isError) return { status: "unknown" };
+  const payload = parseToolResultJson(res);
+  if (!setWidgetReadbackScopeMatches(payload, expectedScope)) return { status: "unknown" };
+  const row = widgetRowFromGraphQuery(payload);
+  if (!row) return { status: "unknown" };
+  const identity = parseQueriedNodeIdentityRow(row);
+  const requestedId = canonicalQueriedNodeId(nodeId);
+  if (!identity || !requestedId || identity.id !== requestedId) return { status: "unknown" };
+  // The numeric id is reusable. A matching value on a replacement live object
+  // cannot certify the timed-out write, even when every graph/tab fence still
+  // matches; require the opaque per-object incarnation captured at dispatch.
+  if (!expectedNodeIdentity || identity.nodeIdentity !== expectedNodeIdentity) {
+    return { status: "unknown" };
+  }
+  const widgets = row.widgets;
+  if (!widgets || typeof widgets !== "object" || Array.isArray(widgets)) return { status: "unknown" };
+  if (!Object.prototype.hasOwnProperty.call(widgets, widget)) return { status: "unknown" };
+  const value = (widgets as Record<string, unknown>)[widget];
+  if (!isReadableWidgetScalar(value)) return { status: "unknown" };
+  return { status: "value", value };
+}
+
+function setWidgetTimeoutUnknown(
+  timedOut: ToolResult,
+  nodeId: unknown,
+  widget: string,
+  value: unknown,
+  mutationId: string | undefined,
+): ToolResult {
+  return appendReplyNote(
+    timedOut,
+    JSON.stringify(
+      {
+        applied: "unknown",
+        acknowledged: false,
+        mutation_id: mutationId ?? null,
+        requested: { node_id: nodeId, widget, value },
+        note: setWidgetUnknownNote(),
+      },
+      null,
+      2,
+    ),
+  );
+}
+
+function setWidgetReadbackProbe(
+  nodeId: unknown,
+  widget: string,
+  value: unknown,
+): Record<string, unknown> {
+  const probe: Record<string, unknown> = {
+    cmd: "graph_query",
+    ids: [nodeId],
+    fields: "detail",
+    limit: 1,
+  };
+  if (typeof value === "string" && value.length > DETAIL_WIDGET_MAX_CHARS_DEFAULT) {
+    probe.widget_max_chars = Math.min(
+      Math.max(value.length, DETAIL_WIDGET_MAX_CHARS_DEFAULT),
+      DETAIL_WIDGET_MAX_CHARS_CEILING,
+    );
+  }
+  return probe;
+}
+
+async function settleSetWidgetAfterAckTimeout(
+  ctx: PanelToolCtx,
+  timedOut: ToolResult,
+  nodeId: unknown,
+  widget: string,
+  value: unknown,
+  mutationId: string | undefined,
+  dispatchTab: string,
+  expectedScope?: SetWidgetReadbackScope,
+  dispatchConnection?: SetWidgetReadbackConnection,
+  dispatchNodeIdentity?: string,
+): Promise<ToolResult> {
+  // Probe the tab the write was DISPATCHED to. A silent rebind of an unpinned
+  // session would otherwise let a different tab's widget certify this write.
+  const probeOnSessionTab = ctx.tabId === dispatchTab;
+  if (!probeOnSessionTab || !isUsablePanelConnectionIdentity(dispatchConnection)) {
+    return setWidgetTimeoutUnknown(timedOut, nodeId, widget, value, mutationId);
+  }
+  let connectionBeforeProbe: SetWidgetReadbackConnection | undefined;
+  try {
+    connectionBeforeProbe = ctx.panelConnectionIdentity?.();
+  } catch {
+    return setWidgetTimeoutUnknown(timedOut, nodeId, widget, value, mutationId);
+  }
+  if (
+    !isUsablePanelConnectionIdentity(connectionBeforeProbe) ||
+    !samePanelConnectionIdentity(dispatchConnection, connectionBeforeProbe)
+  ) {
+    return setWidgetTimeoutUnknown(timedOut, nodeId, widget, value, mutationId);
+  }
+  const probe = await ctx.call(setWidgetReadbackProbe(nodeId, widget, value), SET_WIDGET_RECONCILE_MS);
+  let connectionAfterProbe: SetWidgetReadbackConnection | undefined;
+  try {
+    connectionAfterProbe = ctx.panelConnectionIdentity?.();
+  } catch {
+    return setWidgetTimeoutUnknown(timedOut, nodeId, widget, value, mutationId);
+  }
+  if (
+    ctx.tabId !== dispatchTab ||
+    !isUsablePanelConnectionIdentity(connectionAfterProbe) ||
+    !samePanelConnectionIdentity(dispatchConnection, connectionAfterProbe)
+  ) {
+    return setWidgetTimeoutUnknown(timedOut, nodeId, widget, value, mutationId);
+  }
+  const observed = observedWidgetFromQuery(
+    probe,
+    nodeId,
+    widget,
+    expectedScope,
+    dispatchNodeIdentity,
+  );
+  if (observed.status === "unknown") {
+    return setWidgetTimeoutUnknown(timedOut, nodeId, widget, value, mutationId);
+  }
+  if (widgetValuesMatch(value, observed.value)) {
+    return ok({
+      set: { node_id: nodeId, widget, value: observed.value },
+      applied: true,
+      acknowledged: false,
+      mutation_id: mutationId ?? null,
+      confirmed_by: "graph read after ack timeout",
+      note: setWidgetAppliedNote(widget),
+    });
+  }
+  if (widgetValuePossiblyClipped(value, observed.value)) {
+    return setWidgetTimeoutUnknown(timedOut, nodeId, widget, value, mutationId);
+  }
+  return {
+    isError: true,
+    content: [
+      {
+        type: "text",
+        text: JSON.stringify(
+          {
+            applied: false,
+            acknowledged: false,
+            mutation_id: mutationId ?? null,
+            requested: { node_id: nodeId, widget, value },
+            observed: observed.value,
+            confirmed_by: "graph read after ack timeout",
+            note: setWidgetNotAppliedNote(widget),
+          },
+          null,
+          2,
+        ),
+      },
+    ],
+  };
+}
+
 // ---- panel_free_vram: verifiable when the canvas tab is frozen (#1249) -----
 // `free_vram` is a purely SERVER-SIDE operation — the panel's handler is a plain
 // `POST /free` against the ComfyUI the tab fronts — yet the tool treated the
@@ -3999,6 +4942,86 @@ async function readVramDevicesMaybe(
   return (readVramDevicesOverride ?? readVramDevices)(base, timeoutMs);
 }
 
+/** Device 0-N occupancy signature — any GPU's vram or torch pool changing is not settled. */
+function vramDevicesSignature(devices: VramDeviceSample[]): string {
+  return devices
+    .map((d) => `${d.index ?? d.name ?? ""}:${d.vram_free ?? ""}:${d.torch_vram_free ?? ""}`)
+    .join("|");
+}
+
+/** Stable per-device identity, so a baseline key and a live key line up. */
+function vramDeviceKey(d: VramDeviceSample): string {
+  return `${d.index ?? d.name ?? ""}`;
+}
+
+/** The DRIVER counter of each watched device, ONE KEY PER DEVICE. Torch hands
+ *  its pool back in ~400ms while `vram_free` can stay frozen for seconds, so
+ *  proving a release against the combined signature would certify the driver as
+ *  released on torch's schedule; and joining the devices into one string would
+ *  let card 0 releasing certify card 1, which never moved (#2704). */
+function vramDeviceReleaseKeys(
+  devices: VramDeviceSample[],
+  only?: ReadonlySet<string>,
+): ReadonlyMap<string, string> {
+  const keys = new Map<string, string>();
+  const ambiguous = new Set<string>();
+  for (const d of devices) {
+    const id = vramDeviceKey(d);
+    if (only != null && !only.has(id)) continue;
+    // A repeated identity cannot be attributed to one card, and `Map.set`
+    // would silently keep the last one — letting the second device's movement
+    // clear the first device's entry. Drop it instead: an unattributable key
+    // is absent, and absence never counts as a release.
+    if (keys.has(id)) ambiguous.add(id);
+    keys.set(id, `${d.vram_free ?? ""}`);
+  }
+  for (const id of ambiguous) keys.delete(id);
+  return keys;
+}
+
+/** Do these devices have identities we can hold a per-card baseline against? */
+function vramDevicesAreIdentifiable(devices: VramDeviceSample[]): boolean {
+  const ids = devices.map(vramDeviceKey);
+  return !ids.includes("") && new Set(ids).size === ids.length;
+}
+
+/**
+ * #2050 — POST /free returns when ComfyUI drops model refs; CUDA can still be
+ * releasing. The 0.52.146 recurrence: panel_free_vram reported freed:true, a
+ * ~32 MB torch pool, occupied_devices:[cuda:0] at 1.2 GB free; a health read
+ * 0.2s later showed 10.7 GB free. Poll until the counters stop changing.
+ */
+async function readSettledVramDevices(
+  base: string,
+  timeoutMs: number,
+  before?: VramDeviceSample[] | null,
+): Promise<SettledRead<VramDeviceSample[]>> {
+  // #2704 — hold the poll against the PRE-/free counters, but only for the
+  // cards that were occupied enough for a release to move them. A still reading
+  // is otherwise indistinguishable from a release that has not begun, which is
+  // how a frozen driver number was returned as settled at ~780ms. Cards that
+  // were already free are excluded rather than waited on: they will never move.
+  const occupiedBefore = before != null ? occupiedVramDevices(before) : [];
+  // Cards we cannot tell apart cannot be proven to have released individually,
+  // so we do not pretend to: no baseline, and the result is not confirmable.
+  const identifiable = vramDevicesAreIdentifiable(occupiedBefore);
+  const watched = identifiable ? new Set(occupiedBefore.map(vramDeviceKey)) : new Set<string>();
+  const baselineKeys = watched.size > 0 ? vramDeviceReleaseKeys(before!, watched) : null;
+  const baseline = baselineKeys != null && baselineKeys.size > 0 ? baselineKeys : null;
+  return settleUntilStable(
+    () => readVramDevicesMaybe(base, timeoutMs),
+    vramDevicesSignature,
+    {
+      baseline,
+      progressOf: (devices) => vramDeviceReleaseKeys(devices, watched),
+      // A `before` we could not read — or occupied cards we cannot tell apart —
+      // is not the same as a box with nothing to release. Only the latter may
+      // be published as a measured figure.
+      confirmable: before != null && identifiable,
+    },
+  );
+}
+
 interface FreeVramDirectOutcome {
   ok: boolean;
   /** Failure detail when !ok (HTTP status / transport error), already worded
@@ -4006,6 +5029,9 @@ interface FreeVramDirectOutcome {
   reason?: string;
   before?: VramDeviceSample[] | null;
   after?: VramDeviceSample[] | null;
+  /** #2704 — false when `after` was returned at the settle cap without the
+   *  release ever being observed, i.e. the counters are reported unconfirmed. */
+  afterSettled?: boolean;
 }
 
 /** Issue ComfyUI's /free DIRECTLY against a proven-local base and read the
@@ -4036,8 +5062,8 @@ async function freeVramDirect(base: string): Promise<FreeVramDirectOutcome> {
   } finally {
     clearTimeout(timer);
   }
-  const after = await readVramDevicesMaybe(base, FREE_VRAM_DIRECT_TIMEOUT_MS);
-  return { ok: true, before, after };
+  const after = await readSettledVramDevices(base, FREE_VRAM_DIRECT_TIMEOUT_MS, before);
+  return { ok: true, before, after: after.value, afterSettled: after.settled };
 }
 
 /** Test injection for the direct server-side /free, so the settle can be
@@ -4090,6 +5116,11 @@ async function settleFreeVramAfterAckTimeout(
     via: `POST ${base}/free`,
     ...(direct.before != null ? { vram_before: direct.before } : {}),
     ...(direct.after != null ? { vram_after: direct.after } : {}),
+    // #2704 — a card whose release never landed inside the settle cap is
+    // reported, but never as a confirmed post-release measurement.
+    ...(direct.after != null && direct.afterSettled === false
+      ? { vram_after_settled: false }
+      : {}),
   };
   // #1866 — a 2xx from /free is not a free GPU. Ray/CLIP workers can keep a
   // device pinned. When we have occupancy numbers, they are the verdict.
@@ -4125,9 +5156,10 @@ async function settleFreeVramAfterAckTimeout(
 
 /**
  * #1866 — a panel ack of `{freed:true}` is the /free HTTP 2xx, not a measured
- * GPU. After the tab says it posted /free, re-read /system_stats and refuse to
- * claim VRAM was freed when a device is still occupied. Unreadable stats leave
- * the original ack UNTOUCHED: an unknown answer claims nothing extra.
+ * GPU. After the tab says it posted /free, re-read /system_stats (after CUDA
+ * occupancy settles — #2050) and refuse to claim VRAM was freed when a device
+ * is still occupied. Unreadable stats leave the original ack UNTOUCHED: an
+ * unknown answer claims nothing extra.
  *
  * #1887 — occupancy is read from the same proven local base the frozen-tab
  * settle uses (`captureRebootHealthBase(ctx)`), never `getComfyUIBaseUrl()`.
@@ -4152,7 +5184,10 @@ async function annotateFreeVramAck(ctx: PanelToolCtx, res: ToolResult): Promise<
       note: UNOBSERVED_OCCUPANCY_NOTE,
     });
   }
-  const devices = await readVramDevicesMaybe(base, FREE_VRAM_DIRECT_TIMEOUT_MS);
+  // No pre-/free sample exists on this path — the tab already posted /free
+  // before it acked — so this read keeps the best-effort plateau rule and
+  // cannot rule out a still-settling card the way freeVramDirect can (#2704).
+  const devices = (await readSettledVramDevices(base, FREE_VRAM_DIRECT_TIMEOUT_MS)).value;
   if (devices == null) return res;
   const pinned = pinnedVramDevices(devices);
   if (pinned.length > 0) {
@@ -4351,7 +5386,32 @@ function queueNeverSawATask(reply: Record<string, unknown> | null): boolean {
  */
 function panelIncarnation(ctx: PanelToolCtx, tabId: string): string | undefined {
   const b = ctx.bridge as { tabIncarnation?: (t: string) => string | undefined };
-  return typeof b?.tabIncarnation === "function" ? b.tabIncarnation(tabId) : undefined;
+  if (typeof b?.tabIncarnation !== "function") return undefined;
+
+  // Claude's in-process server is bound to the backend-qualified scope address
+  // (for example `orchestrator::claude`), not to a concrete bridge tab id. The
+  // bridge's scope resolver is the same canonical routing decision used by the
+  // subsequent queue read, so ask it for the real connection before reading its
+  // incarnation. Never pass an unresolved scope address to tabIncarnation: the
+  // UiBridge stores incarnations by real connection key, and a mock/legacy
+  // implementation must not make an unknown scope look identified.
+  const resolvedTab = isScopeAddress(tabId)
+    ? (() => {
+        const resolveSharedTabId = (ctx.bridge as BridgeProbe).resolveSharedTabId;
+        try {
+          // Preserve UiBridge's receiver: resolveSharedTabId delegates through
+          // `this.resolveTarget()`. Scope-key contexts (Claude and HTTP lanes)
+          // must not lose that receiver merely because this probe extracts the
+          // optional method before invoking it.
+          return typeof resolveSharedTabId === "function"
+            ? resolveSharedTabId.call(ctx.bridge, tabId)
+            : undefined;
+        } catch {
+          return undefined;
+        }
+      })()
+    : tabId;
+  return resolvedTab === undefined ? undefined : b.tabIncarnation(resolvedTab);
 }
 
 type RegistryInstallSnapshot = {
@@ -4709,16 +5769,38 @@ async function settleDroppedEnqueue(
 }
 
 /**
- * #1699 — a drained Manager queue is not apply_manifest completion when
- * custom_nodes were never submitted. Keep the panel payload parseable (do not
- * append prose after the JSON) and name the leftover entries on the object.
+ * #1699/#1129 — a drained Manager queue is not apply_manifest completion when
+ * custom_nodes were never submitted or a submitted operation is unresolved.
+ * Keep the panel payload parseable (do not append prose after the JSON) and
+ * name the outstanding entries on the object.
  */
-function annotateQueueStatusWithManifestPartial(res: ToolResult): ToolResult {
-  const leftover = getManifestPartialLeftover();
-  if (!leftover || leftover.not_started.length === 0) return res;
+function annotateQueueStatusWithManifestPartial(
+  res: ToolResult,
+  target: { url: string; generation: number } | undefined,
+  scope: string | undefined,
+): ToolResult {
+  // Both records are scoped to the target snapshot captured for this poll. An
+  // absent scope/target is UNKNOWN and therefore cannot authorize an annotation.
+  // In particular, do not fall back to getComfyUIBaseUrl() here: a retarget can
+  // occur while the panel status request is in flight.
+  if (!target || !scope) return res;
+  const local = readManifestPartials(target.url, scope, target.generation);
+  const published = readPublishedManifestOutcomes(target.url, scope, target.generation);
+  const partials = [...local, ...published];
+  const uniquePartials = partials.filter((partial, index, all) => {
+    const key = JSON.stringify(partial);
+    return all.findIndex((candidate) => JSON.stringify(candidate) === key) === index;
+  });
+  if (uniquePartials.length === 0) {
+    return res;
+  }
   if (res.isError) return res;
   const parsed = parseToolResultJson(res);
-  if (!parsed) return appendNote(res, formatQueueStatusPartialNote(leftover));
+  const leftover = uniquePartials[0];
+  const note = uniquePartials.length === 1
+    ? formatQueueStatusPartialNote(leftover)
+    : uniquePartials.map(formatQueueStatusPartialNote).join("\n\n");
+  if (!parsed) return appendNote(res, note);
   return {
     ...res,
     content: [
@@ -4728,6 +5810,7 @@ function annotateQueueStatusWithManifestPartial(res: ToolResult): ToolResult {
           {
             ...parsed,
             apply_manifest_partial: leftover,
+            ...(uniquePartials.length > 1 ? { apply_manifest_partials: uniquePartials } : {}),
             queue_complete_for_apply_manifest: false,
           },
           null,
@@ -5243,18 +6326,68 @@ function isObjectInfoBudgetRefusal(res: ToolResult): boolean {
  * The refresh is only a coordination primitive. Callers must still require the panel's
  * explicit `refreshed:true` result before retrying a write; a timeout, malformed reply,
  * `refresh_still_running`, or any other non-authoritative result remains fail-closed.
+ * The bridge already gives this idempotent read one bounded reconnect retry, so a
+ * generation change alone does not make a still-young record stale. A record that has
+ * outlived that same bounded request window may be replaced once the current bridge
+ * generation is known and monotonic; replacing the coordinator record does not cancel
+ * or authorize the old request.
  */
+type PanelSchemaRefreshRecord = {
+  token: object;
+  promise: Promise<ToolResult>;
+  startedAt: number;
+  generation: number | undefined;
+};
+
 const panelSchemaRefreshes = new Map<
   string,
-  { token: object; promise: Promise<ToolResult> }
+  PanelSchemaRefreshRecord
 >();
+
+function panelSchemaRefreshGeneration(ctx: PanelToolCtx): number | undefined {
+  const bridge = ctx.bridge as
+    | { tabConnectionGeneration?: (tabId: string) => number | undefined }
+    | undefined;
+  if (typeof bridge?.tabConnectionGeneration !== "function") return undefined;
+  try {
+    const generation = bridge.tabConnectionGeneration(journalTabFor(ctx));
+    return typeof generation === "number" && Number.isSafeInteger(generation) && generation >= 0
+      ? generation
+      : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function panelSchemaRefreshIsStale(
+  record: PanelSchemaRefreshRecord,
+  ctx: PanelToolCtx,
+  now = Date.now(),
+): boolean {
+  // A refresh can legitimately be parked and resumed by UiBridge after a reconnect.
+  // Do not replace it merely because the hello generation changed, or because the
+  // generation probe is unavailable. Only a record beyond the same finite request
+  // bound, with a known non-regressing current generation, is reclaimable.
+  if (now - record.startedAt < OBJECT_INFO_REFRESH_ACK_TIMEOUT_MS) return false;
+  const currentGeneration = panelSchemaRefreshGeneration(ctx);
+  return (
+    record.generation !== undefined &&
+    currentGeneration !== undefined &&
+    currentGeneration >= record.generation
+  );
+}
 
 function sharedPanelSchemaRefresh(ctx: PanelToolCtx): Promise<ToolResult> {
   const key = panelSchemaKey(ctx);
   const existing = panelSchemaRefreshes.get(key);
-  if (existing) return existing.promise;
+  if (existing && !panelSchemaRefreshIsStale(existing, ctx)) return existing.promise;
+  // Replacing a stale record is deliberately not cancellation: the old bridge read
+  // may still settle later. Its token-guarded finally cannot remove this new record.
+  if (existing) panelSchemaRefreshes.delete(key);
 
   const token = {};
+  const startedAt = Date.now();
+  const generation = panelSchemaRefreshGeneration(ctx);
   // Yield before dispatch so the map is installed before even a synchronously-throwing
   // bridge stub can settle this promise and run its cleanup.
   const promise = (async () => {
@@ -5267,7 +6400,7 @@ function sharedPanelSchemaRefresh(ctx: PanelToolCtx): Promise<ToolResult> {
       if (panelSchemaRefreshes.get(key)?.token === token) panelSchemaRefreshes.delete(key);
     }
   })();
-  panelSchemaRefreshes.set(key, { token, promise });
+  panelSchemaRefreshes.set(key, { token, promise, startedAt, generation });
   return promise;
 }
 
@@ -5737,6 +6870,135 @@ function stripVerifiedLastObservedSchemaNote(res: ToolResult): ToolResult {
   return rewriteToolResultJson(res, next);
 }
 
+// ---- #2545: MiniMaxH3Director duration onValueChange write_warning ----------
+// The panel assigns duration, verifies the value, then invokes the widget
+// callback. ComfyUI's settingStore onValueChange throws
+// `Cannot read properties of undefined (reading 'options')` when editor/options
+// is missing. That throw is a post-write disclosure, not a failed assignment.
+// Relaying it as isError (or leaving write_warning as the salient failure)
+// makes a landed 5→6 write look like a retryable error.
+
+function isDirectorDurationCallbackWarning(widget: string, text: string): boolean {
+  if (widget.toLowerCase() !== "duration") return false;
+  if (!/reading ['"]options['"]/.test(text)) return false;
+  return /onValueChange|settingStore|widget_callback/i.test(text);
+}
+
+function scalarWidgetValuesMatch(requested: unknown, observed: unknown): boolean {
+  if (Object.is(requested, observed)) return true;
+  if (
+    (typeof requested === "number" || typeof requested === "string") &&
+    (typeof observed === "number" || typeof observed === "string")
+  ) {
+    return String(requested) === String(observed);
+  }
+  return false;
+}
+
+function recordFromUnknown(value: unknown): Record<string, unknown> | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  return value as Record<string, unknown>;
+}
+
+function parseJsonObjectFromToolText(res: ToolResult): Record<string, unknown> | null {
+  const parsed = parseToolResultJson(res);
+  if (parsed) return parsed;
+  const text = res?.content?.find((c) => c.type === "text")?.text;
+  if (typeof text !== "string") return null;
+  const trimmed = text.replace(/^Error:\s*/i, "").trim();
+  const start = trimmed.indexOf("{");
+  if (start < 0) return null;
+  try {
+    return recordFromUnknown(JSON.parse(trimmed.slice(start)));
+  // unknown-ok: the reply is not JSON; keep the original widget-write result.
+  } catch {
+    return null;
+  }
+}
+
+function stripWriteWarningFields(record: Record<string, unknown>): Record<string, unknown> {
+  const next = { ...record };
+  delete next.write_warning;
+  delete next.write_warning_frame;
+  delete next.write_warning_source;
+  return next;
+}
+
+function landedDurationWriteResult(
+  payload: Record<string, unknown> | null,
+  set: Record<string, unknown>,
+): ToolResult {
+  const next: Record<string, unknown> = payload
+    ? stripWriteWarningFields({ ...payload, set: stripWriteWarningFields(set) })
+    : { set: stripWriteWarningFields(set) };
+  return ok(next);
+}
+
+async function readNamedWidgetValue(
+  ctx: PanelToolCtx,
+  nodeId: unknown,
+  widget: string,
+): Promise<unknown> {
+  const probe = await ctx.call(
+    {
+      cmd: "graph_query",
+      ids: [nodeId],
+      fields: "detail",
+      limit: 1,
+      max_chars: DYNAMIC_COMBO_PROBE_MAX_CHARS,
+    },
+    8000,
+  );
+  if (probe.isError) return undefined;
+  const detail = parseVerifiedQueriedNodeDetail(normalizeGraphQueryResult(probe));
+  const requestedId = canonicalQueriedNodeId(nodeId);
+  if (!detail || !requestedId || detail.id !== requestedId || !detail.widgets) {
+    return undefined;
+  }
+  if (!Object.prototype.hasOwnProperty.call(detail.widgets, widget)) return undefined;
+  return detail.widgets[widget];
+}
+
+/**
+ * #2545 — a verified Director duration write whose setting-store callback
+ * threw is still a landed write. Swallow that write_warning when `set.value`
+ * matches the request; if the panel reported it as an error without a set
+ * envelope, one graph_query may prove the value. Anything else stays failed.
+ */
+async function classifyLandedDirectorDurationWriteWarning(
+  ctx: PanelToolCtx,
+  res: ToolResult,
+  nodeId: unknown,
+  widget: string,
+  requested: unknown,
+): Promise<ToolResult> {
+  const text = textOfToolResult(res);
+  const payload = parseJsonObjectFromToolText(res);
+  const set = recordFromUnknown(payload?.set);
+  const warningText = [
+    typeof set?.write_warning === "string" ? set.write_warning : "",
+    typeof set?.write_warning_frame === "string" ? set.write_warning_frame : "",
+    typeof set?.write_warning_source === "string" ? set.write_warning_source : "",
+    text,
+  ].join("\n");
+  if (!isDirectorDurationCallbackWarning(widget, warningText)) return res;
+  if (set && scalarWidgetValuesMatch(requested, set.value)) {
+    return landedDurationWriteResult(payload, set);
+  }
+  if (!res.isError) return res;
+  const observed = await readNamedWidgetValue(ctx, nodeId, widget);
+  if (observed === undefined || !scalarWidgetValuesMatch(requested, observed)) {
+    return res;
+  }
+  return ok({
+    set: {
+      node_id: nodeId,
+      widget,
+      value: observed,
+    },
+  });
+}
+
 async function exitSubgraphLevels(
   ctx: PanelToolCtx,
   count: number,
@@ -5998,7 +7260,7 @@ function parseQueriedNodeType(payload: Record<string, unknown> | null): string |
   return null;
 }
 
-type QueriedNodeIdentity = { id: string; type: string };
+type QueriedNodeIdentity = { id: string; type: string; nodeIdentity?: string };
 
 function canonicalQueriedNodeId(value: unknown): string | null {
   if (typeof value === "number") {
@@ -6025,35 +7287,75 @@ function parseQueriedNodeIdentityRow(row: unknown): QueriedNodeIdentity | null {
     return null;
   }
   const resolvedType = typeof type === "string" ? type : classType;
-  return resolvedType ? { id, type: resolvedType } : null;
+  const nodeIdentity = record.node_identity;
+  if (
+    nodeIdentity !== undefined &&
+    (typeof nodeIdentity !== "string" || nodeIdentity.length === 0 || nodeIdentity.length > 256)
+  ) {
+    return null;
+  }
+  return resolvedType
+    ? { id, type: resolvedType, ...(nodeIdentity !== undefined ? { nodeIdentity } : {}) }
+    : null;
 }
 
 type QueriedNodeScope = {
   activeView: "root" | "subgraph";
   node: "ordinary" | "container";
+  nodeType: string;
+  nodeIdentity?: string;
+  /** Owner of the currently viewed subgraph, when the target row is nested. */
+  scopeOwnerNodeId?: string;
+  workflowUuid?: string;
+  /** The object-keyed graph identity of the exact view that supplied the row. */
+  graphIdentity?: string;
 };
+
+function rememberLiveRootViewing(ctx: PanelToolCtx, viewing: unknown): void {
+  applyLiveRootViewing(ctx.tabId, viewing);
+  ctx.bridge?.applyLiveRootViewing?.(ctx.tabId, viewing);
+}
+
+function forgetStaleSubgraphIdentity(ctx: PanelToolCtx): void {
+  clearStaleSubgraphIdentity(ctx.tabId);
+  ctx.bridge?.clearPromotedSubgraphIdentity?.(ctx.tabId);
+}
 
 /** Read the active viewing scope and node's explicit container bit before
  * attempting promoted-widget resolution. The pinpoint detail projection carries
  * the node bit even when the widget list is empty (which is how a fresh rgthree
- * Power Lora Loader appears). Anything short of one exact, non-truncated row
- * with an explicit root/subgraph witness is deliberately indeterminate; callers
- * retain the existing fail-closed promoted-container path in that case. */
+ * Power Lora Loader appears). A clipped widget value (`truncated: true`) is not
+ * a reason to discard a one-row pinpoint: that is how a root StringConcatenate
+ * appears after a long-string detail read (#2518). A missing `is_subgraph` is
+ * still indeterminate. Anything short of a root/subgraph witness plus an
+ * explicit container bit retains the fail-closed promoted-container path. */
 function parseVerifiedQueriedNodeScope(
   payload: Record<string, unknown> | null,
   nodeId: unknown,
 ): QueriedNodeScope | null {
   if (!payload) return null;
+  const viewing = payload.viewing;
+  if (!viewing || typeof viewing !== "object" || Array.isArray(viewing)) return null;
+  const viewingRecord = viewing as Record<string, unknown>;
+  const activeView = viewingRecord.scope;
+  if (activeView !== "root" && activeView !== "subgraph") return null;
+  const graphIdentity = viewingRecord.graph_identity;
   if (
-    Object.prototype.hasOwnProperty.call(payload, "truncated") &&
-    payload.truncated !== false
+    graphIdentity !== undefined &&
+    (typeof graphIdentity !== "string" || graphIdentity.length === 0 || graphIdentity.length > 256)
   ) {
     return null;
   }
-  const viewing = payload.viewing;
-  if (!viewing || typeof viewing !== "object" || Array.isArray(viewing)) return null;
-  const activeView = (viewing as Record<string, unknown>).scope;
-  if (activeView !== "root" && activeView !== "subgraph") return null;
+  const workflowUuid = viewingRecord.workflow_uuid;
+  if (workflowUuid !== undefined && (typeof workflowUuid !== "string" || workflowUuid.length === 0)) {
+    return null;
+  }
+  const rawScopeOwner = viewingRecord.owner_node_id;
+  const scopeOwnerNodeId =
+    rawScopeOwner === undefined || rawScopeOwner === null
+      ? undefined
+      : canonicalQueriedNodeId(rawScopeOwner);
+  if (rawScopeOwner !== undefined && rawScopeOwner !== null && !scopeOwnerNodeId) return null;
 
   let row: unknown;
   if (Object.prototype.hasOwnProperty.call(payload, "nodes")) {
@@ -6083,6 +7385,11 @@ function parseVerifiedQueriedNodeScope(
   return {
     activeView,
     node: isSubgraph ? "container" : "ordinary",
+    nodeType: identity.type,
+    ...(identity.nodeIdentity !== undefined ? { nodeIdentity: identity.nodeIdentity } : {}),
+    ...(scopeOwnerNodeId ? { scopeOwnerNodeId } : {}),
+    ...(workflowUuid !== undefined ? { workflowUuid } : {}),
+    ...(graphIdentity !== undefined ? { graphIdentity } : {}),
   };
 }
 
@@ -6264,6 +7571,11 @@ const DYNAMIC_COMBO_REFUSED_CHILD_TYPE = "STRING";
  *  The node most likely to overflow that budget is the node already holding a long
  *  prompt, i.e. exactly the #2299 report ("<any long prompt>"). */
 const DYNAMIC_COMBO_PROBE_MAX_CHARS = 60000;
+// #2478 — the Panel's one-ID compact projection carries a minimal structured
+// node witness, including its opaque incarnation identity. Keep every strict
+// identity probe below the graph_query floor's bounded budget; broad/detail
+// reads retain their existing budgets and semantics.
+const PROMOTED_IDENTITY_PROBE_MAX_CHARS = 2048;
 
 function dynamicComboSubWidgetRefusal(
   nodeType: string,
@@ -6492,29 +7804,86 @@ async function refuseKnownBadWriteBeforeDispatch(
 type PromotedWriteBinding = {
   tabId: string;
   identity: { generation: number; tabSessionId: string };
+  /** The node-identity write-fence capability observed when this target was
+   * captured. A same-socket re-hello can change hello capabilities without
+   * changing the connection identity, so the final write must not silently
+   * drop or add this fence. */
+  nodeIdentityFenceAdvertised: boolean;
+  /** The opaque identity of the exact inner node captured with the binding. */
+  nodeIdentity?: string;
 };
 
 type PromotedWritePlan = {
   kind: "promoted-write";
   outerNodeId: number | string;
+  /** Host/subgraph-input widget to write on the addressed SubgraphNode. */
+  hostWidget: string;
+  /** The current graph that contains the addressed host instance. This is
+   * distinct from `scope`, which names the child graph reached by entering it. */
+  outerScope?: PromotedExpectedScope;
+  outerNodeType?: string;
+  outerNodeIdentity?: string;
   inner: {
     innerNodeId: number | string;
     widget: string;
+    nodeIdentity?: string;
     parentRail?: PromotedParentRailWitness;
   };
   innerNodeType: string;
+  /** Inner widget is a live input driven by the promoted parent rail. */
+  innerLinkDriven: boolean;
   terminal?: PromotedTerminalWitness;
   scope: PromotedScopeWitness;
   binding: PromotedWriteBinding;
 };
 
+type OrdinaryWritePlan = {
+  kind: "ordinary-write";
+  activeView: "root" | "subgraph";
+  scopeOwnerNodeId?: string;
+  graphIdentity: string;
+  workflowUuid?: string;
+  expectedNodeType: string;
+  expectedNodeIdentity?: string;
+  binding: {
+    tabId: string;
+    identity?: { generation: number; tabSessionId: string };
+  };
+};
+
 type PromotedExpectedScope = PromotedScopeWitness & {
+  /** Root is used for a host-instance write; inner writes remain subgraph-scoped. */
+  scope?: "root" | "subgraph";
   terminal?: PromotedTerminalWitness;
   promotedWidget?: string;
   parentRail?: PromotedParentRailWitness;
 };
 
-type PromotedWritePreflight = PromotedWritePlan | ToolResult | null;
+function outerPromotedExpectedScope(
+  targetScope: QueriedNodeScope | null,
+  outerNodeId: unknown,
+): PromotedExpectedScope | null {
+  if (!targetScope?.graphIdentity) return null;
+  const outerId = canonicalQueriedNodeId(outerNodeId);
+  if (!outerId) return null;
+  if (targetScope.activeView === "root") {
+    return {
+      scope: "root",
+      ownerNodeId: outerId,
+      graphIdentity: targetScope.graphIdentity,
+      ...(targetScope.workflowUuid !== undefined ? { workflowUuid: targetScope.workflowUuid } : {}),
+    };
+  }
+  if (!targetScope.scopeOwnerNodeId) return null;
+  return {
+    scope: "subgraph",
+    ownerNodeId: targetScope.scopeOwnerNodeId,
+    graphIdentity: targetScope.graphIdentity,
+    ...(targetScope.workflowUuid !== undefined ? { workflowUuid: targetScope.workflowUuid } : {}),
+  };
+}
+
+type PromotedWritePreflight = PromotedWritePlan | OrdinaryWritePlan | ToolResult | null;
 
 function promotedEnvelopeCarriesEvidence(payload: Record<string, unknown> | null): boolean {
   if (!payload) return false;
@@ -6562,6 +7931,49 @@ function isDefinitiveNonPromotedSubgraphRead(res: ToolResult): boolean {
   return /^Error:\s*Node\s+\S+(?:\s+\((?:(?:[^()]|\([^()]*\))*|[^)]*)\))?\s+is not a subgraph\b/i.test(
     textOfToolResult(res),
   );
+}
+
+/** Extract the receiver-published type from the definitive ordinary-node
+ * refusal. A definitive classification without a type is still enough to
+ * avoid treating the node as promoted, but not enough to fence a write after
+ * an indeterminate read: an id can have been reused while the read was away. */
+function definitiveNonPromotedNodeType(res: ToolResult): string | null {
+  if (!isDefinitiveNonPromotedSubgraphRead(res)) return null;
+  const match = /^Error:\s*Node\s+\S+\s+([\s\S]*?)\s+is not a subgraph\b/i.exec(
+    textOfToolResult(res),
+  );
+  if (!match) return null;
+  const type = match[1].trim();
+  if (!type.startsWith("(") || !type.endsWith(")")) return null;
+  const unwrapped = type.slice(1, -1).trim();
+  return unwrapped || null;
+}
+
+type PromotedSubgraphReadErrorKind = "definitive-ordinary" | "transient" | "permanent";
+
+/** The promoted-write refresh is deliberately narrower than the broad panel
+ * call retry classifier. Only known transport/reconnect shapes may consume the
+ * one explicit refresh; application refusals must not be replayed. */
+function classifyPromotedSubgraphReadError(res: ToolResult): PromotedSubgraphReadErrorKind {
+  if (!res.isError) return "permanent";
+  if (isDefinitiveNonPromotedSubgraphRead(res)) return "definitive-ordinary";
+  const text = textOfToolResult(res);
+  // Keep this list aligned with the bridge's established reconnect classifier.
+  // The promoted preflight opts out of the ordinary retry wrapper, so this is
+  // the one place that decides whether its explicit refresh is allowed. The
+  // panel's workflow-switch guard is a separate, known-safe pre-executor
+  // refusal: it explicitly says nothing was applied and asks for a retry.
+  if (
+    isTransientReconnectError(new Error(text)) ||
+    /(?:websocket|socket).*(?:disconnected|closed|reset)|(?:disconnected|closed|reset).*(?:websocket|socket)/i.test(
+      text,
+    ) ||
+    /\bunavailable\b/i.test(text) ||
+    isWorkflowSwitchGuardRefusal(new Error(text))
+  ) {
+    return "transient";
+  }
+  return "permanent";
 }
 
 /**
@@ -6639,20 +8051,40 @@ function promotedMatchCount(payload: Record<string, unknown>, widget: string): n
  * array is also the distinction between a promoted alias and an ordinary
  * widget on the same subgraph container; do not infer that distinction from
  * the inner node's concrete widget names because aliases may be renamed. */
+function rawPromotedTerminalMatchesWidget(
+  entry: Record<string, unknown>,
+  widget: string,
+): boolean {
+  const wanted = widget.toLowerCase();
+  if (typeof entry.widget === "string" && entry.widget.toLowerCase() === wanted) return true;
+  if (typeof entry.immediate_widget === "string" && entry.immediate_widget.toLowerCase() === wanted) {
+    return true;
+  }
+  return typeof entry.terminal_widget === "string" && entry.terminal_widget.toLowerCase() === wanted;
+}
+
+function rawPromotedTerminalOwnEntries(
+  entries: Array<Record<string, unknown>>,
+  widget: string,
+): Array<Record<string, unknown>> {
+  const wanted = widget.toLowerCase();
+  const byHostAlias = entries.filter(
+    (entry) => typeof entry.widget === "string" && entry.widget.toLowerCase() === wanted,
+  );
+  if (byHostAlias.length > 0) return byHostAlias;
+  return entries.filter((entry) => rawPromotedTerminalMatchesWidget(entry, widget));
+}
+
 function promotedTerminalAliasCount(
   payload: Record<string, unknown>,
   widget: string,
 ): number | null {
   const entries = payload.promoted_terminals;
   if (!Array.isArray(entries)) return null;
-  return entries.filter(
-    (entry) =>
-      !!entry &&
-      typeof entry === "object" &&
-      !Array.isArray(entry) &&
-      typeof (entry as Record<string, unknown>).widget === "string" &&
-      ((entry as Record<string, unknown>).widget as string).toLowerCase() === widget.toLowerCase(),
-  ).length;
+  const records = entries.filter(
+    (entry) => !!entry && typeof entry === "object" && !Array.isArray(entry),
+  ) as Array<Record<string, unknown>>;
+  return rawPromotedTerminalOwnEntries(records, widget).length;
 }
 
 /** A capability-skewed receiver's witness array is not authoritative. Any
@@ -6693,7 +8125,6 @@ function promotedTerminalEvidenceError(
   if (!Object.prototype.hasOwnProperty.call(payload, "promoted_terminals")) return null;
   const entries = payload.promoted_terminals;
   if (!Array.isArray(entries)) return "the current receiver's promoted-terminal witness was unavailable";
-  const wanted = widget.toLowerCase();
   // Structural pass first: a malformed array cannot be narrowed, because the
   // requested alias may be exactly the entry that failed to parse.
   for (const entry of entries) {
@@ -6707,9 +8138,7 @@ function promotedTerminalEvidenceError(
   }
   // ONE entry for the requested alias is the only case this narrows: that entry
   // is complete evidence about this write, and it decides it.
-  const own = (entries as Array<Record<string, unknown>>).filter(
-    (entry) => (entry.widget as string).toLowerCase() === wanted,
-  );
+  const own = rawPromotedTerminalOwnEntries(entries as Array<Record<string, unknown>>, widget);
   if (own.length === 1) {
     return own[0].error ? "the promoted-terminal witness was incomplete or unresolved" : null;
   }
@@ -6771,18 +8200,28 @@ function resolvePromotedWriteTarget(
   return resolveLegacyInnerPromotedTarget(payload, widget, nodeId);
 }
 
+const PROMOTED_PREFLIGHT_READ_OPTIONS: PanelToolCallOptions = {
+  retry: false,
+  maxBridgeReconnectRetries: 0,
+};
+
 async function readPromotedTargetScope(
   ctx: PanelToolCtx,
   nodeId: unknown,
+  options: PanelToolCallOptions = PROMOTED_PREFLIGHT_READ_OPTIONS,
 ): Promise<QueriedNodeScope | null> {
   const probe = await ctx.call({
     cmd: "graph_query",
     ids: [nodeId],
     fields: "detail",
     limit: 1,
-  });
+  }, undefined, undefined, undefined, options);
   if (probe.isError) return null;
-  return parseVerifiedQueriedNodeScope(parseToolResultJson(probe), nodeId);
+  const payload = parseToolResultJson(probe);
+  if (parseViewingScope(payload?.viewing)?.scope === "root") {
+    rememberLiveRootViewing(ctx, payload?.viewing);
+  }
+  return parseVerifiedQueriedNodeScope(payload, nodeId);
 }
 
 function currentPromotedBindingError(
@@ -6803,6 +8242,49 @@ function currentPromotedBindingError(
     return "the panel session or connection changed";
   }
   return null;
+}
+
+/** A promoted write must retain the node-identity fence capability observed at
+ * capture through the final synchronous dispatch. UiBridge deliberately keeps
+ * anonymous same-socket incarnations stable across re-hello, but re-reads the
+ * capability flags from each hello. Treat either direction of capability drift
+ * as a refusal: a false -> true upgrade cannot authorize a target captured
+ * without its witness, and a true -> false withdrawal cannot authorize an
+ * unfenced write on the old target. */
+function currentPromotedNodeIdentityFenceError(
+  ctx: PanelToolCtx,
+  binding: PromotedWriteBinding,
+): string | null {
+  let currentCapability: boolean;
+  try {
+    currentCapability = ctx.tabExpectedNodeIdentityFenceCapability?.() === true;
+  } catch {
+    return "the panel node-identity write fence became unreadable";
+  }
+  if (currentCapability !== binding.nodeIdentityFenceAdvertised) {
+    return binding.nodeIdentityFenceAdvertised
+      ? "the panel node-identity write fence was withdrawn or became unavailable"
+      : "the panel node-identity write fence changed after the promoted target was captured";
+  }
+  if (currentCapability && !binding.nodeIdentity) {
+    return "the panel node-identity write fence was advertised without a captured node witness";
+  }
+  return null;
+}
+
+function capturePromotedWriteBinding(ctx: PanelToolCtx): PromotedWriteBinding | null {
+  if (typeof ctx.panelConnectionIdentity !== "function") return null;
+  const identity = ctx.panelConnectionIdentity();
+  if (!isUsablePanelConnectionIdentity(identity)) return null;
+  let nodeIdentityFenceAdvertised = false;
+  if (typeof ctx.tabExpectedNodeIdentityFenceCapability === "function") {
+    nodeIdentityFenceAdvertised = ctx.tabExpectedNodeIdentityFenceCapability() === true;
+  }
+  return {
+    tabId: ctx.tabId,
+    identity,
+    nodeIdentityFenceAdvertised,
+  };
 }
 
 /** The bridge's workflow stamp is the strongest synchronous receiver witness
@@ -6876,6 +8358,45 @@ function currentPromotedScopeError(
   return null;
 }
 
+/** Check the graph that contains the addressed host instance. The promoted
+ * child witness above cannot do this job: before entry its graph identity is
+ * deliberately different from the current root/parent graph. Host-first
+ * writes therefore carry their own root-or-parent scope envelope. */
+function currentPromotedExpectedScopeError(
+  ctx: PanelToolCtx,
+  expected: PromotedExpectedScope,
+): string | null {
+  const readScope = ctx.bridge.promotedScopeFor;
+  if (typeof readScope !== "function") {
+    return "the receiving panel current-view scope became unavailable";
+  }
+  let observed: TabPromotedScopeRead;
+  try {
+    observed = readScope.call(ctx.bridge, ctx.tabId);
+  } catch {
+    return "the receiving panel current-view scope became unreadable";
+  }
+  if (observed.known !== true) {
+    return "the receiving panel current-view scope became unverifiable";
+  }
+  const expectedScope = expected.scope ?? "subgraph";
+  if (expectedScope === "root") {
+    if (observed.scope !== "root" || observed.graphIdentity !== expected.graphIdentity) {
+      return "the receiving panel current root graph changed or became unverifiable";
+    }
+  } else if (
+    observed.scope !== "subgraph" ||
+    observed.ownerNodeId !== expected.ownerNodeId ||
+    observed.graphIdentity !== expected.graphIdentity
+  ) {
+    return "the receiving panel current graph/subgraph identity changed or became unverifiable";
+  }
+  if (expected.workflowUuid !== undefined && observed.workflowUuid !== expected.workflowUuid) {
+    return "the receiving panel workflow scope changed or became unverifiable";
+  }
+  return null;
+}
+
 type PromotedScopeFence = {
   error: string | null;
   /** The exact structured result of the live graph_query. Once present, the
@@ -6918,6 +8439,121 @@ function promotedWriteRefusal(widget: string, reason: string): ToolResult {
       `No graph_set_widget was dispatched; retry only after the panel binding and ` +
       `subgraph mapping are stable.`,
   );
+}
+
+/**
+ * #2688 — the ownership-envelope refusal, which a retry can NOT clear.
+ *
+ * `validatePromotedSubgraphEnvelope` rejects for about twenty distinct reasons
+ * and every one of them used to arrive as "graph_get_subgraph returned a
+ * malformed, stale, or incomplete ownership envelope" plus
+ * {@link promotedWriteRefusal}'s "retry only after the panel binding and
+ * subgraph mapping are stable". The reporter did exactly that — retried,
+ * re-opened the workflow, re-bound the tab — and got the identical sentence
+ * every time, because every invariant is a pure function of ONE reply and not a
+ * binding state that settles. There was no exit from that loop and nothing to
+ * report but "something was wrong".
+ *
+ * Same fail-closed decision as before; the only thing that changes is what the
+ * caller is told. The invariant text is shape-only (field paths, indices,
+ * counts, the two compared node ids) — naming it must not become a way to read
+ * a graph this fence is refusing to write to.
+ *
+ * The all-or-nothing sentence is load-bearing, not filler: the envelope is
+ * rejected as a whole, so a caller whose OWN widget maps perfectly can be
+ * refused by an unrelated `promoted_terminals` entry, and without that line the
+ * named index reads as irrelevant to their write.
+ */
+function promotedEnvelopeInvariantText(
+  subject: string,
+  invariant: string,
+  consequence: string,
+): string {
+  return (
+    `${subject}'s ownership envelope failed a completeness invariant: ${invariant}. ` +
+    `${consequence}\n` +
+    // The remedy claim is scoped to what the verdict is actually a function of.
+    // An earlier draft said these three "do not clear it" outright; the verdict
+    // is decided from the REPLY, so what is provable is that re-reading the same
+    // receiver re-runs the same check on the same shape. Stating more than that
+    // would send the next reader hunting for a shape change that never happened.
+    `This is a SHAPE defect in the reply, not a binding state. The verdict is decided from that ` +
+    `one reply alone, so retrying re-reads the same receiver: unless the panel's reply itself ` +
+    `changes shape, panel_open_workflow and panel_set_workflow_target re-bind the tab and ` +
+    `produce the identical refusal.\n` +
+    `The envelope is accepted or rejected as a WHOLE: one unusable field, or one malformed ` +
+    `promoted_terminals entry, refuses every promoted write on this wrapper, including widgets ` +
+    `whose own mapping is fine. Report the invariant above together with the panel version — it ` +
+    `names the field to fix.`
+  );
+}
+
+function promotedEnvelopeInvariantRefusal(
+  widget: string,
+  invariant: string,
+  subject = "graph_get_subgraph",
+): ToolResult {
+  return fail(
+    `panel_set_widget refused the promoted "${widget}" write because ` +
+      promotedEnvelopeInvariantText(subject, invariant, "No graph_set_widget was dispatched."),
+  );
+}
+
+/** True when a successful inner write is the panel's link-driven no-op. The
+ * stored value was verified, but the enclosing subgraph input still holds the
+ * render value — reporting that as a durable write is the #2488 lie. */
+function linkDrivenPromotedInnerWarning(res: ToolResult): boolean {
+  if (res.isError) return false;
+  if (parseLinkDrivenPromotedWriteWarning(textOfToolResult(res))) return true;
+  const payload = parseToolResultJson(res);
+  return typeof payload?.warning === "string" &&
+    parseLinkDrivenPromotedWriteWarning(payload.warning) != null;
+}
+
+function promotedHostAppliedNote(plan: PromotedWritePlan): string {
+  return (
+    `\n\n(Applied on the enclosing subgraph node ${plan.outerNodeId} widget ` +
+    `"${plan.hostWidget}". The promoted inner mapping node ${plan.inner.innerNodeId} ` +
+    `"${plan.inner.widget}" is synchronized from that host rail.)`
+  );
+}
+
+/** #2514 — an enclosing-subgraph host write is the parent-authoritative
+ * receipt. Advertise parent_widget_synced even when we never entered the
+ * inner scope (#2500/#2533 host-first), matching the remapped-inner path. */
+function promotedHostWriteReceipt(res: ToolResult, plan: PromotedWritePlan): ToolResult {
+  const payload = parseToolResultJson(res);
+  const note = promotedHostAppliedNote(plan);
+  if (!payload) return appendToolResultText(res, note);
+  const shaped = shapeParentAuthoritativePromotedWrite(payload, {
+    nodeId: plan.outerNodeId,
+    widget: plan.hostWidget,
+    synced: true,
+  });
+  return appendToolResultText(rewriteToolResultJson(res, shaped), note);
+}
+
+const PROMOTED_PRIMITIVE_INNER_TYPES = new Set([
+  "PrimitiveInt",
+  "PrimitiveFloat",
+  "PrimitiveBoolean",
+  "PrimitiveNumber",
+  "PrimitiveString",
+]);
+
+/** #2488 — a promoted subgraph INPUT whose inner widget is a different name
+ * (frame_counts → length) or a linked primitive must be written on the host.
+ * Same-name proxyWidgets promotions keep the inner write so #2314's known-bad
+ * live probe still runs before any container mutation.
+ * #2500 — a Primitive* `value` that exists as a live input is driven by the
+ * promoted rail even when the parent-rail witness is missing; write the host.
+ * #2533 — an authoritative parent rail whose inner widget is a live input
+ * (unet_name, clip_name, labelled prompt) is the same store; write the host. */
+function shouldWritePromotedHostFirst(plan: PromotedWritePlan): boolean {
+  if (plan.innerLinkDriven) return true;
+  if (!plan.inner.parentRail) return false;
+  if (plan.hostWidget.toLowerCase() !== plan.inner.widget.toLowerCase()) return true;
+  return PROMOTED_PRIMITIVE_INNER_TYPES.has(plan.innerNodeType);
 }
 
 /**
@@ -6993,10 +8629,12 @@ function promotedPanelBuildRefusal(
 
 /**
  * #2314 — inspect a promoted target before the first write. A valid mapping is
- * not permission to write the wrapper: the plan carries the receiver identity,
- * inner node id, and inner type to an inner write whose final dispatch fence
- * checks the receiver again. A later promotion relink therefore cannot redirect
- * an apparently safe container write onto a known-bad inner.
+ * not permission to write an uninspected wrapper: the plan carries the receiver
+ * identity, inner node id, and inner type so known-bad inner widgets (Anima,
+ * DaSiWa, dynamic-combo) are refused before any mutation. #2488 then writes the
+ * inspected host rail first; the inner write is only the #1655 fallback when
+ * the host listing-vs-lookup contradicts. A later promotion relink therefore
+ * cannot redirect an apparently safe container write onto a known-bad inner.
  *
  * Only the panel's definitive "is not a subgraph" result supplies a safe
  * non-promoted classification. An unavailable, malformed, or otherwise
@@ -7025,22 +8663,138 @@ function panelBindingDriftReason(
   tabBefore: string,
 ): string | undefined {
   if (!hasIdentityApi) return `the receiver identity was unavailable ${where}`;
-  if (!isUsablePanelConnectionIdentity(identityBefore)) {
-    return `the panel connection identity was unavailable ${where}`;
-  }
   let identityAfter: { generation: number; tabSessionId: string } | undefined;
   try {
     identityAfter = ctx.panelConnectionIdentity?.();
   } catch {
     return `the panel connection identity became unreadable ${where}`;
   }
-  if (ctx.tabId !== tabBefore || !isUsablePanelConnectionIdentity(identityAfter)) {
+  if (ctx.tabId !== tabBefore) {
+    return `the panel tab or connection changed ${where}`;
+  }
+  // #2551 / remaining #2475 path: a missing fingerprint is cannot-compare, not a
+  // rebind. Graph reads already answered on this binding. A usable-then-gone
+  // tuple is still drift. Call the type guard directly so TS narrows the pair.
+  if (
+    !isUsablePanelConnectionIdentity(identityBefore) &&
+    !isUsablePanelConnectionIdentity(identityAfter)
+  ) {
+    return undefined;
+  }
+  if (!isUsablePanelConnectionIdentity(identityBefore)) {
+    return `the panel connection identity was unavailable ${where}`;
+  }
+  if (!isUsablePanelConnectionIdentity(identityAfter)) {
     return `the panel tab or connection changed ${where}`;
   }
   if (!samePanelConnectionIdentity(identityBefore, identityAfter)) {
     return `the panel session or connection changed ${where}`;
   }
   return undefined;
+}
+
+/** Ordinary writes do not have an `expected_scope` field that the panel can
+ * enforce. Keep their graph identity fence on the MCP side instead, and give
+ * binding drift its own diagnosis so a failed promotion read is not blamed
+ * for a reconnect. */
+function ordinaryBindingRefusal(widget: string, reason: string): ToolResult {
+  return fail(
+    `panel_set_widget refused "${widget}" because the ordinary panel graph binding ${reason}. ` +
+      `No graph_set_widget was dispatched. Rebind the live panel with ` +
+      `panel_set_workflow_target({mode:"current"}) and retry.`,
+  );
+}
+
+function ordinaryWritePlanFromScope(
+  widget: string,
+  scope: QueriedNodeScope,
+  tabBefore: string,
+  identityBefore: { generation: number; tabSessionId: string } | undefined,
+): OrdinaryWritePlan | ToolResult {
+  if (!scope.graphIdentity) {
+    return ordinaryBindingRefusal(
+      widget,
+      "did not publish the current graph identity needed to fence this ordinary write",
+    );
+  }
+  return {
+    kind: "ordinary-write",
+    activeView: scope.activeView,
+    ...(scope.scopeOwnerNodeId !== undefined
+      ? { scopeOwnerNodeId: scope.scopeOwnerNodeId }
+      : {}),
+    graphIdentity: scope.graphIdentity,
+    ...(scope.workflowUuid !== undefined ? { workflowUuid: scope.workflowUuid } : {}),
+    expectedNodeType: scope.nodeType,
+    ...(scope.nodeIdentity !== undefined ? { expectedNodeIdentity: scope.nodeIdentity } : {}),
+    binding: {
+      tabId: tabBefore,
+      ...(isUsablePanelConnectionIdentity(identityBefore) ? { identity: identityBefore } : {}),
+    },
+  };
+}
+
+function currentOrdinaryWriteFenceError(
+  ctx: PanelToolCtx,
+  plan: OrdinaryWritePlan,
+): string | null {
+  if (ctx.tabId !== plan.binding.tabId) return "the panel tab was rebound";
+
+  if (typeof ctx.panelConnectionIdentity !== "function") {
+    return "the panel connection identity became unavailable";
+  }
+  let currentIdentity: { generation: number; tabSessionId: string } | undefined;
+  try {
+    currentIdentity = ctx.panelConnectionIdentity();
+  } catch {
+    return "the panel connection identity became unreadable";
+  }
+  if (plan.binding.identity) {
+    if (!isUsablePanelConnectionIdentity(currentIdentity)) {
+      return "the panel connection identity became unavailable";
+    }
+    if (!samePanelConnectionIdentity(plan.binding.identity, currentIdentity)) {
+      return "the panel session or connection changed";
+    }
+  }
+
+  const readScope = (ctx.bridge as BridgeProbe).promotedScopeFor;
+  if (typeof readScope !== "function") {
+    return "the current graph identity became unavailable";
+  }
+  let currentScope: TabPromotedScopeRead;
+  try {
+    currentScope = readScope.call(ctx.bridge, ctx.tabId);
+  } catch {
+    return "the current graph identity became unreadable";
+  }
+  if (currentScope.known !== true) {
+    return "the current graph identity became unavailable";
+  }
+  if (
+    currentScope.scope !== plan.activeView ||
+    currentScope.graphIdentity !== plan.graphIdentity
+  ) {
+    return "the current graph identity changed";
+  }
+  return null;
+}
+
+function ordinaryWriteBeforeDispatch(
+  ctx: PanelToolCtx,
+  widget: string,
+  plan: OrdinaryWritePlan,
+): () => void {
+  return () => {
+    const error = currentOrdinaryWriteFenceError(ctx, plan);
+    if (error) {
+      throw new Error(
+        `Refusing ordinary graph_set_widget for "${widget}": ${error}. ` +
+          `No graph_set_widget was dispatched. Rebind the live panel with ` +
+          `panel_set_workflow_target({mode:"current"}) and retry.`,
+      );
+    }
+  };
 }
 
 async function preparePromotedWidgetWrite(
@@ -7069,6 +8823,16 @@ async function preparePromotedWidgetWrite(
   // bundle that can classify renamed promotion aliases.
   const publishesCompleteTerminalWitness =
     ctx.tabPromotedTerminalWitnessCapability?.() === true;
+  // Snapshot this independently from the terminal-witness capability. UiBridge
+  // rereads hello flags on a same-socket re-hello, while the target and all of
+  // the reads below belong to this one preflight. A later dispatch must not
+  // silently switch between witnessed and legacy writes.
+  let nodeIdentityFenceAdvertised = false;
+  try {
+    nodeIdentityFenceAdvertised = ctx.tabExpectedNodeIdentityFenceCapability?.() === true;
+  } catch {
+    return promotedWriteRefusal(widget, "the panel node-identity write fence could not be read");
+  }
 
   const tabBefore = ctx.tabId;
   const hasIdentityApi = typeof ctx.panelConnectionIdentity === "function";
@@ -7086,28 +8850,184 @@ async function preparePromotedWidgetWrite(
   // promoted-container classifier to resolve a target that is intentionally
   // absent. An unreadable scope probe is not permission for an outer write;
   // it falls through to the existing conservative graph_get_subgraph path.
-  const targetScope = await readPromotedTargetScope(ctx, nodeId);
+  const targetScope = await readPromotedTargetScope(
+    ctx,
+    nodeId,
+    PROMOTED_PREFLIGHT_READ_OPTIONS,
+  );
+  // #2518 — a live root query names the current root workflow instance. Do not
+  // enter the promoted-subgraph identity path for an ordinary (or unproven)
+  // root node; a truncated StringConcatenate pinpoint used to fall through,
+  // reuse a stale subgraph envelope, and refuse because connection identity
+  // was unavailable after that subgraph read.
   if (targetScope?.activeView === "root" && targetScope.node === "ordinary") {
     // The scope probe crossed an await. Re-read the binding before taking the
     // ordinary fast path; otherwise a tab/connection rebind can make this
     // probe's ordinary classification authorize a write on the new receiver.
     const drift = panelBindingDriftReason(ctx, "after the scope probe", hasIdentityApi, identityBefore, tabBefore);
-    if (drift) return promotedWriteRefusal(widget, drift);
-    return null;
+    if (drift) return ordinaryBindingRefusal(widget, drift);
+    return ordinaryWritePlanFromScope(widget, targetScope, tabBefore, identityBefore);
   }
+  const outerNodeType = targetScope?.node === "container" ? targetScope.nodeType : undefined;
+  const outerNodeIdentity =
+    targetScope?.node === "container" ? targetScope.nodeIdentity : undefined;
 
-  const sub = await ctx.call({ cmd: "graph_get_subgraph", node_id: nodeId });
+  let sub = await ctx.call(
+    { cmd: "graph_get_subgraph", node_id: nodeId },
+    undefined,
+    undefined,
+    undefined,
+    PROMOTED_PREFLIGHT_READ_OPTIONS,
+  );
   if (sub.isError) {
-    if (isDefinitiveNonPromotedSubgraphRead(sub)) {
+    const firstReadKind = classifyPromotedSubgraphReadError(sub);
+    if (firstReadKind === "definitive-ordinary") {
       const drift2 = panelBindingDriftReason(ctx, "after the subgraph read", hasIdentityApi, identityBefore, tabBefore);
       if (drift2) return promotedWriteRefusal(widget, drift2);
+      // A node can be an ordinary widget in the SUBGRAPH the caller is already
+      // viewing. Keep the graph identity and node incarnation captured by the
+      // preceding graph_query instead of falling through to an unfenced write;
+      // #2489's timeout read-back needs the same target proof as the write.
+      if (targetScope?.activeView === "subgraph" && targetScope.node === "ordinary") {
+        // Older panel builds do not publish node_identity on ordinary text
+        // rows. Preserve their established conservative path; the new
+        // subgraph read-back is only eligible once the full target fence is
+        // available.
+        if (!targetScope.nodeIdentity) return null;
+        const expectedNodeType = definitiveNonPromotedNodeType(sub);
+        if (expectedNodeType !== targetScope.nodeType) {
+          return promotedWriteRefusal(
+            widget,
+            "the ordinary node type changed between the scope and subgraph reads",
+          );
+        }
+        if (ctx.tabExpectedNodeTypeFenceCapability?.() !== true) {
+          return promotedPanelBuildRefusal(
+            ctx,
+            nodeId,
+            widget,
+            "does not advertise the atomic ordinary-node write fence",
+            "enforces_expected_node_type_at_write",
+          );
+        }
+        if (ctx.tabExpectedNodeIdentityFenceCapability?.() !== true) {
+          return promotedPanelBuildRefusal(
+            ctx,
+            nodeId,
+            widget,
+            "does not advertise the atomic ordinary-node identity write fence",
+            "enforces_expected_node_identity_at_write",
+          );
+        }
+        return ordinaryWritePlanFromScope(widget, targetScope, tabBefore, identityBefore);
+      }
       return null;
     }
-    return promotedSubgraphReadRefusal(
-      widget,
-      sub,
-      "graph_get_subgraph could not determine whether the addressed node is a promoted container",
+    // A canvas/root divergence is a panel diagnosis with its own remedy, not a
+    // transient ownership read. Preserve that diagnosis instead of replacing it
+    // with a generic retry result (panel#1869).
+    if (textOfToolResult(sub).includes(CANVAS_ROOT_DIVERGENCE_MARKER)) {
+      return promotedSubgraphReadRefusal(
+        widget,
+        sub,
+        "graph_get_subgraph could not determine whether the addressed node is a promoted container",
+      );
+    }
+    if (firstReadKind === "permanent") {
+      return promotedSubgraphReadRefusal(
+        widget,
+        sub,
+        "graph_get_subgraph could not determine whether the addressed node is a promoted container",
+      );
+    }
+    // A binding/subgraph registration transition can make the first read
+    // indeterminate even though the same live container is readable immediately
+    // afterward. Refresh once, then keep the existing fail-closed classification
+    // and identity checks for the fresh reply.
+    const refreshedSub = await ctx.call(
+      { cmd: "graph_get_subgraph", node_id: nodeId },
+      undefined,
+      undefined,
+      undefined,
+      PROMOTED_PREFLIGHT_READ_OPTIONS,
     );
+    if (refreshedSub.isError) {
+      const refreshedReadKind = classifyPromotedSubgraphReadError(refreshedSub);
+      if (refreshedReadKind === "definitive-ordinary") {
+        const driftAfterRefresh = panelBindingDriftReason(
+          ctx,
+          "after the subgraph refresh",
+          hasIdentityApi,
+          identityBefore,
+          tabBefore,
+        );
+        if (driftAfterRefresh) return promotedWriteRefusal(widget, driftAfterRefresh);
+        const expectedNodeType = definitiveNonPromotedNodeType(refreshedSub);
+        if (!expectedNodeType) {
+          return promotedWriteRefusal(
+            widget,
+            "the definitive ordinary refresh did not publish a node type fence",
+          );
+        }
+        const expectedNodeIdentity = targetScope?.nodeIdentity;
+        if (!expectedNodeIdentity) {
+          return promotedWriteRefusal(
+            widget,
+            "the preflight ordinary-node read did not publish a trustworthy node identity fence",
+          );
+        }
+        if (ctx.tabExpectedNodeTypeFenceCapability?.() !== true) {
+          return promotedPanelBuildRefusal(
+            ctx,
+            nodeId,
+            widget,
+            "does not advertise the atomic ordinary-node write fence",
+            "enforces_expected_node_type_at_write",
+          );
+        }
+        if (ctx.tabExpectedNodeIdentityFenceCapability?.() !== true) {
+          return promotedPanelBuildRefusal(
+            ctx,
+            nodeId,
+            widget,
+            "does not advertise the atomic ordinary-node identity write fence",
+            "enforces_expected_node_identity_at_write",
+          );
+        }
+        const ordinaryScope = targetScope;
+        if (!ordinaryScope?.graphIdentity) {
+          return ordinaryBindingRefusal(
+            widget,
+            "did not publish the current graph identity needed to fence this ordinary write",
+          );
+        }
+        return {
+          kind: "ordinary-write",
+          activeView: ordinaryScope.activeView,
+          ...(ordinaryScope.scopeOwnerNodeId !== undefined
+            ? { scopeOwnerNodeId: ordinaryScope.scopeOwnerNodeId }
+            : {}),
+          graphIdentity: ordinaryScope.graphIdentity,
+          ...(ordinaryScope.workflowUuid !== undefined
+            ? { workflowUuid: ordinaryScope.workflowUuid }
+            : {}),
+          expectedNodeType,
+          expectedNodeIdentity,
+          binding: {
+            tabId: tabBefore,
+            ...(isUsablePanelConnectionIdentity(identityBefore)
+              ? { identity: identityBefore }
+              : {}),
+          },
+        };
+      }
+      return promotedSubgraphReadRefusal(
+        widget,
+        refreshedSub,
+        "graph_get_subgraph could not determine whether the addressed node is a promoted container",
+      );
+    }
+    sub = refreshedSub;
   }
   let payload = parseToolResultJson(sub);
   if (!payload || !promotedEnvelopeCarriesEvidence(payload)) {
@@ -7179,13 +9099,11 @@ async function preparePromotedWidgetWrite(
     return promotedWriteRefusal(widget, "the panel session or connection changed while the mapping was read");
   }
 
-  const envelope = validatePromotedSubgraphEnvelope(payload, nodeId as number | string);
-  if (!envelope) {
-    return promotedWriteRefusal(
-      widget,
-      "graph_get_subgraph returned a malformed, stale, or incomplete ownership envelope",
-    );
+  const described = describePromotedSubgraphEnvelope(payload, nodeId as number | string);
+  if (!described.ok) {
+    return promotedEnvelopeInvariantRefusal(widget, described.invariant);
   }
+  const envelope = described.envelope;
   // panel#1859 — ask the HELLO before reading the witness out of the envelope.
   // A build that never advertised this fence also never writes
   // `subgraph_of.graph_identity` (both landed in panel 0.15.101; v0.15.85
@@ -7213,14 +9131,24 @@ async function preparePromotedWidgetWrite(
       "graph_get_subgraph did not publish a verifiable workflow and viewing-scope identity",
     );
   }
-  const terminalEvidenceError = promotedTerminalEvidenceError(payload, widget);
-  if (terminalEvidenceError) return promotedWriteRefusal(widget, terminalEvidenceError);
   const inner = resolvePromotedWriteTarget(
     payload,
     widget,
     nodeId as number | string,
     publishesCompleteTerminalWitness,
   );
+  const terminalEvidenceError = promotedTerminalEvidenceError(payload, widget);
+  if (terminalEvidenceError) {
+    // #2393 — an incomplete OWN entry may still uniquely name a rail-backed
+    // inner COMBO. Any other witness error, including an unadvertised duplicate
+    // that would otherwise fall through to the legacy same-name scan, stays a
+    // hard refusal.
+    const railBackedCombo =
+      terminalEvidenceError === "the promoted-terminal witness was incomplete or unresolved" &&
+      inner?.terminal?.chainDepth === 0 &&
+      !inner.parentRail;
+    if (!railBackedCombo) return promotedWriteRefusal(widget, terminalEvidenceError);
+  }
   if (!inner) {
     if (publishesCompleteTerminalWitness) {
       const terminalAliases = promotedTerminalAliasCount(payload, widget);
@@ -7250,10 +9178,16 @@ async function preparePromotedWidgetWrite(
     );
   }
   if (publishesCompleteTerminalWitness && !inner.parentRail) {
-    return promotedWriteRefusal(
-      widget,
-      "the current promoted-terminal witness did not prove an authoritative parent rail",
-    );
+    // #2393 — official-template COMBOs can load with a name-only host stub, so
+    // the parent rail is unauthenticatable while the unique rail-backed inner
+    // widget is still the subgraph-definition store. Nested promotions still
+    // require the parent rail; a one-hop terminal is the only exception.
+    if (!inner.terminal || inner.terminal.chainDepth !== 0) {
+      return promotedWriteRefusal(
+        widget,
+        "the current promoted-terminal witness did not prove an authoritative parent rail",
+      );
+    }
   }
   const scopeError = currentPromotedScopeError(ctx, scope);
   if (scopeError) return promotedWriteRefusal(widget, scopeError);
@@ -7279,6 +9213,26 @@ async function preparePromotedWidgetWrite(
   if (inner.terminal) {
     const terminalBlocked = refuseKnownBadPromotedTerminal(inner.terminal);
     if (terminalBlocked) return terminalBlocked;
+  }
+  // A receiver that advertises the identity fence must publish the immediate
+  // inner node's opaque identity. Carry the captured value through the
+  // enter/recheck/write sequence so a same-id, same-type replacement cannot
+  // satisfy the inner write fence. The capability is intentionally the value
+  // observed at the start of this preflight, not a later re-hello's value.
+  if (publishesCompleteTerminalWitness && !nodeIdentityFenceAdvertised) {
+    return promotedPanelBuildRefusal(
+      ctx,
+      nodeId,
+      widget,
+      "does not advertise the atomic inner-node identity write fence",
+      "enforces_expected_node_identity_at_write",
+    );
+  }
+  if (nodeIdentityFenceAdvertised && !inner.nodeIdentity) {
+    return promotedWriteRefusal(
+      widget,
+      "the current receiver did not publish a trustworthy immediate inner-node identity fence",
+    );
   }
   // panel#1859 — these three are capability skew, exactly like the missing
   // graph identity above: the hello either advertises the fence or it does not,
@@ -7308,14 +9262,32 @@ async function preparePromotedWidgetWrite(
     );
   }
 
+  const outerScope = outerPromotedExpectedScope(targetScope, nodeId);
   return {
     kind: "promoted-write",
     outerNodeId: nodeId as number | string,
+    hostWidget: inner.parentRail?.widget ?? widget,
+    ...(outerScope ? { outerScope } : {}),
+    ...(outerNodeType ? { outerNodeType } : {}),
+    ...(outerNodeIdentity ? { outerNodeIdentity } : {}),
     inner,
     innerNodeType,
+    innerLinkDriven: promotedInnerWidgetIsLinkDriven(
+      innerNode,
+      inner.widget,
+      inner.terminal,
+      inner.parentRail,
+    ),
     ...(inner.terminal ? { terminal: inner.terminal } : {}),
     scope,
-    binding: { tabId: tabBefore, identity: identityAfter },
+    binding: {
+      tabId: tabBefore,
+      identity: identityAfter,
+      nodeIdentityFenceAdvertised,
+      ...(nodeIdentityFenceAdvertised && inner.nodeIdentity
+        ? { nodeIdentity: inner.nodeIdentity }
+        : {}),
+    },
   };
 }
 
@@ -7323,6 +9295,7 @@ type PromotedMappingProof = {
   inner: {
     innerNodeId: number | string;
     widget: string;
+    nodeIdentity?: string;
     parentRail?: PromotedParentRailWitness;
   };
   innerNodeType: string;
@@ -7340,6 +9313,7 @@ async function recheckPromotedOuterMapping(
   expectedInner: {
     innerNodeId: number | string;
     widget: string;
+    nodeIdentity?: string;
     parentRail?: PromotedParentRailWitness;
   },
   expectedScope: PromotedScopeWitness,
@@ -7366,24 +9340,34 @@ async function recheckPromotedOuterMapping(
       "the current receiver advertised complete promoted-terminal witnesses but omitted the witness array",
     );
   }
-  const envelope = validatePromotedSubgraphEnvelope(payload, outerNodeId);
-  const observedScope = envelope ? promotedScopeWitnessFromEnvelope(envelope) : null;
-  const inner = envelope
-    ? resolvePromotedWriteTarget(
-        payload,
-        widget,
-        outerNodeId,
-        ctx.tabPromotedTerminalWitnessCapability?.() === true,
-      )
-    : null;
+  // #2688 — an envelope that fails a completeness invariant is named here too.
+  // Folding it into the combined refusal below reported a shape defect in the
+  // re-read as "the promoted inner mapping changed", which sends the caller
+  // looking for a canvas edit that never happened.
+  const describedRecheck = describePromotedSubgraphEnvelope(payload, outerNodeId);
+  if (!describedRecheck.ok) {
+    return promotedEnvelopeInvariantRefusal(
+      widget,
+      describedRecheck.invariant,
+      "the pre-write graph_get_subgraph re-read",
+    );
+  }
+  const envelope = describedRecheck.envelope;
+  const observedScope = promotedScopeWitnessFromEnvelope(envelope);
+  const inner = resolvePromotedWriteTarget(
+    payload,
+    widget,
+    outerNodeId,
+    ctx.tabPromotedTerminalWitnessCapability?.() === true,
+  );
   if (
-    !envelope ||
     !observedScope ||
     observedScope.workflowUuid !== expectedScope.workflowUuid ||
     observedScope.ownerNodeId !== expectedScope.ownerNodeId ||
     !inner ||
     canonicalQueriedNodeId(inner.innerNodeId) !== canonicalQueriedNodeId(expectedInner.innerNodeId) ||
     inner.widget !== expectedInner.widget ||
+    (expectedInner.nodeIdentity !== undefined && inner.nodeIdentity !== expectedInner.nodeIdentity) ||
     !samePromotedParentRail(inner.parentRail, expectedInner.parentRail) ||
     !samePromotedTerminal(inner.terminal, expectedTerminal)
   ) {
@@ -7423,6 +9407,7 @@ async function recheckPromotedInnerTarget(
   expectedInner: {
     innerNodeId: number | string;
     widget: string;
+    nodeIdentity?: string;
     parentRail?: PromotedParentRailWitness;
   },
   expectedNodeType: string,
@@ -7435,6 +9420,7 @@ async function recheckPromotedInnerTarget(
     ids: [expectedInner.innerNodeId],
     fields: "compact",
     limit: 1,
+    max_chars: PROMOTED_IDENTITY_PROBE_MAX_CHARS,
   });
   if (probe.isError) {
     return promotedWriteRefusal(
@@ -7455,7 +9441,8 @@ async function recheckPromotedInnerTarget(
     !identity ||
     !expectedId ||
     identity.id !== expectedId ||
-    identity.type !== expectedNodeType
+    identity.type !== expectedNodeType ||
+    (expectedInner.nodeIdentity !== undefined && identity.nodeIdentity !== expectedInner.nodeIdentity)
   ) {
     return promotedWriteRefusal(
       widget,
@@ -7475,18 +9462,23 @@ async function recheckPromotedInnerTarget(
       );
     }
     const nestedPayload = parseToolResultJson(nested);
-    const nestedEnvelope = validatePromotedSubgraphEnvelope(
+    const describedNested = describePromotedSubgraphEnvelope(
       nestedPayload,
       expectedInner.innerNodeId,
     );
-    const nestedInner = nestedEnvelope
-      ? resolvePromotedWriteTarget(
-          nestedPayload,
-          expectedInner.widget,
-          expectedInner.innerNodeId,
-          ctx.tabPromotedTerminalWitnessCapability?.() === true,
-        )
-      : null;
+    if (!describedNested.ok) {
+      return promotedEnvelopeInvariantRefusal(
+        widget,
+        describedNested.invariant,
+        "the nested graph_get_subgraph read",
+      );
+    }
+    const nestedInner = resolvePromotedWriteTarget(
+      nestedPayload,
+      expectedInner.widget,
+      expectedInner.innerNodeId,
+      ctx.tabPromotedTerminalWitnessCapability?.() === true,
+    );
     if (
       !nestedInner?.terminal ||
       (ctx.tabPromotedTerminalWitnessCapability?.() === true && !nestedInner.parentRail) ||
@@ -7497,9 +9489,23 @@ async function recheckPromotedInnerTarget(
         "the nested promoted terminal mapping changed or became unverifiable after entering",
       );
     }
-    return { inner: expectedInner, innerNodeType: identity.type, terminal: expectedTerminal };
+    return {
+      inner: {
+        ...expectedInner,
+        ...(identity.nodeIdentity !== undefined ? { nodeIdentity: identity.nodeIdentity } : {}),
+      },
+      innerNodeType: identity.type,
+      terminal: expectedTerminal,
+    };
   }
-  return { inner: expectedInner, innerNodeType: identity.type, ...(expectedTerminal ? { terminal: expectedTerminal } : {}) };
+  return {
+    inner: {
+      ...expectedInner,
+      ...(identity.nodeIdentity !== undefined ? { nodeIdentity: identity.nodeIdentity } : {}),
+    },
+    innerNodeType: identity.type,
+    ...(expectedTerminal ? { terminal: expectedTerminal } : {}),
+  };
 }
 
 function daSiWaStackRefusal(type: string): ToolResult {
@@ -7577,6 +9583,7 @@ async function refuseDaSiWaStackWrite(
       ids: [nodeId],
       fields: "compact",
       limit: 1,
+      max_chars: PROMOTED_IDENTITY_PROBE_MAX_CHARS,
     });
   } catch {
     return daSiWaIdentityRefusal("the graph_query probe failed before identity could be verified");
@@ -7650,6 +9657,7 @@ async function verifyDaSiWaStackWriteFence(
       ids: [nodeId],
       fields: "compact",
       limit: 1,
+      max_chars: PROMOTED_IDENTITY_PROBE_MAX_CHARS,
     });
   } catch {
     return daSiWaIdentityRefusal("the final graph_query fence failed before dispatch");
@@ -8735,6 +10743,10 @@ function isPanelQueueUncertainty(parsed: Record<string, unknown> | null): boolea
  * headless stdio tool and may be unreachable (ECONNREFUSED) even while the
  * panel is connected. The only safe next step on this surface is to wait for
  * an eventual UNDETERMINED completion and not re-dispatch.
+ *
+ * #2521 — this string is only honest when something actually reached ComfyUI
+ * (a post-dispatch `got prompt` log line, or a new queue/history entry). An
+ * id-less `queued_unknown` with neither is fail-closed as not queued instead.
  */
 const PANEL_QUEUED_UNKNOWN_RETRY_GUIDANCE =
   `Do NOT re-run panel_run: the /prompt request already left the panel, and a second ` +
@@ -8743,10 +10755,42 @@ const PANEL_QUEUED_UNKNOWN_RETRY_GUIDANCE =
   `event for this tab; if one arrives, treat it as this run's possible outcome rather ` +
   `than queuing another.`;
 
-function applyQueuedUnknownRetryGuidance(res: ToolResult): ToolResult {
+/** #2521 — used when queued_unknown has no prompt_id and this tool also could
+ *  not prove a /prompt reached ComfyUI. Must not claim the request left the
+ *  panel or was accepted. */
+const PANEL_QUEUED_UNKNOWN_UNOBSERVED_RETRY_GUIDANCE =
+  `This tool is NOT claiming a /prompt request left the panel or was accepted: there is ` +
+  `no prompt_id, and it could not prove ComfyUI received the run. If ComfyUI is idle, ` +
+  `you MAY retry panel_run or use enqueue_workflow; if a render may already be in flight, ` +
+  `wait rather than stacking a duplicate.`;
+
+const GOT_PROMPT_RE = /got prompt/i;
+const COMFY_LOG_TS_RE = /^(\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}(?:\.\d+)?)/;
+const GOT_PROMPT_CLOCK_SLACK_MS = 2000;
+const GOT_PROMPT_LOG_BUDGET_MS = 2500;
+
+export type QueuedUnknownReach = {
+  kind: "reached" | "not-queued" | "unobserved";
+  gotPrompt: boolean;
+  queueIdle: boolean;
+  queueObserved: boolean;
+};
+
+export type QueuedUnknownReachInput = {
+  dispatchedAt: number;
+  logLines: string[] | null;
+  queueObserved: boolean;
+  queueIdle: boolean;
+  newPromptVisible: boolean;
+  completedAfterDispatch: boolean;
+};
+
+let gotPromptLinesProbe: (() => Promise<string[] | null>) | null = null;
+
+function rewriteQueuedUnknownRetryGuidance(res: ToolResult, guidance: string): ToolResult {
   const parsed = parseToolResultJson(res);
   if (!parsed || !isPanelQueueUncertainty(parsed)) return res;
-  if (parsed.retry_guidance === PANEL_QUEUED_UNKNOWN_RETRY_GUIDANCE) return res;
+  if (parsed.retry_guidance === guidance) return res;
   return {
     ...res,
     content: [
@@ -8754,12 +10798,133 @@ function applyQueuedUnknownRetryGuidance(res: ToolResult): ToolResult {
         type: "text",
         text: JSON.stringify({
           ...parsed,
-          retry_guidance: PANEL_QUEUED_UNKNOWN_RETRY_GUIDANCE,
+          retry_guidance: guidance,
         }),
       },
       ...res.content.slice(1),
     ],
   };
+}
+
+function applyQueuedUnknownRetryGuidance(res: ToolResult): ToolResult {
+  return rewriteQueuedUnknownRetryGuidance(res, PANEL_QUEUED_UNKNOWN_RETRY_GUIDANCE);
+}
+
+function applyUnobservedQueuedUnknownRetryGuidance(res: ToolResult): ToolResult {
+  return rewriteQueuedUnknownRetryGuidance(res, PANEL_QUEUED_UNKNOWN_UNOBSERVED_RETRY_GUIDANCE);
+}
+
+function logLineTimestampMs(line: string): number | null {
+  const m = line.match(COMFY_LOG_TS_RE);
+  if (!m) return null;
+  const raw = m[1]!;
+  const ts = Date.parse(raw.includes("T") ? raw : raw.replace(" ", "T"));
+  return Number.isFinite(ts) ? ts : null;
+}
+
+/** True when `/internal/logs` contains a `got prompt` that is not clearly
+ *  earlier than this dispatch. Untimestamped lines are possible evidence: the
+ *  in-memory deque is recent, so fail-closed would be a guess. */
+function logHasGotPromptAfter(lines: readonly string[], dispatchedAt: number): boolean {
+  let untimestamped = false;
+  for (const line of lines) {
+    if (!GOT_PROMPT_RE.test(line)) continue;
+    const ts = logLineTimestampMs(line);
+    if (ts === null) {
+      untimestamped = true;
+      continue;
+    }
+    if (ts >= dispatchedAt - GOT_PROMPT_CLOCK_SLACK_MS) return true;
+  }
+  return untimestamped;
+}
+
+function classifyQueuedUnknownReach(input: QueuedUnknownReachInput): QueuedUnknownReach {
+  const gotPrompt =
+    input.logLines !== null && logHasGotPromptAfter(input.logLines, input.dispatchedAt);
+  if (gotPrompt || input.newPromptVisible || input.completedAfterDispatch) {
+    return {
+      kind: "reached",
+      gotPrompt,
+      queueIdle: input.queueIdle,
+      queueObserved: input.queueObserved,
+    };
+  }
+  const logNegative = input.logLines !== null;
+  if (logNegative || (input.queueObserved && input.queueIdle)) {
+    return {
+      kind: "not-queued",
+      gotPrompt: false,
+      queueIdle: input.queueIdle,
+      queueObserved: input.queueObserved,
+    };
+  }
+  return {
+    kind: "unobserved",
+    gotPrompt: false,
+    queueIdle: input.queueIdle,
+    queueObserved: input.queueObserved,
+  };
+}
+
+function panelQueueNotQueuedMessage(reach: QueuedUnknownReach): string {
+  const logBit = reach.gotPrompt
+    ? ""
+    : "and ComfyUI never logged 'got prompt' for this dispatch";
+  const queueBit = reach.queueObserved && reach.queueIdle ? ", and the queue is idle" : "";
+  return (
+    `panel_run did not queue this run. The Panel returned queued_unknown with no prompt_id, ` +
+    `${logBit}${queueBit}. This tool is NOT claiming a /prompt request left the panel or was ` +
+    `accepted — that request never reached ComfyUI. You MAY retry panel_run, or use ` +
+    `enqueue_workflow. Nothing was queued.`
+  );
+}
+
+async function readGotPromptLines(): Promise<string[] | null> {
+  if (gotPromptLinesProbe) {
+    try {
+      return await gotPromptLinesProbe();
+    } catch {
+      return null;
+    }
+  }
+  try {
+    return await Promise.race([
+      // unknown-ok: failed log read and empty log both fail closed as not queued (#2521)
+      getLogs({ keyword: "got prompt" }).catch(() => null),
+      sleep(GOT_PROMPT_LOG_BUDGET_MS).then(() => null),
+    ]);
+  } catch {
+    return null;
+  }
+}
+
+async function observeQueuedUnknownReach(opts: {
+  dispatchedAt: number;
+  preRunningPromptId: string | null;
+  preQueueDepth: number;
+}): Promise<QueuedUnknownReach> {
+  try {
+    await QueueMonitor.poll();
+  } catch {
+    /* best-effort — classify from whatever snapshot we already have */
+  }
+  const snap = QueueMonitor.snapshot();
+  const newPromptVisible =
+    promptAppearedAfterDispatch(opts.preRunningPromptId) !== null ||
+    snap.queueDepth > opts.preQueueDepth;
+  const completedAfterDispatch =
+    snap.lastCompleted !== null && snap.lastCompleted.at >= opts.dispatchedAt;
+  const queueIdle = !snap.running && snap.queueDepth === 0;
+  const logLines = await readGotPromptLines();
+  return classifyQueuedUnknownReach({
+    dispatchedAt: opts.dispatchedAt,
+    logLines,
+    queueObserved: snap.connected,
+    queueIdle,
+    newPromptVisible,
+    completedAfterDispatch,
+  });
 }
 
 function detectRunRejection(res: ToolResult): ToolResult | null {
@@ -8902,18 +11067,109 @@ function isRetryableRunToNodeStampRace(res: ToolResult, rejection: ToolResult): 
 }
 
 /**
- * #2120 — an older panel can decorate a fixed seed while it builds the deferred
- * run prompt. That can make the same scoped run hit the certified stamp race more
- * than once. The panel still has to identify the changed entry as a seed; this is
- * deliberately narrower than allowing an arbitrary third dispatch.
+ * #2120 — a queue-time seed roll (KSampler control_after_generate, DaSiWa_SeedControl
+ * in random mode, RandomNoise noise_seed) can make the same scoped run hit the
+ * certified stamp race more than once. The panel has to name the changed entries,
+ * and every named entry has to be a seed-like input. DaSiWa's hidden
+ * seed_control_state is accepted only when paired with seed_value on the same
+ * execution node; a real graph mismatch still fails closed after the ordinary
+ * single re-issue.
  */
 const MAX_SCOPED_STAMP_RACE_RETRIES = 2;
 
+/** Serialized prompt inputs a queue-time seed roller is allowed to rewrite. */
+function isQueueTimeSeedInputName(name: string): boolean {
+  return /^(?:noise_)?seed$|^seed_value$/i.test(name.trim());
+}
+
+/**
+ * The panel's drift list (`The differing entry: 53 seed_value.`) or the older
+ * `differing entry node 53 seed: <n>` form. Null when the refusal does not name
+ * a parseable list — fail toward treating that as a real mismatch.
+ */
+function stampRaceDriftTokens(text: string): string[] | null {
+  const modern = text.match(/The differing entr(?:y|ies):\s*([^.]+)\./i);
+  if (modern?.[1]) {
+    const tokens = modern[1]
+      .split(";")
+      .map((t) => t.trim())
+      .filter(Boolean);
+    return tokens.length ? tokens : null;
+  }
+  const legacy = text.match(/differing entry(?: node)?\s+(\S+)\s+([A-Za-z_][A-Za-z0-9_]*)/i);
+  return legacy ? [`${legacy[1]} ${legacy[2]}`] : null;
+}
+
+function driftTokenParts(token: string): { execId: string; inputName: string } | null {
+  const m = token.trim().match(/^(\S+)\s+([A-Za-z_][A-Za-z0-9_]*)/);
+  return m ? { execId: m[1], inputName: m[2] } : null;
+}
+
 function isSeedRunToNodeStampRace(res: ToolResult, rejection: ToolResult): boolean {
-  return (
-    isRetryableRunToNodeStampRace(res, rejection) &&
-    /\bdiffering\b[\s\S]{0,160}\bseed\b/i.test(toolResultText(rejection))
+  if (!isRetryableRunToNodeStampRace(res, rejection)) return false;
+  const tokens = stampRaceDriftTokens(toolResultText(rejection));
+  if (!tokens) return false;
+  const entries = tokens.map(driftTokenParts);
+  if (entries.some((entry) => entry == null)) return false;
+  const parsed = entries as { execId: string; inputName: string }[];
+  // DaSiWa_SeedControl's queue-time graphToPrompt hook updates the hidden state
+  // and seed mirror together. Accept that exact same-node pair, but never treat
+  // seed_control_state alone as volatile: a mode/state edit is real graph drift.
+  for (const state of parsed.filter((entry) => /^seed_control_state$/i.test(entry.inputName))) {
+    if (
+      !parsed.some(
+        (entry) => entry.execId === state.execId && /^seed_value$/i.test(entry.inputName),
+      )
+    ) {
+      return false;
+    }
+  }
+  return parsed.every(
+    (entry) =>
+      isQueueTimeSeedInputName(entry.inputName) ||
+      /^seed_control_state$/i.test(entry.inputName),
   );
+}
+
+/**
+ * #2537 — the ONE full-graph (and scoped) graph_run throw that is safe to re-issue:
+ * ComfyUI's V3 dynamic-combo serializer racing a widget rebuild.
+ *
+ * After a burst of panel_* mutations, `graphToPrompt` can throw the bare frontend
+ * error `Dynamic widget doesn't exist on node` because a COMFY_DYNAMICCOMBO_V3
+ * sub-widget (SaveVideo `format.codec` / `format.codec.encoding`, MinimaxH3
+ * `mode.scale`, …) has not been recreated yet. The user's Queue button works on
+ * the same graph, and an identical `panel_run` a few seconds later succeeds —
+ * nothing about the widget VALUES was wrong. The throw is inside serialization,
+ * which runs BEFORE POST /prompt, so the first dispatch queued nothing.
+ *
+ * FAILS CLOSED in every other direction, because a wrong "yes" here queues a
+ * second render:
+ *  - a tagged reply-timeout or mid-command disconnect is UNKNOWN — the command
+ *    may already be queued — and an unknown must never be retried;
+ *  - STRUCTURED queue evidence VETOES the retry (`queued:true` / any prompt id);
+ *  - a timeout/transport wrapper that merely QUOTES the phrase is not this
+ *    throw (those carry `did not reply`, `outcome is UNKNOWN`, or a minted
+ *    `retry_of:"…"` token);
+ *  - the text must actually name the frontend throw. A generic widget/validation
+ *    failure is terminal.
+ */
+const DYNAMIC_WIDGET_MISSING_RE = /Dynamic widget doesn't exist on node/i;
+const MAX_DYNAMIC_WIDGET_RACE_RETRIES = 1;
+
+function isRetryableDynamicWidgetRace(res: ToolResult, rejection: ToolResult): boolean {
+  if (isReplyTimeoutResult(res) || isMidCommandDisconnectResult(res)) return false;
+  const parsed = parseToolResultJson(res);
+  if (parsed) {
+    if (parsed.queued === true) return false;
+    if (acceptedPromptIds(parsed).length > 0) return false;
+  }
+  const text = toolResultText(rejection);
+  if (!DYNAMIC_WIDGET_MISSING_RE.test(text)) return false;
+  if (/\bdid not reply to\b/i.test(text)) return false;
+  if (/\boutcome is UNKNOWN\b/i.test(text)) return false;
+  if (/\bretry_of:"/i.test(text)) return false;
+  return true;
 }
 
 export const __panelRunTestHooks = {
@@ -8921,9 +11177,20 @@ export const __panelRunTestHooks = {
   formatRunRejection,
   isRetryableRunToNodeStampRace,
   isSeedRunToNodeStampRace,
+  isQueueTimeSeedInputName,
+  stampRaceDriftTokens,
+  isRetryableDynamicWidgetRace,
   describeDroppedOutputs,
   applyQueuedUnknownRetryGuidance,
+  applyUnobservedQueuedUnknownRetryGuidance,
   PANEL_QUEUED_UNKNOWN_RETRY_GUIDANCE,
+  PANEL_QUEUED_UNKNOWN_UNOBSERVED_RETRY_GUIDANCE,
+  classifyQueuedUnknownReach,
+  logHasGotPromptAfter,
+  panelQueueNotQueuedMessage,
+  setGotPromptLinesProbe(fn: (() => Promise<string[] | null>) | null): void {
+    gotPromptLinesProbe = fn;
+  },
 };
 
 /** Drop a trailing .json (case-insensitive) so filename/path forms compare equal. */
@@ -9144,6 +11411,38 @@ type OpenIdentityRebind =
   | { status: "skipped" };
 
 /**
+ * #2503 — restamp extra.comfyui_mcp.workflow_uuid onto an already-active tmp
+ * tab. workflow_open of the exact tmp: key is the documented rebind; it must
+ * not require a saved filename, and it must replace a source-file uuid the
+ * imported graph still carries.
+ */
+async function tryRebindImportedTmpIdentity(
+  ctx: PanelToolCtx,
+  requestedPath: string,
+): Promise<{ status: "rebound" } | { status: "skipped" }> {
+  if (!unsavedTmpWorkflowKey(requestedPath)) return { status: "skipped" };
+  const fence = currentWorkflowFence(ctx);
+  const destUuid = fence.known && typeof fence.uuid === "string" && fence.uuid ? fence.uuid : undefined;
+  if (!destUuid) return { status: "skipped" };
+
+  let live: Record<string, unknown> | null = null;
+  try {
+    const serialized = await ctx.call({ cmd: "graph_serialize" }, 8000);
+    live = workflowFromSerializeReply(parseToolResultJson(serialized));
+  } catch {
+    return { status: "skipped" };
+  }
+  if (!live) return { status: "skipped" };
+
+  const bound = bindImportedTmpWorkflowUuid(live, destUuid);
+  if (!bound) return { status: "skipped" };
+  const loaded = await ctx.call({ cmd: "graph_load", graph: bound }, 30000);
+  if (loaded.isError) return { status: "skipped" };
+  refreshWorkflowUuid(ctx, { workflow_uuid: destUuid });
+  return { status: "rebound" };
+}
+
+/**
  * #1710 — restamp extra.comfyui_mcp onto the dest the tab is already bound to,
  * and copy dest-file promoted widgets onto any live empty slots.
  *
@@ -9232,11 +11531,14 @@ function openedNormalizedContentResult(destPath: string): ToolResult {
 }
 
 /**
- * #1846 — the panel's identity-proven CONTENT_UNVERIFIED reply is not unknown
- * when dest's structural content is already on the canvas.
+ * #1846 / #2501 / #2494 — the panel's identity-proven CONTENT_UNVERIFIED reply
+ * is not unknown when dest's structural content is already on the canvas.
  *
  * Fail closed: dest unreadable, a missing/extra node, a rewired link, or a dest
  * widget value the live graph does not hold leaves the panel error in place.
+ * After reconnect or an already-open tab switch, frontend-derived per-node bags
+ * (inputs/outputs/properties/widgets_values representation, ue_properties) are
+ * accepted once identity, node id/type, and link topology match (#2501, #2494).
  */
 async function tryAcceptNormalizedOpenContent(
   ctx: PanelToolCtx,
@@ -9260,7 +11562,9 @@ async function tryAcceptNormalizedOpenContent(
   } catch {
     return { status: "skipped" };
   }
-  if (!openLiveMatchesDestContent(live, dest)) return { status: "skipped" };
+  if (!openLiveMatchesDestContent(live, dest) && !openLiveMatchesDestAfterReconnect(live, dest)) {
+    return { status: "skipped" };
+  }
 
   const destUuid = await activeWorkflowUuidForPath(ctx, destPath);
   if (destUuid) refreshWorkflowUuid(ctx, { workflow_uuid: destUuid });
@@ -9778,6 +12082,70 @@ function responseWorkflowUuid(value: unknown): string | undefined {
   return WORKFLOW_UUID_RE.test(raw) ? raw : undefined;
 }
 
+/**
+ * #2483 — the two sides of a workflow-instance mismatch, as the panel names them.
+ *
+ * "issued for" is the stamp the command carried (expected); "active canvas reports"
+ * is what the panel compared it against (observed). Older or shorter refusals omit
+ * one or both; the caller fills those from the session fence / a live probe rather
+ * than inventing values.
+ */
+function workflowInstanceIdsFromMismatchMessage(raw: string): {
+  expected: string | null;
+  observed: string | null;
+} {
+  const expected =
+    /this command was issued for workflow instance ([0-9a-f-]{36})/i.exec(raw)?.[1] ?? null;
+  const observed =
+    /the active canvas reports ([0-9a-f-]{36})/i.exec(raw)?.[1] ?? null;
+  return { expected, observed };
+}
+
+function instanceIdsDiagnostic(expected: string | null, observed: string | null): string {
+  return `instance expected=${expected ?? "unknown"} observed=${observed ?? "unknown"}`;
+}
+
+/**
+ * A successful graph_query is proof the current instance is readable on this tab.
+ * A payload that names a DIFFERENT workflow_uuid is not — that would be reading
+ * someone else's graph. No uuid on the reply is still proof: the panel accepted
+ * the fenced query, and query is the read the reporter already saw succeed.
+ */
+function graphQueryProvesCurrentInstance(
+  payload: unknown,
+  expectedUuid: string | null,
+): boolean {
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) return false;
+  const rec = payload as Record<string, unknown>;
+  if (typeof rec.error === "string" && rec.error.length > 0) return false;
+  const uuid = responseWorkflowUuid(rec);
+  if (!uuid || !expectedUuid) return true;
+  return uuid === expectedUuid;
+}
+
+/**
+ * Tab identity for the #2483 outline retry: same routing id, and the same
+ * connection generation when the bridge exposes one. Lightweight test ctxs
+ * have no generation; for those the tab id is the identity. A generation that
+ * WAS readable at refusal and then moved (or became unreadable) is a reconnect
+ * or tab replace — not the post-save race this retry covers.
+ */
+function sameTabIdentityForOutlineRetry(
+  ctx: PanelToolCtx,
+  tabAtRefusal: string,
+  identityAtRefusal: { generation: number; tabSessionId: string } | undefined,
+): boolean {
+  if (ctx.tabId !== tabAtRefusal) return false;
+  if (!isUsablePanelConnectionIdentity(identityAtRefusal)) return true;
+  let now: { generation: number; tabSessionId: string } | undefined;
+  try {
+    now = ctx.panelConnectionIdentity?.();
+  } catch {
+    return false;
+  }
+  return isUsablePanelConnectionIdentity(now) && samePanelConnectionIdentity(identityAtRefusal, now);
+}
+
 /** Refresh only the bridge-owned command stamp, never caller data. */
 /** #1656 — tell the orchestrator that a live read confirmed the routed tab's CURRENT
  *  stamp, so a value inherited on a same-socket re-hello stops being treated as
@@ -9875,20 +12243,28 @@ function refreshFenceFromOwnReply(ctx: PanelToolCtx, reply: ToolResult): Workflo
 /**
  * #2419 — the PATH the save reply names as the dest canvas.
  *
- * `routing_key` is the precise identity (`wf:<path>` handle, or a full
- * `wf:<route>:<path>` tab id). `path` / `workflow` / `filename` are fallbacks
- * for older replies that only named the new file. Empty / unreadable →
- * undefined, so the caller leaves routing alone rather than guessing.
+ * `routing_key` is the precise identity: a `wf:<path>` handle, a full
+ * `wf:<route>:<path>` tab id, or (first save of a tmp: canvas) the bare
+ * `workflows/…` path the panel publishes after persist. `path` / `workflow` /
+ * `filename` are fallbacks for older replies that only named the new file.
+ * Empty / unreadable / still-tmp → undefined, so the caller leaves routing
+ * alone rather than guessing.
  */
 function saveDestWorkflowPath(parsed: Record<string, unknown>): string | undefined {
   const routing = parsed.routing_key;
-  if (typeof routing === "string" && routing.startsWith("wf:")) {
-    const rest = routing.slice(3);
-    const sep = rest.indexOf(":");
-    const pathPart =
-      sep >= 0 && rest.slice(sep + 1).includes("/") ? rest.slice(sep + 1) : rest;
-    const fromRouting = canonicalSavedWorkflowPath(pathPart);
-    if (fromRouting) return fromRouting;
+  if (typeof routing === "string" && routing.trim()) {
+    const trimmed = routing.trim();
+    if (trimmed.startsWith("wf:")) {
+      const rest = trimmed.slice(3);
+      const sep = rest.indexOf(":");
+      const pathPart =
+        sep >= 0 && rest.slice(sep + 1).includes("/") ? rest.slice(sep + 1) : rest;
+      const fromRouting = canonicalSavedWorkflowPath(pathPart);
+      if (fromRouting) return fromRouting;
+    } else if (!trimmed.startsWith("tmp:")) {
+      const fromRouting = canonicalSavedWorkflowPath(trimmed);
+      if (fromRouting) return fromRouting;
+    }
   }
   for (const v of [parsed.path, parsed.workflow, parsed.filename]) {
     if (typeof v !== "string") continue;
@@ -9914,17 +12290,85 @@ function uniqueLiveTabForSaveDest(ctx: PanelToolCtx, destPath: string): string |
   return matches.length === 1 ? matches[0] : undefined;
 }
 
+/** The live tab `ctx.tabId` currently routes to, if any. */
+function liveRoutingTab(ctx: PanelToolCtx): string | undefined {
+  if (typeof ctx.bridge.liveTabIdFor === "function") {
+    try {
+      return ctx.bridge.liveTabIdFor(ctx.tabId);
+    } catch {
+      return undefined;
+    }
+  }
+  if (typeof ctx.bridge.canReach === "function" && ctx.bridge.canReach(ctx.tabId)) {
+    return ctx.tabId;
+  }
+  return undefined;
+}
+
+/**
+ * #2419 recurrence — a PINNED unsaved canvas (`tmp:<uuid>` tab id or pin path).
+ * First persist changes the routing key to `workflows/…` but the tmp: address
+ * often still `canReach` via the same-socket migration alias, which is what
+ * made the original dead-address-only re-point a no-op.
+ */
+function routingIsUnsavedPredecessor(ctx: PanelToolCtx): boolean {
+  if (ctx.tabId.startsWith("tmp:")) return true;
+  const pin = ctx.workflowTarget?.get(ctx.tabId);
+  return typeof pin?.path === "string" && pin.path.startsWith("tmp:");
+}
+
+function destPinnedTarget(
+  pinned: { path?: string; filename?: string },
+  destPath: string,
+  parsed: Record<string, unknown>,
+): { mode: "pinned"; path: string; filename?: string } {
+  let filename: string | undefined;
+  for (const v of [parsed.filename, parsed.workflow]) {
+    if (typeof v === "string" && v.trim()) {
+      filename = v.trim().replace(/\.json$/i, "");
+      break;
+    }
+  }
+  if (!filename) {
+    const base = destPath.split("/").pop();
+    filename = base ? base.replace(/\.json$/i, "") : pinned.filename;
+  }
+  return { mode: "pinned", path: destPath, filename };
+}
+
+function adoptPinnedDestPath(
+  ctx: PanelToolCtx,
+  destPath: string,
+  parsed: Record<string, unknown>,
+  destTab?: string,
+): void {
+  if (!ctx.workflowTarget) return;
+  const previous = ctx.tabId;
+  const pinned = ctx.workflowTarget.get(previous);
+  if (pinned?.mode !== "pinned") return;
+  const next = destPinnedTarget(pinned, destPath, parsed);
+  if (destTab && destTab !== previous && !isScopeAddress(previous)) {
+    ctx.workflowTarget.clear(previous);
+    ctx.workflowTarget.set(destTab, next);
+    return;
+  }
+  ctx.workflowTarget.set(previous, next);
+}
+
 /**
  * #2419 — after Save-As (or a first save) mints a new tab id, the command
  * fence is already refreshed from the reply, but session-scoped commands
  * (`panel_set_todo`, `panel_canvas`) still address the old id.
  *
- * Re-point ONLY when the current routing address is dead. A live pin
- * elsewhere is left alone — that is #1917 / #884: this recovery must not
- * take a routing target out from under a pin another command in the same
- * turn is relying on. Matching is on the dest path the save reply proved,
- * and only when exactly one live canvas carries it, so this cannot silently
- * redirect to a different workflow.
+ * Follow dest when the current address is dead, when it already aliases onto
+ * dest (same-socket tmp:→wf: / Save-As rename), or when it is the unsaved
+ * predecessor of dest (pinned tmp: canvas whose first save published a
+ * `workflows/…` routing key). A live pin on a DIFFERENT saved tab is left
+ * alone — that is #1917 / #884.
+ *
+ * Matching is on the dest path the save reply proved, and only when exactly
+ * one live canvas carries it, so this cannot silently redirect to a different
+ * workflow.
  *
  * Best-effort by construction: the file WAS written. A re-point that cannot
  * happen must not retract the save.
@@ -9934,24 +12378,26 @@ function repointRoutingAfterSave(ctx: PanelToolCtx, reply: ToolResult): void {
   if (!parsed) return;
   const destPath = saveDestWorkflowPath(parsed);
   if (!destPath) return;
-  if (typeof ctx.bridge.canReach === "function" && ctx.bridge.canReach(ctx.tabId)) return;
   const destTab = uniqueLiveTabForSaveDest(ctx, destPath);
-  if (!destTab) return;
+  if (!destTab) {
+    if (routingIsUnsavedPredecessor(ctx)) adoptPinnedDestPath(ctx, destPath, parsed);
+    return;
+  }
+  const live = liveRoutingTab(ctx);
+  const follow =
+    !live || live === destTab || routingIsUnsavedPredecessor(ctx);
+  if (!follow) return;
   if (isScopeAddress(ctx.tabId)) {
     try {
       ctx.bridge.repinScopeToWorkflow?.(ctx.tabId, destPath);
     } catch {
       // never worse than the pre-#2419 silence; the save already succeeded
     }
+    adoptPinnedDestPath(ctx, destPath, parsed);
     return;
   }
+  adoptPinnedDestPath(ctx, destPath, parsed, destTab);
   if (destTab === ctx.tabId) return;
-  const previous = ctx.tabId;
-  const pinned = ctx.workflowTarget?.get(previous);
-  if (ctx.workflowTarget && pinned?.mode === "pinned") {
-    ctx.workflowTarget.clear(previous);
-    ctx.workflowTarget.set(destTab, pinned);
-  }
   ctx.tabId = destTab;
 }
 
@@ -10948,6 +13394,25 @@ function pinHonorsLiveCanvas(
 }
 
 /**
+ * Automatic fence repair needs stronger identity than legacy pin resolution.
+ * `activeMatchesTarget` intentionally accepts filename/basename aliases for
+ * compatibility, but a basename cannot prove which saved workflow is live
+ * when two directories contain the same filename. Use only a canonical path
+ * or a canonical key here; otherwise leave the dispatch fence refusing.
+ */
+function exactPinnedSavedPathMatchesLive(
+  pinPath: string,
+  liveActive: Record<string, unknown> | undefined,
+): boolean {
+  const expected = canonicalSavedWorkflowPath(pinPath);
+  if (!expected || !expected.includes("/") || !liveActive) return false;
+  const observed = liveActive as { path?: unknown; key?: unknown };
+  return [observed.path, observed.key].some(
+    (value) => canonicalSavedWorkflowPath(value) === expected,
+  );
+}
+
+/**
  * The ONE remedy that is actually reachable from every wedged state below, and
  * the one the reporters found to be the only thing that worked.
  *
@@ -11485,10 +13950,29 @@ async function refreshOpenWorkflowUuid(
     parsedOpen.routedTo === ctx.tabId &&
     (typeof ctx.bridge.canReach !== "function" || ctx.bridge.canReach(ctx.tabId));
   const opened = parsedOpen?.opened;
-  const openedPath =
-    opened && typeof opened === "object" && typeof (opened as { path?: unknown }).path === "string"
-      ? (opened as { path: string }).path
+  const openedRecord =
+    opened && typeof opened === "object" && !Array.isArray(opened)
+      ? (opened as Record<string, unknown>)
       : undefined;
+  const openedPath = typeof openedRecord?.path === "string" ? openedRecord.path : undefined;
+  // #2477 / #2503 — a tmp: request is never a filename alias. Accept any
+  // non-empty tmp: token panel_list_workflows publishes (not only RFC-uuid suffixes),
+  // or an already-active imported tab is rejected as an unresolved filename.
+  // Fence adoption stays RFC-strict on the key (#812): a malformed tmp: suffix
+  // must not stamp the session even if the reply echoes it.
+  const requestedTmp = unsavedTmpWorkflowKey(requestedPath);
+  if (requestedTmp) {
+    const openedRoutingKey =
+      unsavedTmpWorkflowKey(parsedOpen?.routing_key) ??
+      unsavedTmpWorkflowKey(openedRecord?.routing_key);
+    const requestedUnsaved = canonicalUnsavedWorkflowIdentity(requestedPath);
+    // Absent routing_key is the already-active tmp tab: the panel applied the
+    // open but did not echo the handle. A DIFFERENT tmp: key is another tab.
+    if (requestedUnsaved && (!openedRoutingKey || requestedUnsaved === openedRoutingKey)) {
+      refreshWorkflowUuid(ctx, parsedOpen) || refreshWorkflowUuid(ctx, openedRecord);
+    }
+    return null;
+  }
   // The caller's original token is the fence target. A panel can resolve an
   // alias/basename to a path, but that reply must never retroactively turn the
   // alias into a UUID-refresh authorization. Require the reply to corroborate
@@ -11602,22 +14086,6 @@ async function refreshOpenWorkflowUuid(
       };
     }
 
-    // #812 — the SAVED corroboration above can never succeed for an unsaved
-    // target (there is no path), so try the parallel UNSAVED identity: the
-    // caller's literal token against the panel's own proven routing_key for
-    // the tab it just opened. Exact equality only — see
-    // canonicalUnsavedWorkflowIdentity for why that carries no alias risk.
-    //
-    // Trust level matches the EXISTING "could not ask" fallback below exactly:
-    // adopt the reply's own workflow_uuid directly, which the panel published
-    // only after its own final synchronous check that this target was still
-    // the active workflow (#716). No extra workflow_list round trip — that
-    // read is itself refused by the exact wedge this exists to repair
-    // (#1071), which is the same trap `panel_new_workflow`'s recovery hit.
-    const requestedUnsaved = canonicalUnsavedWorkflowIdentity(requestedPath);
-    if (requestedUnsaved && requestedUnsaved === parsedOpen?.routing_key) {
-      refreshWorkflowUuid(ctx, parsedOpen);
-    }
     return null;
   }
 
@@ -11699,16 +14167,44 @@ function resolvedOpenPathMatches(receipt: Record<string, unknown>, path: string)
 }
 
 /**
- * Poll `workflow_list` for the #514 `last_open` receipt for this exact bridge rid.
- * Active workflow state is deliberately ignored as recovery proof. Older panels
- * without receipt fields are identified promptly and remain undetermined.
+ * How much of the poll was spent, for the caller's message. Carried on every
+ * outcome so a recovery can say how long it looked, not just what it found.
  */
-async function waitForOpenReceipt(
+interface ReceiptPollCost {
+  waited_ms: number;
+  attempts: number;
+}
+
+/**
+ * The TRANSPORT half of receipt recovery: poll `workflow_list` until the #514
+ * `last_open` receipt minted for THIS exact bridge rid AND this exact command
+ * name appears, the panel proves itself too old to have receipts, or the budget
+ * runs out. It reads the correlation and nothing else — every judgement about
+ * what the receipt MEANS belongs to the caller, because `workflow_open` and
+ * `workflow_new` corroborate an applied receipt against different things (a
+ * caller-supplied path vs the tab the command itself minted).
+ *
+ * Extracted from `waitForOpenReceipt` (#2705) rather than copied: the
+ * correlation rule — rid, `answers_only_command_rid`, AND `cmd` — is the load-
+ * bearing guard on both paths, and two copies of it would be two chances for one
+ * to drift into accepting a receipt for someone else's command.
+ *
+ * Active workflow state is deliberately ignored as recovery proof here. Older
+ * panels without receipt fields are identified promptly and remain undetermined.
+ */
+type CorrelatedReceiptProbe = ReceiptPollCost &
+  (
+    | { kind: "matched"; parsed: Record<string, unknown>; receipt: Record<string, unknown> }
+    | { kind: "unsupported" }
+    | { kind: "missing" }
+  );
+
+async function waitForCorrelatedOpenReceipt(
   ctx: PanelToolCtx,
-  path: string,
+  cmd: "workflow_open" | "workflow_new",
   rid: string,
   timing: OpenVerifyTiming,
-): Promise<OpenVerifyResult> {
+): Promise<CorrelatedReceiptProbe> {
   const start = Date.now();
   const deadline = start + timing.budgetMs;
   const intervalMs = openVerifyTimingOverride
@@ -11725,49 +14221,13 @@ async function waitForOpenReceipt(
       // #514 always includes active_confirmed, including when last_open is null.
       // Its absence identifies an older panel which cannot make recovery claims.
       if (!("active_confirmed" in parsed) && !("last_open" in parsed)) {
-        return { receipt: "unsupported", waited_ms: Date.now() - start, attempts };
+        return { kind: "unsupported", waited_ms: Date.now() - start, attempts };
       }
       const lastOpen = parsed.last_open;
       if (lastOpen && typeof lastOpen === "object") {
         const receipt = lastOpen as Record<string, unknown>;
-        if (receipt.rid === rid && receipt.answers_only_command_rid === rid && receipt.cmd === "workflow_open") {
-          // The exact RID identifies this command. Keep a target check as an
-          // accidental wrong-workflow guard; active itself is never proof.
-          if (!resolvedOpenPathMatches(receipt, path)) {
-            return { receipt: "unknown", waited_ms: Date.now() - start, attempts };
-          }
-          if (receipt.applied === true) {
-            // A receipt proves this open applied, but a later user switch could
-            // have made another canvas active before this probe.  Refresh only
-            // when the current active object still names this exact target.
-            const active = parsed.active;
-            const resolved = receipt.resolved as Record<string, unknown>;
-            const resolvedPath = resolved.path as string;
-            // The receipt has already proved the command's exact resolved path.
-            // Still require its routing claim and the live active record to
-            // corroborate the ORIGINAL request identity before refreshing.
-            const requestedIdentity = canonicalRequestedSavedIdentity(path);
-            const resolvedIdentity = canonicalSavedRecordIdentity({
-              path: resolvedPath,
-              routing_key: resolved.routing_key,
-            });
-            const workflowUuid =
-              requestedIdentity &&
-              requestedIdentity === resolvedIdentity &&
-              activeMatchesOpenRefreshTarget(active, path)
-              ? responseWorkflowUuid(active)
-              : undefined;
-            return { receipt: "applied", workflowUuid, waited_ms: Date.now() - start, attempts };
-          }
-          if (receipt.applied === false) {
-            return {
-              receipt: "not_applied",
-              error: typeof receipt.error === "string" ? receipt.error : undefined,
-              waited_ms: Date.now() - start,
-              attempts,
-            };
-          }
-          return { receipt: "unknown", waited_ms: Date.now() - start, attempts };
+        if (receipt.rid === rid && receipt.answers_only_command_rid === rid && receipt.cmd === cmd) {
+          return { kind: "matched", parsed, receipt, waited_ms: Date.now() - start, attempts };
         }
       }
     }
@@ -11775,7 +14235,151 @@ async function waitForOpenReceipt(
     if (left <= 0) break;
     await sleep(Math.min(intervalMs, left));
   }
-  return { receipt: "missing", waited_ms: Date.now() - start, attempts };
+  return { kind: "missing", waited_ms: Date.now() - start, attempts };
+}
+
+/**
+ * Poll `workflow_list` for the #514 `last_open` receipt for this exact bridge rid,
+ * then decide what it says about THIS `workflow_open`.
+ */
+async function waitForOpenReceipt(
+  ctx: PanelToolCtx,
+  path: string,
+  rid: string,
+  timing: OpenVerifyTiming,
+): Promise<OpenVerifyResult> {
+  const probe = await waitForCorrelatedOpenReceipt(ctx, "workflow_open", rid, timing);
+  const { waited_ms, attempts } = probe;
+  if (probe.kind === "unsupported") return { receipt: "unsupported", waited_ms, attempts };
+  if (probe.kind === "missing") return { receipt: "missing", waited_ms, attempts };
+  const { parsed, receipt } = probe;
+  // The exact RID identifies this command. Keep a target check as an
+  // accidental wrong-workflow guard; active itself is never proof.
+  if (!resolvedOpenPathMatches(receipt, path)) {
+    return { receipt: "unknown", waited_ms, attempts };
+  }
+  if (receipt.applied === true) {
+    // A receipt proves this open applied, but a later user switch could
+    // have made another canvas active before this probe.  Refresh only
+    // when the current active object still names this exact target.
+    const active = parsed.active;
+    const resolved = receipt.resolved as Record<string, unknown>;
+    const resolvedPath = resolved.path as string;
+    // The receipt has already proved the command's exact resolved path.
+    // Still require its routing claim and the live active record to
+    // corroborate the ORIGINAL request identity before refreshing.
+    const requestedIdentity = canonicalRequestedSavedIdentity(path);
+    const resolvedIdentity = canonicalSavedRecordIdentity({
+      path: resolvedPath,
+      routing_key: resolved.routing_key,
+    });
+    const workflowUuid =
+      requestedIdentity &&
+      requestedIdentity === resolvedIdentity &&
+      activeMatchesOpenRefreshTarget(active, path)
+      ? responseWorkflowUuid(active)
+      : undefined;
+    return { receipt: "applied", workflowUuid, waited_ms, attempts };
+  }
+  if (receipt.applied === false) {
+    return {
+      receipt: "not_applied",
+      error: typeof receipt.error === "string" ? receipt.error : undefined,
+      waited_ms,
+      attempts,
+    };
+  }
+  return { receipt: "unknown", waited_ms, attempts };
+}
+
+/** A `routing_key` from a receipt's `resolved` block, or from a `workflow_list`
+ *  record — the per-instance handle (`tmp:<uuid>` unsaved, `wf:<path>` saved) that
+ *  is the ONLY thing that distinguishes two unsaved tabs from each other. Empty,
+ *  absent, or non-string reads as "no identity", never as a match. */
+function routingKeyOf(value: unknown): string | undefined {
+  if (!value || typeof value !== "object") return undefined;
+  const key = (value as { routing_key?: unknown }).routing_key;
+  return typeof key === "string" && key.trim() ? key.trim() : undefined;
+}
+
+/** What the panel's rid-correlated receipt says about ONE `workflow_new`. */
+interface NewWorkflowVerifyResult extends ReceiptPollCost {
+  receipt: "applied" | "not_applied" | "unknown" | "unsupported" | "missing";
+  /** The panel's own error text, when it journaled one. */
+  error?: string;
+  /** The routing handle of the tab the receipt says this command created. */
+  routingKey?: string;
+  /** The routing handle the live `workflow_list` reports as the active canvas. */
+  activeKey?: string;
+  /**
+   * THREE states, not two (codex gate). "The active record names a different
+   * canvas" and "one of the two identities could not be read at all" are opposite
+   * facts with opposite remedies, and folding the second into the first is the
+   * absence-of-evidence collapse this repo keeps auditing for: it would tell a
+   * caller another workflow is in view when nothing was observed about what is.
+   */
+  corroboration?: "matched" | "different" | "unreadable";
+  /** #716 shape-gated fence identity, and ONLY when `corroboration === "matched"`. */
+  workflowUuid?: string;
+}
+
+/**
+ * #2705 — the `workflow_new` half of receipt recovery.
+ *
+ * `panel_new_workflow` timed out after 15s, the blank tab HAD been created, and
+ * the tool returned the raw ack-timeout: no receipt lookup, and — the part that
+ * wedged the session — no fence refresh, so the next `panel_graph_outline` was
+ * refused with `workflow instance mismatch` naming the workflow the user had just
+ * left. The panel already journals this command (`noteOpenAttempt({cmd:
+ * "workflow_new", …})` on every exit, `applied:true` only where the tab exists and
+ * is active), so the evidence is a STRUCTURED, rid-correlated receipt rather than
+ * a re-read of `active` — which after a reconnect names a tab the frontend
+ * restored by itself and proves nothing about our command.
+ *
+ * CORROBORATION IS DIFFERENT FROM THE OPEN PATH, because the identity is. An open
+ * has a caller-supplied path to check the receipt against; a new workflow has no
+ * caller target at all — the command MINTS its target. So the check is: the
+ * receipt names the routing key its own execution created, and the live `active`
+ * record still names that same key. That is what makes `active.workflow_uuid`
+ * safe to adopt: the two fields come from one observation of one tab
+ * (`liveWorkflowListActive`), so a matching routing key means the uuid belongs to
+ * the tab this rid created, not to whatever happens to be in view.
+ *
+ * Nothing is adopted without that match. `applied:"unknown"` — which the panel
+ * uses for every branch where creation may have got partway, or where it
+ * deliberately RETIRED the binding proof — never adopts either: taking a fence
+ * from a live record the panel just invalidated would re-assert exactly the proof
+ * it withdrew.
+ */
+async function waitForNewWorkflowReceipt(
+  ctx: PanelToolCtx,
+  rid: string,
+  timing: OpenVerifyTiming,
+): Promise<NewWorkflowVerifyResult> {
+  const probe = await waitForCorrelatedOpenReceipt(ctx, "workflow_new", rid, timing);
+  const { waited_ms, attempts } = probe;
+  if (probe.kind === "unsupported") return { receipt: "unsupported", waited_ms, attempts };
+  if (probe.kind === "missing") return { receipt: "missing", waited_ms, attempts };
+  const { parsed, receipt } = probe;
+  const error = typeof receipt.error === "string" ? receipt.error : undefined;
+  if (receipt.applied === false) return { receipt: "not_applied", error, waited_ms, attempts };
+  if (receipt.applied !== true) return { receipt: "unknown", error, waited_ms, attempts };
+  // The panel sets `resolved: null` on several failure paths and can report no
+  // active record at all, so EITHER side of this comparison can be missing. A
+  // missing side is `unreadable` — not `different`.
+  const routingKey = routingKeyOf(receipt.resolved);
+  const activeKey = routingKeyOf(parsed.active);
+  const corroboration: "matched" | "different" | "unreadable" =
+    !routingKey || !activeKey ? "unreadable" : routingKey === activeKey ? "matched" : "different";
+  return {
+    receipt: "applied",
+    routingKey,
+    activeKey,
+    corroboration,
+    workflowUuid: corroboration === "matched" ? responseWorkflowUuid(parsed.active) : undefined,
+    waited_ms,
+    attempts,
+  };
 }
 
 /**
@@ -11852,6 +14456,26 @@ function noReachableTabFail(cmd: string, ctx?: PanelToolCtx): ToolResult {
       `restart/reload, or multiple tabs are open and none is this session's). Nothing was ` +
       `sent. Retry in a moment, or rebind with panel_set_workflow_target({mode:"current"}).`,
   );
+}
+
+/**
+ * #2531 — after a successful open or a verified-active pin, align the
+ * conversation's turn-routing key onto THIS canvas. A live pin is still never
+ * stolen onto a different tab (#884); `alignLiveCanvas` only rewrites lastOrigin
+ * onto the canonical live id so the next origin-less turn (a run completion)
+ * inherits the switched workflow instead of the pre-open one, and so the tool
+ * does not report pin success while retaining a different healthy routing key.
+ *
+ * Best-effort: the open/pin already succeeded. A failed align must not retract it.
+ */
+function alignTurnRoutingAfterSwitch(ctx: PanelToolCtx, workflowPath: string): ScopeRepinOutcome | undefined {
+  if (!isScopeAddress(ctx.tabId)) return undefined;
+  if (typeof ctx.bridge.repinScopeToWorkflow !== "function") return undefined;
+  try {
+    return ctx.bridge.repinScopeToWorkflow(ctx.tabId, workflowPath, { alignLiveCanvas: true });
+  } catch {
+    return undefined; // never worse than the pre-#2531 silence
+  }
 }
 
 async function openWorkflowWithVerify(path: string, ctx: PanelToolCtx): Promise<ToolResult> {
@@ -11958,7 +14582,9 @@ async function openWorkflowWithVerify(path: string, ctx: PanelToolCtx): Promise<
             `if you still need it — another tab became active during or after the open.`,
         );
       }
+      await tryRebindImportedTmpIdentity(ctx, path);
     }
+    alignTurnRoutingAfterSwitch(ctx, path);
     return res;
   }
 
@@ -11973,6 +14599,7 @@ async function openWorkflowWithVerify(path: string, ctx: PanelToolCtx): Promise<
   const verify = await waitForOpenReceipt(ctx, path, dispatchedRid, timing);
   if (verify.receipt === "applied") {
     if (verify.workflowUuid) refreshWorkflowUuid(ctx, { workflow_uuid: verify.workflowUuid });
+    alignTurnRoutingAfterSwitch(ctx, path);
     return ok({
       opened: { path },
       recovered: true,
@@ -11999,6 +14626,249 @@ async function openWorkflowWithVerify(path: string, ctx: PanelToolCtx): Promise<
     `${toolResultText(res)}\n\nworkflow_open outcome is undetermined: ${reason}. ` +
       `Do not assume the workflow was opened; inspect the current workflow before deciding whether to retry.`,
   );
+}
+
+/**
+ * The tab's graph-MUTATION capability, in the tri-state `describeFenceRebind`
+ * consumes: `true` permitted, `false` refused (with the cause that decides which
+ * remedy is printed), `undefined` NOT KNOWN.
+ *
+ * Shared by `panel_new_workflow`'s normal and recovered paths (#2705) so both
+ * report the same `graph_binding` vocabulary for the same tab state — a recovery
+ * that invented its own binding words would be a second dialect for the one fact
+ * the caller acts on.
+ */
+function readGraphMutationCapability(ctx: PanelToolCtx): {
+  canMutate: boolean | undefined;
+  refusalCause?: "unroutable" | "disconnected" | "no_identity" | "capability" | "target_disagreement";
+} {
+  try {
+    if (ctx.tabGraphMutationCapability) {
+      const cap = ctx.tabGraphMutationCapability();
+      return {
+        canMutate: cap.known ? cap.canMutate : undefined,
+        refusalCause: cap.known && !cap.canMutate ? cap.because : undefined,
+      };
+    }
+    return { canMutate: ctx.tabCanMutateGraph?.() };
+  } catch {
+    // unknown-ok: a guard that can throw is not a guard. A probe that threw has
+    // OBSERVED nothing, and `undefined` is exactly that state for this renderer —
+    // it prints "not verified", not the refusal wording a collapsed `false` would.
+    return { canMutate: undefined };
+  }
+}
+
+/**
+ * #2705 — what to report when `workflow_new` did not ACK.
+ *
+ * The reporter's sequence: a 15s ack timeout that said the mutation "may have
+ * been applied", a blank tab that HAD in fact been created, and a session still
+ * fenced to the workflow it had just left — so the next `panel_graph_outline` was
+ * refused with `workflow instance mismatch` and the only way out was a manual
+ * `panel_set_workflow_target({mode:"current"})`.
+ *
+ * Both halves are answered from ONE structured source: the panel's #402/#514
+ * rid-correlated receipt. `applied:true` settles the outcome the timeout could
+ * not, and the routing key it names — matched against the live `active` record —
+ * is what licenses re-pointing the fence at the canvas this command created.
+ *
+ * WHAT IT DELIBERATELY DOES NOT DO. It never adopts an identity the receipt did
+ * not correlate, and it never tells the caller to retry unless the panel
+ * journaled a clean negative: `workflow_new` is not idempotent, so a wrong
+ * "safe to retry" costs the user a second blank tab — which is the failure the
+ * panel's own `applied:"unknown"` branches exist to prevent.
+ */
+async function recoverTimedOutNewWorkflow(
+  ctx: PanelToolCtx,
+  res: ToolResult,
+  dispatchedRid: string | undefined,
+): Promise<ToolResult> {
+  // The stale fence is the SECOND half of this report, so every undetermined exit
+  // names it too: an agent that reads only "outcome unknown" then meets a
+  // `workflow instance mismatch` has no way to know the two are the same event.
+  const undetermined = (reason: string): ToolResult =>
+    fail(
+      `${toolResultText(res)}\n\nworkflow_new outcome is undetermined: ${reason}. Do NOT re-issue ` +
+        `panel_new_workflow — it is NOT idempotent, so if the tab was in fact created a retry ` +
+        `leaves a SECOND blank tab behind. Call panel_list_workflows to see whether a new blank ` +
+        `tab exists. This session's workflow-instance fence was NOT re-pointed either, so a graph ` +
+        `call that now fails with "workflow instance mismatch" is that same stale fence rather ` +
+        `than a second fault — once you know which canvas you are on, clear it with ` +
+        `panel_set_workflow_target({mode:"current"}).`,
+    );
+
+  if (!dispatchedRid) {
+    return undetermined(
+      "this bridge/panel combination did not expose a request id for receipt correlation",
+    );
+  }
+  const verify = await waitForNewWorkflowReceipt(ctx, dispatchedRid, getOpenVerifyTiming());
+  const waited =
+    `${(verify.waited_ms / 1000).toFixed(1)}s (${verify.attempts} probe` +
+    `${verify.attempts === 1 ? "" : "s"})`;
+
+  if (verify.receipt === "not_applied") {
+    // The ONE branch that may say "retry": the panel journaled that nothing ran.
+    return fail(
+      `workflow_new was confirmed NOT applied by the panel's request-id-correlated receipt` +
+        `${verify.error ? `: ${verify.error}` : "."} No blank tab was created, and this session's ` +
+        `workflow target is unchanged — it is safe to call panel_new_workflow again.`,
+    );
+  }
+  if (verify.receipt !== "applied") {
+    return undetermined(
+      verify.receipt === "unsupported"
+        ? "this panel version does not provide request-id-correlated open receipts"
+        : verify.receipt === "unknown"
+          ? `the matching panel receipt did not confirm that the command was applied` +
+            `${verify.error ? ` (${verify.error})` : ""}`
+          : `no request-id-correlated panel receipt was observed in ${waited}`,
+    );
+  }
+
+  // APPLIED. The tab exists. Adopt its identity only if the receipt's routing key
+  // is still what the panel reports as active — see waitForNewWorkflowReceipt.
+  const before = currentWorkflowFence(ctx);
+  const adopted = verify.workflowUuid
+    ? refreshWorkflowUuid(ctx, { workflow_uuid: verify.workflowUuid })
+    : false;
+  const cap = readGraphMutationCapability(ctx);
+  // No `panelTooOldNote` here, deliberately (#1043's gate counts its call sites
+  // and this would be a third). It is printed ONLY in the `not_recovered` branch,
+  // for a fence read that could not be made — and this call always passes
+  // `status:"refreshed"`, because it is reached only when the adoption already
+  // succeeded. Passing it would be an argument that provably cannot be read.
+  const fence =
+    adopted && verify.workflowUuid
+      ? describeFenceRebind(
+          { status: "refreshed", uuid: verify.workflowUuid, before },
+          cap.canMutate,
+          cap.refusalCause,
+        )
+      : null;
+  // #708's caveat rides EVERY recovered creation. The panel journals the receipt
+  // BEFORE it decides whether the new tab is provably empty, so `applied:true`
+  // proves the tab was created and is active — never that it is blank. Claiming
+  // "blank" here would be the exact fabrication the direct reply refuses to make,
+  // and an earlier draft made it TWICE (codex gate): the lead said "the blank
+  // workflow WAS created" and this caveat then said the opposite, while the last
+  // clause asserted any nodes found "belong to another workflow" — a second
+  // unobserved claim about a graph nothing here has read.
+  const blankCaveat =
+    ` NOT PROVEN BLANK: the receipt records that the tab was created and made active; it does ` +
+    `not carry the panel's zero-node proof, which the lost reply was going to. Call ` +
+    `panel_graph_outline before building — if it already holds nodes, this is not the fresh ` +
+    `canvas you asked for (a reconnect/tab-restore can leave the previously active graph on the ` +
+    `shared canvas — #708), so open the workflow you actually want rather than building here.`;
+  const fenceNote = adopted
+    ? ` This session's workflow-instance fence has been RE-POINTED at the new canvas` +
+      `${verify.workflowUuid ? ` (${verify.workflowUuid})` : ""}, so graph tools target it rather ` +
+      `than the workflow you were on.${fence ? fence.note : ""}`
+    : verify.corroboration === "matched"
+      ? ` This session's fence was NOT re-pointed: the panel reports the new tab as active, but ` +
+        `${verify.workflowUuid ? `this bridge did not accept the stamp` : `it published no usable ` +
+        `workflow-instance identity for that tab`}, so graph commands keep the stamp they had. ` +
+        `Call panel_set_workflow_target({mode:"current"}) to bind onto it.`
+      : verify.corroboration === "different"
+        ? ` This session's fence was NOT re-pointed: the panel's live active record names a ` +
+          `DIFFERENT canvas (${verify.activeKey}) than the tab this command created ` +
+          `(${verify.routingKey}), so adopting an identity from it would fence you to the wrong ` +
+          `workflow. Switch to the new tab (panel_open_workflow with ${verify.routingKey}), then ` +
+          `call panel_set_workflow_target({mode:"current"}).`
+        : // UNREADABLE — one of the two identities was missing, so NOTHING was
+          // observed about which canvas is in view. Do not narrate that as drift.
+          ` This session's fence was NOT re-pointed, and which canvas is in view was NOT ` +
+          `established: ${
+            verify.routingKey
+              ? `the panel reported no readable routing identity for the active canvas`
+              : `the receipt carried no routing identity for the tab it created`
+          }, so there was nothing to compare and adopting an identity would have been a guess. ` +
+          `Call panel_list_workflows to see the open tabs, then ` +
+          `panel_set_workflow_target({mode:"current"}) once you know which one you are on.`;
+  // Two shapes reach here and they are NOT the same event: an ack TIMEOUT is a tab
+  // that never answered inside the window; a reconnect DROP is the tab going away
+  // mid-command. What they share is that no acknowledgement arrived — which is the
+  // fact a caller acts on — so that is what the always-present field asserts, and
+  // the cause rides beside it. An earlier draft set `applied_but_ack_timed_out` on
+  // both and explained in a comment why that was fine (codex gate round 2): it is
+  // not, because the name says "timed out" and a disconnect did not.
+  const ackTimedOut = isAckTimeout(res, "workflow_new");
+  return ok({
+    created: true,
+    empty: "unknown",
+    recovered: true,
+    // The machine-readable form of "the mutation landed, the acknowledgement did
+    // not" — so a caller never has to parse the prose to learn that (#2705).
+    applied_but_unacknowledged: true,
+    unacknowledged_cause: ackTimedOut ? "ack_timeout" : "reconnect_drop",
+    // #2705's own vocabulary, kept for the case it was written about — and ONLY
+    // for that case, so a caller keying on it is never told a disconnect was a
+    // timeout. Absent on the reconnect-drop path rather than false: this field
+    // has always meant "the thing named happened".
+    ...(ackTimedOut ? { applied_but_ack_timed_out: true } : {}),
+    ...(verify.routingKey ? { key: verify.routingKey, routing_key: verify.routingKey } : {}),
+    workflow_instance_adopted: adopted,
+    graph_binding: fence ? fence.binding : "not_recovered",
+    note:
+      `${
+        ackTimedOut
+          ? "panel_new_workflow did not receive its acknowledgement within the 15s window"
+          : "panel_new_workflow lost its acknowledgement — the tab disconnected mid-command"
+      }, but the ` +
+      `panel's request-id-correlated receipt confirms a NEW WORKFLOW TAB WAS created and made ` +
+      `active (found after ${waited}). Do NOT call panel_new_workflow again — it is not ` +
+      `idempotent and a retry would leave a second blank tab.${fenceNote}${blankCaveat}`,
+  });
+}
+
+/**
+ * `panel_new_workflow` body. Forwards `workflow_new`, and on an ACK-TIMEOUT or a
+ * mid-command reconnect drop settles the outcome against the panel's own
+ * rid-correlated receipt instead of handing the caller an unknown (#2705).
+ */
+async function newWorkflowWithVerify(ctx: PanelToolCtx): Promise<ToolResult> {
+  let dispatchedRid: string | undefined;
+  const res = await ctx.call({ cmd: "workflow_new" }, 15000, (rid) => {
+    dispatchedRid = rid;
+  });
+  // Checked BEFORE `res.isError`: a genuine acked executor error (the panel's own
+  // "could not take the workflow switch/reload section", a thrown creation) must
+  // still surface verbatim, and only a no-reply is a candidate for recovery.
+  if (isAckTimeout(res, "workflow_new") || isReconnectDrop(res)) {
+    return recoverTimedOutNewWorkflow(ctx, res, dispatchedRid);
+  }
+  if (res.isError) return res;
+  // #932 (recurrence on 0.50.6) — a NEW canvas needs a NEW fence.
+  //
+  // workflow_new authoritatively re-points the active workflow, exactly as
+  // workflow_open does — but only the open path re-derived the command
+  // fence afterwards (openWorkflowWithVerify). So this session kept the
+  // PREVIOUS workflow's instance stamp while the user was now looking at a
+  // brand-new blank canvas, and every stamped command after it failed with
+  // "workflow instance mismatch". The reporter created a workflow and could
+  // not add a single node to it.
+  //
+  // Refresh from the panel's own live active record, the same way the open
+  // path does. The panel mints the new canvas's identity EAGERLY at
+  // creation ("so the key exists BEFORE the first edit").
+  //
+  // #814/#812 — this reply DOES carry workflow_uuid directly (#762), and the
+  // stale comment that used to stand here said otherwise. Trust it first,
+  // before ever attempting rebindWorkflowFence's independent workflow_list
+  // round trip, which can be refused by the exact fence being repaired
+  // (#1071) — the same trap a reporter hit via panel_new_workflow's own
+  // recovery attempt.
+  //
+  // NEVER fails the call on a rebind miss: the workflow WAS created, and
+  // retracting that would be the worse lie. Disclose instead, so the agent
+  // learns the graph tools are not yet usable here rather than discovering
+  // it one confusing mismatch at a time.
+  const fenceRebind = refreshFenceFromOwnReply(ctx, res) ?? (await rebindWorkflowFence(ctx));
+  const cap = readGraphMutationCapability(ctx);
+  const fence = describeFenceRebind(fenceRebind, cap.canMutate, cap.refusalCause, panelTooOldNote(ctx));
+  if (!fence || fence.binding === "bound") return res;
+  return appendNote(res, `The blank workflow WAS created.${fence.note}`);
 }
 
 /** True when a ToolResult is a MID-COMMAND reconnect drop ("disconnected
@@ -12191,14 +15061,15 @@ function computeIsActive(rec: OpenWorkflowRecord, activeObj: unknown): boolean |
  * Per-tab unsaved handle (`tmp:<id>`). Unsaved tabs have no path/filename; this
  * is the only unique identity they publish. Accepts any non-empty `tmp:` token
  * (not only RFC-uuid suffixes) so a panel that mints a shorter handle still
- * corroborates — `canonicalUnsavedWorkflowIdentity` stays strict for OPEN,
- * which is a caller-supplied selector.
+ * corroborates. OPEN uses the same matcher to skip filename resolution (#2503);
+ * fence adoption stays RFC-strict via `canonicalUnsavedWorkflowIdentity` (#812).
  */
 function recordTmpHandle(value: unknown): string | null {
   if (!value || typeof value !== "object") return null;
   const rec = value as { key?: unknown; routing_key?: unknown };
   for (const v of [rec.routing_key, rec.key]) {
-    if (typeof v === "string" && /^tmp:\S+$/.test(v)) return v;
+    const key = unsavedTmpWorkflowKey(v);
+    if (key) return key;
   }
   return null;
 }
@@ -13565,8 +16436,11 @@ interface BridgeProbe {
   workflowUuidFor?: (tabId: string) => TabWorkflowUuidRead;
   promotedScopeFor?: (tabId: string) => TabPromotedScopeRead;
   readPromotedScope?: (tabId: string, innerNodeId: number | string) => Promise<TabPromotedScopeRead>;
+  applyLiveRootViewing?: (tabId: string, viewing: unknown) => void;
+  clearPromotedSubgraphIdentity?: (tabId: string) => void;
   tabPromotedTerminalWitnessCapability?: (tabId: string) => boolean;
   tabPromotedParentRailFenceCapability?: (tabId: string) => boolean;
+  tabExpectedNodeIdentityFenceCapability?: (tabId: string) => boolean;
   lastFenceRefusal?: (tabId: string) => string | undefined;
   isHeadless?: (tabId: string) => boolean;
   canReach?: (tabId: string) => boolean;
@@ -13585,6 +16459,13 @@ export interface ExplicitCurrentRebindProof {
   savedIdentity: string;
 }
 
+export interface PanelToolCallOptions {
+  /** Disable the orchestrator's post-transport retry for a one-shot probe. */
+  retry?: boolean;
+  /** Limit UiBridge reconnect resumption for this call. */
+  maxBridgeReconnectRetries?: number;
+}
+
 export interface PanelToolCtx {
   /** Forward a command to the panel and wrap the reply as a tool result. An
    *  optional observer receives the bridge request id after the frame is written,
@@ -13597,6 +16478,7 @@ export interface PanelToolCtx {
     timeoutMs?: number,
     onDispatchedRid?: (rid: string) => void,
     beforeDispatch?: () => void,
+    options?: PanelToolCallOptions,
   ) => Promise<ToolResult>;
   /** Human-in-the-loop yes/no confirm card. Tri-state (#360): "yes" on an explicit
    *  affirmative, "no" on a decline / no-panel / transport error, "timeout" when the
@@ -13620,6 +16502,12 @@ export interface PanelToolCtx {
   modelInventoryDisclosure?: ModelInventoryDisclosureProbe;
   /** Per-tab workflow pin store (optional for tests). */
   workflowTarget?: WorkflowTargetStore;
+  /** Immutable lane identity used to read apply_manifest outcome records. */
+  manifestOutcomeScope?: string;
+  /** Capture the ComfyUI target at the start/end of a queue-status poll. */
+  manifestOutcomeTarget?: () =>
+    | { url: string; generation: number }
+    | undefined;
   /**
    * EXPLICIT self-heal: re-point THIS session at the currently active/sole
    * connected tab. The tabId captured at session creation is frozen; a full
@@ -13715,6 +16603,11 @@ export interface PanelToolCtx {
    * expected_node_type at the synchronous mutation boundary. Real contexts
    * provide this; omitted/false is a fail-closed answer for #2107. */
   tabExpectedNodeTypeFenceCapability?: () => boolean;
+  /** Whether the currently bound panel enforces the opaque node-incarnation
+   * expected_node_identity at the synchronous mutation boundary. Real contexts
+   * provide this; omitted/false is a fail-closed answer for the transient
+   * ordinary-node recovery path. */
+  tabExpectedNodeIdentityFenceCapability?: () => boolean;
   /** Whether the currently bound panel enforces the stable graph identity in
    * expected_scope at the synchronous mutation boundary. Real contexts provide
    * this; omitted/false is a fail-closed answer for promoted writes (#2314 P1). */
@@ -13804,6 +16697,12 @@ export interface PanelToolCtxLane {
   inheritsUserMcpServers?: boolean;
   /** See {@link PanelToolCtx.userMcpServersAtSpawn}. */
   userMcpServersAtSpawn?: readonly string[];
+  /** Scope capability minted for this agent lane; never derive it from ctx.tabId. */
+  manifestOutcomeScope?: string;
+  /** Target resolver supplied by the owning orchestrator scope. */
+  manifestOutcomeTarget?: () =>
+    | { url: string; generation: number }
+    | undefined;
 }
 
 /** Build a tab-bound execution context shared by both transports. */
@@ -13832,6 +16731,12 @@ export function makePanelToolCtx(
     ...(lane?.userMcpServersAtSpawn === undefined
       ? {}
       : { userMcpServersAtSpawn: lane.userMcpServersAtSpawn }),
+    ...(lane?.manifestOutcomeScope === undefined
+      ? {}
+      : { manifestOutcomeScope: lane.manifestOutcomeScope }),
+    ...(lane?.manifestOutcomeTarget === undefined
+      ? {}
+      : { manifestOutcomeTarget: lane.manifestOutcomeTarget }),
   } as PanelToolCtx;
 
   // AUTO-HEAL an orphaned session in place. When THIS session's captured tabId no
@@ -14038,6 +16943,7 @@ export function makePanelToolCtx(
     timeoutMs?: number,
     onDispatchedRid?: (rid: string) => void,
     beforeDispatch?: () => void,
+    options?: PanelToolCallOptions,
   ): Promise<unknown> => {
     const target = workflowTargets?.get(ctx.tabId);
     const routed = target ? withWorkflowTarget(cmd, target) : cmd;
@@ -14046,6 +16952,7 @@ export function makePanelToolCtx(
       timeoutMs,
       onDispatchedRid,
       beforeDispatch,
+      maxReconnectRetries: options?.maxBridgeReconnectRetries,
     });
   };
 
@@ -14061,6 +16968,7 @@ export function makePanelToolCtx(
     // fourteenth is added, and the fact being carried belongs to the ERROR rather
     // than to any one of those wordings.
     onFailure?: (err: unknown) => void,
+    options?: PanelToolCallOptions,
   ): Promise<ToolResult> => {
     // #694: capture the rid of THIS call's dispatched attempt so an OUTCOME-UNKNOWN
     // mutating failure can name it as the caller's explicit retry token (see the
@@ -14095,16 +17003,24 @@ export function makePanelToolCtx(
       // so they are dispatched on the bounded budget above instead.
       const blocked = graphCmdBlockedByRunningPrompt(cmd);
       if (blocked) return fail(blocked);
+      // #2527 — a timed-out mutation may still be applying. Graph reads wait for
+      // that settlement (or disclose the outstanding receipt) so they cannot
+      // certify a stale widget value as current.
+      if (isGraphReadSettleCmd(cmd)) {
+        await awaitOutstandingMutationSettle(bridge, ctx.tabId);
+      }
       // The bridge owns the graph lane and re-resolves the live connection after
       // waiting. Pass the fence through so it runs at the actual socket dispatch,
       // not before that retarget window.
-      const firstTry = ok(await sendRouted(cmd, timeoutMs, observeRid, beforeDispatch));
+      const firstTry = ok(await sendRouted(cmd, timeoutMs, observeRid, beforeDispatch, options));
       // panel#1097 — a guard-domain command that SUCCEEDS is the evidence that the
       // switch is over, whichever attempt lands it. Without this an ordinary
       // first-attempt success left the old run in place, and a later unrelated
       // switch inherited its age and was announced as stuck at once (codex r4).
       if (successProvesSwitchCleared(cmd.cmd)) clearSwitchHold(ctx.tabId);
-      return firstTry;
+      return isGraphReadSettleCmd(cmd)
+        ? discloseOutstandingMutations(bridge, ctx.tabId, firstTry)
+        : firstTry;
     } catch (err) {
       onFailure?.(err); // #1560 — the error this attempt failed on (see the wrapper).
       // Post-reconnect retry-once: a reboot/free_vram/reconnect can drop the tab's
@@ -14134,11 +17050,12 @@ export function makePanelToolCtx(
       const workerTransportRetry =
         isWorkerTransportSendError(err) && isWorkerTransportRetrySafeCmd(cmd);
       if (
-        preExecutorRefusal ||
+        options?.retry !== false &&
+        (preExecutorRefusal ||
         (isRetrySafeCmd(cmd) &&
           (isTransientReconnectError(err) ||
             isWorkflowSwitchGuardRefusal(err) ||
-            workerTransportRetry))
+            workerTransportRetry)))
       ) {
         // panel#1097 — declared out here so the refusal branch below can see it,
         // and REASSIGNED after ensureReachable so it names the tab the command is
@@ -14182,7 +17099,12 @@ export function makePanelToolCtx(
           await awaitReachable();
           ensureReachable(); // rebinds a current-mode session onto the reconnected tab
           holdTab = ctx.tabId;
-          const retried = ok(await sendRouted(cmd, timeoutMs, observeRid, beforeDispatch));
+          if (isGraphReadSettleCmd(cmd)) {
+            await awaitOutstandingMutationSettle(bridge, ctx.tabId);
+          }
+          const retried = ok(
+            await sendRouted(cmd, timeoutMs, observeRid, beforeDispatch, options),
+          );
           // Cleared HERE and nowhere else, and only when the failure this retried
           // was a SWITCH refusal. Clearing on every routed success let an unguarded
           // status read wipe the evidence while graph commands stayed refused
@@ -14195,7 +17117,9 @@ export function makePanelToolCtx(
           if (isWorkflowSwitchGuardRefusal(err) && successProvesSwitchCleared(cmd.cmd)) {
             clearSwitchHold(holdTab);
           }
-          return retried;
+          return isGraphReadSettleCmd(cmd)
+            ? discloseOutstandingMutations(bridge, ctx.tabId, retried)
+            : retried;
         } catch (err2) {
           // #1560 — the RETRY's failure is the one every exit below describes, so it
           // supersedes the first. A retried read that comes back refused is a panel
@@ -14745,10 +17669,56 @@ export function makePanelToolCtx(
         const refusedLead = inertRead
           ? `${name} was refused before it ran — no graph data was read.`
           : `${name} was refused before it ran — nothing was applied.`;
+        // #2483 — outline can lag a post-save instance/generation flip while a
+        // fresh graph_query already reads the same tab. Retry the inert outline
+        // ONCE when tab identity is unchanged and that query proves the current
+        // instance. sendRouted, not ctx.call: a nested mismatch diagnosis on the
+        // probe would recurse into this branch. Unstamped reads keep the #1519
+        // mint path; this is the stamped (and unstated) race after save.
+        if (
+          options?.retry !== false &&
+          name === "graph_outline" &&
+          inertRead &&
+          shape !== "unstamped"
+        ) {
+          const tabAtRefusal = ctx.tabId;
+          let identityAtRefusal: { generation: number; tabSessionId: string } | undefined;
+          try {
+            identityAtRefusal = ctx.panelConnectionIdentity?.();
+          } catch {
+            identityAtRefusal = undefined;
+          }
+          const fenceAtRefusal = currentWorkflowFence(ctx);
+          const expectedUuid =
+            stamped ?? (fenceAtRefusal.known ? fenceAtRefusal.uuid ?? null : null);
+          try {
+            const proved = await sendRouted(
+              { cmd: "graph_query", fields: "ids", limit: 1 },
+              Math.min(timeoutMs ?? 8000, 8000),
+            );
+            if (
+              sameTabIdentityForOutlineRetry(ctx, tabAtRefusal, identityAtRefusal) &&
+              graphQueryProvesCurrentInstance(proved, expectedUuid)
+            ) {
+              const fenceNow = currentWorkflowFence(ctx);
+              if (fenceNow.known && fenceNow.uuid) corroborateTabStamp(ctx, fenceNow.uuid);
+              const retried = ok(await sendRouted(cmd, timeoutMs, observeRid));
+              if (successProvesSwitchCleared(cmd.cmd)) clearSwitchHold(ctx.tabId);
+              return isGraphReadSettleCmd(cmd)
+                ? discloseOutstandingMutations(bridge, ctx.tabId, retried)
+                : retried;
+            }
+          } catch {
+            // query refused, tab moved, or the outline retry still mismatched —
+            // fall through to the existing diagnosis, with both instance ids named.
+          }
+        }
         let verdict: string;
+        let liveForIds: string | null = null;
         try {
           const probe = await rebindWorkflowFence(ctx, { adopt: false });
           const live = "uuid" in probe ? probe.uuid : null;
+          liveForIds = typeof live === "string" ? live : null;
           const priorAbsent =
             "before" in probe && probe.before.known === true && !probe.before.uuid;
           const admitUnstampedRead =
@@ -14767,7 +17737,9 @@ export function makePanelToolCtx(
             try {
               const retried = ok(await sendRouted(cmd, timeoutMs, observeRid));
               if (successProvesSwitchCleared(cmd.cmd)) clearSwitchHold(ctx.tabId);
-              return retried;
+              return isGraphReadSettleCmd(cmd)
+                ? discloseOutstandingMutations(bridge, ctx.tabId, retried)
+                : retried;
             } catch (retryErr) {
               onFailure?.(retryErr);
               return fail(retryErr instanceof Error ? retryErr : new Error(String(retryErr)));
@@ -14782,7 +17754,9 @@ export function makePanelToolCtx(
             try {
               const retried = ok(await sendRouted(cmd, timeoutMs, observeRid));
               if (successProvesSwitchCleared(cmd.cmd)) clearSwitchHold(ctx.tabId);
-              return retried;
+              return isGraphReadSettleCmd(cmd)
+                ? discloseOutstandingMutations(bridge, ctx.tabId, retried)
+                : retried;
             } catch (retryErr) {
               onFailure?.(retryErr);
               if (!isWorkflowInstanceMismatch(retryErr)) {
@@ -14869,7 +17843,18 @@ export function makePanelToolCtx(
             `refusal stands on its own terms and the fence is unchanged. ` +
             `(${probeErr instanceof Error ? probeErr.message : String(probeErr)})`;
         }
-        return fail(`${refusedLead} ${raw}${verdict}`);
+        const fromRefusal = workflowInstanceIdsFromMismatchMessage(raw);
+        const fenceForIds = currentWorkflowFence(ctx);
+        const expectedId =
+          fromRefusal.expected ??
+          stamped ??
+          (fenceForIds.known ? fenceForIds.uuid ?? null : null);
+        const observedId = fromRefusal.observed ?? liveForIds;
+        const idsNote =
+          expectedId || observedId
+            ? `\n\n${instanceIdsDiagnostic(expectedId, observedId)}`
+            : "";
+        return fail(`${refusedLead} ${raw}${verdict}${idsNote}`);
       }
       // #1480 — NAME A REMEDY THE TAB CAN ACTUALLY ACCEPT.
       //
@@ -15015,11 +18000,19 @@ export function makePanelToolCtx(
     timeoutMs?: number,
     onDispatchedRid?: (rid: string) => void,
     beforeDispatch?: () => void,
+    options?: PanelToolCallOptions,
   ): Promise<ToolResult> => {
     let failure: unknown;
-    const res = await callOnce(cmd, timeoutMs, onDispatchedRid, beforeDispatch, (err) => {
-      failure = err;
-    });
+    const res = await callOnce(
+      cmd,
+      timeoutMs,
+      onDispatchedRid,
+      beforeDispatch,
+      (err) => {
+        failure = err;
+      },
+      options,
+    );
     return carryWorkflowListReadinessMark(
       failure,
       carryMidCommandDisconnectMark(failure, carryPanelAnsweredMark(failure, res)),
@@ -15217,6 +18210,9 @@ export function makePanelToolCtx(
   ctx.tabCanMutateGraph = () => bridge.tabCanMutateGraph(ctx.tabId);
   ctx.tabExpectedNodeTypeFenceCapability = () =>
     bridge.tabExpectedNodeTypeFenceCapability(ctx.tabId);
+  ctx.tabExpectedNodeIdentityFenceCapability = () =>
+    typeof bridge.tabExpectedNodeIdentityFenceCapability === "function" &&
+    bridge.tabExpectedNodeIdentityFenceCapability(ctx.tabId);
   ctx.tabExpectedScopeGraphIdentityFenceCapability = () =>
     bridge.tabExpectedScopeGraphIdentityFenceCapability(ctx.tabId);
   ctx.tabPromotedTerminalWitnessCapability = () =>
@@ -15242,6 +18238,97 @@ export function makePanelToolCtx(
  * what I have open" is the common ask, and requiring a save-to-disk round trip
  * first derailed real sessions (deleted placeholder files, 404 tabs).
  */
+/**
+ * #2487 — whether the dispatch-time stamp-target gate would refuse a fenced
+ * graph command from this session.
+ *
+ * TRI-STATE on purpose. The gate compares the session stamp against the routed
+ * tab's LAST ADVERTISED identity, which is not the pin and is not the live
+ * canvas. A missing or throwing probe is an unmade observation, not "no
+ * disagreement".
+ */
+function stampTargetDisagrees(ctx: PanelToolCtx): boolean | undefined {
+  try {
+    const cap = ctx.tabGraphMutationCapability?.();
+    if (!cap) return undefined;
+    if (cap.known !== true) return undefined;
+    return cap.canMutate === false && cap.because === "target_disagreement";
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * #2487 — a pin is a PATH, not the last-active tab's advertised instance.
+ *
+ * After a verified pin, subgraph enter/exit can succeed (they go through
+ * `ctx.call`) while the next live-canvas capture — `panel_strip_workflow({})`
+ * via `bridge.send` — is refused because the routed tab still advertises a
+ * different workflow instance. The refusal names `mode:"current"`, which
+ * RELEASES the pin.
+ *
+ * Re-resolve the pin against the live canvas. If it still NAMES that canvas,
+ * reconcile a stale advertisement (#2209) or refresh a reminted instance
+ * stamp (#1913: honoring the path is not abandoning it). A pin to a
+ * DIFFERENT canvas is left alone — that refusal is the fence working.
+ *
+ * Returns whether a repair actually happened, so a caller can retry a
+ * capture that was refused for this reason and not for any other.
+ */
+async function repairPinnedStampForLiveCanvas(ctx: PanelToolCtx): Promise<boolean> {
+  let pin: { mode?: string; path?: string } | undefined;
+  try {
+    pin = ctx.workflowTarget?.get(ctx.tabId);
+  } catch {
+    return false;
+  }
+  if (pin?.mode !== "pinned" || typeof pin.path !== "string" || pin.path.length === 0) {
+    return false;
+  }
+  if (typeof ctx.call !== "function") return false;
+
+  let probe: WorkflowFenceRebind;
+  try {
+    probe = await rebindWorkflowFence(ctx, { adopt: false });
+  } catch {
+    return false;
+  }
+  // pinHonorsLiveCanvas is the UUID-adoption gate: it needs routing_key ===
+  // wf:<path>. Current panels advertise wf:<route>:<path> (#640), which that
+  // gate reads as indeterminate. Path/filename/key equality still proves the
+  // pin names this canvas. A path/key match is required when the panel's
+  // routing shape is indeterminate; a bare filename is never enough.
+  const live = liveActiveFromProbe(probe);
+  const namesLive =
+    pinHonorsLiveCanvas(pin, live) ||
+    exactPinnedSavedPathMatchesLive(pin.path, live);
+  if (!namesLive) return false;
+
+  if (probe.status === "already_current") {
+    return reconcileStampTarget(ctx, probe.uuid).ok;
+  }
+  if (probe.status === "diverged") {
+    const identity = probe.active ?? { workflow_uuid: probe.uuid };
+    if (!refreshWorkflowUuid(ctx, identity)) return false;
+    const rec = reconcileStampTarget(ctx, probe.uuid);
+    return rec.ok || rec.why === "no_disagreement";
+  }
+  return false;
+}
+
+/** Live-canvas capture: the same pin injection `ctx.call` applies, over the
+ *  direct `bridge.send` this path has to use (it needs the raw graph, not a
+ *  ToolResult wrapper). */
+async function sendLiveCanvasGraphCmd(
+  ctx: PanelToolCtx,
+  cmd: "graph_serialize" | "graph_get_state",
+  timeoutMs: number,
+) {
+  const target = ctx.workflowTarget?.get(ctx.tabId);
+  const routed = target ? withWorkflowTarget({ cmd }, target) : { cmd };
+  return ctx.bridge.send(routed as { cmd: string }, { tabId: ctx.tabId, timeoutMs });
+}
+
 /**
  * Rebuild a UI-format workflow ({ nodes, links }) from the panel's back-compat
  * `graph_get_state` reply (the #384 fallback). Each summarized node carries its
@@ -15450,18 +18537,26 @@ async function resolveWorkflowInput(
   let reply: unknown;
   try {
     ctx.ensureReachable?.();
-    // Route to the SAME authoritative target as ctx.call: when the session is
-    // pinned, inject the pinned workflow_path so the live-canvas capture serializes
-    // the PINNED workflow, not whatever tab is visible (codex — this direct send
-    // otherwise bypasses withWorkflowTarget and reads the wrong graph).
-    const target = ctx.workflowTarget?.get(ctx.tabId);
-    const cmd = target
-      ? withWorkflowTarget({ cmd: "graph_serialize" }, target)
-      : { cmd: "graph_serialize" };
-    reply = await ctx.bridge.send(cmd as { cmd: string }, {
-      tabId: ctx.tabId,
-      timeoutMs: 30000,
-    });
+    // #2487 — honor a verified pin BEFORE the capture is compared against the
+    // routed tab's last-advertised identity. That advertisement is unrelated
+    // active-tab state: subgraph enter/exit can leave it stale while the pin
+    // still names the live canvas. Re-resolve here rather than telling the
+    // caller to `mode:"current"`, which would release the pin. Cheap when the
+    // gate is not refusing; a missing probe is not treated as disagreement.
+    if (stampTargetDisagrees(ctx) === true) {
+      await repairPinnedStampForLiveCanvas(ctx);
+    }
+    try {
+      reply = await sendLiveCanvasGraphCmd(ctx, "graph_serialize", 30000);
+    } catch (err) {
+      // The capability probe is optional (lightweight ctxs omit it) and can
+      // miss a disagreement the send() gate still sees. One repair+retry, and
+      // only for this refusal — any other capture error keeps its own path.
+      if (!isWorkflowInstanceMismatch(err) || !(await repairPinnedStampForLiveCanvas(ctx))) {
+        throw err;
+      }
+      reply = await sendLiveCanvasGraphCmd(ctx, "graph_serialize", 30000);
+    }
   } catch (err) {
     // #384: a panel too old to register graph_serialize (added at 0.8.2) still
     // answers the back-compat `graph_get_state`. On an unsupported-command
@@ -15477,14 +18572,7 @@ async function resolveWorkflowInput(
     const msg = err instanceof Error ? err.message : String(err);
     if (allowStateFallback && isPanelCmdUnsupportedError(err, "graph_serialize")) {
       try {
-        const target = ctx.workflowTarget?.get(ctx.tabId);
-        const stateCmd = target
-          ? withWorkflowTarget({ cmd: "graph_get_state" }, target)
-          : { cmd: "graph_get_state" };
-        const stateReply = await ctx.bridge.send(stateCmd as { cmd: string }, {
-          tabId: ctx.tabId,
-          timeoutMs: 30000,
-        });
+        const stateReply = await sendLiveCanvasGraphCmd(ctx, "graph_get_state", 30000);
         const rebuilt = reconstructUiFromState(stateReply);
         if (rebuilt) return rebuilt;
       } catch {
@@ -15519,14 +18607,7 @@ async function resolveWorkflowInput(
   if (allowStateFallback && notes) {
     let stateReply: unknown;
     try {
-      const target = ctx.workflowTarget?.get(ctx.tabId);
-      const stateCmd = target
-        ? withWorkflowTarget({ cmd: "graph_get_state" }, target)
-        : { cmd: "graph_get_state" };
-      stateReply = await ctx.bridge.send(stateCmd as { cmd: string }, {
-        tabId: ctx.tabId,
-        timeoutMs: 30000,
-      });
+      stateReply = await sendLiveCanvasGraphCmd(ctx, "graph_get_state", 30000);
     } catch (err) {
       // Never fatal: strip already HAS a usable graph. Losing the cross-check
       // degrades fidelity, and that degradation is what gets reported.
@@ -15778,9 +18859,12 @@ async function dispatchToTab(
   cmd: Record<string, unknown>,
   timeoutMs: number,
   reResolve?: () => string | undefined,
+  onDispatchedRid?: (rid: string) => void,
 ): Promise<ToolResult> {
   try {
-    return ok(await ctx.bridge.send(cmd as { cmd: string }, { tabId, timeoutMs }));
+    return ok(
+      await ctx.bridge.send(cmd as { cmd: string }, { tabId, timeoutMs, onDispatchedRid }),
+    );
   } catch (err) {
     if (
       isRetrySafeCmd(cmd) &&
@@ -15790,12 +18874,18 @@ async function dispatchToTab(
       try {
         await sleep(retrySettleMs());
         const fresh = reResolve?.() ?? tabId;
-        return ok(await ctx.bridge.send(cmd as { cmd: string }, { tabId: fresh, timeoutMs }));
+        return ok(
+          await ctx.bridge.send(cmd as { cmd: string }, {
+            tabId: fresh,
+            timeoutMs,
+            onDispatchedRid,
+          }),
+        );
       } catch (err2) {
-        return fail(err2);
+        return carryReplyTimeoutMark(err2, fail(err2));
       }
     }
-    return fail(err);
+    return carryReplyTimeoutMark(err, fail(err));
   }
 }
 
@@ -15965,9 +19055,11 @@ function runLateAckGraceMs(): number {
  *
  * Returns null when there is nothing to reconcile. The negatives are deliberate:
  *
- *  - NOT an unacked post-write (timeout or disconnect), or the Panel's explicit
- *    id-less queued_unknown receipt (#1728) ⇒ nothing to wait for.
- *    Gated on the bridge's own typed marks, never on message text: an acked
+ *  - A `queued_unknown` with no exact receipt and no scoped queue-attribution
+ *    contract ⇒ nothing to claim. Full-graph uncertainty waits only for the
+ *    bridge's rid-correlated `run_receipt`; scoped uncertainty may additionally
+ *    use its existing bounded queue observation. Gated on the bridge's own typed
+ *    marks, never on message text: an acked
  *    panel error can quote our timeout/OUTCOME UNKNOWN sentence verbatim
  *    (#1468 round 2), and the difference is whether the tab answered, which
  *    only the bridge knows.
@@ -16015,9 +19107,10 @@ async function reconcileLateRunAck(
   res: ToolResult,
   rid: string | undefined,
   preRunningPromptId?: string | null,
-  allowPanelQueueUnknown = false,
+  allowPanelQueueUnknownReceipt = false,
   expectedTabId?: string,
   expectedPromptCount = 1,
+  allowQueueUnknownInference = false,
 ): Promise<{
   result: unknown;
   lateByMs: number;
@@ -16033,10 +19126,15 @@ async function reconcileLateRunAck(
   // id-less-only below.
   const receiptEligible =
     Boolean(rid) &&
-    ((allowPanelQueueUnknown && isPanelQueueUncertainty(parsed)) ||
+    ((allowPanelQueueUnknownReceipt && isPanelQueueUncertainty(parsed)) ||
       isReplyTimeoutResult(res) ||
       isMidCommandDisconnectResult(res));
-  const queueEligible = isUnackedGraphRunResult(res, allowPanelQueueUnknown);
+  // A run_receipt is exact Panel evidence for BOTH full and scoped runs. Queue
+  // observation is weaker: only the scoped Panel contract makes a new queue id
+  // attributable to this dispatch. Keep those authorities separate so enabling
+  // full-graph receipt recovery cannot turn a foreign back-to-back render into
+  // this run's prompt id.
+  const queueEligible = isUnackedGraphRunResult(res, allowQueueUnknownInference);
   if (!receiptEligible && !queueEligible) return null;
   const fromQueue = (): {
     result: unknown;
@@ -16190,6 +19288,11 @@ function panelLateReceiptNote(promptId: string): string {
  * #2143 / #2438 — a normal Panel timeout receipt is neither a confirmed queue
  * nor a refusal. Name the next step that exists on THIS surface rather than
  * forwarding Panel retry_guidance that points at a headless queue inspector.
+ *
+ * #2521 — the "left the panel" wording is only used when this tool saw a
+ * post-dispatch `got prompt` or a new queue/history entry. An id-less receipt
+ * with neither is fail-closed as not queued; an unread/unobserved case uses
+ * panelQueueUnobservedNote instead of this string.
  */
 function panelQueueUncertaintyNote(queuedPromptIds: readonly string[]): string {
   if (queuedPromptIds.length > 0) {
@@ -16207,12 +19310,23 @@ function panelQueueUncertaintyNote(queuedPromptIds: readonly string[]): string {
   );
 }
 
+/** #2521 — id-less queued_unknown, and this tool could not read a prompt
+ *  reaching ComfyUI either. Honest about the gap; does not forbid a retry. */
+function panelQueueUnobservedNote(): string {
+  return (
+    `\n\n[UNCERTAIN] The Panel could not confirm whether this run entered ComfyUI's queue, ` +
+    `and this tool also could not prove a /prompt reached ComfyUI (no prompt_id; logs unread; ` +
+    `no live queue observation). It is NOT claiming a request left the panel or was accepted. ` +
+    `${PANEL_QUEUED_UNKNOWN_UNOBSERVED_RETRY_GUIDANCE} No second panel_run was dispatched.`
+  );
+}
+
 async function pollLateAskReply(
   bridge: PanelToolCtx["bridge"],
   askId: string,
   timing: AskTiming,
   hardDeadline?: number,
-): Promise<unknown | undefined> {
+) {
   const probe: BridgeProbe = bridge;
   const take = probe.takeLateAskReply;
   if (typeof take !== "function") return undefined;
@@ -17078,22 +20192,42 @@ function withRetryToken(d: PanelToolDef): PanelToolDef {
       // they just named it. Drained here (once) and reported alongside the
       // retry's own outcome.
       //
-      // Deliberately NOT a short-circuit. Skipping the dispatch would be wrong
-      // whenever the token is stale or pasted onto different args -- the bridge
-      // stores the rid, not a fingerprint of what it carried, so "the write for
-      // this rid landed" does not prove "the write you are asking for now is
-      // that same write". Suppressing a real mutation on that inference is the
-      // #683 mistake with the arrow reversed, and #687 reverted it for cause.
-      // Double-apply is already the #521 panel ledger's job; this only makes the
-      // outcome VISIBLE, which is the half of #694 nothing else does.
+      // #683/#687 — do NOT short-circuit on rid alone. The token names an
+      // attempt, not a fingerprint of its args, so "this rid landed" does not
+      // prove "the write you are asking for now is that same write".
+      //
+      // #2527 — when the receipt for that rid is the SAME command (semantic
+      // identity) and the frontend has already settled it, re-dispatching is
+      // what gets rejected as "retry_of refers to a different command or
+      // workflow". Answer from the receipt instead. A sibling mutation inside
+      // the same handler (enter_subgraph during a set_widget retry) must not
+      // carry this token at all.
       const wrapped = Object.create(ctx) as PanelToolCtx;
       wrapped.call = (
         cmd: Record<string, unknown>,
         timeoutMs?: number,
         onDispatchedRid?: (rid: string) => void,
         beforeDispatch?: () => void,
-      ) =>
-        ctx.call(
+      ) => {
+        const cmdName = typeof cmd.cmd === "string" ? cmd.cmd : "";
+        const original = ctx.bridge?.peekDeliveredMutation?.(retryOf);
+        if (original) {
+          if (original.cmd !== cmdName) {
+            return ctx.call(cmd, timeoutMs, onDispatchedRid, beforeDispatch);
+          }
+          const settled = ctx.bridge.peekLateMutation?.(retryOf);
+          if (settled && mutationIdentityMatches(cmd, original.frame)) {
+            return Promise.resolve(
+              ok(settled.result !== undefined ? settled.result : { ok: true, retry_of: retryOf }),
+            );
+          }
+          if (mutationIdentityMatches(cmd, original.frame)) {
+            const replay: Record<string, unknown> = { ...original.frame, retry_of: retryOf };
+            delete replay.rid;
+            return ctx.call(replay, timeoutMs, onDispatchedRid, beforeDispatch);
+          }
+        }
+        return ctx.call(
           // Ask the RETRY MAP's question, not the workflow fence's (codex gate).
           // These were the same answer only while isMutatingGraphCommand
           // over-classified — the #778 defect. Once the fence got its own effect
@@ -17107,13 +20241,12 @@ function withRetryToken(d: PanelToolDef): PanelToolDef {
           // A read probe inside a mutating handler (panel_flatten_workflow's
           // graph_serialize) is still excluded — RETRY_TOKEN_CMDS contains no
           // reads, which is asserted in panel-retry-identity.test.ts.
-          RETRY_TOKEN_CMDS.has(typeof cmd.cmd === "string" ? cmd.cmd : "")
-            ? { ...cmd, retry_of: retryOf }
-            : cmd,
+          RETRY_TOKEN_CMDS.has(cmdName) ? { ...cmd, retry_of: retryOf } : cmd,
           timeoutMs,
           onDispatchedRid,
           beforeDispatch,
         );
+      };
       const out = await d.handler(args, wrapped);
       // Drained AFTER the handler, deliberately, for two measured reasons.
       //
@@ -17298,7 +20431,9 @@ export function buildPanelToolDefs(): PanelToolDef[] {
       // announced. Nothing is shed while the whole reply fits.
       async (args: A, ctx) => {
         const widgetMaxChars = widgetMaxCharsRequest(args);
-        const panelReply = await ctx.call({
+        const panelReply = await callAndRememberViewing(
+          ctx.tabId,
+          {
             cmd: "graph_query",
             types: args.types,
             title: args.title,
@@ -17314,9 +20449,44 @@ export function buildPanelToolDefs(): PanelToolDef[] {
             ...(widgetMaxChars.value === undefined
               ? {}
               : { widget_max_chars: widgetMaxChars.value }),
-          });
-        return fitQueryGraphReply(
+          },
+          (cmd, timeoutMs) => ctx.call(cmd, timeoutMs),
+        );
+        // #2544 — content-only [root-shape-mismatch] after custom-widget / builder
+        // edits (same node count, unsaved live canvas). Inspect the live graph
+        // read-only. Never open or rebind: that would discard the builder work.
+        if (panelReply.isError && isContentOnlyRootShapeMismatch(toolResultText(panelReply))) {
+          const recovered = await recoverContentOnlyGraphQuery((cmd, timeoutMs) => ctx.call(cmd, timeoutMs), {
+            types: args.types,
+            title: args.title,
+            where: args.where,
+            ids: args.ids,
+            upstream_of: args.upstream_of,
+            downstream_of: args.downstream_of,
+            depth: args.depth,
+            fields: args.fields,
+            group_by: args.group_by,
+            limit: args.limit,
+            max_chars: args.max_chars,
+          } as GraphQueryOptions);
+          if (recovered) {
+            const recoveredReply = ok(recovered);
+            rememberLiveRootViewing(ctx, recovered.viewing);
+            return fitQueryGraphReply(
+              recoveredReply,
+              args.max_chars,
+              widgetMaxChars.note ?? legacyWidgetMaxCharsNote(recoveredReply, widgetMaxChars.value),
+            );
+          }
+          return fail(contentOnlyRootShapeReadNote(toolResultText(panelReply)));
+        }
+        rememberLiveRootViewing(ctx, parseToolResultJson(panelReply)?.viewing);
+        const outputNodeObjectInfo = await outputNodeObjectInfoForPanel(
+          (cmd, timeoutMs) => ctx.call(cmd, timeoutMs),
           panelReply,
+        );
+        return fitQueryGraphReply(
+          stampOutputNodeFlagsOnToolResult(panelReply, outputNodeObjectInfo),
           args.max_chars,
           widgetMaxChars.note ?? legacyWidgetMaxCharsNote(panelReply, widgetMaxChars.value),
         );
@@ -17339,8 +20509,21 @@ export function buildPanelToolDefs(): PanelToolDef[] {
           .describe(
             `Output character bound for the outline (default ${OUTLINE_MAX_CHARS_DEFAULT}, max ${OUTLINE_MAX_CHARS_CEILING}) — the SAME budget concept as panel_query_graph's max_chars. ` +
               `COVERAGE IS NEVER TRADED AWAY: over budget the outline sheds RESOLUTION, not nodes — first per-node widget values, then titles, and at the floor a per-group summary — so any outline it DOES return describes the whole graph, with real node/group counts. ` +
-              `If even the group-level floor will not fit, it returns NO outline and says so (detail_level:"refused") rather than a partial one that would read as complete. ` +
-              `detail_level names the rung used and degraded_reason says why. Panel builds older than this budget ignore it and return the full outline; the result carries a max_chars field when the budget was actually applied.`,
+              `If even the group-level floor will not fit, it returns NO outline and says so — the RESULT field detail_level is "refused" rather than a partial outline that would read as complete. ` +
+              `The result's detail_level names the rung used; degraded_reason says why. Those are outputs. Panel builds older than this budget ignore max_chars and return the full outline; the result carries a max_chars field when the budget was actually applied.`,
+          ),
+        // #2541 — the result names its default rung `detail_level:"full"`, and
+        // the max_chars prose used to print that as if it were an argument. A
+        // Codex session then called `{ detail: "full" }` and died at the
+        // strict schema (`Unrecognized key 'detail' — accepted keys: 'max_chars'`)
+        // before the handler ran. `full` is already the default; accepting it
+        // lands the call. It is not forwarded: the panel's graph_outline only
+        // takes max_chars, and resolution is still chosen by that bound.
+        detail: z
+          .enum(["full"])
+          .optional()
+          .describe(
+            "Optional request for the default full-resolution outline. The outline already starts at full and sheds rungs only to fit max_chars; passing `full` does not change that. Raise max_chars for more detail. Omit this for the no-argument call.",
           ),
       },
       async (args: A, ctx) =>
@@ -17627,53 +20810,59 @@ export function buildPanelToolDefs(): PanelToolDef[] {
             `Projection: 'compact' (default) keeps id/type/title/mode/is_output/is_subgraph and the matched_on reasons; 'ids' returns bare ids; 'detail' is the full node summary with every widget, socket and the node description. The reply echoes the projection it applied.`,
           ),
       },
-      async (args: A, ctx) =>
-        projectFindNodesReply(
-          withTruncationHints(
-            await ctx.call({
-              cmd: "graph_find_nodes",
-              query: args.query,
-              type: args.type,
-              title: args.title,
-              input: args.input,
-              output: args.output,
-              widget: args.widget,
-              widget_value: args.widget_value,
-              is_output: args.is_output,
-              is_subgraph: args.is_subgraph,
-              mode: args.mode,
-              limit: args.limit,
-            }),
-            [
-            {
-              flag: "truncated",
-              key: "truncation_hint",
-              // #809 (defect 2): the scan STOPS at the cap, so `count` is not a match
-              // total and the absent matches are not "no more matches".
-              //
-              // The wording is deliberately "may be incomplete", not "there ARE more"
-              // (codex gate): this orchestrator ships ahead of the panel, and a panel
-              // build older than the matching panel PR sets `truncated` on an EXACT-cap
-              // result that dropped nothing. Asserting more exist would manufacture the
-              // very false alarm this issue is removing. A current panel supplies its own
-              // precise hint and the rider defers to it.
-              text: (p) => {
-                const inForce =
-                  typeof args.limit === "number" ? args.limit : FIND_NODES_DEFAULT_LIMIT;
-                const raise =
-                  inForce >= FIND_NODES_LIMIT_CEILING
-                    ? `\`limit\` is already at its ceiling of ${FIND_NODES_LIMIT_CEILING}, so narrow with \`type\`/\`title\`/\`widget_value\` instead`
-                    : `Raise \`limit\` up to ${FIND_NODES_LIMIT_CEILING}, or narrow with \`type\`/\`title\`/\`widget_value\``;
-                return (
-                  `The scan reached \`limit\`=${inForce} at ${replyCount(p, "matches") ?? "the cap"} match(es), so this result MAY be incomplete — ` +
-                  `treat it as "not proof a node is absent" rather than as the full match set. ${raise}.`
-                );
-              },
-            },
-            ],
-          ),
-          args.fields,
-        ),
+      async (args: A, ctx) => {
+        const findReply = projectFindNodesReply(
+            withTruncationHints(
+              await ctx.call({
+                cmd: "graph_find_nodes",
+                query: args.query,
+                type: args.type,
+                title: args.title,
+                input: args.input,
+                output: args.output,
+                widget: args.widget,
+                widget_value: args.widget_value,
+                is_output: args.is_output,
+                is_subgraph: args.is_subgraph,
+                mode: args.mode,
+                limit: args.limit,
+              }),
+              [
+                {
+                  flag: "truncated",
+                  key: "truncation_hint",
+                  // #809 (defect 2): the scan STOPS at the cap, so `count` is not a match
+                  // total and the absent matches are not "no more matches".
+                  //
+                  // The wording is deliberately "may be incomplete", not "there ARE more"
+                  // (codex gate): this orchestrator ships ahead of the panel, and a panel
+                  // build older than the matching panel PR sets `truncated` on an EXACT-cap
+                  // result that dropped nothing. Asserting more exist would manufacture the
+                  // very false alarm this issue is removing. A current panel supplies its own
+                  // precise hint and the rider defers to it.
+                  text: (p) => {
+                    const inForce =
+                      typeof args.limit === "number" ? args.limit : FIND_NODES_DEFAULT_LIMIT;
+                    const raise =
+                      inForce >= FIND_NODES_LIMIT_CEILING
+                        ? `\`limit\` is already at its ceiling of ${FIND_NODES_LIMIT_CEILING}, so narrow with \`type\`/\`title\`/\`widget_value\` instead`
+                        : `Raise \`limit\` up to ${FIND_NODES_LIMIT_CEILING}, or narrow with \`type\`/\`title\`/\`widget_value\``;
+                    return (
+                      `The scan reached \`limit\`=${inForce} at ${replyCount(p, "matches") ?? "the cap"} match(es), so this result MAY be incomplete — ` +
+                      `treat it as "not proof a node is absent" rather than as the full match set. ${raise}.`
+                    );
+                  },
+                },
+              ],
+            ),
+            args.fields,
+          );
+        const outputNodeObjectInfo = await outputNodeObjectInfoForPanel(
+          (cmd, timeoutMs) => ctx.call(cmd, timeoutMs),
+          findReply,
+        );
+        return stampOutputNodeFlagsOnToolResult(findReply, outputNodeObjectInfo);
+      },
     ),
     def(
       "panel_add_node",
@@ -18162,6 +21351,24 @@ export function buildPanelToolDefs(): PanelToolDef[] {
           // Generous timeout — loading a large graph onto the live canvas can take a moment.
           const tabAtDispatch = ctx.tabId;
           const fenceBefore = currentWorkflowFence(ctx);
+          // #2503 — a UI import onto this tab must not keep the source file's
+          // extra.comfyui_mcp.workflow_uuid. Dest is the tab uuid already
+          // assigned (fence).
+          // #2505 — a load onto a *saved* tab must also replace
+          // extra.comfyui_mcp.workflow_path with that tab's identity, or a later
+          // in-place save is refused by the #1667 stale-canvas guard.
+          const destUuid =
+            fenceBefore.known && typeof fenceBefore.uuid === "string" && fenceBefore.uuid
+              ? fenceBefore.uuid
+              : undefined;
+          const destPath = savedPathFromTabId(tabAtDispatch);
+          if (destPath) {
+            const bound = bindLoadedWorkflowIdentity(data, destPath, destUuid);
+            if (bound) data = bound;
+          } else if (destUuid) {
+            const bound = bindImportedTmpWorkflowUuid(data, destUuid);
+            if (bound) data = bound;
+          }
           let graphBefore: unknown;
           if (uiWorkflowNodeCount(data) !== undefined) {
             try {
@@ -18230,7 +21437,7 @@ export function buildPanelToolDefs(): PanelToolDef[] {
     ),
     def(
       "panel_connect",
-      "Connect an output slot of one node to an input slot of another in the user's open graph. Slots accept a name ('MODEL', 'samples') or numeric index. If both slot args are omitted the panel picks the first type-compatible pairing. On failure the error lists every slot with its type and [connected] flag — re-check with panel_query_graph ({ids:[node_id], fields:'detail'}). Undoable.",
+      "Connect an output slot of one node to an input slot of another in the user's open graph. Slots accept a name ('MODEL', 'samples') or numeric index. If both slot args are omitted the panel picks the first type-compatible pairing. On failure the error lists every slot with its type and [connected] flag — re-check with panel_query_graph ({ids:[node_id], fields:'detail'}). LiteGraph wildcard-to-wildcard (`*` → `*`) pairings are compatible (a PrimitiveNode 'connect to widget input' output can land on LogicIF.when_true / when_false so the primitive becomes typed from the destination). A frontend PrimitiveNode only serializes through a target widget; connecting one to a forceInput-only / non-widget STRING is refused (panel_run would omit the required input) — use a backend STRING producer such as PrimitiveStringMultiline instead. Undoable.",
       {
         from_node_id: nodeId().describe("Source node id."),
         from_output: slotRef
@@ -18255,15 +21462,19 @@ export function buildPanelToolDefs(): PanelToolDef[] {
         output: slotRef.optional().describe("Alias for from_output."),
         input: slotRef.optional().describe("Alias for to_input."),
       },
-      async (args: A, ctx) =>
-        ctx.call({
-          cmd: "graph_connect",
+      async (args: A, ctx) => {
+        const connectArgs = {
           from_node_id: args.from_node_id,
           from_output: args.from_output ?? args.from_slot_name ?? args.from_slot ?? args.output,
           to_node_id: args.to_node_id,
           to_input: args.to_input ?? args.to_slot_name ?? args.to_slot ?? args.input,
           auto_match: args.auto_match,
-        }),
+        };
+        const call = (cmd: Record<string, unknown>, timeoutMs?: number) => ctx.call(cmd, timeoutMs);
+        const connected = await retryConnectAgainstLiveGraph(connectArgs, call);
+        const afterWildcard = await retryWildcardSlotConnect(connectArgs, connected, call);
+        return verifyPrimitiveForceInputAfterConnect(connectArgs, afterWildcard, call);
+      },
     ),
     def(
       "panel_disconnect",
@@ -18338,9 +21549,13 @@ export function buildPanelToolDefs(): PanelToolDef[] {
         const promotedPlan = promotedPreflight && promotedPreflight.kind === "promoted-write"
           ? promotedPreflight
           : null;
+        const ordinaryPlan = promotedPreflight && promotedPreflight.kind === "ordinary-write"
+          ? promotedPreflight
+          : null;
 
-        let expectedNodeType: string | undefined;
-        if (!promotedPlan && args.widget === DASIWA_STACK_WIDGET) {
+        let expectedNodeType: string | undefined = ordinaryPlan?.expectedNodeType;
+        let expectedNodeIdentity: string | undefined = ordinaryPlan?.expectedNodeIdentity;
+        if (!promotedPlan && !ordinaryPlan && args.widget === DASIWA_STACK_WIDGET) {
           const daSiWaFence = await verifyDaSiWaStackWriteFence(ctx, args.node_id);
           if (daSiWaFence && "content" in daSiWaFence) return daSiWaFence;
           expectedNodeType = daSiWaFence?.expectedNodeType;
@@ -18363,68 +21578,162 @@ export function buildPanelToolDefs(): PanelToolDef[] {
           targetExpectedNodeType: string | undefined = expectedNodeType,
           beforeDispatch?: () => void,
           targetExpectedScope?: PromotedExpectedScope,
-        ): Promise<ToolResult> =>
-          stripVerifiedLastObservedSchemaNote(
-            summarizeSetWidgetEcho(
-              await ctx.call(
-                {
-                  cmd: "graph_set_widget",
-                  node_id: nodeId,
-                  widget,
-                  value,
-                  // The caller supplies the type proven for THIS addressed node.
-                  // The outer final fence is used for direct/re-mapped writes;
-                  // promoted recovery re-probes its inner node after entering
-                  // and supplies that node's own type.
-                  ...(targetExpectedNodeType
-                    ? { expected_node_type: targetExpectedNodeType }
-                    : {}),
-                  ...(targetExpectedScope
-                    ? {
-                        expected_scope: {
-                          scope: "subgraph",
-                          owner_node_id: targetExpectedScope.ownerNodeId,
-                          graph_identity: targetExpectedScope.graphIdentity,
-                          ...(targetExpectedScope.promotedWidget && targetExpectedScope.parentRail
-                            ? {
-                                promoted_widget: targetExpectedScope.promotedWidget,
-                                parent_rail: {
-                                  authoritative: true,
-                                  widget: targetExpectedScope.parentRail.widget,
-                                  ...(targetExpectedScope.parentRail.widgetId !== undefined
-                                    ? { widget_id: targetExpectedScope.parentRail.widgetId }
-                                    : {}),
-                                },
-                              }
-                            : {}),
-                          ...(targetExpectedScope.workflowUuid !== undefined
-                            ? { workflow_uuid: targetExpectedScope.workflowUuid }
-                            : {}),
-                          ...(targetExpectedScope.terminal
-                            ? {
-                                terminal: {
-                                  node_id: targetExpectedScope.terminal.nodeId,
-                                  type: targetExpectedScope.terminal.nodeType,
-                                  widget: targetExpectedScope.terminal.widget,
-                                  inputs: targetExpectedScope.terminal.inputs,
-                                  chain_depth: targetExpectedScope.terminal.chainDepth,
-                                },
-                              }
-                            : {}),
-                        },
-                      }
-                    : {}),
-                  ...(args.defer_until_idle === true
-                    ? { defer_until_idle: true, expected_value: args.expected_value }
-                    : {}),
-                },
-                OBJECT_INFO_REFRESH_ACK_TIMEOUT_MS,
-                undefined,
-                beforeDispatch,
-              ),
-              echoFull,
-            ),
+          targetExpectedNodeIdentity: string | undefined = expectedNodeIdentity,
+        ): Promise<ToolResult> => {
+          let mutationId: string | undefined;
+          let dispatchTab = ctx.tabId;
+          let dispatchConnection: SetWidgetReadbackConnection | undefined;
+          const written = await ctx.call(
+            {
+              cmd: "graph_set_widget",
+              node_id: nodeId,
+              widget,
+              value,
+              // The caller supplies the type proven for THIS addressed node.
+              // The outer final fence is used for direct/re-mapped writes;
+              // promoted recovery re-probes its inner node after entering
+              // and supplies that node's own type.
+              ...(targetExpectedNodeType
+                ? { expected_node_type: targetExpectedNodeType }
+                : {}),
+              ...(targetExpectedNodeIdentity
+                ? { expected_node_identity: targetExpectedNodeIdentity }
+                : {}),
+              ...(targetExpectedScope
+                ? {
+                    expected_scope: {
+                      scope: targetExpectedScope.scope ?? "subgraph",
+                      owner_node_id: targetExpectedScope.ownerNodeId,
+                      graph_identity: targetExpectedScope.graphIdentity,
+                      ...(targetExpectedScope.promotedWidget && targetExpectedScope.parentRail
+                        ? {
+                            promoted_widget: targetExpectedScope.promotedWidget,
+                            parent_rail: {
+                              authoritative: true,
+                              widget: targetExpectedScope.parentRail.widget,
+                              ...(targetExpectedScope.parentRail.widgetId !== undefined
+                                ? { widget_id: targetExpectedScope.parentRail.widgetId }
+                                : {}),
+                            },
+                          }
+                        : {}),
+                      ...(targetExpectedScope.workflowUuid !== undefined
+                        ? { workflow_uuid: targetExpectedScope.workflowUuid }
+                        : {}),
+                      ...(targetExpectedScope.terminal
+                        ? {
+                            terminal: {
+                              node_id: targetExpectedScope.terminal.nodeId,
+                              type: targetExpectedScope.terminal.nodeType,
+                              widget: targetExpectedScope.terminal.widget,
+                              inputs: targetExpectedScope.terminal.inputs,
+                              chain_depth: targetExpectedScope.terminal.chainDepth,
+                            },
+                          }
+                        : {}),
+                    },
+                  }
+                : {}),
+              ...(args.defer_until_idle === true
+                ? { defer_until_idle: true, expected_value: args.expected_value }
+                : {}),
+            },
+            OBJECT_INFO_REFRESH_ACK_TIMEOUT_MS,
+            (rid) => {
+              mutationId = rid;
+              // UiBridge invokes this observer only after the frame has been
+              // accepted by the bound tab. Capture the actual tab/incarnation
+              // here, after the reachability wait and immediately at dispatch;
+              // a pre-call snapshot could describe a different receiver.
+              dispatchTab = ctx.tabId;
+              try {
+                const identity = ctx.panelConnectionIdentity?.();
+                if (isUsablePanelConnectionIdentity(identity)) {
+                  dispatchConnection = identity;
+                }
+              } catch {
+                // An unreadable identity must stay absent. The read-back path
+                // fails closed instead of certifying another connection.
+              }
+            },
+            beforeDispatch,
           );
+          const echoed = stripVerifiedLastObservedSchemaNote(
+            summarizeSetWidgetEcho(written, echoFull),
+          );
+          const classified = await classifyLandedDirectorDurationWriteWarning(
+            ctx,
+            echoed,
+            nodeId,
+            widget,
+            value,
+          );
+          // #2495 — ONLY a tagged no-reply on a named Power Lora row is settled
+          // by a read. An acked executor error is a definite outcome.
+          if (
+            isReplyTimeoutResult(classified) &&
+            isPowerLoraDynamicRowWidget(widget) &&
+            args.defer_until_idle !== true
+          ) {
+            return settlePowerLoraWidgetAfterAckTimeout(
+              ctx,
+              classified,
+              nodeId,
+              widget,
+              value,
+              mutationId,
+              dispatchTab,
+            );
+          }
+          // #2489 — ONLY a no-reply on a write proven to be in the active
+          // subgraph is settled by a read. Ordinary root writes intentionally
+          // remain on #2527's late-mutation receipt path, and Power Lora rows
+          // were handled above by #2495. An acked executor error is a definite
+          // outcome; re-deciding it from a later widget read would overwrite a
+          // better-informed verdict. Host-rail writes (#2488) fence the current
+          // root/parent view, not the child graph the inner widget lives in.
+          const readbackScope = targetExpectedScope
+            ? {
+                activeView: targetExpectedScope.scope ?? "subgraph",
+                ...(targetExpectedScope.scope === "subgraph"
+                  ? { ownerNodeId: targetExpectedScope.ownerNodeId }
+                  : {}),
+                graphIdentity: targetExpectedScope.graphIdentity,
+                ...(targetExpectedScope.workflowUuid !== undefined
+                  ? { workflowUuid: targetExpectedScope.workflowUuid }
+                  : {}),
+              }
+            : ordinaryPlan
+              ? {
+                  activeView: ordinaryPlan.activeView,
+                  ...(ordinaryPlan.activeView === "subgraph"
+                    ? { ownerNodeId: ordinaryPlan.scopeOwnerNodeId }
+                    : {}),
+                  graphIdentity: ordinaryPlan.graphIdentity,
+                  ...(ordinaryPlan.workflowUuid !== undefined
+                    ? { workflowUuid: ordinaryPlan.workflowUuid }
+                    : {}),
+                }
+              : undefined;
+          const settled =
+            isReplyTimeoutResult(classified) &&
+            args.defer_until_idle !== true &&
+            readbackScope?.activeView === "subgraph"
+            ? await settleSetWidgetAfterAckTimeout(
+                ctx,
+                classified,
+                nodeId,
+                widget,
+                value,
+                mutationId,
+                dispatchTab,
+                readbackScope,
+                dispatchConnection,
+                targetExpectedNodeIdentity,
+              )
+            : classified;
+          return stripVerifiedLastObservedSchemaNote(summarizeSetWidgetEcho(settled, echoFull));
+        };
         let writePromotedInner: (plan: PromotedWritePlan) => Promise<ToolResult>;
         const guardedWrite = async (
           nodeId: unknown,
@@ -18438,6 +21747,16 @@ export function buildPanelToolDefs(): PanelToolDef[] {
           }
           const blocked = await refuseKnownBadWriteBeforeDispatch(ctx, nodeId, widget);
           if (blocked) return blocked;
+          if (promotedRetry && promotedRetry.kind === "ordinary-write") {
+            return write(
+              nodeId,
+              widget,
+              promotedRetry.expectedNodeType,
+              ordinaryWriteBeforeDispatch(ctx, widget, promotedRetry),
+              undefined,
+              promotedRetry.expectedNodeIdentity,
+            );
+          }
           return write(nodeId, widget, targetExpectedNodeType);
         };
 
@@ -18471,6 +21790,59 @@ export function buildPanelToolDefs(): PanelToolDef[] {
             }
             const afterMappingError = currentPromotedBindingError(ctx, plan.binding);
             if (afterMappingError) return promotedWriteRefusal(args.widget as string, afterMappingError);
+
+            // #2500/#2533 — a link-driven inner (Primitive value, or a same-name
+            // COMBO/STRING live input with an authoritative parent rail) accepts
+            // a write and warns that rendering still reads the enclosing subgraph
+            // widget. Write that container first, at the caller's current graph,
+            // and do not enter the inner scope. This is the #1655 fallback path
+            // when the #2488 host-rail write already contradicted.
+            if (plan.innerLinkDriven) {
+              if (plan.terminal) {
+                const terminalBlocked = refuseKnownBadPromotedTerminal(plan.terminal);
+                if (terminalBlocked) return terminalBlocked;
+              }
+              const hostWidget = plan.hostWidget;
+              const hostScope = plan.outerScope;
+              const written = await write(
+                plan.outerNodeId,
+                hostWidget,
+                plan.outerNodeType,
+                () => {
+                  const error = currentPromotedBindingError(ctx, plan.binding);
+                  if (error) {
+                    throw new Error(
+                      `Refusing promoted container graph_set_widget: ${error}. No graph_set_widget was dispatched.`,
+                    );
+                  }
+                  if (hostScope) {
+                    const scopeError = currentPromotedExpectedScopeError(ctx, hostScope);
+                    if (scopeError) {
+                      throw new Error(
+                        `Refusing promoted container graph_set_widget: ${scopeError}. No graph_set_widget was dispatched.`,
+                      );
+                    }
+                  }
+                },
+                hostScope,
+                plan.outerNodeIdentity,
+              );
+              if (written.isError) {
+                return appendToolResultText(
+                  written,
+                  `\n\n(Tried the enclosing subgraph widget on node ${plan.outerNodeId} ` +
+                    `"${hostWidget}" first because the promoted inner widget is link-driven. ` +
+                    `Navigation scope was left unchanged.)`,
+                );
+              }
+              markPanelSchemaReady(panelSchemaKey(ctx));
+              const persisted = await persistUnpromotedControlAfterGenerate(
+                written,
+                ctx,
+                plan.outerNodeId,
+              );
+              return promotedHostWriteReceipt(persisted, plan);
+            }
 
             const enter = await ctx.call(
               { cmd: "graph_enter_subgraph", node_id: plan.outerNodeId },
@@ -18617,6 +21989,13 @@ export function buildPanelToolDefs(): PanelToolDef[] {
                     `Refusing promoted inner graph_set_widget: ${error}. No graph_set_widget was dispatched.`,
                   );
                 }
+                const nodeIdentityError = currentPromotedNodeIdentityFenceError(ctx, plan.binding);
+                if (nodeIdentityError) {
+                  throw new Error(
+                    `Refusing promoted inner graph_set_widget: ${nodeIdentityError}. ` +
+                      `No graph_set_widget was dispatched.`,
+                  );
+                }
                 const scopeError = currentPromotedScopeError(
                   ctx,
                   plan.scope,
@@ -18635,6 +22014,7 @@ export function buildPanelToolDefs(): PanelToolDef[] {
                 parentRail: plan.inner.parentRail,
                 ...(plan.terminal ? { terminal: plan.terminal } : {}),
               },
+              plan.binding.nodeIdentity,
             );
             const exited = await leave();
             if (written.isError) {
@@ -18644,10 +22024,68 @@ export function buildPanelToolDefs(): PanelToolDef[] {
                   `"${plan.inner.widget}" and it FAILED: ${textOfToolResult(written)})`,
               );
             }
+            if (linkDrivenPromotedInnerWarning(written)) {
+              return appendToolResultText(
+                fail(
+                  `panel_set_widget wrote widget "${plan.inner.widget}" on inner node ` +
+                    `${plan.inner.innerNodeId}, but that widget is link-driven and will NOT change ` +
+                    `the render. Set the widget on the enclosing subgraph node ` +
+                    `${plan.outerNodeId} ("${plan.hostWidget}") instead. ` +
+                    `No durable host write was applied.`,
+                ),
+                exited.isError
+                  ? ` panel_exit_subgraph then FAILED — call panel_exit_subgraph. (${textOfToolResult(exited)})`
+                  : "",
+              );
+            }
+            // #2514 — the caller addressed the enclosing subgraph. The panel's
+            // #1087 warning is for a DIRECT inner write to a widget that is
+            // link-driven from that parent rail, and it tells the caller to
+            // set the enclosing node — which is what this call already did.
+            // Treat the parent promotion as authoritative: write that
+            // parent-facing widget now that we have left the inner scope,
+            // and never forward the inner warning on this path.
+            const innerPayload = parseToolResultJson(written);
+            const innerWarning =
+              typeof innerPayload?.warning === "string" ? innerPayload.warning : "";
+            if (innerPayload && isInnerLinkDrivenWriteWarning(innerWarning)) {
+              const parentWritten = await write(plan.outerNodeId, args.widget as string);
+              const exitNote = exited.isError
+                ? ` panel_exit_subgraph then FAILED — call panel_exit_subgraph. (${textOfToolResult(exited)})`
+                : "";
+              if (!parentWritten.isError) {
+                const parentPayload = parseToolResultJson(parentWritten) ?? innerPayload;
+                const shaped = shapeParentAuthoritativePromotedWrite(parentPayload, {
+                  nodeId: plan.outerNodeId,
+                  widget: args.widget as string,
+                  synced: true,
+                });
+                return appendToolResultText(
+                  rewriteToolResultJson(parentWritten, shaped),
+                  `\n\n(Applied the enclosing subgraph widget on node ${plan.outerNodeId} ` +
+                    `"${args.widget as string}" as the authoritative parent promotion.)` +
+                    exitNote,
+                );
+              }
+              const shaped = shapeParentAuthoritativePromotedWrite(innerPayload, {
+                nodeId: plan.outerNodeId,
+                widget: args.widget as string,
+                synced: false,
+              });
+              return appendToolResultText(
+                rewriteToolResultJson(written, shaped),
+                `\n\n(Applied via the validated promoted inner widget: node ${plan.inner.innerNodeId} ` +
+                  `"${plan.inner.widget}". The enclosing subgraph widget is the authoritative ` +
+                  `parent promotion; the inner link-driven warning was suppressed because that ` +
+                  `is the node this call addressed.)` +
+                  exitNote,
+              );
+            }
             return appendToolResultText(
               written,
               `\n\n(Applied via the validated promoted inner widget: node ${plan.inner.innerNodeId} ` +
-                `"${plan.inner.widget}". The container was not written.)` +
+                `"${plan.inner.widget}". The host rail "${plan.hostWidget}" on node ` +
+                `${plan.outerNodeId} was not writable.)` +
                 (exited.isError
                   ? ` panel_exit_subgraph then FAILED — call panel_exit_subgraph. (${textOfToolResult(exited)})`
                   : ""),
@@ -18668,13 +22106,118 @@ export function buildPanelToolDefs(): PanelToolDef[] {
         };
 
         if (promotedPlan) {
+          if (shouldWritePromotedHostFirst(promotedPlan)) {
+            // #2488 — the caller already addressed the host SubgraphNode. Write
+            // that host rail first so a link-driven inner widget is not treated
+            // as the durable store. Known-bad inner widgets were refused above
+            // when the terminal witness named them.
+            const hostScope = promotedPlan.outerScope;
+            if (!hostScope) {
+              return promotedWriteRefusal(
+                args.widget as string,
+                "the current host graph identity was unavailable for the enclosing-node write",
+              );
+            }
+            const hostWidget = promotedPlan.hostWidget;
+            const hostWritten = await write(
+              promotedPlan.outerNodeId,
+              hostWidget,
+              promotedPlan.outerNodeType,
+              () => {
+                const error = currentPromotedBindingError(ctx, promotedPlan.binding);
+                if (error) {
+                  throw new Error(
+                    `Refusing promoted host graph_set_widget: ${error}. No graph_set_widget was dispatched.`,
+                  );
+                }
+                const scopeError = currentPromotedExpectedScopeError(ctx, hostScope);
+                if (scopeError) {
+                  throw new Error(
+                    `Refusing promoted host graph_set_widget: ${scopeError}. No graph_set_widget was dispatched.`,
+                  );
+                }
+              },
+              hostScope,
+              promotedPlan.outerNodeIdentity,
+            );
+            if (!hostWritten.isError) {
+              markPanelSchemaReady(panelSchemaKey(ctx));
+              const persisted = await persistUnpromotedControlAfterGenerate(
+                hostWritten,
+                ctx,
+                promotedPlan.outerNodeId,
+              );
+              return promotedHostWriteReceipt(persisted, promotedPlan);
+            }
+            const hostRefusal = parseContradictoryPromotedWidgetRefusal(
+              textOfToolResult(hostWritten),
+              hostWidget,
+            );
+            if (!hostRefusal || String(hostRefusal.nodeId) !== String(promotedPlan.outerNodeId)) {
+              return hostWritten;
+            }
+            if (hostRefusal.widget !== hostWidget) {
+              const remapPlan = { ...promotedPlan, hostWidget: hostRefusal.widget };
+              const remappedHost = await write(
+                promotedPlan.outerNodeId,
+                hostRefusal.widget,
+                promotedPlan.outerNodeType,
+                () => {
+                  const error = currentPromotedBindingError(ctx, promotedPlan.binding);
+                  if (error) {
+                    throw new Error(
+                      `Refusing promoted host graph_set_widget: ${error}. No graph_set_widget was dispatched.`,
+                    );
+                  }
+                  const scopeError = currentPromotedExpectedScopeError(ctx, hostScope);
+                  if (scopeError) {
+                    throw new Error(
+                      `Refusing promoted host graph_set_widget: ${scopeError}. No graph_set_widget was dispatched.`,
+                    );
+                  }
+                },
+                hostScope,
+                promotedPlan.outerNodeIdentity,
+              );
+              if (!remappedHost.isError) {
+                markPanelSchemaReady(panelSchemaKey(ctx));
+                const persisted = await persistUnpromotedControlAfterGenerate(
+                  remappedHost,
+                  ctx,
+                  promotedPlan.outerNodeId,
+                );
+                return promotedHostWriteReceipt(persisted, remapPlan);
+              }
+              if (
+                !parseContradictoryPromotedWidgetRefusal(
+                  textOfToolResult(remappedHost),
+                  hostRefusal.widget,
+                )
+              ) {
+                return remappedHost;
+              }
+            }
+          }
           const promotedWritten = await writePromotedInner(promotedPlan);
-          if (!promotedWritten.isError) markPanelSchemaReady(panelSchemaKey(ctx));
+          if (!promotedWritten.isError && parseToolResultJson(promotedWritten)?.refresh_pending !== true) {
+            markPanelSchemaReady(panelSchemaKey(ctx));
+          }
           return promotedWritten;
         }
-        let first = await write(args.node_id, args.widget as string);
+        let first = await write(
+          args.node_id,
+          args.widget as string,
+          expectedNodeType,
+          ordinaryPlan
+            ? ordinaryWriteBeforeDispatch(ctx, args.widget as string, ordinaryPlan)
+            : undefined,
+          undefined,
+          expectedNodeIdentity,
+        );
         if (!first.isError) {
-          markPanelSchemaReady(panelSchemaKey(ctx));
+          if (parseToolResultJson(first)?.refresh_pending !== true) {
+            markPanelSchemaReady(panelSchemaKey(ctx));
+          }
           return persistUnpromotedControlAfterGenerate(first, ctx, args.node_id);
         }
         // #2202 — stale-combo recovery may have retired the panel's last usable
@@ -18861,20 +22404,20 @@ export function buildPanelToolDefs(): PanelToolDef[] {
           return appendToolResultText(first, `\n\n${textOfToolResult(promotedWritten)}`);
         }
 
-        const recoveryTabId = ctx.tabId;
-        let recoveryIdentity: { generation: number; tabSessionId: string } | undefined;
-        const recoveryBinding: PromotedWriteBinding | null =
-          typeof ctx.panelConnectionIdentity === "function"
-            ? (() => {
-                const identity = ctx.panelConnectionIdentity?.();
-                return isUsablePanelConnectionIdentity(identity)
-                  ? { tabId: recoveryTabId, identity }
-                  : null;
-              })()
-            : null;
+        let recoveryBinding: PromotedWriteBinding | null = null;
         if (typeof ctx.panelConnectionIdentity === "function") {
-          recoveryIdentity = recoveryBinding?.identity;
-          if (!isUsablePanelConnectionIdentity(recoveryIdentity)) {
+          try {
+            recoveryBinding = capturePromotedWriteBinding(ctx);
+          } catch {
+            return appendToolResultText(
+              first,
+              `\n\n${textOfToolResult(promotedWriteRefusal(
+                refusal.widget,
+                "the panel connection binding could not be read before the inner mapping read",
+              ))}`,
+            );
+          }
+          if (!recoveryBinding) {
             return appendToolResultText(
               first,
               `\n\n${textOfToolResult(promotedWriteRefusal(
@@ -18893,10 +22436,8 @@ export function buildPanelToolDefs(): PanelToolDef[] {
               `${textOfToolResult(sub)})`,
           );
         }
-        if (recoveryIdentity) {
-          const recoveryBindingError = recoveryBinding
-            ? currentPromotedBindingError(ctx, recoveryBinding)
-            : null;
+        if (recoveryBinding) {
+          const recoveryBindingError = currentPromotedBindingError(ctx, recoveryBinding);
           if (recoveryBindingError) {
             return appendToolResultText(
               first,
@@ -18905,16 +22446,24 @@ export function buildPanelToolDefs(): PanelToolDef[] {
           }
         }
         const recoveryPayload = parseToolResultJson(sub);
-        const recoveryEnvelope = validatePromotedSubgraphEnvelope(
+        const describedRecovery = describePromotedSubgraphEnvelope(
           recoveryPayload,
           args.node_id as number | string,
         );
-        if (promotedEnvelopeCarriesEvidence(recoveryPayload) && !recoveryEnvelope) {
+        const recoveryEnvelope = describedRecovery.ok ? describedRecovery.envelope : null;
+        if (promotedEnvelopeCarriesEvidence(recoveryPayload) && !describedRecovery.ok) {
+          // #2688 — the recovery path had the same unnamed refusal. A legacy
+          // envelope that carries no evidence still falls through untouched
+          // below; only a receiver that DID publish evidence and then failed an
+          // invariant reaches here, and that one is worth naming.
           return appendToolResultText(
             first,
             `\n\n(The panel listed "${refusal.widget}" as promoted while refusing it. ` +
-              `graph_get_subgraph returned a malformed, stale, or incomplete ownership ` +
-              `envelope, so the inner write was not retried.)`,
+              `${promotedEnvelopeInvariantText(
+                "graph_get_subgraph",
+                describedRecovery.invariant,
+                "The inner write was not retried.",
+              )})`,
           );
         }
         const recoveryScope = recoveryEnvelope
@@ -19078,7 +22627,13 @@ export function buildPanelToolDefs(): PanelToolDef[] {
           // reject a valid inner node, while omitting a fence would let a same-
           // type replacement mutate a detached object and report false success.
           const innerProbe = await ctx.call(
-            { cmd: "graph_query", ids: [inner.innerNodeId], fields: "compact", limit: 1 },
+            {
+              cmd: "graph_query",
+              ids: [inner.innerNodeId],
+              fields: "compact",
+              limit: 1,
+              max_chars: PROMOTED_IDENTITY_PROBE_MAX_CHARS,
+            },
             OBJECT_INFO_REFRESH_ACK_TIMEOUT_MS,
           );
           const innerIdentity = innerProbe.isError
@@ -19252,12 +22807,31 @@ export function buildPanelToolDefs(): PanelToolDef[] {
           );
         }
 
+        const recoveryWriteBinding = recoveryBinding
+          ? {
+              ...recoveryBinding,
+              ...(recoveryBinding.nodeIdentityFenceAdvertised && inner.nodeIdentity
+                ? { nodeIdentity: inner.nodeIdentity }
+                : {}),
+            }
+          : null;
+
         const recoveryBeforeDispatch = recoveryBinding
           ? () => {
-              const error = currentPromotedBindingError(ctx, recoveryBinding);
+              const error = currentPromotedBindingError(ctx, recoveryWriteBinding!);
               if (error) {
                 throw new Error(
                   `Refusing promoted inner graph_set_widget: ${error}. No graph_set_widget was dispatched.`,
+                );
+              }
+              const nodeIdentityError = currentPromotedNodeIdentityFenceError(
+                ctx,
+                recoveryWriteBinding!,
+              );
+              if (nodeIdentityError) {
+                throw new Error(
+                  `Refusing promoted inner graph_set_widget: ${nodeIdentityError}. ` +
+                    `No graph_set_widget was dispatched.`,
                 );
               }
               const scopeError = recoveryScope
@@ -19283,6 +22857,7 @@ export function buildPanelToolDefs(): PanelToolDef[] {
           recoveryScope
             ? { ...recoveryScope, ...(inner.terminal ? { terminal: inner.terminal } : {}) }
             : undefined,
+          recoveryWriteBinding?.nodeIdentity,
         );
         const exited = await ctx.call({ cmd: "graph_exit_subgraph" }, 15000);
         if (!written.isError) {
@@ -19537,7 +23112,7 @@ export function buildPanelToolDefs(): PanelToolDef[] {
     ),
     def(
       "panel_run",
-      "Queue the workflow the user has OPEN — exactly like them pressing Queue Prompt (current widget values, the live graph they can see). On success it confirms the run was queued; if ComfyUI REFUSES the prompt (validation failure on either channel — per-node node_errors OR a top-level error like a missing node type) it returns a FAILURE with that rejection detail, never a false 'queued'. Pass to_node_id to RUN ONLY ONE BRANCH ('run to node'): ComfyUI renders just that output node plus everything upstream of it and SKIPS every other output branch — handy for previewing or debugging part of a big graph without rendering the whole thing. to_node_id MUST be an OUTPUT node (SaveImage, PreviewImage, SaveVideo, …) — pick the one at the END of the branch you want; nodes are tagged is_output:true in panel_query_graph's detail rows. The output node may be NESTED inside a subgraph — just pass its id (resolved in the scope you're currently viewing, then anywhere in the workflow); the tool builds the nested execution path for you. Omit it to run the whole graph. DUPLICATE FENCE (#862): if a render this session cannot account for is already in flight (after a reconnect this is usually YOUR earlier render still running — the queue record does not survive a restart), the run is REFUSED before anything is queued and the in-flight prompt is named; inspect queue (action:'list') first, then pass allow_duplicate:true once you have decided it is fine to run behind what is there — a scoped to_node_id preview after a reconnect is the ordinary case for it, a deliberate sweep/batch the other. Use this so the render runs on THEIR canvas and they see the result.",
+      "Queue the workflow the user has OPEN — exactly like them pressing Queue Prompt (current widget values, the live graph they can see). On success it confirms the run was queued; if ComfyUI REFUSES the prompt (validation failure on either channel — per-node node_errors OR a top-level error like a missing node type) it returns a FAILURE with that rejection detail, never a false 'queued'. Pass to_node_id to RUN ONLY ONE BRANCH ('run to node'): ComfyUI renders just that output node plus everything upstream of it and SKIPS every other output branch — handy for previewing or debugging part of a big graph without rendering the whole thing. to_node_id MUST be an OUTPUT node (SaveImage, PreviewImage, SaveVideo, VHS_VideoCombine, or any class whose live /object_info has output_node:true) — pick the one at the END of the branch you want; nodes are tagged is_output:true in panel_query_graph's detail rows. The output node may be NESTED inside a subgraph — just pass its id (resolved in the scope you're currently viewing, then anywhere in the workflow); the connected panel builds the exact nested execution path for you. If a legacy panel still refuses this class, recovery uses /prompt only for an identity-proven root target and FAILS CLOSED rather than guessing a numeric target for a nested execution path. Omit it to run the whole graph. DUPLICATE FENCE (#862): if a render this session cannot account for is already in flight (after a reconnect this is usually YOUR earlier render still running — the queue record does not survive a restart), the run is REFUSED before anything is queued and the in-flight prompt is named; inspect queue (action:'list') first, then pass allow_duplicate:true once you have decided it is fine to run behind what is there — a scoped to_node_id preview after a reconnect is the ordinary case for it, a deliberate sweep/batch the other. Use this so the render runs on THEIR canvas and they see the result.",
       {
         batch_count: z
           .number()
@@ -19752,11 +23327,15 @@ export function buildPanelToolDefs(): PanelToolDef[] {
             res,
             runRid,
             pre.runningPromptId,
-            typeof args.to_node_id === "number",
+            // #2143 — queued_unknown is receipt-recoverable for full graph runs
+            // too. Only exact run_receipt evidence is allowed there; the weaker
+            // QueueMonitor inference remains scoped-run-only below.
+            true,
             runTicketTab,
             typeof args.batch_count === "number"
               ? Math.max(1, Math.min(64, Math.floor(args.batch_count)))
               : 1,
+            typeof args.to_node_id === "number",
           );
           if (!recovered) return;
           for (const entry of recovered.completionKeys ?? []) {
@@ -19791,14 +23370,58 @@ export function buildPanelToolDefs(): PanelToolDef[] {
         // "you'll be notified automatically" guidance. Only a genuine queue
         // gets the anti-poll note below.
         let rejection = detectRunRejection(res);
+        // #2537 — the frontend's dynamic-combo serializer can throw
+        // "Dynamic widget doesn't exist on node" on the first queue after graph
+        // edits, then succeed on an identical retry once those widgets exist.
+        // Serialization is pre-/prompt, so the first dispatch queued nothing.
+        // One settle-and-retry, same pause #1050 uses for the stamp race; a
+        // second miss is surfaced rather than spent again.
+        let dynamicWidgetRetryCount = 0;
+        while (
+          rejection &&
+          isRetryableDynamicWidgetRace(res, rejection) &&
+          dynamicWidgetRetryCount < MAX_DYNAMIC_WIDGET_RACE_RETRIES
+        ) {
+          dynamicWidgetRetryCount += 1;
+          let retryResultReceived = false;
+          try {
+            await sleep(retrySettleMs());
+            runDispatchedAt = Date.now();
+            res = await ctx.call(runCmd, 20000, observeRunRid);
+            retryResultReceived = true;
+            await reconcileRun();
+            rejection = detectRunRejection(res);
+          } catch (err) {
+            installLateReceiptHandoff();
+            if (retryResultReceived) {
+              return appendToolResultText(
+                res,
+                `\n\n(Dispatch history: the retry dispatch returned the result above, but local ` +
+                  `late-ack reconciliation failed before this handler could finish ` +
+                  `interpreting it. That result is preserved and no further dispatch was ` +
+                  `made. Do not infer an additional queue entry from the reconciliation ` +
+                  `failure alone. (${err instanceof Error ? err.message : String(err)})`,
+              );
+            }
+            return fail(
+              `panel_run re-issued the run after ComfyUI's frontend threw ` +
+                `"Dynamic widget doesn't exist on node" during graph serialization, and that ` +
+                `SECOND dispatch failed before any reply could be read — its outcome is UNKNOWN ` +
+                `and it may have queued a render. The FIRST dispatch threw inside graphToPrompt, ` +
+                `which runs before /prompt is posted, so it queued nothing. Do NOT re-run blindly: ` +
+                `check the queue (action:"list") or get_history before deciding. (${err instanceof Error ? err.message : String(err)})`,
+            );
+          }
+        }
         // #772/#2120 — re-issue only the scoped-run stamp race the panel explicitly
         // certifies as not-queued. Gated on OUR OWN args (this really was a scoped run)
         // and on the panel having ANSWERED, so an unknown outcome is never retried.
         // The ordinary race gets one re-issue. A repeated race gets ONE additional
-        // chance only when the panel names a differing seed entry — the fixed-seed
-        // decoration race reported in #2120. Every attempt still passes the panel's
-        // graph-stamp check independently; this is not a bypass or a blind mutation
-        // retry.
+        // chance only when EVERY named differing entry is a seed-like input — a
+        // queue-time KSampler / SeedControl / noise_seed roll, including DaSiWa
+        // random mode (`seed_value`). A steps/cfg/topology mismatch still fails
+        // closed. Every attempt still passes the panel's graph-stamp check
+        // independently; this is not a bypass or a blind mutation retry.
         let scopeRebuilt = false;
         let scopeRetryCount = 0;
         while (
@@ -19831,20 +23454,24 @@ export function buildPanelToolDefs(): PanelToolDef[] {
             // first certified refusal but before this re-issue belongs to neither
             // attempt; keep the ticket fence at the dispatch that actually minted its
             // prompt id rather than allowing that stale arm to be synthesized (#2021).
-            runDispatchedAt = Date.now();
-            res = await ctx.call(runCmd, 20000, observeRunRid);
-            retryResultReceived = true;
+            const sendScopedRetry = async (): Promise<void> => {
+              runDispatchedAt = Date.now();
+              res = await ctx.call(runCmd, 20000, observeRunRid);
+              retryResultReceived = true;
+            };
+            await sendScopedRetry();
             // #1175 — the re-issue can miss its window exactly as the first
             // dispatch can, and this is the one whose outcome is genuinely open
             // (the first was CERTIFIED to have queued nothing). Reconcile it on
             // the same terms; observeRunRid has already rebound to this attempt.
             await reconcileRun();
             rejection = detectRunRejection(res);
-          } catch (err) {
+          } catch (thrown) {
             // A retry timeout/transport failure still has a concrete rid when the
             // bridge accepted the dispatch. Register the bounded exact handoff
             // before returning so a later Panel receipt can open its ticket.
             installLateReceiptHandoff();
+            let err = thrown;
             // A bridge/late-receipt failure after ctx.call already returned must not
             // erase the retry's own result (notably its retry_of token). Preserve it
             // verbatim and stop: no further dispatch is justified by a failed local
@@ -19885,6 +23512,37 @@ export function buildPanelToolDefs(): PanelToolDef[] {
             );
           }
         }
+        // #2529 — the panel refuses run-to-node when constructor.nodeData.output_node
+        // is missing, even for classes whose live /object_info OUTPUT_NODE is true
+        // (VHS_VideoCombine). Consult that metadata and recover before surfacing.
+        if (rejection && typeof args.to_node_id === "number") {
+          const recovered = await recoverOutputNodeScopedRun({
+            toNodeId: args.to_node_id,
+            res,
+            rejection,
+            batchCount: typeof args.batch_count === "number" ? args.batch_count : undefined,
+            call: (cmd, timeoutMs) =>
+              ctx.call(
+                cmd,
+                timeoutMs,
+                cmd.cmd === "graph_run" ? observeRunRid : undefined,
+              ),
+            // The direct fallback is allowed only when the panel's server-observed
+            // origin proves the configured headless target (cloud uses its scoped
+            // cloud payload instead). A missing or contradictory origin fails closed.
+            directFallbackAllowed:
+              isCloudMode() ||
+              sameHttpBase(
+                ctx.bridge?.tabServerOrigin?.(ctx.tabId),
+                getComfyUIBaseUrl(),
+              ),
+          });
+          if (recovered) {
+            res = recovered as ToolResult;
+            await reconcileRun();
+            rejection = detectRunRejection(res);
+          }
+        }
         if (rejection) {
           // Timeout and transport failures can return before the ordinary ticket
           // phase. Keep this exact rid owner alive before exposing the error.
@@ -19900,6 +23558,20 @@ export function buildPanelToolDefs(): PanelToolDef[] {
           // as the failure it is — but it still has to say it arrived late, or the
           // caller reads a refusal for a dispatch they were told was unknown and
           // cannot tell whether these are one event or two.
+          if (dynamicWidgetRetryCount > 0) {
+            return appendToolResultText(
+              rejection,
+              `\n\n(Dispatch history: the first graph_run failed because ComfyUI's frontend threw ` +
+                `"Dynamic widget doesn't exist on node" while serializing the graph — a race after ` +
+                `recent graph edits while dynamic-combo sub-widgets were still rebuilding. That throw ` +
+                `happens BEFORE /prompt is posted, so the first dispatch queued nothing. The run was ` +
+                `re-issued once after a short pause to let those widgets settle (#2537). The failure ` +
+                `above is that SECOND dispatch; it was not retried again. You MAY re-issue panel_run ` +
+                `after a brief wait — do NOT pass retry_of: nothing was applied to dedupe. The ` +
+                `frontend error names no node id or widget.)` +
+                lateAckNote,
+            );
+          }
           if (!scopeRebuilt)
             return lateAckNote ? appendToolResultText(rejection, lateAckNote) : rejection;
           return appendToolResultText(
@@ -19969,6 +23641,22 @@ export function buildPanelToolDefs(): PanelToolDef[] {
           }
         }
         const panelQueueUncertain = isPanelQueueUncertainty(runReply);
+        // #2521 — an id-less queued_unknown is not proof that /prompt left the
+        // panel. Check ComfyUI's log + queue before claiming acceptance: no
+        // prompt_id and no `got prompt` (or an observed idle queue) fails closed
+        // as not queued. A late Panel receipt can still open a ticket.
+        let queuedUnknownReach: QueuedUnknownReach | null = null;
+        if (panelQueueUncertain && queuedIds.length === 0) {
+          queuedUnknownReach = await observeQueuedUnknownReach({
+            dispatchedAt: runDispatchedAt,
+            preRunningPromptId: pre.runningPromptId,
+            preQueueDepth: pre.queueDepth,
+          });
+          if (queuedUnknownReach.kind === "not-queued") {
+            installLateReceiptHandoff();
+            return fail(panelQueueNotQueuedMessage(queuedUnknownReach));
+          }
+        }
         // #944: a run ComfyUI accepted while dropping some outputs reaches here
         // (a minted prompt id outranks the rejection signals). Say which outputs
         // were dropped, or the caller waits for files that will never be written.
@@ -19990,12 +23678,15 @@ export function buildPanelToolDefs(): PanelToolDef[] {
               `and this dispatch stacked a duplicate.`
             : "";
         // markSelfQueued with NO id still stamps the recent-self-queue timestamp,
-        // so both the id-less genuine queue and the Panel's explicit uncertainty
-        // receipt must call it exactly once (#559/#2143). The latter must not be
-        // mistaken for a definite queue, but it is still unsafe to immediately
-        // redispatch a request that the Panel says left its tab.
-        if (queuedIds.length === 0 || panelQueueUncertain) QueueMonitor.markSelfQueued(null);
-        for (const id of queuedIds) QueueMonitor.markSelfQueued(id);
+        // so both the id-less genuine queue and a queued_unknown that DID reach
+        // ComfyUI must call it (#559/#2143/#2521). An unobserved id-less receipt
+        // must not pretend a request left the tab.
+        if (queuedIds.length > 0) {
+          if (panelQueueUncertain) QueueMonitor.markSelfQueued(null);
+          for (const id of queuedIds) QueueMonitor.markSelfQueued(id);
+        } else if (!panelQueueUncertain || queuedUnknownReach?.kind === "reached") {
+          QueueMonitor.markSelfQueued(null);
+        }
         // #468 — open a run ticket so the render's completion can be CORRELATED
         // to this exact call by prompt id. This is what lets the orchestrator
         // journal an undelivered completion and replay it into the right run
@@ -20080,7 +23771,9 @@ export function buildPanelToolDefs(): PanelToolDef[] {
             ? ""
             : ` (this run queued ${queuedIds.length} prompts, so the check is the queue as a whole; get_history settles the outcome of any that are no longer in flight)`;
         const note = panelQueueUncertain
-          ? panelQueueUncertaintyNote(ticketedPromptIds)
+          ? queuedUnknownReach?.kind === "unobserved"
+            ? panelQueueUnobservedNote()
+            : panelQueueUncertaintyNote(ticketedPromptIds)
           : correlatable
           ? "\n\n[IMPORTANT] You will be notified automatically with the output image(s)/video when the render finishes — do NOT poll queue (action:\"list\"), get_history, or get_image (action:\"list_outputs\"). Just end your turn now and wait for the result to be delivered to you." +
             `\n[FALLBACK] That notification is journaled and replayed if an agent is not there to take it, and the orchestrator will fill one in from ComfyUI itself — its execution event or its history record — if the panel never reports the finish. But it cannot be GUARANTEED, so do not wait forever on it. If nothing has arrived LONG after this render should have finished (roughly twice the time you expect it to take), make ONE check with ${fallbackCheck} instead of idling indefinitely${fallbackTail}. One check, not a loop — and not before then.`
@@ -20101,16 +23794,25 @@ export function buildPanelToolDefs(): PanelToolDef[] {
         // dispatch can enqueue several, and the panel reports one prompt id, not a count.
         // The certified fact is about DISPATCHES, not renders: the prior dispatches
         // queued nothing, so everything in the queue came from the final dispatch.
+        const dynamicWidgetRetryNote =
+          dynamicWidgetRetryCount === 0
+            ? ""
+            : `\n\n[NOTE] The first dispatch failed with "Dynamic widget doesn't exist on node" ` +
+              `(ComfyUI's frontend serializer racing a dynamic-combo widget rebuild after graph edits). ` +
+              `That throw is pre-queue, so nothing was queued; the run was re-issued once after a short ` +
+              `pause, and THAT is the run above (#2537).`;
         const retryNote =
           scopeRetryCount === 0
-            ? ""
+            ? dynamicWidgetRetryNote
             : scopeRetryCount === 1
-              ? "\n\n[NOTE] The first dispatch of this scoped run was refused by the panel's run-to-node " +
+              ? dynamicWidgetRetryNote +
+                "\n\n[NOTE] The first dispatch of this scoped run was refused by the panel's run-to-node " +
                 "graph-stamp race (the graph changed between dispatch and apply); the panel certified that " +
                 "nothing was queued, so the scope was rebuilt and re-issued once, and THAT is the run above. " +
                 "The first dispatch contributed NOTHING to the queue, so whatever this run queued was " +
                 "queued once, not twice."
-              : `\n\n[NOTE] The first ${scopeRetryCount} dispatches of this scoped run were refused by the ` +
+              : dynamicWidgetRetryNote +
+                `\n\n[NOTE] The first ${scopeRetryCount} dispatches of this scoped run were refused by the ` +
                 `panel's run-to-node graph-stamp race (the graph changed between dispatch and apply), ` +
                 `and each was certified to have queued NOTHING. The scope was rebuilt and re-issued ` +
                 `${scopeRetryCount} times, and THAT is the run above. Whatever this run queued came ` +
@@ -20135,7 +23837,13 @@ export function buildPanelToolDefs(): PanelToolDef[] {
         // #2438 — rewrite Panel retry_guidance BEFORE the notes are spliced so
         // a headless `queue (action:"list")` inspector is not left in the JSON
         // for a surface that cannot call it.
-        if (panelQueueUncertain) res = applyQueuedUnknownRetryGuidance(res);
+        // #2521 — the "left the panel" wording is only for a reach we observed.
+        if (panelQueueUncertain) {
+          res =
+            queuedUnknownReach?.kind === "unobserved"
+              ? applyUnobservedQueuedUnknownRetryGuidance(res)
+              : applyQueuedUnknownRetryGuidance(res);
+        }
         if (res.content?.[0]?.type === "text") {
           return {
             ...res,
@@ -20943,24 +24651,34 @@ export function buildPanelToolDefs(): PanelToolDef[] {
         const items = normalizeTodoItems(keyed.value as Array<{ text?: unknown; status?: unknown }>);
         const redirect = desktopCanvasRedirect(ctx, "panel_set_todo");
         if (redirect?.error) return fail(redirect.error);
-        if (redirect?.tabId) {
-          // #977 — the desktop redirect writes the checklist to ANOTHER tab, so
-          // record it against that one. Keying it on ctx.tabId would leave the
-          // tab that actually holds the plan looking planless.
-          recordTodo(redirect.tabId, items);
-          return dispatchToTab(
-            ctx,
-            redirect.tabId,
-            { cmd: "set_todo", items },
-            15000,
-            () => reResolveDesktopTab(ctx, "panel_set_todo"),
-          );
-        }
         // #977 — retain what the agent DECLARED, so a later render completion can
         // tell "you are mid-sweep" from "that was the last thing you were doing".
         // The panel keeps the UI copy; this is the orchestrator's own record.
-        recordTodo(ctx.tabId, items);
-        return ctx.call({ cmd: "set_todo", items }, 15000);
+        // The desktop redirect writes the checklist to ANOTHER tab, so record it
+        // against that one. Keying it on ctx.tabId would leave the tab that
+        // actually holds the plan looking planless.
+        const targetTab = redirect?.tabId ?? ctx.tabId;
+        recordTodo(targetTab, items);
+        let mutationId: string | undefined;
+        const observeRid = (rid: string): void => {
+          mutationId = rid;
+        };
+        const cmd = { cmd: "set_todo", items };
+        const res = redirect?.tabId
+          ? await dispatchToTab(
+              ctx,
+              redirect.tabId,
+              cmd,
+              15000,
+              () => reResolveDesktopTab(ctx, "panel_set_todo"),
+              observeRid,
+            )
+          : await ctx.call(cmd, 15000, observeRid);
+        // #2481 — ONLY a no-reply is settled by a read. An acked executor error
+        // is a definite outcome; re-deciding it from a later tray read would
+        // overwrite a better-informed verdict.
+        if (!isReplyTimeoutResult(res)) return res;
+        return settleSetTodoAfterAckTimeout(ctx, res, items, mutationId, targetTab);
       },
     ),
     def(
@@ -21411,9 +25129,10 @@ export function buildPanelToolDefs(): PanelToolDef[] {
         // #2419 — BEFORE the fence refresh so the stamp lands on the dest
         // address. Save-As mints a new tab id; the fence repair re-stamps
         // graph commands, but session-scoped commands (set_todo, graph_canvas)
-        // still address the old id unless routing is re-pointed. Only when
-        // the current address is dead — a live pin elsewhere is left alone
-        // (#1917 / #884).
+        // still address the old id unless routing is re-pointed. Follow dest
+        // when the current address is dead, aliases onto dest, or is the
+        // unsaved tmp: predecessor of dest. A live pin on a different saved
+        // tab is left alone (#1917 / #884).
         repointRoutingAfterSave(ctx, res);
         const fenceRebind = refreshFenceFromOwnReply(ctx, res) ?? (await rebindWorkflowFence(ctx));
         let canMutateNow: boolean | undefined;
@@ -21690,8 +25409,16 @@ export function buildPanelToolDefs(): PanelToolDef[] {
           // source-text "wiring" assertion passed, because grepping for a call
           // cannot tell reachable code from dead code. The handler now does the
           // matching against the routes the bridge actually holds.
+          //
+          // #2531 — a pin the panel just verified as the live canvas is an
+          // explicit switch: align lastOrigin onto this canvas rather than
+          // reporting success while turn routing still names the previous
+          // workflow. An UNVERIFIED (lenient) pin keeps the #884 gate: a
+          // healthy pin is left alone.
           try {
-            scopeRepin = ctx.bridge.repinScopeToWorkflow?.(ctx.tabId, pinPath);
+            scopeRepin = pinVerifiedActive
+              ? alignTurnRoutingAfterSwitch(ctx, pinPath)
+              : ctx.bridge.repinScopeToWorkflow?.(ctx.tabId, pinPath);
           } catch {
             scopeRepin = undefined; // never worse than the pre-#888 silence
           }
@@ -22070,6 +25797,7 @@ CHECKED FOR YOU: the graph read this message prescribes was just run, and it ` +
                 ? fenceRebind.before.uuid
                 : undefined;
             if (turnPinStillAmbiguous()) return refuseBoundWhileAmbiguous();
+            forgetStaleSubgraphIdentity(ctx);
             return ok({
               ...target,
               graph_binding: "bound",
@@ -22106,12 +25834,18 @@ CHECKED FOR YOU: the graph read this message prescribes was just run, and it ` +
         // A refusal carries its own reason out for the same reason.
         const scopeRepinNote =
           typeof scopeRepin === "string"
-            ? ` This session's turn routing was AMBIGUOUS (a reconnect delivered messages from several workflows at once) and is now pinned to this workflow, so graph tools will resolve deterministically.`
+            ? ` This session's turn routing now follows this workflow, so graph tools will resolve deterministically.`
             : scopeRepin && typeof scopeRepin === "object" && scopeRepin.reason
               ? ` NOTE — the workflow target was set, but this session's turn routing was NOT re-pinned: ${scopeRepin.reason}.`
               : "";
         if (fence?.binding === "bound" && turnPinStillAmbiguous()) {
           return refuseBoundWhileAmbiguous();
+        }
+        if (mode === "current" && !deferredBind) {
+          // #2518 — mode:"current" already named the live canvas; a leftover
+          // subgraph/promoted identity from an earlier inspect must not keep
+          // classifying root widgets as promoted.
+          forgetStaleSubgraphIdentity(ctx);
         }
         return ok({
           ...target,
@@ -22134,56 +25868,11 @@ CHECKED FOR YOU: the graph read this message prescribes was just run, and it ` +
       "panel_new_workflow",
       "Open a brand-new BLANK workflow in a NEW TAB. Use this whenever the user wants a 'new workflow' / 'fresh canvas' / 'start over for a new project'. This does NOT touch their current workflow — it opens a separate tab. NEVER use panel_clear for a new workflow (panel_clear wipes the CURRENT graph and is only for 'clear/reset this canvas').",
       {},
-      async (_args, ctx) => {
-        const res = await ctx.call({ cmd: "workflow_new" }, 15000);
-        if (res.isError) return res;
-        // #932 (recurrence on 0.50.6) — a NEW canvas needs a NEW fence.
-        //
-        // workflow_new authoritatively re-points the active workflow, exactly as
-        // workflow_open does — but only the open path re-derived the command
-        // fence afterwards (openWorkflowWithVerify). So this session kept the
-        // PREVIOUS workflow's instance stamp while the user was now looking at a
-        // brand-new blank canvas, and every stamped command after it failed with
-        // "workflow instance mismatch". The reporter created a workflow and could
-        // not add a single node to it.
-        //
-        // Refresh from the panel's own live active record, the same way the open
-        // path does. The panel mints the new canvas's identity EAGERLY at
-        // creation ("so the key exists BEFORE the first edit").
-        //
-        // #814/#812 — this reply DOES carry workflow_uuid directly (#762), and the
-        // stale comment that used to stand here said otherwise. Trust it first,
-        // before ever attempting rebindWorkflowFence's independent workflow_list
-        // round trip, which can be refused by the exact fence being repaired
-        // (#1071) — the same trap a reporter hit via panel_new_workflow's own
-        // recovery attempt.
-        //
-        // NEVER fails the call on a rebind miss: the workflow WAS created, and
-        // retracting that would be the worse lie. Disclose instead, so the agent
-        // learns the graph tools are not yet usable here rather than discovering
-        // it one confusing mismatch at a time.
-        const fenceRebind = refreshFenceFromOwnReply(ctx, res) ?? (await rebindWorkflowFence(ctx));
-        let canMutateNow: boolean | undefined;
-        let refusalCause: "unroutable" | "disconnected" | "no_identity" | "capability" | "target_disagreement" | undefined;
-        try {
-          if (ctx.tabGraphMutationCapability) {
-            const cap = ctx.tabGraphMutationCapability();
-            canMutateNow = cap.known ? cap.canMutate : undefined;
-            if (cap.known && !cap.canMutate) refusalCause = cap.because;
-          } else {
-            canMutateNow = ctx.tabCanMutateGraph?.();
-          }
-        } catch {
-          canMutateNow = undefined; // a guard that can throw is not a guard
-          refusalCause = undefined;
-        }
-        const fence = describeFenceRebind(fenceRebind, canMutateNow, refusalCause, panelTooOldNote(ctx));
-        if (!fence || fence.binding === "bound") return res;
-        return appendNote(
-          res,
-          `The blank workflow WAS created.${fence.note}`,
-        );
-      },
+      // Verify-after-timeout (#2705), the same mechanism panel_open_workflow uses:
+      // a backgrounded/frozen tab can create the blank workflow and still miss the
+      // 15s ack window, and returning that raw timeout left the session fenced to
+      // the PREVIOUS canvas — see newWorkflowWithVerify.
+      async (_args, ctx) => newWorkflowWithVerify(ctx),
     ),
     def(
       "panel_open_workflow",
@@ -22497,8 +26186,40 @@ CHECKED FOR YOU: the graph read this message prescribes was just run, and it ` +
             { cmd: "graph_screenshot", padding: args.padding },
             target ?? { mode: "current" },
           );
+          // panel#2191 — the SAME bounded budget the sibling idempotent reads
+          // already take, for the same reason and against the same evidence.
+          //
+          // A screenshot's cost scales with the graph: the frontend handler forces
+          // one synchronous LiteGraph repaint of every node and group at the fitted
+          // transform, PNG-encodes the result, and repaints again on restore — all
+          // on the panel's single main thread. Dispatched with no `timeoutMs` it
+          // took the bare 20 000 ms default, and a reporter's 264-node / 63-group
+          // graph was declared "backgrounded or frozen" on a tab that, in the same
+          // session, answered panel_query_graph, panel_get_errors over all 264
+          // nodes, and panel_save_workflow. That is a busy-but-alive main thread,
+          // which is precisely what graph_get_errors' own budget comment describes
+          // — and graph_get_errors survived that graph because it already passes
+          // this constant while the screenshot alone was left on the default.
+          //
+          // Safe to widen because the read is idempotent (see the panel#2191 entry
+          // in BRIDGE_READONLY_CMDS): waiting longer costs a slow reply, never a
+          // double-applied write. Still BOUNDED, never Infinity, so a genuinely
+          // frozen tab fails — at 90 s instead of 20 s.
+          //
+          // ONE-SHOT ACROSS RECONNECTS, deliberately. Being a read now also makes
+          // this command eligible for the bridge's park-and-resume, and that
+          // resume re-dispatches on `tabId` alone — but a `wf:` route key recurs,
+          // and the hello handler's own #486 rule is that "same key is not the
+          // same tab". A parked capture could be resumed onto a DIFFERENT browser
+          // tab that took the key over, and answer this caller with a picture of a
+          // canvas they never asked about. `maxReconnectRetries: 0` keeps it out
+          // of that branch: a mid-capture drop fails honestly, and re-asking for a
+          // screenshot costs nothing. The general resume-vs-incarnation gap is
+          // real and older than this call site; it is tracked in #2761.
           const res = (await ctx.bridge.send(cmd as { cmd: string }, {
             tabId: ctx.tabId,
+            timeoutMs: OBJECT_INFO_REFRESH_ACK_TIMEOUT_MS,
+            maxReconnectRetries: 0,
           })) as {
             image?: string;
             mimeType?: string;
@@ -22530,14 +26251,25 @@ CHECKED FOR YOU: the graph read this message prescribes was just run, and it ` +
       "panel_enter_subgraph",
       "Navigate INTO a subgraph node so you can read and EDIT its inner nodes — after this, panel_query_graph / panel_graph_outline and all panel_* edit tools target the subgraph's inner graph (the user sees the canvas drill in). This is how you edit inside a subgraph (e.g. tweak a widget on an inner node). Call panel_exit_subgraph when done. Returns the new viewing scope.",
       { node_id: nodeId().describe("Subgraph node id (is_subgraph=true).") },
-      async (args: A, ctx) => ctx.call({ cmd: "graph_enter_subgraph", node_id: args.node_id }, 15000),
+      async (args: A, ctx) =>
+        callAndRememberViewing(
+          ctx.tabId,
+          { cmd: "graph_enter_subgraph", node_id: args.node_id },
+          (cmd, timeoutMs) => ctx.call(cmd, timeoutMs),
+          15000,
+        ),
     ),
     def(
       "panel_exit_subgraph",
       "Leave the current subgraph and return to the root graph (undo a panel_enter_subgraph). After this, panel_* tools target the root graph again.",
       {},
       async (_args, ctx) => {
-        const res = await ctx.call({ cmd: "graph_exit_subgraph" }, 15000);
+        const res = await callAndRememberViewing(
+          ctx.tabId,
+          { cmd: "graph_exit_subgraph" },
+          (cmd, timeoutMs) => ctx.call(cmd, timeoutMs),
+          15000,
+        );
         // #1468 — ONLY a no-reply is settled by a read. A genuine executor error
         // (the panel's own "could not confirm … no observation ever saw the canvas
         // there") is an ACKED reply the bridge received and relayed; it already
@@ -22545,7 +26277,9 @@ CHECKED FOR YOU: the graph read this message prescribes was just run, and it ` +
         // so re-deciding it from out here would overwrite a better-informed verdict
         // with a worse-informed one.
         if (!isReplyTimeoutResult(res)) return res;
-        return settleExitSubgraphAfterAckTimeout(ctx, res);
+        const settled = await settleExitSubgraphAfterAckTimeout(ctx, res);
+        if (!settled.isError) noteConfirmedViewingFromToolResult(ctx.tabId, settled);
+        return settled;
       },
     ),
     def(
@@ -22555,7 +26289,12 @@ CHECKED FOR YOU: the graph read this message prescribes was just run, and it ` +
         rail: z.enum(["input", "output"]).describe("Which boundary rail to move."),
         pos: xy().describe("New top-left [x, y] (two numbers)."),
       },
-      async (args: A, ctx) => ctx.call({ cmd: "graph_move_rail", rail: args.rail, pos: args.pos }),
+      async (args: A, ctx) =>
+        callWithRememberedSubgraph(
+          ctx.tabId,
+          { cmd: "graph_move_rail", rail: args.rail, pos: args.pos },
+          (cmd, timeoutMs) => ctx.call(cmd, timeoutMs),
+        ),
     ),
     def(
       "panel_promote_widget",
@@ -22566,7 +26305,17 @@ CHECKED FOR YOU: the graph read this message prescribes was just run, and it ` +
         demote: z.boolean().optional().describe("Set true to UN-promote (remove the widget from the parent node)."),
       },
       async (args: A, ctx) =>
-        ctx.call({ cmd: "graph_promote_widget", node_id: args.node_id, widget: args.widget, demote: args.demote }, 15000),
+        callWithRememberedSubgraph(
+          ctx.tabId,
+          {
+            cmd: "graph_promote_widget",
+            node_id: args.node_id,
+            widget: args.widget,
+            demote: args.demote,
+          },
+          (cmd, timeoutMs) => ctx.call(cmd, timeoutMs),
+          15000,
+        ),
     ),
     def(
       "panel_expose_subgraph_output",
@@ -22577,33 +26326,38 @@ CHECKED FOR YOU: the graph read this message prescribes was just run, and it ` +
         name: z.string().optional().describe("Optional name for the new subgraph output (boundary slot). Defaults from the source slot. IGNORED when the slot is already exposed — the reply carries reused:true and the existing name."),
       },
       async (args: A, ctx) =>
-        ctx.call(
+        callWithRememberedSubgraph(
+          ctx.tabId,
           {
             cmd: "graph_expose_subgraph_output",
             from_node_id: args.from_node_id,
             from_output: args.from_output,
             name: args.name,
           },
+          (cmd, timeoutMs) => ctx.call(cmd, timeoutMs),
           15000,
         ),
     ),
     def(
       "panel_expose_subgraph_input",
-      "Wire an interior node's INPUT to the subgraph's INPUT RAIL — i.e. expose it as a SUBGRAPH INPUT on the boundary so the PARENT graph can feed the subgraph node's new input slot. You MUST be INSIDE the subgraph first (panel_enter_subgraph). This is the correct way to wire an internal input to the subgraph's input rail: do NOT panel_connect to a guessed rail node id — call this with the interior node + the input you want exposed. Read panel_query_graph's `rails` to see the resulting boundary slots. `to_input` is an input slot NAME ('model', 'pixels') or numeric index. Optional `name` titles the new boundary input (defaults from the target slot) — but it is IGNORED when this slot is ALREADY exposed: the call then returns the existing boundary input unchanged, with `reused:true` and its ORIGINAL `name`. Check `reused` before relying on the name you asked for — there is currently NO tool that renames an existing boundary slot, so a name is only applied on FIRST exposure. Undoable with Ctrl+Z.",
+      "Wire an interior node's INPUT to the subgraph's INPUT RAIL — i.e. expose it as a SUBGRAPH INPUT on the boundary so the PARENT graph can feed the subgraph node's new input slot. You MUST be INSIDE the subgraph first (panel_enter_subgraph). This is the correct way to wire an internal input to the subgraph's input rail: do NOT panel_connect to a guessed rail node id — call this with the interior node + the input you want exposed. Read panel_query_graph's `rails` to see the resulting boundary slots. `to_input` is an input slot NAME ('model', 'pixels') or numeric index. Optional `name` titles the new boundary input (defaults from the target slot) — but it is IGNORED when this slot is ALREADY exposed: the call then returns the existing boundary input unchanged, with `reused:true` and its ORIGINAL `name`. Check `reused` before relying on the name you asked for — there is currently NO tool that renames an existing boundary slot, so a name is only applied on FIRST exposure. After Convert to Subgraph, Anything Everywhere? may keep its wildcard source as a live LiteGraph socket whose DISPLAY label is \"anything\" while the panel's name lookup only lists widget sockets such as group_regex (artokun/comfyui-mcp#2493). This tool retries against that live slot array (label / unique `*` wildcard) and will not expose a STRING widget socket as the virtual bus. Undoable with Ctrl+Z.",
       {
         to_node_id: nodeId().describe("Interior (inner) node id whose input to expose (from panel_query_graph while inside the subgraph)."),
         to_input: slotRef.describe("Input slot name (e.g. 'model', 'pixels') or numeric index on that node."),
         name: z.string().optional().describe("Optional name for the new subgraph input (boundary slot). Defaults from the target slot. IGNORED when the slot is already exposed — the reply carries reused:true and the existing name."),
       },
       async (args: A, ctx) =>
-        ctx.call(
-          {
-            cmd: "graph_expose_subgraph_input",
-            to_node_id: args.to_node_id,
-            to_input: args.to_input,
-            name: args.name,
-          },
-          15000,
+        retryExposeSubgraphInput(
+          { to_node_id: args.to_node_id, to_input: args.to_input, name: args.name },
+          (cmd, timeoutMs) =>
+            cmd.cmd === "graph_expose_subgraph_input"
+              ? callWithRememberedSubgraph(
+                  ctx.tabId,
+                  cmd,
+                  (inner, innerTimeout) => ctx.call(inner, innerTimeout),
+                  timeoutMs,
+                )
+              : ctx.call(cmd, timeoutMs),
         ),
     ),
     def(
@@ -22613,8 +26367,13 @@ CHECKED FOR YOU: the graph read this message prescribes was just run, and it ` +
         name: z.string().describe("Boundary output slot name (e.g. 'IMAGE') exactly as panel_query_graph lists it under rails.output.accepts_inputs — NOT a rail_node_id."),
       },
       async (args: A, ctx) => {
-        const res = await ctx.call({ cmd: "graph_unexpose_subgraph_output", name: args.name }, 15000);
-        return withUnexposeHostLinkShiftNote(res);
+        const res = await callWithRememberedSubgraph(
+          ctx.tabId,
+          { cmd: "graph_unexpose_subgraph_output", name: args.name },
+          (cmd, timeoutMs) => ctx.call(cmd, timeoutMs),
+          15000,
+        );
+        return withUnexposeHostLinkShiftNote(res, ctx);
       },
     ),
     def(
@@ -22624,8 +26383,13 @@ CHECKED FOR YOU: the graph read this message prescribes was just run, and it ` +
         name: z.string().describe("Boundary input slot name (e.g. 'model') exactly as panel_query_graph lists it under rails.input.provides_outputs — NOT a rail_node_id."),
       },
       async (args: A, ctx) => {
-        const res = await ctx.call({ cmd: "graph_unexpose_subgraph_input", name: args.name }, 15000);
-        return withUnexposeHostLinkShiftNote(res);
+        const res = await callWithRememberedSubgraph(
+          ctx.tabId,
+          { cmd: "graph_unexpose_subgraph_input", name: args.name },
+          (cmd, timeoutMs) => ctx.call(cmd, timeoutMs),
+          15000,
+        );
+        return withUnexposeHostLinkShiftNote(res, ctx);
       },
     ),
     def(
@@ -22636,12 +26400,15 @@ CHECKED FOR YOU: the graph read this message prescribes was just run, and it ` +
     ),
     def(
       "panel_search_nodes",
-      "Search installable custom-node packs via the user's BUILT-IN ComfyUI Manager (the same source the Manager UI uses). Returns matching packs {id, title, description}. Use the `id` with panel_install_node. Prefer this over the headless search_custom_nodes tool — it works against the user's actual (Desktop) Manager. If Manager's cache mappings endpoint returns HTTP 5xx, this retries remote/local and still searches; a remaining 5xx is a Manager outage, not proof the pack is missing.",
+      "Search installable custom-node packs via the user's BUILT-IN ComfyUI Manager (the same source the Manager UI uses). Returns matching packs {id, title, description}. Use the `id` with panel_install_node. Prefer this over the headless search_custom_nodes tool — it works against the user's actual (Desktop) Manager. If Manager's cache mappings endpoint returns HTTP 5xx, this retries remote/local and still searches; a remaining 5xx is a Manager outage, not proof the pack is missing. If the panel tab is live but the browser Manager request does not complete (Failed to fetch), the search is served from host Manager HTTP instead of dying as a transport error — that is a panel-origin failure, not a Manager outage.",
       { query: z.string().describe("Search text, e.g. 'kjnodes', 'controlnet', 'ipadapter'."), limit: z.number().int().min(1).max(40).optional().describe("Max results to return, 1-40 (default 15). Requests above 40 are refused; the panel also clamps to 40 and discloses limit_cap.") },
       async (args: A, ctx) => {
         // #1669 — the panel asks getmappings?mode=cache and used to fail the
         // whole search on HTTP 500. Degrade: retry remote/local, or name the
         // 500 as a Manager outage (not a missing pack).
+        // #2492 — a live tab whose browser Manager fetch never completed
+        // (Failed to fetch) is the same host-HTTP search, not a transport
+        // death and not a Manager outage.
         const query = String(args.query ?? "");
         const limit = typeof args.limit === "number" ? args.limit : undefined;
         const out = await searchPanelNodes({
@@ -22659,13 +26426,15 @@ CHECKED FOR YOU: the graph read this message prescribes was just run, and it ` +
     ),
     def(
       "panel_list_nodes",
-      "List the custom-node PACKS currently installed in the user's ComfyUI (via the built-in Manager). Takes no arguments — it returns the whole installed set. Read-only. This lists packs, NOT node classes: to find out whether a specific node type is available (e.g. LTXVContextWindowsGuideAware), use comfy_cli action:\"search_nodes\", which fuzzy-searches real node classes and falls back to the connected server's live /object_info. panel_search_nodes is a third thing again — it searches INSTALLABLE packs in the registry, not what is already here. If the panel tab is gone, the listing is served from the ComfyUI host's Manager HTTP instead of failing as a dispatch error.",
+      "List the custom-node PACKS currently installed in the user's ComfyUI (via the built-in Manager). Takes no arguments — it returns the whole installed set. Read-only. This lists packs, NOT node classes: to find out whether a specific node type is available (e.g. LTXVContextWindowsGuideAware), use comfy_cli action:\"search_nodes\", which fuzzy-searches real node classes and falls back to the connected server's live /object_info. panel_search_nodes is a third thing again — it searches INSTALLABLE packs in the registry, not what is already here. If the panel tab is gone, the listing is served from the ComfyUI host's Manager HTTP instead of failing as a dispatch error. If the tab is live but the browser Manager request does not complete (Failed to fetch), the same host HTTP listing is used; that is a panel-origin transport failure, not a Manager outage.",
       {},
       async (_args, ctx) => {
         // #2459 — pack listing is a Manager / object_info server-state read.
         // Try the live tab first (Manager dialect + /object_info + #1496
         // filter). When dispatch never reaches the tab, serve the same
         // inventory from host Manager HTTP instead of dying as tab-loss.
+        // #2492 — a live tab whose browser Manager fetch never completed
+        // is the same host listing; do not call that a Manager outage.
         const out = await listPanelNodes({
           panelList: () => ctx.call({ cmd: "nodes_list" }, 20000),
         });
@@ -22779,13 +26548,30 @@ CHECKED FOR YOU: the graph read this message prescribes was just run, and it ` +
       "Check the built-in Manager's install/update queue status (to see if a queued install finished). Read-only. " +
         "A drained queue (total_count: 0, is_processing: false) only means THIS queue is idle — " +
         "it does not include apply_manifest custom_nodes that were never submitted (#1699). " +
-        "When apply_manifest returned a PARTIAL INSTALL, this tool names the leftover entries and " +
-        "sets queue_complete_for_apply_manifest:false; do not restart ComfyUI until those are " +
-        "submitted (re-run apply_manifest).",
+        "When apply_manifest returned a PARTIAL INSTALL, this tool names the outstanding entries and " +
+        "sets queue_complete_for_apply_manifest:false; do not treat queue idle as completion until " +
+        "those entries are verified (re-run apply_manifest only when the result authorizes it).",
       {},
       async (_args, ctx) => {
+        const targetBeforePoll = ctx.manifestOutcomeTarget?.();
         const res = await ctx.call({ cmd: "nodes_queue_status" }, 20000);
-        return annotateQueueStatusWithManifestPartial(res);
+        const targetAfterPoll = ctx.manifestOutcomeTarget?.();
+        // A status reply that crosses a retarget boundary is not attributable to
+        // either instance. Fail closed instead of annotating it with the old
+        // instance's partial.
+        if (
+          !targetBeforePoll ||
+          !targetAfterPoll ||
+          targetBeforePoll.generation !== targetAfterPoll.generation ||
+          targetBeforePoll.url !== targetAfterPoll.url
+        ) {
+          return res;
+        }
+        return annotateQueueStatusWithManifestPartial(
+          res,
+          targetBeforePoll,
+          ctx.manifestOutcomeScope,
+        );
       },
     ),
     def(
@@ -22823,6 +26609,11 @@ CHECKED FOR YOU: the graph read this message prescribes was just run, and it ` +
         // awaits. The proxy is never treated as a ComfyUI process; it only lets
         // the tab-scoped Manager request be observed against the immutable backend.
         let proxyRestartTarget: VerifiedProxyRestartTarget | undefined;
+        // #2068: a Panel may front a concrete local Desktop port selected after
+        // this MCP process started. This binding authorizes only the Panel's
+        // authenticated relative Manager dispatch; it is never a health or
+        // headless-restart target.
+        let panelRestartTarget: string | undefined;
         // #1819: resolve instance identity BEFORE the confirmation card. Asking the
         // user to confirm a restart, then refusing because we cannot tell which
         // ComfyUI this tab fronts, is two contradictory outcomes (timeout vs refuse)
@@ -22842,11 +26633,14 @@ CHECKED FOR YOU: the graph read this message prescribes was just run, and it ` +
             if (proxyTargetBindsPanel(ctx, candidate)) {
               proxyRestartTarget = candidate;
             }
+            if (proxyRestartTarget == null) {
+              panelRestartTarget = currentPanelRestartTarget(ctx) ?? undefined;
+            }
             const tabStillHere =
               typeof ctx.bridge?.canReach === "function"
                 ? ctx.bridge.canReach(ctx.tabId) === true
                 : true;
-            if (tabStillHere && proxyRestartTarget == null) {
+            if (tabStillHere && proxyRestartTarget == null && panelRestartTarget == null) {
               return restartRefusedPreservingBinding(
                 ctx,
                 unboundLocalRestartRefusalNote(ctx, identityHealthBase, identityBinding.blocker),
@@ -23637,11 +27431,19 @@ CHECKED FOR YOU: the graph read this message prescribes was just run, and it ` +
             ? refreshedProxy
             : undefined;
         }
+        if (proxyRestartTarget == null && panelRestartTarget != null) {
+          const refreshedPanelTarget = currentPanelRestartTarget(ctx);
+          panelRestartTarget =
+            refreshedPanelTarget != null && sameHttpBase(refreshedPanelTarget, panelRestartTarget)
+              ? refreshedPanelTarget
+              : undefined;
+        }
         const preflightBinding = resolveRebootHealthBinding(ctx);
         const preflightHealthBase =
-          proxyRestartTarget?.backendBase ?? preflightBinding.base;
+          proxyRestartTarget?.backendBase ?? panelRestartTarget ?? preflightBinding.base;
         const preflightBound =
           proxyRestartTarget != null ||
+          panelRestartTarget != null ||
           (preflightHealthBase != null &&
             sameHttpBase(getComfyUIBaseUrl(), preflightHealthBase));
         // #848: what the instance was OBSERVED running with, taken from the preflight
@@ -23708,10 +27510,15 @@ CHECKED FOR YOU: the graph read this message prescribes was just run, and it ` +
           }
           ctx.ensureReachable?.();
           const postPreflightHealthBase = captureRebootHealthBase(ctx);
+          const postPreflightPanelTarget =
+            panelRestartTarget != null ? currentPanelRestartTarget(ctx) : null;
           const tabFrontsSameInstance =
             proxyRestartTarget != null ||
-            (postPreflightHealthBase != null &&
-              sameHttpBase(preflightHealthBase, postPreflightHealthBase));
+            (panelRestartTarget != null
+              ? postPreflightPanelTarget != null &&
+                sameHttpBase(preflightHealthBase, postPreflightPanelTarget)
+              : postPreflightHealthBase != null &&
+                sameHttpBase(preflightHealthBase, postPreflightHealthBase));
           const configStable =
             proxyRestartTarget != null
               ? getComfyuiTargetGeneration() === proxyRestartTarget.generation
@@ -23804,6 +27611,13 @@ CHECKED FOR YOU: the graph read this message prescribes was just run, and it ` +
             preflightArgvGeneration = proxyRestartTarget.generation;
           }
         }
+        if (proxyRestartTarget == null && panelRestartTarget != null) {
+          const dispatchPanelTarget = currentPanelRestartTarget(ctx);
+          panelRestartTarget =
+            dispatchPanelTarget != null && sameHttpBase(dispatchPanelTarget, panelRestartTarget)
+              ? dispatchPanelTarget
+              : undefined;
+        }
         const healthBase =
           proxyRestartTarget?.backendBase ?? captureRebootHealthBase(ctx);
         // THE BINDING RULE APPLIES AT THE DISPATCH POINT, NOT ONLY BEFORE THE AWAIT.
@@ -23820,7 +27634,9 @@ CHECKED FOR YOU: the graph read this message prescribes was just run, and it ` +
         // instance this server accounts for is refused.
         const dispatchBound =
           proxyRestartTarget != null ||
-          (healthBase != null && sameHttpBase(getComfyUIBaseUrl(), healthBase));
+          (healthBase != null && sameHttpBase(getComfyUIBaseUrl(), healthBase)) ||
+          (panelRestartTarget != null &&
+            sameHttpBase(getComfyUIBaseUrl(), panelRestartTarget));
         if (!dispatchBound && !isRemoteMode() && !isCloudMode()) {
           return restartRefusedPreservingBinding(
             ctx,
@@ -25214,6 +29030,9 @@ export function createPanelMcpServer(
   tabId: string,
   workflowTargets?: WorkflowTargetStore,
   onRunTicketOpened?: (promptIds: readonly string[]) => void,
+  manifestOutcomeTarget?: () =>
+    | { url: string; generation: number }
+    | undefined,
 ): McpSdkServerConfigWithInstance {
   // #2311 — record whether this agent was handed the user's own MCP servers, so
   // panel_list_mcp / panel_add_mcp report the session and not the config file.
@@ -25233,6 +29052,8 @@ export function createPanelMcpServer(
     keyBackend === undefined ? undefined : backendInheritsUserMcpServers(keyBackend);
   const ctx = makePanelToolCtx(bridge, tabId, workflowTargets, onRunTicketOpened, {
     inheritsUserMcpServers,
+    manifestOutcomeScope: tabId,
+    ...(manifestOutcomeTarget ? { manifestOutcomeTarget } : {}),
     // Snapshot the names THIS spawn was given, not the file. makeAgent() builds
     // `mcpServers` (which re-reads ~/.claude.json) and `panelServer` (this call)
     // as two properties of one synchronous object literal, so these are the same

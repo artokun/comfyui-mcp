@@ -6,17 +6,18 @@ import type { SystemStats } from "../comfyui/types.js";
 import { ComfyUIError, errorToToolResult } from "../utils/errors.js";
 import { bodyPrefixOf, describeStatus } from "../comfyui/json-guard.js";
 import { logger } from "../utils/logger.js";
+import {
+  settleUntilStable,
+  VRAM_OCCUPIED_FREE_RATIO,
+  VRAM_OCCUPIED_MIN_TOTAL_BYTES,
+} from "../services/vram-settle.js";
+import type { SettledRead } from "../services/vram-settle.js";
 
-/** Poll interval between /system_stats reads after /free (#2050). */
-export const CLEAR_VRAM_SETTLE_INTERVAL_MS = 250;
-/** Do not treat an unchanged first reading as settled — CUDA may not have started releasing yet. */
-export const CLEAR_VRAM_SETTLE_MIN_MS = 1_000;
-/** Hard cap so a card that never plateaus still returns a number. */
-export const CLEAR_VRAM_SETTLE_TIMEOUT_MS = 5_000;
-
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
+export {
+  VRAM_SETTLE_INTERVAL_MS as CLEAR_VRAM_SETTLE_INTERVAL_MS,
+  VRAM_SETTLE_MIN_MS as CLEAR_VRAM_SETTLE_MIN_MS,
+  VRAM_SETTLE_TIMEOUT_MS as CLEAR_VRAM_SETTLE_TIMEOUT_MS,
+} from "../services/vram-settle.js";
 
 /** The counters `clear_vram` prints — device 0's VRAM + torch pool. */
 function vramSignature(stats: SystemStats): string {
@@ -25,57 +26,109 @@ function vramSignature(stats: SystemStats): string {
   return `${gpu.vram_free}:${gpu.torch_vram_free}`;
 }
 
-function formatVramStats(stats: SystemStats): string {
+/**
+ * The DRIVER counter alone — the one whose release lags (#2704).
+ *
+ * Deliberately not `vramSignature`: torch gives its pool back in ~400ms while
+ * `vram_free` can stay frozen for seconds, so a combined signature moves on
+ * torch's schedule and would certify the driver as released while it is still
+ * holding ~29 GB. That is the reported bug, and testing movement against the
+ * combined signature would reintroduce it.
+ */
+function vramReleaseSignature(stats: SystemStats): ReadonlyMap<string, string> {
+  const gpu = stats.devices?.[0];
+  if (!gpu) return new Map();
+  return new Map([[`${gpu.index ?? gpu.name ?? "0"}`, `${gpu.vram_free}`]]);
+}
+
+function formatVramStats(stats: SystemStats, settled = true): string {
   const gpu = stats.devices?.[0];
   if (!gpu) return "";
   const vramFreeMB = (gpu.vram_free / 1024 / 1024).toFixed(0);
   const vramTotalMB = (gpu.vram_total / 1024 / 1024).toFixed(0);
   const torchFreeMB = (gpu.torch_vram_free / 1024 / 1024).toFixed(0);
   const torchTotalMB = (gpu.torch_vram_total / 1024 / 1024).toFixed(0);
-  return `\n\nCurrent VRAM: ${vramFreeMB}/${vramTotalMB} MB free | Torch: ${torchFreeMB}/${torchTotalMB} MB free`;
+  // #2704 — the unconfirmed reading is the one that misleads: it UNDERSTATES
+  // free VRAM, so it reads as an imminent OOM on a card that is actually empty.
+  // Print it (it is the best number we have) but never as a measured result.
+  const caveat = settled
+    ? ""
+    : ` (the card had not finished releasing when this was read — re-check with` +
+      ` get_system_stats (action:"stats") before sizing a model load against it)`;
+  return `\n\nCurrent VRAM: ${vramFreeMB}/${vramTotalMB} MB free | Torch: ${torchFreeMB}/${torchTotalMB} MB free${caveat}`;
+}
+
+/**
+ * The signature the post-/free poll must move AWAY from, or null to skip the
+ * wait entirely.
+ *
+ * #2704 — a full unload is only EXPECTED to move the driver's number when the
+ * card is actually holding memory. On a card that is already mostly free there
+ * is nothing to wait for, and demanding movement that will never come would
+ * spend the whole settle cap on the common speculative `clear_vram`. So the
+ * wait is armed by the same "occupied" rule the panel applies to these very
+ * counters, and an idle card keeps exactly today's fast path.
+ *
+ * Device 0 only, deliberately: `formatVramStats` prints device 0's counters, so
+ * device 0's release is exactly what backs the number being reported. Proving a
+ * second card released would not make the printed figure any more true.
+ */
+function settleBaselineOf(before: SystemStats | null): ReadonlyMap<string, string> | null {
+  const gpu = before?.devices?.[0];
+  if (!gpu) return null;
+  const free = gpu.vram_free;
+  const total = gpu.vram_total;
+  if (!Number.isFinite(free) || !Number.isFinite(total)) return null;
+  if (total < VRAM_OCCUPIED_MIN_TOTAL_BYTES) return null;
+  if (free > total * VRAM_OCCUPIED_FREE_RATIO) return null;
+  const keys = vramReleaseSignature(before as SystemStats);
+  return keys.size > 0 ? keys : null;
+}
+
+/** Best effort — a baseline we cannot read costs precision, never the clear. */
+async function readVramBaseline(): Promise<SystemStats | null> {
+  try {
+    return await getSystemStats();
+  } catch {
+    return null;
+  }
 }
 
 /**
  * /free answers when ComfyUI drops model refs; CUDA/driver release can lag.
  * Poll until the displayed counters stop changing (or we hit the cap) so the
  * printed value matches a follow-up get_system_stats (action:"stats") (#2050).
+ *
+ * #2704 — "stopped changing" is not on its own evidence of a release, because a
+ * release that has not STARTED is equally still. `baseline` is the pre-/free
+ * reading the poll must move away from before a plateau counts.
  */
-async function readSettledSystemStats(): Promise<SystemStats | null> {
-  const started = Date.now();
-  const deadline = started + CLEAR_VRAM_SETTLE_TIMEOUT_MS;
-  let last: SystemStats | null = null;
-  let lastSig: string | null = null;
-  let sawChange = false;
-
-  for (;;) {
-    let current: SystemStats;
-    try {
-      current = await getSystemStats();
-    } catch {
-      // A prior sample is not a valid substitute for the current one: /free may
-      // have released memory between the two reads, so returning `last` would
-      // print a known-stale VRAM figure as if it were current.
-      return null;
-    }
-
-    const sig = vramSignature(current);
-    const elapsed = Date.now() - started;
-    if (lastSig !== null && sig !== lastSig) sawChange = true;
-    const stable = lastSig !== null && sig === lastSig;
-    last = current;
-    lastSig = sig;
-
-    if (stable && (sawChange || elapsed >= CLEAR_VRAM_SETTLE_MIN_MS)) {
-      return current;
-    }
-    if (elapsed >= CLEAR_VRAM_SETTLE_TIMEOUT_MS) {
-      return current;
-    }
-
-    const wait = Math.min(CLEAR_VRAM_SETTLE_INTERVAL_MS, Math.max(0, deadline - Date.now()));
-    if (wait <= 0) return current;
-    await sleep(wait);
-  }
+async function readSettledSystemStats(
+  before: SystemStats | null,
+  releaseRequested: boolean,
+): Promise<SettledRead<SystemStats>> {
+  return settleUntilStable(
+    async () => {
+      try {
+        return await getSystemStats();
+      } catch {
+        return null;
+      }
+    },
+    vramSignature,
+    {
+      // Only wait for movement we actually ASKED for. `/free` with both flags
+      // off releases nothing, so an occupied card would sit out the whole cap
+      // and then be told it "had not finished releasing" — a wait and a warning
+      // for an operation that was never going to move the number.
+      baseline: releaseRequested ? settleBaselineOf(before) : null,
+      progressOf: vramReleaseSignature,
+      // A baseline we could not READ is not the same as having nothing to
+      // prove. Both arrive here without keys to check, but only the second may
+      // be published as a measured figure.
+      confirmable: !releaseRequested || before !== null,
+    },
+  );
 }
 
 export function registerMemoryManagementTools(server: McpServer): void {
@@ -96,6 +149,12 @@ export function registerMemoryManagementTools(server: McpServer): void {
     },
     async (args) => {
       try {
+        // Sample BEFORE the mutation (#2704). A baseline taken after /free is
+        // useless: on a lagging driver the first post-/free sample IS the stale
+        // pre-release value, so it can never show the release landing. Read
+        // failures degrade to null, which restores the pre-#2704 behaviour
+        // rather than failing the clear.
+        const before = await readVramBaseline();
 
         // ComfyUI's /free endpoint accepts POST with JSON body
         const res = await comfyApiFetch("/free", {
@@ -129,8 +188,13 @@ export function registerMemoryManagementTools(server: McpServer): void {
         // Get updated stats — after CUDA release settles, not the first post-/free sample.
         let statsText = "";
         try {
-          const stats = await readSettledSystemStats();
-          if (stats) statsText = formatVramStats(stats);
+          const settledRead = await readSettledSystemStats(
+            before,
+            args.unload_models === true || args.free_memory === true,
+          );
+          if (settledRead.value) {
+            statsText = formatVramStats(settledRead.value, settledRead.settled);
+          }
         } catch {
           // Best effort
         }

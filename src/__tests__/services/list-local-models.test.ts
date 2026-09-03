@@ -53,6 +53,17 @@ vi.mock("node:fs/promises", () => ({
   utimes: vi.fn(),
 }));
 
+const extraRoots = vi.hoisted(() => ({
+  current: [] as Array<{ category: string; dir: string; group: string }>,
+}));
+vi.mock("../../services/extra-paths.js", async (importOriginal) => {
+  const real = await importOriginal<typeof import("../../services/extra-paths.js")>();
+  return {
+    ...real,
+    getExtraModelRoots: async () => extraRoots.current,
+  };
+});
+
 const { config } = await import("../../config.js");
 const { listLocalModels } = await import("../../services/model-resolver.js");
 
@@ -68,6 +79,7 @@ beforeEach(() => {
   mode.remote = false;
   mode.generation = 0;
   mode.baseUrl = "http://127.0.0.1:8188";
+  extraRoots.current = [];
 });
 
 afterEach(() => {
@@ -630,5 +642,53 @@ describe("#962: weights under an UNKNOWN registered category are found", () => {
     const result = await listLocalModels("checkpoints");
     expect(result).toHaveLength(1);
     expect(queried).not.toContain("/models");
+  });
+
+  it("#2480: filtered unet 404 still surfaces unet_gguf REST listing", async () => {
+    getClient.mockReturnValue({ fetchApi });
+    fetchApi.mockImplementation(async (path: string) => {
+      if (path === "/models/unet") return new Response("", { status: 404 });
+      if (path === "/models/unet_gguf") {
+        return new Response(JSON.stringify(["z_image_turbo-Q8_0.gguf"]), { status: 200 });
+      }
+      return new Response("[]", { status: 200 });
+    });
+    const result = await listLocalModels("unet");
+    expect(result).toEqual([
+      {
+        name: "z_image_turbo-Q8_0.gguf",
+        path: "unet_gguf/z_image_turbo-Q8_0.gguf",
+        size: 0,
+        modified: "",
+        type: "unet_gguf",
+      },
+    ]);
+    expect(readdir).not.toHaveBeenCalled();
+  });
+
+  it("#2480: unet REST 404 still lists GGUF from extra_model_paths unet dir", async () => {
+    extraRoots.current = [
+      { category: "unet", dir: "/shared/models/unet", group: "desktop" },
+    ];
+    getClient.mockReturnValue({ fetchApi });
+    fetchApi.mockImplementation(async (path: string) =>
+      path === "/models/unet" || path === "/models/unet_gguf"
+        ? new Response("", { status: 404 })
+        : new Response("[]", { status: 200 }),
+    );
+    readdir.mockImplementation(async (dir: string) => {
+      const s = String(dir).replace(/\\/g, "/");
+      return s.endsWith("/shared/models/unet") ? ["z_image_turbo-Q8_0.gguf"] : [];
+    });
+    stat.mockResolvedValue({
+      isFile: () => true,
+      size: 42,
+      mtime: new Date("2026-08-30T00:00:00Z"),
+    });
+
+    const result = await listLocalModels("unet");
+    expect(result.some((m) => m.name === "z_image_turbo-Q8_0.gguf" && m.type === "unet")).toBe(
+      true,
+    );
   });
 });

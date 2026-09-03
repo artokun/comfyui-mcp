@@ -272,17 +272,23 @@ import { readComfyuiCrashLog, formatCrashNote } from "../services/crash-log.js";
 import { QueueMonitor } from "../services/queue-monitor.js";
 import { formatQueueNote } from "./queue-note.js";
 import {
+  liveStallSecondsValue,
+  setLiveStallSeconds,
+  stallThresholdMs,
+} from "../services/stall-threshold.js";
+import {
   RunCompletions,
   describe as describeCorrelation,
   type CompletionPayload,
 } from "./run-completion-journal.js";
+import { buildCompletionReceipt, canonicalPromptId } from "./completion-receipt.js";
 import {
   RunCompletionIdempotencyFence,
   scheduleRunCompletion,
 } from "./run-completion-idempotency.js";
 import {
   createRunCompletionWatchdog,
-  resolveHistoryCompletionImages,
+  resolveHistoryCompletion,
   resolveHistoryCompletionStatus,
   type RunCompletionWatchdog,
 } from "./run-completion-watchdog.js";
@@ -290,6 +296,7 @@ import { AskAnswers, preview as previewQuestion } from "./ask-answer-journal.js"
 import { initRunpodWatcher, getRunpodWatcher, type RunpodStatusFrame, type RunpodAlertFrame } from "../services/runpod-watch.js";
 import { getPod } from "../services/runpod-client.js";
 import { listTargetChangeRequests, consumeTargetChange, ackTargetChange, setProgressDir, CONTROL_PREFIX, newestAttemptEpochs, isSupersededAttempt, downloadAttemptKey, markSupersededByLive, migrateInFlightJobs } from "../services/download-progress.js";
+import { configureManifestOutcomeReader } from "../services/manifest-outcome-channel.js";
 import { hasActiveTrainingJob, reconcileStaleTrainingJobs } from "../services/training-jobs.js";
 import {
   buildQueueStatusFrame,
@@ -583,24 +590,10 @@ const HEADLESS_DIRECTIVE =
   "missing models (exact file + the widget holding it) and missing node types that the list action omits, in one call. It is " +
   "the canvas-less equivalent of the panel's \"why is this red?\", so also do NOT try panel_get_errors here.";
 
-/** Live stall threshold (seconds) pushed from the panel setting via a `set_config`
- *  frame — applies WITHOUT a reconnect. null = not set, fall back to env then the
- *  built-in default. Process-global: one ComfyUI per orchestrator. */
-let liveStallSeconds: number | null = null;
-function setLiveStallSeconds(v: unknown): void {
-  const n = Number(v);
-  liveStallSeconds = Number.isFinite(n) && n > 0 ? Math.min(3600, Math.max(15, Math.round(n))) : null;
-}
-
-/** Stall threshold (ms): a running job with no node/progress advance for this long
- *  is treated as stalled. Video steps are legitimately slow, so the DEFAULT is high
- *  (180s). Precedence: live panel setting (set_config) → COMFYUI_MCP_STALL_S env
- *  (spawn value) → 180s default. */
-function stallThresholdMs(): number {
-  if (liveStallSeconds != null) return liveStallSeconds * 1000;
-  const s = Number(process.env.COMFYUI_MCP_STALL_S);
-  return Number.isFinite(s) && s > 0 ? Math.round(s * 1000) : 180000;
-}
+// #2684 — the stall threshold moved to services/stall-threshold.ts so the
+// queue-busy notes in panel-tools.ts read the SAME number this file does. While
+// it was private here, those notes could assert a run was live at a moment this
+// file was already calling the server dark.
 
 /**
  * Lockfile path for a given bridge port. The orchestrator self-registers its
@@ -1339,6 +1332,15 @@ export async function runPanelOrchestrator(): Promise<void> {
   // whatever ComfyUI (local or a RunPod proxy) the browser is actually on. No
   // `connect <url>` needed.
   let comfyuiUrl = process.env.COMFYUI_URL ?? "http://127.0.0.1:8188";
+  // Queue-status annotations use this orchestrator-owned target state rather
+  // than re-reading config's mutable global URL inside a poll. Retarget events
+  // update it synchronously before any new child is spawned or status reply is
+  // annotated; a poll that crosses the update is rejected by its generation
+  // check in panel-tools.
+  let manifestOutcomeTarget = {
+    url: comfyuiUrl,
+    generation: getComfyuiTargetGeneration(),
+  };
   // Dead-target guard: a `connect` aimed at a TERMINATED pod (an old URL
   // recalled from shell history) otherwise looks perfectly alive — bridge up,
   // tunnel up — while its advertise goes to a dead host, so the panel never
@@ -1820,6 +1822,17 @@ export async function runPanelOrchestrator(): Promise<void> {
   // #2149 — a child may write to the shared progress directory, so its tab
   // identity must never come from request JSON. Capabilities are minted here,
   // injected into the child environment, and resolved only by this process.
+  const manifestOutcomeCredentials = new Map<string, { secret: string; scope: string }>();
+  const manifestOutcomeSecretByAgent = new Map<string, string>();
+  const manifestOutcomeSecretFor = (agentKey: string): string => {
+    const existing = manifestOutcomeSecretByAgent.get(agentKey);
+    if (existing) return existing;
+    const secret = randomBytes(32).toString("hex");
+    manifestOutcomeSecretByAgent.set(agentKey, secret);
+    manifestOutcomeCredentials.set(agentKey, { secret, scope: agentKey });
+    return secret;
+  };
+  configureManifestOutcomeReader(progressDir, () => manifestOutcomeCredentials.values());
   const panelImageRelaySecrets = new Map<string, string>();
   const panelImageRelaySecretFor = (agentKey: string): string => {
     const existing = [...panelImageRelaySecrets.entries()].find(([, key]) => key === agentKey)?.[0];
@@ -1865,6 +1878,25 @@ export async function runPanelOrchestrator(): Promise<void> {
       bridge,
       resolvePanelAgent: panelImageRelayAgentFor,
       resolvePanelTab: scopeToRealTab,
+      resolveCurrentTarget: () => ({
+        url: getComfyUIBaseUrl(),
+        generation: getComfyuiTargetGeneration(),
+      }),
+      resolvePanelTarget: (tabId) => {
+        // The hello URL names the exact target (including a mounted base path),
+        // while the WS Origin independently corroborates its server origin.
+        // Require both before allowing a targetless bridge command to use this
+        // tab; neither missing nor contradictory identity is safe to guess.
+        const tabOrigin = bridge.tabOrigin(tabId);
+        const serverOrigin = bridge.tabServerOrigin(tabId);
+        const claimedOrigin = canonicalOrigin(tabOrigin);
+        const observedOrigin = canonicalOrigin(serverOrigin);
+        if (!tabOrigin || !serverOrigin || !claimedOrigin || claimedOrigin !== observedOrigin) return undefined;
+        return {
+          url: tabOrigin,
+          generation: getComfyuiTargetGeneration(),
+        };
+      },
     });
     panelImageRelayEndpoint = panelImageRelayServer.endpointUrl;
   } catch (error) {
@@ -1904,6 +1936,28 @@ export async function runPanelOrchestrator(): Promise<void> {
     // The provider-switch pin invalidation judges a pin by where the BRIDGE
     // routes it (path-compressed migration aliases included) — codex gate 4.
     liveTabOf: (tab) => bridge.liveTabIdFor(tab),
+    // #1001 — mixed-origin inherit: last established origin if it still
+    // routes, else the current/unique live canvas so graph tools do not need
+    // a manual rebind after reconnect re-delivers several workflow events.
+    currentTabOf: (key) => {
+      const active = bridge.liveLastActiveTabId();
+      if (!active || bridge.isHeadless(active)) return undefined;
+      return backendForTab(active) === backendOf(key) ? active : undefined;
+    },
+    uniqueLiveTabOf: (key) => {
+      const backend = backendOf(key);
+      const interactive = bridge
+        .tabs()
+        .map((t) => t.tab_id)
+        .filter((t) => !bridge.isHeadless(t));
+      const eligible = interactive.filter((t) => backendForTab(t) === backend);
+      if (eligible.length === 1) return eligible[0];
+      if (eligible.length === 0 && interactive.length === 1) return interactive[0];
+      return undefined;
+    },
+    claimTab: (tab, backend) => {
+      tabBackends.set(tab, backend);
+    },
     warn: (msg) => logger.warn(msg),
   });
   // #884 — ROUTING for agent output: every connected tab participating in this
@@ -2251,6 +2305,12 @@ export async function runPanelOrchestrator(): Promise<void> {
         "127.0.0.1",
         workflowTargets,
         (promptIds) => runCompletionWatchdog?.markTicketed(promptIds),
+        // The HTTP lane is keyed by the backend-qualified agent address already
+        // (makeHttpBackendMcpServers passes `key` to urlFor). Preserve that exact
+        // scope for the signed outcome reader; agentKeyFor() expects a real panel
+        // tab id and would remap non-default lanes to the wrong credential.
+        (agentKey) => agentKey,
+        () => manifestOutcomeTarget,
       );
     } catch (err) {
       logger.error(
@@ -2326,6 +2386,8 @@ export async function runPanelOrchestrator(): Promise<void> {
         // downloads resolved to nobody and the owning conversation stalled).
         // `tabId` here IS the agent key (the scope address the lane binds).
         COMFYUI_MCP_TAB: tabId,
+        COMFYUI_MCP_TARGET_GENERATION: String(getComfyuiTargetGeneration()),
+        COMFYUI_MCP_MANIFEST_OUTCOME_SECRET: manifestOutcomeSecretFor(tabId),
         COMFYUI_MCP_RELAY_SECRET: panelImageRelaySecretFor(tabId),
         ...(panelImageRelayEndpoint ? { COMFYUI_MCP_RELAY_URL: panelImageRelayEndpoint } : {}),
         ...(panelTemplateRelayEndpoint
@@ -2667,10 +2729,14 @@ export async function runPanelOrchestrator(): Promise<void> {
         COMFYUI_URL: comfyuiUrl,
         // Where download_model writes live progress for the panel tray.
         COMFYUI_MCP_PROGRESS_DIR: progressDir,
+        COMFYUI_MCP_TARGET_GENERATION: String(getComfyuiTargetGeneration()),
         // Self-scope downloads to the owning CONVERSATION (#547/#884) — the
         // child stamps its own COMFYUI_MCP_TAB into each progress row, and the
         // settle path resolves an agent-key-shaped stamp directly.
         ...(agentKey ? { COMFYUI_MCP_TAB: agentKey } : {}),
+        ...(agentKey
+          ? { COMFYUI_MCP_MANIFEST_OUTCOME_SECRET: manifestOutcomeSecretFor(agentKey) }
+          : {}),
         ...(agentKey ? { COMFYUI_MCP_RELAY_SECRET: panelImageRelaySecretFor(agentKey) } : {}),
         ...(agentKey && panelImageRelayEndpoint ? { COMFYUI_MCP_RELAY_URL: panelImageRelayEndpoint } : {}),
         ...(agentKey && panelTemplateRelayEndpoint
@@ -2712,6 +2778,7 @@ export async function runPanelOrchestrator(): Promise<void> {
             key,
             workflowTargets,
             (promptIds) => runCompletionWatchdog?.markTicketed(promptIds),
+            () => manifestOutcomeTarget,
           )
         : undefined,
     mcpServers: buildMcpServers(),
@@ -4877,12 +4944,12 @@ export async function runPanelOrchestrator(): Promise<void> {
     // live ollama sessions keep their connection until restarted.
     if (event.type === "set_config" && event.tab_id) {
       if ("stall_seconds" in event) {
-        const _prevStall = liveStallSeconds;
+        const _prevStall = liveStallSecondsValue();
         setLiveStallSeconds((event as { stall_seconds?: unknown }).stall_seconds);
         // The panel re-sends set_config on every heartbeat; only log an ACTUAL change.
-        if (liveStallSeconds !== _prevStall) {
+        if (liveStallSecondsValue() !== _prevStall) {
           logger.info(
-            `[panel-orchestrator] live stall threshold → ${liveStallSeconds ?? "default"}s`,
+            `[panel-orchestrator] live stall threshold → ${liveStallSecondsValue() ?? "default"}s`,
           );
         }
       }
@@ -5519,44 +5586,67 @@ export async function runPanelOrchestrator(): Promise<void> {
           ev.completion_key.length <= 512
             ? ev.completion_key
             : null;
+        const promptId = canonicalPromptId(ev.prompt_id);
+        // Correlation and Panel removal both use the trimmed spelling. Keep the
+        // journal payload on that same representation so a lost-ack replay can
+        // hit the duplicate fence instead of creating a second agent turn.
+        const completionPayload =
+          promptId !== undefined
+            ? ev.prompt_id === promptId
+              ? evForTab
+              : { ...evForTab, prompt_id: promptId }
+            : typeof ev.prompt_id === "string"
+              ? (() => {
+                  const { prompt_id: _whitespaceOnlyPromptId, ...withoutPromptId } = evForTab;
+                  return withoutPromptId;
+                })()
+              : evForTab;
         const alreadyKnown =
           completionKey !== null &&
-          typeof ev.prompt_id === "string" &&
+          promptId !== undefined &&
           RunCompletions.hasCompletionReceipt(completionKey, {
-            promptId: ev.prompt_id,
+            promptId,
             key: event.tab_id,
             conversation: agentKeyFor(event.tab_id),
           });
         const entry = alreadyKnown
           ? null
-          : RunCompletions.record(event.tab_id, evForTab as CompletionPayload, {
+          : RunCompletions.record(event.tab_id, blindStrippedCompletion(completionPayload as CompletionPayload), {
               conversation: agentKeyFor(event.tab_id),
             });
+        // #2591 — `completion_key` is unavailable on older/replayed panel
+        // frames, so the durable fence cannot identify an already-acked run.
+        // The journal has nevertheless proved the exact current ticket
+        // generation and ownership; consume that verdict before the flush can
+        // create another agent turn. Unprovable, foreign, and genuinely pending
+        // entries remain on the normal replay path.
+        if (entry?.alreadyDelivered) {
+          RunCompletions.suppressAlreadyDelivered(entry.token);
+        }
         const receiptAccepted =
           completionKey !== null &&
-          typeof ev.prompt_id === "string" &&
-          ev.prompt_id.length > 0 &&
+          promptId !== undefined &&
           RunCompletions.acceptsCompletionReceipt(
             completionKey,
-            ev.prompt_id,
+            promptId,
             event.tab_id,
             agentKeyFor(event.tab_id),
           );
-        if (receiptAccepted) {
-          bridge.push(
-            {
-              type: "ack",
-              ok: true,
-              kind: "completion",
-              prompt_id: ev.prompt_id,
-              completion_key: completionKey,
-            },
-            event.tab_id,
-          );
+        // #2700 / Panel #925 recurrence — the frame has reached the journal
+        // even when the ownership gate refuses its receipt. Tell the panel
+        // that explicitly so it retires the transport retry instead of
+        // spending its bounded replay budget on a frame we already hold.
+        const completionReceipt = buildCompletionReceipt(
+          promptId,
+          completionKey,
+          receiptAccepted,
+        );
+        if (completionReceipt) {
+          bridge.push(completionReceipt, event.tab_id);
         }
         logger.info(
           entry
-            ? `[panel-orchestrator] tab ${event.tab_id.slice(0, 8)} run completion for ${describeCorrelation(entry.correlation)}${entry.possibleRepeat ? " (flagged as a possible repeat)" : ""}`
+            ? `[panel-orchestrator] tab ${event.tab_id.slice(0, 8)} run completion for ${describeCorrelation(entry.correlation)}${entry.alreadyDelivered ? " (suppressed as already delivered)" : entry.possibleRepeat ? " (flagged as a possible repeat)" : ""}`
             : `[panel-orchestrator] tab ${event.tab_id.slice(0, 8)} replayed an acknowledged run completion key`,
         );
         flushRunCompletions(event.tab_id);
@@ -6700,7 +6790,7 @@ export async function runPanelOrchestrator(): Promise<void> {
   const wd = createRunCompletionWatchdog({
     awaiting: (promptId) => RunCompletions.awaitingCompletion(promptId),
     knownTicket: (promptId) => RunCompletions.ticketFor(promptId),
-    resolveOutputs: (promptId) => resolveHistoryCompletionImages(promptId),
+    resolveOutputs: (promptId) => resolveHistoryCompletion(promptId),
     lookupStatus: (promptId) => resolveHistoryCompletionStatus(promptId),
     deliver: (payload, ticket) => {
       // The SAME arrival path the panel's frame takes: correlated once, here,
@@ -6844,6 +6934,10 @@ export async function runPanelOrchestrator(): Promise<void> {
   // a fresh tab knows the host without waiting for a switch.
   let lastRetargetUrl: string | null = comfyuiUrl; // seeded: a first same-URL event must not restart everything
   onComfyuiTargetChanged((url, isLocal) => {
+    manifestOutcomeTarget = {
+      url,
+      generation: getComfyuiTargetGeneration(),
+    };
     // ANY target event — a change OR a reaffirmation of the current target —
     // supersedes ALL pending auto-connects (codex findings: direct
     // setComfyuiTarget callers bypass applyComfyuiUrl, and an explicit

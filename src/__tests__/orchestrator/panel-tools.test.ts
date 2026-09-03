@@ -1939,21 +1939,25 @@ describe("panel-tools: panel_run verdict is derived from the ComfyUI reply", () 
         },
       ],
     };
+    __panelRunTestHooks.setGotPromptLinesProbe(async () => null);
     const { ctx, calls } = makeRunCtx(reply);
-    const res = await defByName("panel_run").handler({ to_node_id: 9 }, ctx);
+    try {
+      const res = await defByName("panel_run").handler({ to_node_id: 9 }, ctx);
 
-    // A normal Panel timeout receipt must stay non-error. #2438 rewrites the
-    // Panel's retry_guidance onto this surface (no live render-queue inspector)
-    // rather than forwarding it verbatim. The handler still performs no second
-    // dispatch and cannot ticket an unidentifiable completion.
-    expect(res.isError).toBeFalsy();
-    expect(calls).toHaveLength(1);
-    const text = textOf(res);
-    expect(text).toContain("[UNCERTAIN]");
-    expect(text).toContain("Do NOT re-run panel_run");
-    expect(text).toContain("UNDETERMINED completion");
-    expect(text).not.toContain(QUEUED_NOTE);
-    expect(text).not.toContain("ComfyUI refused to queue");
+      // Logs unread and the watchdog was not observed: stay non-error UNCERTAIN,
+      // but #2521 forbids claiming a /prompt left the panel. A readable empty
+      // log (or an observed idle queue) fails closed as not queued instead.
+      expect(res.isError).toBeFalsy();
+      expect(calls).toHaveLength(1);
+      const text = textOf(res);
+      expect(text).toContain("[UNCERTAIN]");
+      expect(text).not.toContain("already left the panel");
+      expect(text.toLowerCase()).not.toContain("may have been accepted");
+      expect(text).not.toContain(QUEUED_NOTE);
+      expect(text).not.toContain("ComfyUI refused to queue");
+    } finally {
+      __panelRunTestHooks.setGotPromptLinesProbe(null);
+    }
   });
 });
 
@@ -2313,9 +2317,11 @@ describe("panel-tools: panel_graph_outline (compact text map)", () => {
   // #809: the outline gained ONE optional argument — `max_chars`, deliberately the same
   // name and clamp as panel_query_graph's, so there is one budget concept to learn. It
   // stays argument-free for the "just show me the canvas" call.
-  it("is registered and takes only the optional max_chars budget", () => {
+  // #2541 — `detail` is an accepted alias for that default full-resolution
+  // request, not a second lever.
+  it("is registered and takes optional max_chars plus the documented detail alias", () => {
     expect(buildPanelToolDefs().map((d) => d.name)).toContain("panel_graph_outline");
-    expect(Object.keys(defByName("panel_graph_outline").schema)).toEqual(["max_chars"]);
+    expect(Object.keys(defByName("panel_graph_outline").schema)).toEqual(["max_chars", "detail"]);
   });
 
   it("forwards graph_outline", async () => {

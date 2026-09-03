@@ -6,9 +6,358 @@ All notable changes to this project are documented here. This project adheres to
 
 ## Unreleased
 
+### MCP
+
+#### Fixed
+- **the UI→API converter no longer shifts widgets past a `forceInput`-only input (#2753).**
+  A `["STRING", {forceInput: true}]` input is a socket on canvas, so ComfyUI writes no
+  `widgets_values` slot for it; the converter classified it as a widget, consumed the first
+  saved value, and reported every real widget with its neighbour's value — `get_workflow`
+  returned `unet_name` holding `clip_name`'s model, and so on down the row.
+  A workflow saved before ComfyUI's widget/input unification kept a placeholder slot for
+  such an input; that row is indistinguishable from one carrying an extra serialized
+  value, so it is no longer guessed at — it is reported, naming the unmapped values.
+  The deprecated `defaultInput` spelling is honoured the way the frontend migrates it:
+  socket-only on an OPTIONAL input, widget kept on a REQUIRED one.
+
 ### Documentation
 
 - clarify MiniMax H3 source-video frame-rate conversion and complete ComfyMathExpression edits (#2479)
+
+## [0.52.178] - 2026-09-02
+
+### MCP
+
+#### Fixed
+- support IPv6-only ComfyUI loopback targets when `COMFYUI_URL` uses `127.0.0.1`, for issue #2719 (#2747)
+
+
+## [0.52.177] - 2026-09-02
+
+### MCP
+
+#### Fixed
+- **`node_pack` accepts documented pack-relative paths for git operations (#2716).**
+  Paths are now resolved against the selected pack before the existing jail
+  containment checks, so entries such as `preset_core.py` no longer resolve
+  from `custom_nodes/` and get rejected as outside the pack.
+
+## [0.52.176] - 2026-09-02
+
+### MCP
+
+#### Fixed
+- make wan-multitalk workflow runnable (#2702)
+
+
+## [0.52.175] - 2026-09-02
+
+### MCP
+
+#### Fixed
+- get_workflow strip resolves an absolute path under the live ComfyUI userdata/workflows tree without dropping the workflows segment or mangling Unicode dashes (#2528, #2658)
+- panel_run accepts VHS_VideoCombine (and any class with live object_info output_node true) as a run-to-node target instead of refusing it as not an output node (#2529, #2659); recovery preserves scoped batch and cloud targets, and refuses a nested fallback when the panel cannot provide its exact colon-qualified execution path
+
+
+## [0.52.174] - 2026-09-02
+
+### MCP
+
+#### Fixed
+- get_image accepts a get_history filename that includes a relative subfolder prefix (#2526)
+
+## [0.52.173] - 2026-09-02
+
+### MCP
+
+#### Fixed
+- artokun-flow installs the SAM3 checkpoint its REPLACEMENT MODE subgraph requires, saves with VHS_VideoCombine (an OUTPUT_NODE), and honors the requested artokun/comfyui-teskors-utils git origin instead of Manager teskor-hub alias (#2523, #2657)
+- panel restart binds to the dynamic local target instead of a stale fixed origin (#2068, #2737)
+
+## [0.52.172] - 2026-09-02
+
+### MCP
+
+#### Fixed
+- retry graph reads after `panel_open_workflow` when the initial panel response is incomplete (#2286, #2734)
+
+
+## [0.52.171] - 2026-09-02
+
+### MCP
+
+#### Fixed
+- recover full-graph `panel_run` queued-unknown responses from an exact rid-correlated Panel receipt without inferring a foreign queue prompt (#2143, #2732)
+
+
+## [0.52.170] - 2026-09-01
+
+### MCP
+
+#### Fixed
+- keep ingress completion blind-safe (#925)
+- canonicalize completion receipt prompt ids
+- acknowledge uncorrelatable completion frames
+
+
+## [0.52.169] - 2026-09-01
+
+### MCP
+
+#### Fixed
+- list_local_models removal resolves category-relative models from launch-state-proven ComfyUI Desktop shared roots without falling back to stale local roots (#1474)
+
+## [0.52.168] - 2026-09-01
+
+### MCP
+
+#### Fixed
+- resolve train refs from one live snapshot (#2720)
+- a git install must be corroborated on disk, not by ComfyUI-Manager's own list (#2715)
+- settle an unacked workflow_new against the panel's own rid-correlated receipt (#2710)
+- prove a VRAM release landed before reporting the reading as settled (#2708)
+- a PANEL_FETCH_FAILED panel read now names its cause (#2706)
+
+## [0.52.167] - 2026-09-01
+
+### MCP
+
+#### Fixed
+- panel_set_widget reconciles a missing ACK with a graph read-back and mutation receipt instead of leaving an applied subgraph write as outcome-unknown (#2489)
+- bind panel relay to selected tab target (#2656)
+- bind panel fallback relay to target generation
+- keep Unreleased changelog; vocabulary-safe list_assets mentions
+- name PreviewImage temp refs in panel completion events
+
+
+## [0.52.166] - 2026-09-01
+
+### MCP
+
+#### Fixed
+- panel_run(to_node_id) treats the paired random-mode seed-control graph-stamp diff as queue-time volatility rather than a real graph mismatch, while outer WorkerTransport failures remain outcome-unknown and are fenced for control-plane recovery (#2120, #2670)
+- panel-connected apply_manifest adopts the current panel-reported local ComfyUI path when COMFYUI_PATH is unset (#463, #2695)
+
+- handle DaSiWa seed stamp recurrence safely
+- ignore seed-only run-to-node stamp races
+- a promoted write refused by the ownership envelope names the invariant that failed (#2690)
+- terminate a generated API-node prompt with a sink matching its output type (#2687)
+- stop asserting a run the ComfyUI server has not confirmed (#2685)
+- flag an image-edit graph whose sampled canvas is not derived from the reference (#2683)
+- flag a sampler set below full denoise over an empty latent before it renders a flat field (#2682)
+- a loader input naming a file the server does not have says where it looked, and how to fix it (#2679)
+- a Windows updater that cannot reach npm or git says so, and says what to do (#2672)
+
+## [0.52.165] - 2026-08-30
+
+### MCP
+
+#### Fixed
+- panel_set_widget writes promoted unet_name/clip_name and labelled prompt rails on the enclosing subgraph instead of the link-driven inner (#2533, #2667)
+- install_custom_node does not pip-install cloned-node requirements with an untrusted interpreter (Stability Matrix base Python / PEP 668) and does not recommend that same unsafe command (#2530, #2666)
+
+
+## [0.52.164] - 2026-08-30
+
+### MCP
+
+#### Fixed
+- check_runtime does not classify environment-authenticated paid Gemini and WaveSpeed nodes as local/free (#2543, #2665)
+- install_comfyui action:"environment" reports the pip-installed ComfyUI-Manager version from a trusted interpreter instead of a disabled custom_nodes/ComfyUI-Manager checkout (#2538, #2664)
+
+## [0.52.163] - 2026-08-30
+
+### MCP
+
+#### Fixed
+- panel_set_widget writes the enclosing subgraph widget before a link-driven promoted inner (#2500, #2599)
+
+
+## [0.52.162] - 2026-08-30
+
+### MCP
+
+#### Fixed
+- queue action:"status" confirms an idle prompt against /history before calling it done, and does not report a completed run when ComfyUI has no record of it (#2507, #2661)
+
+## [0.52.161] - 2026-08-30
+
+### MCP
+
+#### Fixed
+- get_image list_assets and get_system_stats logs fall back to the connected panel same-origin history/logs/view reads when the configured headless route is unreachable, and panel_run completion events name PreviewImage outputs with type temp (#2283)
+- panel_set_widget does not treat a MiniMaxH3Director duration write as failed when the value landed and only a setting-store onValueChange callback threw (#2545, #2654)
+- panel_connect retries a LiteGraph wildcard-to-wildcard (`*` → `*`) pairing when the panel reports "No input accepts type *" — PrimitiveNode "connect to widget input" can land on LogicIF.when_true / when_false so the primitive becomes typed from the destination (#2542, #2653)
+- panel_query_graph inspects the unsaved live canvas after custom-widget / builder content-only [root-shape-mismatch] instead of recommending a destructive re-open (#2544, #2652)
+- node_pack action:"patch" accepts the documented apply-patch (`*** Begin Patch` / `*** Update File`) format in addition to ---/+++ unified diffs (#2496, #2650)
+- list_packs action:"extract_deps" walks UI subgraph inner nodes and does not treat subgraph instance UUIDs as class types (#2648, #2649)
+
+
+## [0.52.160] - 2026-08-30
+
+### MCP
+
+#### Fixed
+- get_image list_outputs scans the live server's output dir (and /history if that scan is empty) instead of an unrelated COMFYUI_PATH (#2539, #2642)
+- panel_connect refuses a frontend PrimitiveNode wired to a forceInput-only STRING instead of reporting a LiteGraph link that panel_run omits from the prompt (#2536, #2646)
+- panel_run retries once after a "Dynamic widget doesn't exist on node" serializer throw so the first queue after graph edits is not a false failure (#2537, #2643)
+- get_history and panel_run completion journaling fall back to the connected panel's global /history when the headless `/history/<prompt_id>` is unreachable, and queue.status discloses a cached done when that history still cannot be read (#2532, #2644)
+- panel_graph_outline accepts the documented `detail`:"full" argument instead of rejecting it as an unrecognized key (#2541, #2645)
+- panel_set_widget writes a promoted subgraph input on the enclosing host node instead of the link-driven inner widget (#2488, #2583)
+
+## [0.52.159] - 2026-08-30
+
+### MCP
+
+#### Fixed
+- download_model can target a configured extra-model root when the live server is unreachable (#2499, #2600)
+- don't report a queue clear as failed when the queue verifiably holds no pending jobs (#2517, #2594)
+
+
+## [0.52.158] - 2026-08-30
+
+### MCP
+
+#### Fixed
+- panel_open_workflow and a verified pin align turn routing onto the switched canvas so the next origin-less turn does not inherit the previous workflow (#2531, #2638)
+- panel_set_widget settles a missing ACK on a Power Lora lora_N row with a graph read-back instead of reporting outcome-unknown for a row that already landed (#2495, #2597)
+- panel_open_workflow does not report a successful tab switch as an error when only frontend-owned ue_properties / widget representations differ, including a live serialize that omits nested subgraph definitions (#2494, #2596)
+- upload_image action:image returns a LoadImage-selectable root filename when a nested path is stored but not enumerated (#2498, #2595)
+
+## [0.52.157] - 2026-08-30
+
+### MCP
+
+#### Fixed
+- keep a pending panel_set_widget receipt until the frontend settles so a following graph read cannot certify a stale widget value, and retry_of reconciles the exact delivered command after a late reply (#2527, #2639)
+- install_comfyui(action:"update") prunes a stale origin/dev ref-lock once and switches a detached version-tag checkout onto local master/main when update is explicitly requested (#2524, #2637)
+- krea2-identity-edit ships the LoRA widget as a POSIX path so Linux ComfyUI can match the installed file (#2525, #2636)
+- panel_strip_workflow applies live capturedWidgetValues to promoted subgraph widgets instead of stale definition defaults (#2522, #2635)
+- panel_strip_workflow honors a verified pin when capturing the live canvas instead of refusing a stale last-advertised workflow instance (#2487, #2580)
+
+## [0.52.156] - 2026-08-30
+
+### MCP
+
+#### Fixed
+- deliver interrupted run-completions at interrupt time with duration from ComfyUI's execution record, not from the next prompt (#2512, #2629)
+- panel_set_widget does not classify a root widget as promoted after a root-scope graph read, and a successful mode:current rebind clears leftover subgraph identity (#2518, #2632)
+- panel_run does not claim a /prompt left the panel when ComfyUI never logged a prompt; id-less queued_unknown fails closed as not queued (#2521, #2630)
+- panel_set_widget treats a root-scope promoted widget as the authoritative parent rail and suppresses the inner link-driven warning (#2514, #2627)
+- drain an empty-success Git install enqueue before using the verified local clone fallback (#2620, #2625)
+- panel_graph_outline retries once after save when query_graph already reads the same tab instead of refusing a transient instance mismatch (#2483, #2578)
+- uninstall disk verification uses the live ComfyUI Desktop custom_nodes scan root instead of COMFYUI_PATH (#2485, #2577)
+- save allowlisted OBJ attachments through get_image action:"get" (#2623)
+
+## [0.52.155] - 2026-08-30
+
+### MCP
+
+#### Fixed
+- models_show local fallback does not report an arbitrary duplicate basename as the installed model (#2504, #2614)
+
+## [0.52.154] - 2026-08-30
+
+### MCP
+
+#### Fixed
+- get_workflow get/analyze reads an absolute path under the live ComfyUI workspace from disk instead of sending it to /api/userdata/workflows/ (#2506)
+- z-image-turbo-inpainting no longer installs eight unused custom-node packs (#2484)
+- list_local_models reads inventory through the connected panel when the headless /models route is unreachable (#2511)
+- install_custom_node action:"fix" does not report repaired when Manager's task result is not-found/error (#2490)
+- panel_set_widget writes a promoted subgraph input on the enclosing host node instead of the link-driven inner widget (#2488)
+- panel_load_workflow restamps extra.comfyui_mcp.workflow_path (and uuid) to the active tab so an in-place save is not refused as belonging to the source workflow (#2505)
+- fall back to ComfyUI-Manager for install_custom_node action:"list" when the local comfy-cli version is unrecognized (#2603)
+- fence ordinary `panel_set_widget` writes against the current panel graph identity across reconnects, with an actionable rebind refusal (#2550)
+- clear terminal MCP panel refresh coordination state and reclaim only bounded, stale refresh records while keeping unknown completion fail-closed (#2549)
+- save allowlisted OBJ/mesh attachments returned as application/octet-stream through get_image action:"get" (#2540)
+
+
+
+## [0.52.153] - 2026-08-30
+
+### MCP
+
+#### Fixed
+- rebind an imported tmp tab's extra.workflow_uuid to the assigned tab identity and accept panel_open_workflow on the exact tmp: key (#2503)
+- retry panel_connect against the live graph when a node reported by panel_graph_outline is refused as missing (#2502)
+- panel_open_workflow no longer treats frontend-normalized node fields as a failed load after reconnect (#2501)
+- make `resolve_missing` suggest `models/clip_vision/` for missing `CLIPVisionLoader.clip_name` models while keeping ordinary CLIP loaders on `models/text_encoders/` (#2604)
+- classify an existing `application/octet-stream` OBJ returned by `get_image` as an unsupported attachment instead of a missing file (#2608)
+- suppress acknowledged completion replays after reconnect (#2591)
+
+
+## [0.52.152] - 2026-08-30
+
+### MCP
+
+#### Fixed
+- suppress already-acknowledged run-finished replays after panel reconnects while preserving undelivered completion recovery
+- concurrent panel_set_widget calls each settle after frontend acknowledgement instead of hanging the combined tool call (#2559, #2605)
+- panel_set_widget does not refuse an ordinary-root write when the panel connection identity is missing after a successful scope probe (#2551, #2601)
+- persist subgraph viewing scope across panel tool calls so interior mutations do not silently fall back to root (#2553, #2602)
+- use the authenticated connected panel for headless `/object_info` reads when the configured ComfyUI route is unreachable (#2283, #2566)
+
+## [0.52.151] - 2026-08-30
+
+### MCP
+
+#### Fixed
+- panel_get_errors reports unavailable saved LoadImage values instead of reasonless stale flags (#2587, #2592)
+- re-point Save-As routing after pinned tmp: first save (#2419, #2570)
+- map official-template promoted COMBOs via the unique rail-backed inner widget (#2393, #2569)
+- get_image list_outputs lists completed VHS mp4 outputs in ComfyUI temp/ (#2370, #2568)
+- panel_expose_subgraph_input retries Anything Everywhere? wildcard sockets against the live LiteGraph slot array after Convert to Subgraph (#2493, #2590)
+- panel_search_nodes and panel_list_nodes serve host Manager HTTP when the panel's browser Manager request does not complete (#2492, #2589)
+- omit the unexpose reindex warning when removing the final slot (#2491, #2588)
+- map staged videos onto VHS combo and Path widgets (#2083, #2563)
+- list_templates via live panel when origin is unreachable (#2196, #2562)
+- panel_free_vram reports VRAM after CUDA release settles (#2050, #2561)
+- reconcile manifest outcomes across processes (#1129, #2556)
+- treat nested opened.routing_key as unsaved-open proof (#2477, #2560)
+- preserve bridge receiver for #1129 scope settlement (#2585)
+
+## [0.52.150] - 2026-08-30
+
+### MCP
+
+#### Fixed
+- do not re-deliver run completions after a mid-reply interrupt (#2486, #2579)
+- retry the live origin after restart instead of a dead 8188 (#1845, #2573)
+- list configured unet dir instead of assuming diffusion_models on REST 404 (#2480, #2576)
+- recognise ComfyUI Desktop-2 so restart_comfyui stop records a start path (#2482, #2575)
+- panel_set_todo reconciles a missing ACK with a todo read-back and mutation receipt (#2481, #2572)
+- retry graph reads after enter or panel_run (#2395, #2567)
+- harden #619 command probe lookup (#2564)
+- do not refuse promoted writes when the connection fingerprint is missing (#2475)
+
+## [0.52.149] - 2026-08-30
+
+### MCP
+
+#### Fixed
+- graph tools inherit a live bound/current tab after a multi-workflow reconnect instead of requiring a manual rebind (#1001, #2557)
+- rewrite a panel's bare `unknown <cmd>` (and a missing `panel_version`) into the same actionable version-skew error as `Unknown command "…"` (#619, #2555)
+
+#### Changed
+- raise the filing bar, drop the beta reporting bias (#2554)
+
+
+## [0.52.148] - 2026-08-29
+
+### MCP
+
+#### Fixed
+- bound compact identity probes (#2513, #2478)
+- only list history assets fetchable through /view (#2515)
+- fence same-type transient writes
+- fence transient promoted reads
+- omit the unexpose reindex warning when the panel already reindexed (#2474)
+- keep the causal line above a native fault and stop blaming a pass-through node (#2508)
+- direct-clone local git installs when Manager queue is unavailable (#2509)
+- make the Kimi Code backend usable (#2552)
+- reconcile release citations (#2519, #2520)
+
 
 ## [0.52.147] - 2026-08-28
 
@@ -16,6 +365,8 @@ All notable changes to this project are documented here. This project adheres to
 
 #### Fixed
 - omit the unexpose reindex warning when the panel already reindexed (#2474)
+- keep the causal line above a native fault and stop blaming a pass-through node (#2508) (#2519) (#2520) (#2478) (#2509) (#2552)
+- rewrite a panel's bare `unknown <cmd>` (and a missing `panel_version`) into the same actionable version-skew error as `Unknown command "…"` (#619)
 
 
 ## [0.52.146] - 2026-08-27

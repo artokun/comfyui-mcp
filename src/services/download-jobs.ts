@@ -378,14 +378,18 @@ function requestDownloadKey(
   targetSubfolder: string,
   filename?: string,
   auth?: DownloadAuth,
+  modelRoot?: string,
 ): string {
-  const canonical = JSON.stringify([
+  const parts: Array<string | null> = [
     url,
     String(targetSubfolder ?? "").trim(),
     filename ?? null,
     authIdentity(auth),
-  ]);
-  return createHash("sha256").update(canonical).digest("hex").slice(0, 16);
+  ];
+  // Omit when unset so existing in-flight jobs (no model_root) keep the same key.
+  const root = String(modelRoot ?? "").trim();
+  if (root) parts.push(root);
+  return createHash("sha256").update(JSON.stringify(parts)).digest("hex").slice(0, 16);
 }
 
 /**
@@ -417,6 +421,8 @@ export async function startDownloadJob(
    *  it must drive both the identity key and the writer, just like the decision
    *  computed here for ordinary download_model calls. */
   dispatchToManagerOverride?: boolean,
+  /** Optional explicit model-root directory already known from list_paths (#2499). */
+  modelRoot?: string,
 ): Promise<Entry> {
   // Identity depends on mode. LOCAL: resolve the canonical on-disk destination
   // with the SAME resolver the write uses (throws on an invalid filename/subfolder
@@ -447,7 +453,7 @@ export async function startDownloadJob(
   // "two different URLs → same local destination → one writer" dedup (WS-4). An
   // invalid filename/subfolder is REJECTED here (by resolveDownloadTarget), up
   // front, exactly as the write would reject it.
-  const reqKey = requestDownloadKey(url, targetSubfolder, filename, auth);
+  const reqKey = requestDownloadKey(url, targetSubfolder, filename, auth, modelRoot);
   let destKey: string | undefined;
   // The key jobs SERIALIZE on (#467 P1-C) — the physical destination, AUTH-FREE and
   // normalized for case-insensitive filesystems, so two different-auth (or
@@ -469,7 +475,7 @@ export async function startDownloadJob(
    *  would baseline the WRONG entry, which is worse than having no baseline. */
   let baselineName: string | undefined;
   if (!dispatchToManager) {
-    const target = await resolveDownloadTarget(url, targetSubfolder, filename);
+    const target = await resolveDownloadTarget(url, targetSubfolder, filename, modelRoot);
     baselineName = target.filename;
     // Fold auth into the destination key too (#467 P1-A): two concurrent calls to
     // the SAME on-disk destination with DIFFERENT auth are DIFFERENT downloads
@@ -766,6 +772,7 @@ export async function startDownloadJob(
             persistJobRecord(job);
           }
         },
+        modelRoot,
       );
       // Local paths already committed done via onLanded at the rename. The remote Manager
       // dispatch has no local rename, so commit done here when it returns (dispatch

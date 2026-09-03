@@ -13,9 +13,10 @@
 // asserted source strings against index.ts and could not fail):
 //   - per-mid issue-time origins (recorded at receipt, applied at DEQUEUE);
 //   - the dispatch-batch aggregation (one turn may batch several messages; only
-//     an AGREEING batch pins/stamps — a mixed batch with a user message, or an
-//     unknown origin, fails closed; an all-injected mixed batch inherits the
-//     last established origin, #1001);
+//     an AGREEING batch pins/stamps — unknown origins fail closed; two USER
+//     origins fail closed unless a live bound/current tab exists; a unique
+//     user origin plus injected events pins the user tab; an all-injected
+//     mixed batch inherits last established origin, else current/unique, #1001);
 //   - the turn-target pin + issue-time stamp + last-established origin;
 //   - the explicit-repin recovery and the scope target resolver the UiBridge
 //     consults (built here so tests drive the REAL handlers, not test stand-ins).
@@ -47,6 +48,20 @@ export interface TurnOriginDeps {
    *  still resolve onto the switched tab (codex gate 4). Optional only for
    *  lightweight test trackers; production always wires it. */
   liveTabOf?: (tabId: string) => string | undefined;
+  /** The conversation's current/active canvas tab, if it belongs to this
+   *  backend. Used when a mixed-origin batch has no usable last established
+   *  origin — typically after reconnect, when lastOrigin names a gone id
+   *  (#1001). Optional; omitting it keeps the fail-closed inherit of older
+   *  tests. */
+  currentTabOf?: (key: string) => string | undefined;
+  /** Exactly one live interactive canvas for this conversation (this backend's
+   *  sole tab, or the unique canvas after a hello that omitted `backend`).
+   *  Same unique-canvas rule as makeScopeRepinHandler (panel#1557), applied at
+   *  batch close / routing so a single connected tab is not AMBIGUOUS. */
+  uniqueLiveTabOf?: (key: string) => string | undefined;
+  /** Re-attribute a unique live canvas to this conversation when recovery
+   *  adopts it (hello after reload often omits `backend`). */
+  claimTab?: (tabId: string, backend: string) => void;
   warn: (msg: string) => void;
 }
 
@@ -76,8 +91,15 @@ interface PendingBatch {
    *  workflows (see onSeen). */
   routes: Set<string>;
   /** At least one contribution came from a USER message (not an injected
-   *  event). Only then does a multi-route batch fail closed (#1001). */
+   *  event). Only then does a multi-route batch fail closed (#1001) — and
+   *  only when no unique user origin / live bound tab can take the pin. */
   user: boolean;
+  /** Recorded tab ids of USER contributions (not injected). */
+  userTabs: Set<string>;
+  /** USER origins resolved to the tab they ROUTE TO today. */
+  userRoutes: Set<string>;
+  /** UUIDs of USER contributions, for stamping a unique-user pin. */
+  userKnown: Array<string | undefined>;
   unknown: boolean;
 }
 
@@ -186,6 +208,96 @@ export class TurnOriginTracker {
     return typeof live === "string" && live ? live : last.uuid;
   }
 
+  /** lastOrigin only if it still ROUTES to a live tab of this backend. A gone
+   *  id (reconnect) must not inherit a dead pin that then reads as
+   *  "still reconnecting" (#1001 cause 2). */
+  private lastOriginStillLive(key: string): { tab: string; uuid: string | undefined } | undefined {
+    const last = this.lastOriginByKey.get(key);
+    if (!last) return undefined;
+    const live = this.deps.liveTabOf ? this.deps.liveTabOf(last.tab) : last.tab;
+    if (!live) return undefined;
+    if (this.deps.backendForTab(live) !== this.deps.backendOfKey(key)) return undefined;
+    return last;
+  }
+
+  /** Current/active tab, else the unique live canvas, for this conversation. */
+  private pickCurrentOrUnique(key: string): string | undefined {
+    const backend = this.deps.backendOfKey(key);
+    const current = this.deps.currentTabOf?.(key);
+    if (current && this.deps.backendForTab(current) === backend) return current;
+    return this.deps.uniqueLiveTabOf?.(key);
+  }
+
+  private claimAndPin(key: string, tab: string, uuid: string | undefined): void {
+    const backend = this.deps.backendOfKey(key);
+    if (this.deps.backendForTab(tab) !== backend) {
+      this.deps.claimTab?.(tab, backend);
+    }
+    this.lastTurnUuidByKey.set(key, uuid);
+    this.turnTargetTabByKey.set(key, tab);
+  }
+
+  private failClosed(key: string, msg: string): void {
+    this.lastTurnUuidByKey.set(key, undefined);
+    this.turnTargetTabByKey.set(key, null);
+    this.deps.warn(msg);
+  }
+
+  private mixedOriginRefusal(key: string): string {
+    return (
+      `[panel-orchestrator] ${key} dispatched a mixed/unknown-origin batch — no single workflow stamp/target is honest for it, so scope routing and graph mutations FAIL CLOSED until the agent opens/pins a workflow or the next single-origin message (#884)`
+    );
+  }
+
+  /**
+   * Inherit a live bound tab instead of leaving the pin AMBIGUOUS.
+   * Order: last established origin (if it still routes), then current/active,
+   * then the unique live canvas. Two live tabs and none of those → false.
+   */
+  private applyBoundFallback(key: string, originCount: number): boolean {
+    const last = this.lastOriginStillLive(key);
+    if (last) {
+      this.claimAndPin(key, last.tab, this.inheritedStampOf(last));
+      if (originCount > 1) {
+        this.deps.warn(
+          `[panel-orchestrator] ${key} dispatched re-delivered events from ${originCount} workflows in one turn — no user message to pin on, so the turn inherits the conversation's last established origin (${last.tab.slice(0, 8)}) instead of refusing; name a workflow explicitly to work on one of the others (#1001)`,
+        );
+      }
+      return true;
+    }
+    const tab = this.pickCurrentOrUnique(key);
+    if (!tab) return false;
+    this.claimAndPin(key, tab, this.inheritedStampOf({ tab, uuid: this.deps.uuidOfTab(tab) }));
+    if (originCount > 1) {
+      this.deps.warn(
+        `[panel-orchestrator] ${key} dispatched re-delivered events from ${originCount} workflows in one turn — no usable last origin, so the turn inherits the live bound/current tab (${tab.slice(0, 8)}) instead of refusing (#1001)`,
+      );
+    }
+    return true;
+  }
+
+  /**
+   * Routing-time recovery: an already-AMBIGUOUS pin (`null`) adopts a live
+   * bound/current tab if one exists. A unique canvas that hellos AFTER batch
+   * close (reconnect) can unwedge graph tools without a manual rebind.
+   * Idle (no pin) and a healthy string pin are returned unchanged.
+   */
+  adoptAmbiguousPin(key: string): string | null | undefined {
+    const pin = this.resolvedPinOf(key);
+    if (pin !== null) return pin;
+    // Do NOT inherit lastOrigin here: that is a PREVIOUS turn's binding, and
+    // recovering it would undo a mixed-USER fail-closed (send-now A+B). Only
+    // a current/unique live canvas that exists NOW may unwedge reconnect.
+    const tab = this.pickCurrentOrUnique(key);
+    if (!tab) return null;
+    this.claimAndPin(key, tab, this.inheritedStampOf({ tab, uuid: this.deps.uuidOfTab(tab) }));
+    this.deps.warn(
+      `[panel-orchestrator] ${key} adopted the live bound/current tab (${tab.slice(0, 8)}) for an ambiguous pin instead of refusing (#1001)`,
+    );
+    const adopted = this.resolvedPinOf(key);
+    return typeof adopted === "string" ? adopted : null;
+  }
+
   /** Record a message's issue-time origin, keyed by its mid, to be applied at
    *  dequeue. Captures the tab's backend NOW so the application can verify the
    *  tab still belongs to the same conversation then. `injected` marks an
@@ -260,7 +372,16 @@ export class TurnOriginTracker {
     let batch = this.pendingBatchStamp.get(key);
     const opensBatch = !batch;
     if (!batch) {
-      batch = { known: [], tabs: new Set<string>(), routes: new Set<string>(), user: false, unknown: false };
+      batch = {
+        known: [],
+        tabs: new Set<string>(),
+        routes: new Set<string>(),
+        user: false,
+        userTabs: new Set<string>(),
+        userRoutes: new Set<string>(),
+        userKnown: [],
+        unknown: false,
+      };
       this.pendingBatchStamp.set(key, batch);
     }
     // A mid's origin comes from the LIVE record (first dequeue) or the APPLIED
@@ -329,11 +450,15 @@ export class TurnOriginTracker {
         // closed — only the aliases of ONE tab collapse.
         batch.tabs.add(rec.tab);
         batch.routes.add(liveOrigin);
-        // #1001 — remember whether any contribution is a USER message. Only a
-        // user request can be laundered onto the wrong tab, so only a batch
-        // containing one fails closed on disagreement; an all-injected batch
-        // (re-delivered completions/answers/events) inherits instead.
-        if (!rec.injected) batch.user = true;
+        // #1001 — remember whether any contribution is a USER message. Two
+        // USER origins still fail closed unless a live bound tab exists; a
+        // unique user origin plus injected notifications pins the user tab.
+        if (!rec.injected) {
+          batch.user = true;
+          batch.userTabs.add(rec.tab);
+          batch.userRoutes.add(liveOrigin);
+          batch.userKnown.push(rec.uuid);
+        }
         this.turnUuidByMid.delete(mid);
         this.noteAppliedTurnMid(mid, rec); // keeps its origin for a re-queue
       }
@@ -349,21 +474,8 @@ export class TurnOriginTracker {
       queueMicrotask(() => {
         this.pendingBatchStamp.delete(key);
         const distinct = new Set(closed.known);
-        if (closed.unknown || (closed.routes.size > 1 && closed.user)) {
-          // Mixed/unknown-TAB batch involving a USER message: no single stamp
-          // or target is honest for it — fail BOTH closed (the bridge refuses
-          // routing; the panel fence refuses mutations) until an explicit
-          // target or the next single-origin message. The `user` qualifier is
-          // #1001: the laundering P0 this gate exists for is a user REQUEST
-          // re-aimed onto another tab's graph. A batch of orchestrator-
-          // INJECTED events carries no request — nothing to launder — so it
-          // falls through to the inherit branch below instead of wedging every
-          // scope-addressed tool until a manual rebind.
-          this.lastTurnUuidByKey.set(key, undefined);
-          this.turnTargetTabByKey.set(key, null);
-          this.deps.warn(
-            `[panel-orchestrator] ${key} dispatched a mixed/unknown-origin batch — no single workflow stamp/target is honest for it, so scope routing and graph mutations FAIL CLOSED until the agent opens/pins a workflow or the next single-origin message (#884)`,
-          );
+        if (closed.unknown) {
+          this.failClosed(key, this.mixedOriginRefusal(key));
         } else if (closed.routes.size === 1) {
           // TURN-TARGET PIN (confirming gate P0): this turn's tool calls route
           // to the tab the turn was ISSUED from — never re-resolved mid-turn —
@@ -375,74 +487,42 @@ export class TurnOriginTracker {
           this.lastTurnUuidByKey.set(key, uuid);
           this.turnTargetTabByKey.set(key, tab);
           this.lastOriginByKey.set(key, { tab, uuid });
-        } else {
-          // NO user origin to pin on. Two shapes land here:
-          //
-          //   routes.size === 0 — a deliberately origin-less injected turn
-          //     (a coalesced download_done; re-queued items contribute their
-          //     own origin, see appliedTurnMids).
-          //
-          //   routes.size > 1, all injected — #1001: journaled run completions
-          //     / ask answers from SEVERAL workflows replayed into ONE turn at
-          //     a delivery opportunity (a fresh spawn, a reconnect sweep of
-          //     flushAllJournaledEvents). Each origin is real, but the batch is
-          //     a stack of NOTIFICATIONS, not a request — refusing here wedged
-          //     panel_graph_outline / panel_list_workflows / panel_get_errors
-          //     with "issued from multiple workflows at once" until a manual
-          //     panel_set_workflow_target rebind, on sessions with as few as
-          //     ONE live tab (observed on mcp 0.50.52 and again on 0.51.38).
-          //
-          // Both inherit the conversation's LAST ESTABLISHED origin — NEVER
-          // "whatever tab is active" (confirming gate 2, P0). The inherited tab
-          // must STILL belong to this conversation's backend (confirming gate
-          // 3, P0); no established/valid origin at all → refuse. A follow-up
-          // mutation stays honest: it is stamped with the LIVE uuid of that
-          // inherited tab at THIS turn's start (panel#1209), so the panel fence
-          // (and the dispatch-time stamp-target agreement gate, #1656) refuse
-          // it loudly if the routed canvas is not the one the stamp names.
-          //
-          // Ownership is judged on the tab the inherited origin ROUTES to
-          // today (routedTabOf), NOT on the id it was recorded under — the
-          // same view the message-origin check above and resolvedPinOf() have
-          // always used, and the one place that was still left on the raw id
-          // (panel#1292 recurrence). The last established origin is written at
-          // batch close and keeps its issue-time identity, so a same-socket
-          // migration after it — a WORKFLOW SWITCH, the exact thing the report
-          // starts with — leaves it naming a retired id that `tabBackends` no
-          // longer knows. `backendForTab` then answers with the DEFAULT
-          // backend, so every conversation NOT on the default backend read its
-          // own healthy tab as another backend's and failed the turn closed:
-          // an async download completing after a workflow switch nulled the
-          // pin, and panel_refresh_nodes / panel_graph_outline /
-          // panel_list_workflows all hit "no connected tab can be chosen …
-          // issued from multiple workflows at once" until an explicit
-          // mode:"current" rebind. Cross-backend safety is untouched: the
-          // bridge resolves an id a live foreign tab currently holds to THAT
-          // tab (exact match beats the migration alias), and an origin that
-          // resolves nowhere still falls back to its raw id and fails closed.
-          const last = this.lastOriginByKey.get(key);
-          if (last && this.deps.backendForTab(this.routedTabOf(last.tab)) === this.deps.backendOfKey(key)) {
-            this.lastTurnUuidByKey.set(key, this.inheritedStampOf(last));
-            this.turnTargetTabByKey.set(key, last.tab);
-            if (closed.routes.size > 1) {
-              this.deps.warn(
-                `[panel-orchestrator] ${key} dispatched re-delivered events from ${closed.routes.size} workflows in one turn — no user message to pin on, so the turn inherits the conversation's last established origin (${last.tab.slice(0, 8)}) instead of refusing; name a workflow explicitly to work on one of the others (#1001)`,
-              );
-            }
-          } else {
-            this.lastTurnUuidByKey.set(key, undefined);
-            this.turnTargetTabByKey.set(key, null);
+        } else if (closed.userRoutes.size === 1) {
+          // One USER request plus injected notifications from other workflows
+          // (#1001 recurrence: completions re-delivered into the same turn as
+          // an active-workflow event). The request is the pin; extras are not
+          // a second user origin and must not fail closed.
+          const tab = closed.userTabs.values().next().value as string;
+          const live = this.deps.liveTabOf ? this.deps.liveTabOf(tab) : tab;
+          if (live && this.deps.backendForTab(live) === this.deps.backendOfKey(key)) {
+            const userDistinct = new Set(closed.userKnown);
+            const uuid = userDistinct.size === 1 ? userDistinct.values().next().value : undefined;
+            this.lastTurnUuidByKey.set(key, uuid);
+            this.turnTargetTabByKey.set(key, tab);
+            this.lastOriginByKey.set(key, { tab, uuid });
             this.deps.warn(
-              last
-                ? `[panel-orchestrator] ${key} dispatched ${closed.routes.size > 1 ? "a multi-workflow event replay (#1001)" : "an origin-less turn"} whose last established origin tab ${last.tab.slice(0, 8)}${
-                    // Name the tab the verdict was actually reached on. Judging
-                    // moved to the ROUTED id (panel#1292), so reporting only the
-                    // recorded one would blame an id this branch never looked at.
-                    this.routedTabOf(last.tab) !== last.tab ? ` (routing to ${this.routedTabOf(last.tab).slice(0, 8)})` : ""
-                  } now belongs to another backend's conversation — scope routing FAILS CLOSED until an explicit target or an origin-bearing message (#884 confirming gate 3)`
-                : `[panel-orchestrator] ${key} dispatched a turn with no ${closed.routes.size > 1 ? "user origin (a multi-workflow event replay, #1001) and no" : "origin and no"} established prior origin — scope routing FAILS CLOSED until an explicit target or an origin-bearing message (#884)`,
+              `[panel-orchestrator] ${key} dispatched a user origin plus re-delivered events from other workflows — pinning the user tab (${tab.slice(0, 8)}); name a workflow explicitly to work on one of the others (#1001)`,
             );
+          } else if (!this.applyBoundFallback(key, closed.routes.size)) {
+            this.failClosed(key, this.mixedOriginRefusal(key));
           }
+        } else if (closed.userRoutes.size > 1) {
+          // Two USER requests from different tabs — the laundering P0. A live
+          // lastOrigin from a PREVIOUS turn must not pick a winner for this
+          // batch (send-now merging A+B would otherwise re-aim B onto A).
+          this.failClosed(key, this.mixedOriginRefusal(key));
+        } else if (!this.applyBoundFallback(key, closed.routes.size)) {
+          // Injected multi-origin or origin-less, and no live bound/current/
+          // unique tab to inherit.
+          const last = this.lastOriginByKey.get(key);
+          this.failClosed(
+            key,
+            last
+              ? `[panel-orchestrator] ${key} dispatched ${closed.routes.size > 1 ? "a multi-workflow event replay (#1001)" : "an origin-less turn"} whose last established origin tab ${last.tab.slice(0, 8)}${
+                  this.routedTabOf(last.tab) !== last.tab ? ` (routing to ${this.routedTabOf(last.tab).slice(0, 8)})` : ""
+                } now belongs to another backend's conversation — scope routing FAILS CLOSED until an explicit target or an origin-bearing message (#884 confirming gate 3)`
+              : `[panel-orchestrator] ${key} dispatched a turn with no ${closed.routes.size > 1 ? "user origin (a multi-workflow event replay, #1001) and no" : "origin and no"} established prior origin — scope routing FAILS CLOSED until an explicit target or an origin-bearing message (#884)`,
+          );
         }
       });
     }
@@ -596,19 +676,38 @@ export class TurnOriginTracker {
     this.turnTargetTabByKey.set(key, tab);
     this.lastTurnUuidByKey.set(key, uuid);
   }
+
+  /**
+   * #2531 — an explicit `panel_open_workflow` / verified pin is a
+   * message-equivalent origin: the agent moved this conversation onto that
+   * canvas. Rewrite the in-flight pin, the issue-time stamp, AND the last
+   * established origin so the NEXT origin-less turn (a run completion) inherits
+   * this canvas instead of the pre-switch workflow.
+   *
+   * Distinct from {@link repinTo}, which must not re-establish a rewind-cleared
+   * inheritance source. Callers are the open/verified-pin alignment in
+   * {@link makeScopeRepinHandler} and the #2419 same-canvas rewrite (the dest
+   * IS this canvas under a new id).
+   */
+  alignTo(key: string, tab: string): void {
+    const uuid = this.deps.uuidOfTab(tab);
+    this.turnTargetTabByKey.set(key, tab);
+    this.lastTurnUuidByKey.set(key, uuid);
+    this.lastOriginByKey.set(key, { tab, uuid });
+  }
 }
 
 /** The scope target resolver the UiBridge consults while resolving a
  *  scope-addressed command: the in-flight turn's pin (string), an ambiguous
  *  or ownership-refused origin (`null` → refuse loudly), or no turn in flight
- *  (undefined → active-tab resolution). Goes through resolvedPinOf so the
- *  pin's OWNERSHIP is verified at every use (codex gate-4 delta, P0). Built
- *  here so tests drive the REAL resolver. */
+ *  (undefined → active-tab resolution). Goes through adoptAmbiguousPin so a
+ *  null pin can still take a unique live/current tab after reconnect (#1001)
+ *  and ownership is verified at every use (codex gate-4 delta, P0). */
 export function makeScopeTargetResolver(opts: {
   tracker: TurnOriginTracker;
   scopeAgentKeyOf: (scopeId: string) => string;
 }): (scopeId: string) => string | null | undefined {
-  return (scopeId) => opts.tracker.resolvedPinOf(opts.scopeAgentKeyOf(scopeId));
+  return (scopeId) => opts.tracker.adoptAmbiguousPin(opts.scopeAgentKeyOf(scopeId));
 }
 
 /** The slice of UiBridge the repin recovery consults. */
@@ -617,6 +716,8 @@ export interface ScopeRepinBridge {
   resolveActiveScopeTab(): string | undefined;
   isHeadless?(tabId: string): boolean;
   tabs(): Array<{ tab_id: string }>;
+  /** Canonical live id a (possibly retired/aliased) tab currently routes to. */
+  liveTabIdFor?(tabId: string): string | undefined;
 }
 
 /**
@@ -701,6 +802,19 @@ export function tabRouteCarriesPath(tabId: string, path: string): boolean {
   });
 }
 
+/** Extra consent for {@link makeScopeRepinHandler} when the caller has already
+ *  proven the named workflow is the live canvas (a successful
+ *  `panel_open_workflow`, or a verified-active pin). */
+export type ScopeRepinRequest = {
+  /**
+   * #2531 — rewrite lastOrigin onto this pin's live canonical id. Never
+   * steals onto a different tab: a healthy pin stays on the socket that just
+   * opened/pinned the canvas. Without this, the tool reports pin success while
+   * the next origin-less turn inherits the pre-switch workflow.
+   */
+  alignLiveCanvas?: boolean;
+};
+
 export function makeScopeRepinHandler(opts: {
   bridge: ScopeRepinBridge;
   tracker: TurnOriginTracker;
@@ -715,17 +829,61 @@ export function makeScopeRepinHandler(opts: {
    * pin we just wrote is immediately invalidated by {@link TurnOriginTracker.resolvedPinOf}.
    */
   claimTab?: (tabId: string, backend: string) => void;
-}): (scopeId: string, preferredWorkflowPath?: string) => ScopeRepinOutcome {
-  return (scopeId, preferredWorkflowPath) => {
+}): (scopeId: string, preferredWorkflowPath?: string, request?: ScopeRepinRequest) => ScopeRepinOutcome {
+  return (scopeId, preferredWorkflowPath, request) => {
     const key = opts.scopeAgentKeyOf(scopeId);
+    const backend = opts.backendOfKey(key);
+    const movePin = (tab: string): void => {
+      if (typeof opts.tracker.alignTo === "function") opts.tracker.alignTo(key, tab);
+      else opts.tracker.repinTo(key, tab);
+    };
+    const eligible = opts.bridge
+      .tabs()
+      .map((t) => t.tab_id)
+      .filter((t) => opts.bridge.isHeadless?.(t) !== true && opts.backendForTab(t) === backend);
+    const namedDest = (path: string | undefined): string | undefined => {
+      if (!path) return undefined;
+      const matches = eligible.filter((t) => tabRouteCarriesPath(t, path));
+      return matches.length === 1 ? matches[0] : undefined;
+    };
     // RECOVERY ONLY: a pin that still reaches a live tab OF THIS conversation
     // is healthy — never displace it (null = ambiguous/ownership-refused and
     // absent = no pin are both recoverable). resolvedPinOf, not raw pinOf: a
     // pin whose tab was revived by another backend "reaches" but is NOT
     // healthy — treating it as healthy would deadlock the advertised recovery
     // against the resolution-time refusal (codex gate-4 delta).
+    //
+    // #2419 — exception: a named dest that this pin ALREADY routes to (same-
+    // socket alias) or a tmp: predecessor of that dest is the SAME canvas
+    // under its new identity, not a steal. Rewrite the stored pin onto the
+    // canonical dest id so session-scoped commands stop addressing the retired
+    // tmp: / Untitled handle.
     const existing = opts.tracker.resolvedPinOf(key);
     if (typeof existing === "string" && opts.bridge.canReach(existing)) {
+      const named = namedDest(preferredWorkflowPath);
+      const live = opts.bridge.liveTabIdFor?.(existing) ?? existing;
+      const predecessor = existing.startsWith("tmp:");
+      if (named && existing !== named && (live === named || predecessor)) {
+        movePin(named);
+        opts.info(
+          `[panel-orchestrator] ${key} re-pinned onto ${named.slice(0, 8)} as the save dest successor of ${existing.slice(0, 8)} (#2419)`,
+        );
+        return named;
+      }
+      // #2531 — a successful open / verified pin already proved THIS canvas is
+      // the named workflow. Do not steal onto another tab whose id happens to
+      // carry that path (a second window showing the same file). Rewrite
+      // lastOrigin onto the canonical live id so the next origin-less turn
+      // inherits this canvas instead of the pre-switch workflow, and so the
+      // tool does not report pin success while retaining a different routing
+      // key.
+      if (request?.alignLiveCanvas && preferredWorkflowPath) {
+        movePin(live);
+        opts.info(
+          `[panel-orchestrator] ${key} aligned turn routing onto ${live.slice(0, 8)} after an explicit open/pin (#2531)`,
+        );
+        return live;
+      }
       return {
         repinned: false,
         reason:
@@ -734,11 +892,6 @@ export function makeScopeRepinHandler(opts: {
           `pin that is dead or ambiguous`,
       };
     }
-    const backend = opts.backendOfKey(key);
-    const eligible = opts.bridge
-      .tabs()
-      .map((t) => t.tab_id)
-      .filter((t) => opts.bridge.isHeadless?.(t) !== true && opts.backendForTab(t) === backend);
     // #888 — a NAMED workflow decides which tab, where "current" cannot.
     //
     // The refusal below already tells the agent to do exactly this ("Name the

@@ -85,7 +85,9 @@ export async function removeModelAction(args: { path: string }): Promise<CallToo
         );
       }
       try {
-        const { path: target, info } = await resolveExistingModelFile(args.path);
+        const { path: target, info } = await resolveExistingModelFile(args.path, {
+          mode: "remove",
+        });
 
         if (!info.isFile()) {
           throw new ValidationError(
@@ -286,6 +288,7 @@ export async function downloadCivitaiModelAction(args: {
   model_id?: number;
   filename?: string;
   auth?: DownloadAuth;
+  model_root?: string;
 }): Promise<CallToolResult> {
       try {
         if (args.model_id === undefined && args.model_version_id === undefined) {
@@ -353,6 +356,8 @@ export async function downloadCivitaiModelAction(args: {
           filename,
           args.auth,
           postDownload,
+          undefined,
+          args.model_root,
         );
 
         let timer: NodeJS.Timeout | undefined;

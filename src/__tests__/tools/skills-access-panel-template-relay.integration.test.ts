@@ -209,4 +209,58 @@ describe("list_packs -> panel template relay production boundary (#2196)", () =>
     // COMFYUI_URL fetch that a retarget could leave stale.
     expect(state.headlessCalls).toBe(0);
   });
+
+  it("serves list_templates from a bound remote panel without touching COMFYUI_URL (#2196)", async () => {
+    const index = { "remote-pack": [{ name: "live-template" }] };
+    const body = JSON.stringify(index);
+    const remoteCalls: string[] = [];
+    const realFetch = globalThis.fetch;
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockImplementation((input, init) => {
+      const url = String(input);
+      if (url.startsWith("http://127.0.0.1:")) return realFetch(input, init);
+      remoteCalls.push(url);
+      return Promise.reject(new Error("list_templates must not fetch the remote origin"));
+    });
+    try {
+      state.baseUrl = "https://remote.example/comfyapi";
+      const bridge = {
+        canReach: () => true,
+        resolveFailure: () => undefined,
+        resolveSharedTabId: () => "tab-1",
+        tabServerOrigin: () => "https://remote.example",
+        send: async () => ({
+          operation: "workflow_templates",
+          body,
+          contentType: "application/json",
+          bytes: Buffer.byteLength(body, "utf8"),
+        }),
+      };
+      const relay = await startPanelTemplateRelayServer({
+        bridge,
+        ...createPanelTemplateRelayWiring({
+          bridge,
+          currentTarget: () => state.baseUrl,
+          currentTargetGeneration: () => 0,
+          secrets: new Map([[SECRET, "orchestrator::codex"]]),
+        }),
+      });
+      servers.push(relay);
+      process.env.COMFYUI_MCP_RELAY_SECRET = SECRET;
+      process.env.COMFYUI_MCP_TEMPLATE_RELAY_URL = relay.endpointUrl;
+
+      const result = await listPacksHandler()({ action: "list_templates" });
+      const text = result.content.map((block) => block.text).join(" ");
+      expect(result.isError ?? false).toBe(false);
+      expect(text).not.toContain("NO_PANEL_ORIGIN");
+      expect(JSON.parse(text)).toMatchObject({
+        source_count: 1,
+        template_count: 1,
+        templates: { "remote-pack": [{ name: "live-template" }] },
+      });
+      expect(remoteCalls).toEqual([]);
+      expect(state.headlessCalls).toBe(0);
+    } finally {
+      fetchSpy.mockRestore();
+    }
+  });
 });

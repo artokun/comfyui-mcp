@@ -7,6 +7,7 @@ import {
   extractTextOutputs,
   hasAffirmativeSuccessStatus,
   historyCompletionTimeMs,
+  historyTerminalTimeMs,
 } from "../../services/job-history.js";
 
 function historyEntry(messages: unknown): HistoryEntry {
@@ -264,5 +265,33 @@ describe("historyCompletionTimeMs (#751 r4 real-completion-time gate)", () => {
       ["execution_success", { timestamp: NOW + 3_600_000 }],
     ]);
     expect(historyCompletionTimeMs(entry, NOW)).toBeUndefined();
+  });
+});
+
+describe("#2512 interrupted history is a terminal end event", () => {
+  const START = 1_700_000_000_000;
+  const INTERRUPT = START + 21 * 60 * 1000 + 8 * 1000;
+  const interrupted = (): HistoryEntry =>
+    ({
+      prompt: {},
+      outputs: {},
+      status: {
+        status_str: "error",
+        completed: true,
+        messages: [
+          ["execution_start", { timestamp: START }],
+          ["execution_interrupted", { timestamp: INTERRUPT }],
+        ],
+      },
+    }) as HistoryEntry;
+
+  it("extractExecutionStats measures start → execution_interrupted", () => {
+    expect(extractExecutionStats(interrupted())?.total_duration_ms).toBe(INTERRUPT - START);
+  });
+
+  it("historyTerminalTimeMs reads the interrupt timestamp (historyCompletionTimeMs stays success-only)", () => {
+    const entry = interrupted();
+    expect(historyTerminalTimeMs(entry, INTERRUPT + 1_000)).toBe(INTERRUPT);
+    expect(historyCompletionTimeMs(entry, INTERRUPT + 1_000)).toBeUndefined();
   });
 });

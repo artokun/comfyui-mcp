@@ -614,6 +614,22 @@ export async function resolveLiveComfyUIBase(): Promise<string | undefined> {
 }
 
 /**
+ * Keep values from the server's JSON response at the runtime boundary. The
+ * SystemStats TypeScript type describes the normal ComfyUI response, but the
+ * response is still untrusted JSON at runtime; a shape such as `argv: [1]`
+ * must not reach the string-only launch-argv parsers.
+ */
+function validatedLaunchArgv(value: unknown): string[] | undefined {
+  return Array.isArray(value) && value.every((token): token is string => typeof token === "string")
+    ? value
+    : undefined;
+}
+
+function validatedServerCwd(value: unknown): string | undefined {
+  return typeof value === "string" ? value : undefined;
+}
+
+/**
  * ONE `/system_stats` snapshot for callers that need to derive several things from the
  * SAME server state (the launch flags AND the install root), rather than issuing two
  * calls that could straddle a restart — the same invariant `resolveModelsDirWithBases`
@@ -628,10 +644,14 @@ export async function getLiveServerSnapshot(): Promise<{
   if (isRemoteMode()) return { reachable: false };
   try {
     const stats = await getSystemStats();
+    const system =
+      stats && typeof stats === "object" && stats.system && typeof stats.system === "object"
+        ? (stats.system as Record<string, unknown>)
+        : undefined;
     return {
       reachable: true,
-      argv: stats.system?.argv,
-      cwd: (stats.system as { cwd?: string })?.cwd,
+      argv: validatedLaunchArgv(system?.argv),
+      cwd: validatedServerCwd(system?.cwd),
     };
   } catch {
     return { reachable: false };
@@ -1094,6 +1114,8 @@ export interface LiveServerRootResolution {
   /** The PID the observation was made against, so a caller can confirm the
    *  anchor describes the very process it is acting on (#535). */
   observedPid?: number;
+  /** Normalized process creation time captured by the same correlated observation. */
+  observedStartedAtMs?: number;
 }
 
 /** How far up from the observed interpreter we look for the live install root.
@@ -1244,6 +1266,7 @@ function observeLivePython(
   pid: number;
   launchScript?: string;
   launchScriptInvalid?: boolean;
+  startedAtMs?: number;
 } | undefined {
   let statsHost: string | undefined;
   try {
@@ -1262,12 +1285,14 @@ function observeLivePython(
     // The PID travels with the interpreter (#535). A caller that is about to STOP
     // a process must be able to confirm the anchor describes that very process
     // and not some other ComfyUI — an interpreter path alone cannot prove it.
-    return live && (binary || live.launchScript || live.launchScriptInvalid)
+    return live &&
+      (binary || live.launchScript || live.launchScriptInvalid || live.startedAtMs !== undefined)
       ? {
           python: binary,
           pid: live.pid,
           launchScript: live.launchScript,
           launchScriptInvalid: live.launchScriptInvalid,
+          startedAtMs: live.startedAtMs,
         }
       : undefined;
   } catch {
@@ -1318,6 +1343,10 @@ export function resolveLiveServerRoot(
     observedLaunchScript?: string;
     /** Correlated launch script was present but invalid/non-regular. */
     observedLaunchScriptInvalid?: boolean;
+    /** Test/caller seam for the normalized process start time. */
+    observedStartedAtMs?: number;
+    /** Capture the correlated process start time for launch-state authorization. */
+    includeProcessStart?: boolean;
     /** Skip the process-table probe entirely (remote server). Defaults to isRemoteMode(). */
     remote?: boolean;
   },
@@ -1325,7 +1354,16 @@ export function resolveLiveServerRoot(
   const relDir = liveRelDirFromArgv(argv);
   const lexicalFromArgv = liveRootFromArgv(argv, cwd);
   const argvScriptResolution = liveScriptResolutionFromArgv(argv, cwd);
-  if (argvScriptResolution.indeterminate) return { source: "unresolved", relDir };
+  const remote = opts?.remote ?? isRemoteMode();
+  let observedStartedAtMs = opts?.observedStartedAtMs;
+  let observed: ReturnType<typeof observeLivePython> | undefined;
+  if (observedStartedAtMs === undefined && opts?.includeProcessStart && !remote) {
+    observed = observeLivePython(argv);
+    observedStartedAtMs = observed?.startedAtMs;
+  }
+  if (argvScriptResolution.indeterminate) {
+    return { source: "unresolved", relDir, observedStartedAtMs };
+  }
   const argvScript = argvScriptResolution.path;
   const fromArgv = argvScript ? dirname(argvScript) : lexicalFromArgv;
   // Preserve the historical unresolved/missing-path behavior, but never let an
@@ -1333,37 +1371,37 @@ export function resolveLiveServerRoot(
   // parent as a live install.
   if (argvScript) {
     const entry = pathEntryExists(argvScript);
-    if (entry === "indeterminate") return { source: "unresolved", relDir };
+    if (entry === "indeterminate") return { source: "unresolved", relDir, observedStartedAtMs };
     if (entry === "present" && regularFileState(argvScript) !== "file") {
-      return { source: "unresolved", relDir };
+      return { source: "unresolved", relDir, observedStartedAtMs };
     }
   }
-  if (fromArgv) return { root: fromArgv, source: "argv", relDir };
-  const remote = opts?.remote ?? isRemoteMode();
-  if (remote || relDir === undefined) return { source: "unresolved", relDir };
+  if (fromArgv) return { root: fromArgv, source: "argv", relDir, observedStartedAtMs };
+  if (remote || relDir === undefined) return { source: "unresolved", relDir, observedStartedAtMs };
 
   let observedPython = opts?.observedPython;
   let observedPid = opts?.observedPid;
   let observedLaunchScript = opts?.observedLaunchScript;
   let observedLaunchScriptInvalid = opts?.observedLaunchScriptInvalid;
   if (!observedPython && !observedLaunchScript && !observedLaunchScriptInvalid) {
-    const observed = observeLivePython(argv);
+    observed ??= observeLivePython(argv);
     observedPython = observed?.python;
     observedPid = observed?.pid;
     observedLaunchScript = observed?.launchScript;
     observedLaunchScriptInvalid = observed?.launchScriptInvalid;
+    observedStartedAtMs ??= observed?.startedAtMs;
   }
 
   // A correlated but unusable launch script is explicit contradictory evidence.
   // It must not be erased by anchoring the same observation on its interpreter.
   if (observedLaunchScriptInvalid) {
-    return { source: "unresolved", relDir, observedPython, observedPid };
+    return { source: "unresolved", relDir, observedPython, observedPid, observedStartedAtMs };
   }
 
   if (observedLaunchScript) {
     const resolvedLaunchScript = realpathIfPresent(observedLaunchScript);
     if (!resolvedLaunchScript.path || resolvedLaunchScript.indeterminate) {
-      return { source: "unresolved", relDir, observedPython, observedPid };
+      return { source: "unresolved", relDir, observedPython, observedPid, observedStartedAtMs };
     }
     if (resolvedLaunchScript.path) {
       const resolvedPath = resolvedLaunchScript.path;
@@ -1381,14 +1419,15 @@ export function resolveLiveServerRoot(
           observedPython,
           observedPid,
           observedLaunchScript: resolvedPath,
+          observedStartedAtMs,
         };
       }
     }
     // An explicit observed script that did not authorize its root is not a
     // reason to fall through to an interpreter anchor from another tree.
-    return { source: "unresolved", relDir, observedPython, observedPid };
+    return { source: "unresolved", relDir, observedPython, observedPid, observedStartedAtMs };
   }
-  if (!observedPython) return { source: "unresolved", relDir };
+  if (!observedPython) return { source: "unresolved", relDir, observedStartedAtMs };
 
   const anchored = anchorRelDirOnInterpreter(observedPython, relDir);
   if (anchored) {
@@ -1400,9 +1439,17 @@ export function resolveLiveServerRoot(
       observedPid,
       observedLaunchScript,
       anchorDir: anchored.anchorDir,
+      observedStartedAtMs,
     };
   }
-  return { source: "unresolved", relDir, observedPython, observedPid, observedLaunchScript };
+  return {
+    source: "unresolved",
+    relDir,
+    observedPython,
+    observedPid,
+    observedLaunchScript,
+    observedStartedAtMs,
+  };
 }
 
 /**
@@ -1731,6 +1778,143 @@ export function torchVersionsAgree(a: string | undefined, b: string | undefined)
   return na.length > 0 && na === nb;
 }
 
+type ObservedInterpreterSource = "launched-by-us" | "process-table";
+
+/**
+ * The same python-version trust verdict `install_comfyui(action:"environment")`
+ * uses for `python_probe_trusted`. Shared so a mutating install cannot pip into
+ * an interpreter the environment probe has already marked untrusted (#2530).
+ */
+function observedPythonTrust(opts: {
+  source: ObservedInterpreterSource;
+  shortVer: string;
+  fullVer: string;
+  runningPython?: string;
+  pid?: number;
+  port?: number;
+}): { trusted: boolean; reason: string } {
+  const { source, shortVer, fullVer, runningPython, pid, port } = opts;
+  if (!runningPython) {
+    if (source === "launched-by-us") {
+      return {
+        trusted: true,
+        reason:
+          `this MCP server launched ComfyUI (PID ${pid}) with this exact ` +
+          `interpreter. The running ComfyUI did not report its own python version, so no ` +
+          `cross-check was possible — none is needed, the interpreter is the one we chose`,
+      };
+    }
+    return {
+      trusted: false,
+      reason:
+        `the observed interpreter (${source}) reports python ${shortVer}, but ` +
+        `the running ComfyUI did not report a python version of its own, so the two could ` +
+        `NOT be compared. That is an unverified match, not a mismatch — refusing to ` +
+        `attribute this interpreter's packages to the server on an unmade comparison`,
+    };
+  }
+  if (!pythonVersionsAgree(fullVer, runningPython)) {
+    return {
+      trusted: false,
+      reason:
+        `the observed interpreter (${source}) reports python ${shortVer}, which ` +
+        `does not match the running ComfyUI python ${runningPython} — ` +
+        `refusing to attribute its packages to the server`,
+    };
+  }
+  return {
+    trusted: true,
+    reason:
+      source === "launched-by-us"
+        ? `this MCP server launched ComfyUI (PID ${pid}) with this exact interpreter`
+        : `the OS reports PID ${pid} (serving port ${port}) is running this interpreter`,
+  };
+}
+
+function torchContradictionOf(
+  probed: { ran: boolean; packages: Record<string, string> },
+  serverTorch: string | undefined,
+): "absent" | "version" | undefined {
+  if (!serverTorch) return undefined;
+  if (probed.ran && !probed.packages.torch) return "absent";
+  if (probed.packages.torch && !torchVersionsAgree(probed.packages.torch, serverTorch)) {
+    return "version";
+  }
+  return undefined;
+}
+
+function torchContradictionReason(
+  kind: "absent" | "version",
+  source: string,
+  torch: string | undefined,
+  serverTorch: string,
+): string {
+  return kind === "absent"
+    ? `the observed interpreter (${source}) has none of torch while ` +
+      `the running ComfyUI reports pytorch ${serverTorch} — this is the base ` +
+      `interpreter, not the venv the server imports from. Refusing to attribute ` +
+      `its packages to the server`
+    : `the observed interpreter (${source}) reports torch ${torch}, ` +
+      `which does not match the running ComfyUI pytorch ${serverTorch} — ` +
+      `refusing to attribute its packages to the server`;
+}
+
+/**
+ * Apply the environment probe's trust rules to an observed install interpreter.
+ * A known-untrusted python (base vs venv, torch mismatch) must not be handed to
+ * pip. Launched-by-us still wins when the interpreter cannot be probed at all —
+ * we chose that path — but a successful probe that contradicts the running
+ * server refuses (#2530).
+ */
+async function corroborateObservedInstallPython(
+  python: string,
+  source: ObservedInterpreterSource,
+  opts: { runningPython?: string; runningTorch?: string; pid?: number },
+): Promise<{ trusted: true } | { trusted: false; reason: string }> {
+  const version =
+    (await probe(python, ["-c", "import sys;print(sys.version)"])) ??
+    (await probe(python, ["--version"]));
+  if (!version) {
+    if (source === "launched-by-us") return { trusted: true };
+    return {
+      trusted: false,
+      reason:
+        `Cannot verify the running server's interpreter "${python}": it did not report a python version, ` +
+        `so it cannot be corroborated against the connected ComfyUI.`,
+    };
+  }
+  const ver = version.replace(/^Python\s+/i, "").replace(/\s+/g, " ").trim();
+  const shortVer = ver.match(/^(\d+(?:\.\d+)*)/)?.[1] ?? ver;
+  const initial = observedPythonTrust({
+    source,
+    shortVer,
+    fullVer: ver,
+    runningPython: opts.runningPython,
+    pid: opts.pid,
+    port: config.resolvedPort,
+  });
+  if (!initial.trusted) return { trusted: false, reason: initial.reason };
+  const probed = await probePipPackages(python, KEY_PACKAGES);
+  const serverTorch = opts.runningTorch?.trim();
+  const contradiction = torchContradictionOf(probed, serverTorch);
+  if (contradiction && serverTorch) {
+    return {
+      trusted: false,
+      reason: torchContradictionReason(contradiction, source, probed.packages.torch, serverTorch),
+    };
+  }
+  return { trusted: true };
+}
+
+function untrustedInstallInterpreterReason(python: string, detail: string): string {
+  return (
+    `Cannot install Python packages with "${python}": ${detail} ` +
+    `Never invoke that interpreter for pip. Use install_custom_node(action:"fix") so ` +
+    `ComfyUI-Manager can restore/repair dependencies in the connected environment, ` +
+    `or set COMFYUI_PYTHON to the interpreter ComfyUI actually imports from.`
+  );
+}
+
 /** A bundle root may contain its actual server in `ComfyUI/`; do not confuse a
  * nested independent checkout with that bundle layout. */
 function targetsLiveInstall(serverRoot: string, requestedRoot: string | undefined): boolean {
@@ -1774,9 +1958,19 @@ export async function resolveInstallInterpreter(
     );
   }
 
-  let system: { argv?: string[]; cwd?: string } | undefined;
+  let system: {
+    argv?: string[];
+    cwd?: string;
+    python_version?: string;
+    pytorch_version?: string;
+  } | undefined;
   try {
-    system = (await getSystemStats()).system as { argv?: string[]; cwd?: string };
+    system = (await getSystemStats()).system as {
+      argv?: string[];
+      cwd?: string;
+      python_version?: string;
+      pytorch_version?: string;
+    };
   } catch {
     return refuse(
       "Cannot verify the running server's interpreter: no local ComfyUI is reachable. " +
@@ -1798,9 +1992,26 @@ export async function resolveInstallInterpreter(
     remote: false,
     serverArgv: system?.argv,
   });
+  const trustLive = async (
+    python: string,
+    source: ObservedInterpreterSource,
+    pid: number,
+  ): Promise<InstallInterpreterResolution | undefined> => {
+    const verdict = await corroborateObservedInstallPython(python, source, {
+      runningPython: system?.python_version,
+      runningTorch: system?.pytorch_version,
+      pid,
+    });
+    if (verdict.trusted) return undefined;
+    return refuse(untrustedInstallInterpreterReason(python, verdict.reason));
+  };
   // A VALIDATED launched-by-us observation (tier 1) is authoritative whenever the
   // live server is the requested install — or argv names no root to contradict it.
+  // Still refuse when the environment probe would mark it untrusted (#2530): a
+  // launched base interpreter with no torch is not the env ComfyUI imports from.
   if (live?.source === "launched-by-us" && (!serverRoot || targetsLiveInstall(serverRoot, root))) {
+    const refused = await trustLive(live.python, live.source, live.pid);
+    if (refused) return refused;
     return {
       python: live.python,
       source: "launched",
@@ -1824,8 +2035,12 @@ export async function resolveInstallInterpreter(
   // A process-table observation (tier 2) is ground truth too, but only once the
   // guards above have tied the live server to the requested install. This strictly
   // ADDS a success source: when nothing observes the interpreter the install still
-  // refuses (#651 fail-closed).
+  // refuses (#651 fail-closed). A torch/python contradiction still untrusts it —
+  // Stability Matrix's uv base python is a common argv[0] that is not the venv
+  // ComfyUI imports from (#2530).
   if (live) {
+    const refused = await trustLive(live.python, live.source, live.pid);
+    if (refused) return refused;
     return {
       python: live.python,
       source: "observed",
@@ -1917,7 +2132,10 @@ async function probeGitRev(
   return { rev, branch };
 }
 
-/** Read ComfyUI-Manager version from its local install if present. */
+/** Read ComfyUI-Manager version from a custom_nodes checkout.
+ *  Fallback only — ComfyUI with --enable-manager serves the pip package and
+ *  disables this folder ("Blocked by policy"), so a live version must come
+ *  from a trusted interpreter probe first (#2538). */
 async function readManagerVersion(
   workspacePath: string,
 ): Promise<string | undefined> {
@@ -1991,6 +2209,8 @@ export interface EnvironmentInfo {
      *  "we couldn't determine it" apart from "we determined it's absent" (#401). */
     python_probe_reason?: string;
     git?: { rev?: string; branch?: string };
+    /** Live Manager version: trusted pip `comfyui-manager` when observed,
+     *  else a custom_nodes checkout (unverified when the pip probe is not). */
     comfyui_manager_version?: string;
     packages?: Record<string, string>;
     note?: string;
@@ -2006,6 +2226,9 @@ const KEY_PACKAGES = [
   "transformers",
   "diffusers",
   "comfyui-frontend-package",
+  // pip Manager (ComfyUI --enable-manager). Must outrank a leftover
+  // custom_nodes/ComfyUI-Manager checkout that core has blocked (#2538).
+  "comfyui-manager",
 ];
 
 export async function getEnvironment(): Promise<EnvironmentInfo> {
@@ -2158,7 +2381,6 @@ export async function getEnvironment(): Promise<EnvironmentInfo> {
     // Everything that used to live here (sole-candidate-under-a-believed-root,
     // python/torch "fingerprints", ambiguity corroboration) was inference dressed up
     // as proof, and inference is what reported the wrong venv in the first place.
-    const runningPy = running.python_version;
     let trusted = false;
     let reason: string;
 
@@ -2175,41 +2397,19 @@ export async function getEnvironment(): Promise<EnvironmentInfo> {
         `we did not launch this ComfyUI and could not read the interpreter of the ` +
         `process serving port ${config.resolvedPort} from the OS${deployed}. Package ` +
         `versions are omitted rather than attributed to the wrong environment`;
-    } else if (!runningPy) {
-      // NOT a mismatch. `pythonVersionsAgree` returns false when EITHER side is missing,
-      // so this used to fall into the branch below and report "does not match the running
-      // ComfyUI python (unreported)" — asserting a disagreement that was never observed.
-      // One verdict, two causes; the message picked the wrong one. Say which happened.
-      if (groundTruth.source === "launched-by-us") {
-        // Nothing to cross-check against, and nothing that needs cross-checking: we
-        // CHOSE this interpreter and spawned the process, and its PID + creation time
-        // still match. Refusing here would be the opposite error — withholding a package
-        // list we genuinely know, because a corroboration we never needed was missing.
-        trusted = true;
-        reason =
-          `this MCP server launched ComfyUI (PID ${groundTruth.pid}) with this exact ` +
-          `interpreter. The running ComfyUI did not report its own python version, so no ` +
-          `cross-check was possible — none is needed, the interpreter is the one we chose`;
-      } else {
-        reason =
-          `the observed interpreter (${groundTruth.source}) reports python ${shortVer}, but ` +
-          `the running ComfyUI did not report a python version of its own, so the two could ` +
-          `NOT be compared. That is an unverified match, not a mismatch — refusing to ` +
-          `attribute this interpreter's packages to the server on an unmade comparison`;
-      }
-    } else if (!pythonVersionsAgree(ver, runningPy)) {
-      // We DID observe the interpreter, yet it disagrees with the running server.
-      // Something is off (a stale PID, a wrapper); report unknown, not a wrong list.
-      reason =
-        `the observed interpreter (${groundTruth.source}) reports python ${shortVer}, which ` +
-        `does not match the running ComfyUI python ${runningPy} — ` +
-        `refusing to attribute its packages to the server`;
     } else {
-      trusted = true;
-      reason =
-        groundTruth.source === "launched-by-us"
-          ? `this MCP server launched ComfyUI (PID ${groundTruth.pid}) with this exact interpreter`
-          : `the OS reports PID ${groundTruth.pid} (serving port ${config.resolvedPort}) is running this interpreter`;
+      // Shared with resolveInstallInterpreter so a mutating pip cannot target an
+      // interpreter this probe has already marked untrusted (#2530).
+      const verdict = observedPythonTrust({
+        source: groundTruth.source,
+        shortVer,
+        fullVer: ver,
+        runningPython: running.python_version,
+        pid: groundTruth.pid,
+        port: config.resolvedPort,
+      });
+      trusted = verdict.trusted;
+      reason = verdict.reason;
     }
 
     local.python_probe_trusted = trusted;
@@ -2228,25 +2428,11 @@ export async function getEnvironment(): Promise<EnvironmentInfo> {
       // Homebrew/uv BASE python after the process table lost the venv context
       // (#401 recurrence, 0.52.1). Absence only counts when pip actually answered.
       const serverTorch = running.pytorch_version?.trim();
-      const torchContradiction =
-        serverTorch &&
-        (probed.ran && !pkgs.torch
-          ? "absent"
-          : pkgs.torch && !torchVersionsAgree(pkgs.torch, serverTorch)
-            ? "version"
-            : undefined);
-      if (torchContradiction) {
+      const torchContradiction = torchContradictionOf(probed, serverTorch);
+      if (torchContradiction && serverTorch) {
         trusted = false;
         const observedAs = groundTruth?.source ?? "process-table";
-        reason =
-          torchContradiction === "absent"
-            ? `the observed interpreter (${observedAs}) has none of torch while ` +
-              `the running ComfyUI reports pytorch ${serverTorch} — this is the base ` +
-              `interpreter, not the venv the server imports from. Refusing to attribute ` +
-              `its packages to the server`
-            : `the observed interpreter (${observedAs}) reports torch ${pkgs.torch}, ` +
-              `which does not match the running ComfyUI pytorch ${serverTorch} — ` +
-              `refusing to attribute its packages to the server`;
+        reason = torchContradictionReason(torchContradiction, observedAs, pkgs.torch, serverTorch);
         local.python_probe_trusted = false;
         local.python_probe_reason = reason;
         local.note = [
@@ -2307,11 +2493,19 @@ export async function getEnvironment(): Promise<EnvironmentInfo> {
   // Manager lives under custom_nodes/, which --base-directory runtimes scan
   // from the data/base root (#1770). Fall back to the checkout only when no
   // data root is known (legacy layout next to main.py).
+  //
+  // A trusted pip `comfyui-manager` is the live Manager when ComfyUI is
+  // started with --enable-manager: core then blocks custom_nodes/ComfyUI-Manager
+  // ("Blocked by policy") and the leftover 3.x folder is not what HTTP serves
+  // (#2538). An untrusted probe must not invent that pip version.
   const managerRoot = localRoot ?? codeRoot;
-  if (managerRoot) {
-    const managerVersion = await readManagerVersion(managerRoot);
-    if (managerVersion) local.comfyui_manager_version = managerVersion;
-  }
+  const pipManager =
+    local.python_probe_trusted === true
+      ? (local.packages?.["comfyui-manager"] ?? local.packages?.["comfyui_manager"])
+      : undefined;
+  const managerVersion =
+    pipManager ?? (managerRoot ? await readManagerVersion(managerRoot) : undefined);
+  if (managerVersion) local.comfyui_manager_version = managerVersion;
 
   return { running_instance: running, local };
 }

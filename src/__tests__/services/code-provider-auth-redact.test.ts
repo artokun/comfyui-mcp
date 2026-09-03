@@ -11,6 +11,11 @@ import { __testing } from "../../services/code-provider-auth.js";
 
 const { refreshGrokTokens, refreshOpenAICodexTokens, refreshKimiCodeTokens } = __testing;
 
+/** #2534 — refreshKimiCodeTokens now takes its region-resolved token URL.
+ *  These tests are about REDACTION, so any valid endpoint serves; the URL
+ *  itself is pinned in code-provider-auth.test.ts. */
+const KIMI_TOKEN_URL = "https://auth.kimi.com/api/oauth/token";
+
 describe("refresh error paths redact token-shaped material", () => {
   it("refreshGrokTokens: a leaked refresh_token in the error body never reaches the thrown message", async () => {
     const fetchMock = vi.fn(
@@ -88,7 +93,7 @@ describe("refresh error paths redact token-shaped material", () => {
         }),
     );
 
-    const err = await refreshKimiCodeTokens("some-refresh-token", {
+    const err = await refreshKimiCodeTokens("some-refresh-token", KIMI_TOKEN_URL, {
       fetch: fetchMock as unknown as typeof fetch,
     }).catch((e: unknown) => e);
 
@@ -104,7 +109,7 @@ describe("refresh error paths redact token-shaped material", () => {
       async () => new Response("not json at all refresh_token=LEAKED_RT_999", { status: 200 }),
     );
 
-    const err = await refreshKimiCodeTokens("some-refresh-token", {
+    const err = await refreshKimiCodeTokens("some-refresh-token", KIMI_TOKEN_URL, {
       fetch: fetchMock as unknown as typeof fetch,
     }).catch((e: unknown) => e);
 

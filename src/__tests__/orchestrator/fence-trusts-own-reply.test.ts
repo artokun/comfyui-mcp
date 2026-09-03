@@ -188,12 +188,30 @@ describe("#814 WIRING: both call sites route through refreshFenceFromOwnReply fi
     );
 
     const saveIdx = src.indexOf('"panel_save_workflow"');
-    const newIdx = src.indexOf('"panel_new_workflow"');
+    // #2705 — panel_new_workflow's body MOVED. It grew a verify-after-timeout
+    // path (like panel_open_workflow's) and now lives in `newWorkflowWithVerify`,
+    // so a slice taken from the `def("panel_new_workflow"` literal no longer
+    // contains the wiring line and this pin went red on a refactor that changed
+    // nothing about the wiring. Anchor on the function the tool delegates TO, and
+    // pin the delegation separately — together those are the same claim
+    // ("panel_new_workflow reaches this line") without depending on the two
+    // halves sitting next to each other.
+    const newIdx = src.indexOf("async function newWorkflowWithVerify(");
     expect(saveIdx).toBeGreaterThan(0);
     expect(newIdx).toBeGreaterThan(0);
+    expect(src).toMatch(/async \(_args, ctx\) => newWorkflowWithVerify\(ctx\),/);
 
     const saveBlock = src.slice(saveIdx, saveIdx + 8000);
-    const newBlock = src.slice(newIdx, newIdx + 5000);
+    // Bounded by the top-level closing brace, not by a character count: a
+    // function that grows past an arbitrary slice would silently stop being
+    // checked, which is how a source pin turns into a green no-op.
+    // `\r?\n` on purpose: this tree checks out CRLF on Windows, and a literal
+    // "\n}\n" finds nothing there — the slice would be empty and the assertion
+    // below would fail for a reason that has nothing to do with the wiring.
+    const fromNew = src.slice(newIdx);
+    const newEnd = fromNew.search(/\r?\n\}\r?\n/);
+    expect(newEnd).toBeGreaterThan(0);
+    const newBlock = fromNew.slice(0, newEnd);
     const wired = /const fenceRebind = refreshFenceFromOwnReply\(ctx, res\) \?\? \(await rebindWorkflowFence\(ctx\)\);/;
     expect(saveBlock).toMatch(wired);
     expect(newBlock).toMatch(wired);

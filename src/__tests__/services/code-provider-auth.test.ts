@@ -215,6 +215,120 @@ describe("resolveKimiCodeOAuth", () => {
     };
     expect(saved.access_token).toBe("fresh-kimi");
   });
+
+  /** Write an expired credential file and return a fetch that records its URL. */
+  async function armRefresh(region?: string) {
+    const credDir = join(home, ".kimi-code", "credentials");
+    await mkdir(credDir, { recursive: true });
+    await writeFile(
+      join(credDir, "kimi-code.json"),
+      JSON.stringify({
+        access_token: "stale",
+        refresh_token: "rt-kimi",
+        expires_at: Math.floor(Date.now() / 1000) - 60,
+      }),
+      "utf8",
+    );
+    if (region !== undefined) {
+      await writeFile(join(home, ".kimi-code", "region"), region, "utf8");
+    }
+    const urls: string[] = [];
+    const fetchMock = vi.fn(async (url: unknown) => {
+      urls.push(String(url));
+      return new Response(
+        JSON.stringify({ access_token: "fresh-kimi", refresh_token: "rt2", expires_in: 3600 }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      );
+    });
+    return { urls, fetchMock };
+  }
+
+  it("#2534 refreshes against auth.kimi.com, NOT the 404 api.kimi.com/oauth/token", async () => {
+    // The old constant answered 404 from nginx, so every refresh failed and a
+    // Connect inside the 15-minute token's skew reported "refresh failed (404)".
+    const { urls, fetchMock } = await armRefresh();
+    await resolveKimiCodeOAuth({ home, fetch: fetchMock as typeof fetch, now: () => Date.now() });
+    expect(urls).toEqual(["https://auth.kimi.com/api/oauth/token"]);
+    expect(urls[0]).not.toContain("api.kimi.com/oauth/token");
+  });
+
+  it("#2534 follows the CLI's region file to the global auth host", async () => {
+    const { urls, fetchMock } = await armRefresh("global");
+    await resolveKimiCodeOAuth({ home, fetch: fetchMock as typeof fetch, now: () => Date.now() });
+    expect(urls).toEqual(["https://auth.kimi.ai/api/oauth/token"]);
+  });
+
+  it("#2534 keeps mainland for the CLI's own mainland-cn value", async () => {
+    const { urls, fetchMock } = await armRefresh("mainland-cn\n");
+    await resolveKimiCodeOAuth({ home, fetch: fetchMock as typeof fetch, now: () => Date.now() });
+    expect(urls).toEqual(["https://auth.kimi.com/api/oauth/token"]);
+  });
+
+  it("#2534 an explicit base-URL override pins the region for BOTH hosts", async () => {
+    process.env.COMFYUI_MCP_KIMI_BASE_URL = "https://api.kimi.ai/coding/v1";
+    try {
+      const { urls, fetchMock } = await armRefresh();
+      const creds = await resolveKimiCodeOAuth({ home, fetch: fetchMock as typeof fetch, now: () => Date.now() });
+      expect(urls).toEqual(["https://auth.kimi.ai/api/oauth/token"]);
+      expect(creds.baseUrl).toBe("https://api.kimi.ai/coding/v1");
+    } finally {
+      delete process.env.COMFYUI_MCP_KIMI_BASE_URL;
+    }
+  });
+
+  it("#2534 a global region moves the CODING host too, not just the OAuth host", async () => {
+    // Deriving only the OAuth host left a global install refreshing at
+    // auth.kimi.ai and then sending the fresh token to the mainland coding API
+    // (gate r2 P1) — a split-brain pair worse than being consistently wrong.
+    const { urls, fetchMock } = await armRefresh("global");
+    const creds = await resolveKimiCodeOAuth({ home, fetch: fetchMock as typeof fetch, now: () => Date.now() });
+    expect(urls).toEqual(["https://auth.kimi.ai/api/oauth/token"]);
+    expect(creds.baseUrl).toBe("https://api.kimi.ai/coding/v1");
+  });
+
+  it("#2534 REFUSES when the region file exists but cannot be read", async () => {
+    // Guessing mainland would send a global install's refresh_token to
+    // auth.kimi.com and fail as invalid_grant — an error that points at the
+    // token and says nothing about the region (gate r2/r3 P1).
+    const { fetchMock } = await armRefresh();
+    const regionFile = join(home, ".kimi-code", "region");
+    await mkdir(regionFile, { recursive: true }); // a DIRECTORY: read throws EISDIR
+    await expect(
+      resolveKimiCodeOAuth({ home, fetch: fetchMock as typeof fetch, now: () => Date.now() }),
+    ).rejects.toThrow(/region file .* could not be read/i);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("#2534 an unreadable region file does NOT break the KIMI_API_KEY path", async () => {
+    // That path needs no OAuth, so it must not fail on a file it never consults.
+    const regionFile = join(home, ".kimi-code", "region");
+    await mkdir(regionFile, { recursive: true });
+    process.env.KIMI_API_KEY = "kimi-api-key";
+    const creds = await resolveKimiCodeOAuth({ home });
+    expect(creds.accessToken).toBe("kimi-api-key");
+    expect(creds.baseUrl).toBe(__testing.KIMI_CODE_DEFAULT_BASE);
+  });
+
+  it("#2534 mainland keeps both hosts on .com", async () => {
+    const { urls, fetchMock } = await armRefresh("mainland-cn");
+    const creds = await resolveKimiCodeOAuth({ home, fetch: fetchMock as typeof fetch, now: () => Date.now() });
+    expect(urls).toEqual(["https://auth.kimi.com/api/oauth/token"]);
+    expect(creds.baseUrl).toBe("https://api.kimi.com/coding/v1");
+  });
+
+  it("#2534 sends the form-encoded refresh_token grant the endpoint accepts", async () => {
+    // auth.kimi.* answers `unsupported_grant_type` to a JSON body and
+    // `invalid_grant` to this one — so the encoding is load-bearing, not cosmetic.
+    const { fetchMock } = await armRefresh();
+    await resolveKimiCodeOAuth({ home, fetch: fetchMock as typeof fetch, now: () => Date.now() });
+    const init = fetchMock.mock.calls[0]?.[1] as RequestInit;
+    expect((init.headers as Record<string, string>)["Content-Type"]).toBe(
+      "application/x-www-form-urlencoded",
+    );
+    const body = new URLSearchParams(String(init.body));
+    expect(body.get("grant_type")).toBe("refresh_token");
+    expect(body.get("refresh_token")).toBe("rt-kimi");
+  });
 });
 describe("nativeCliStatus (CLI-auth detection for oauth_status)", () => {
   let home = "";

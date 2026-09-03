@@ -9,6 +9,7 @@ import { describe, expect, it, vi } from "vitest";
 const fetchApiMock = vi.fn();
 vi.mock("../../comfyui/client.js", () => ({
   getClient: () => ({ fetchApi: (...a: unknown[]) => fetchApiMock(...a) }),
+  MAX_VIEW_RESPONSE_BYTES: 32 * 1024 * 1024,
   // #385 — call sites moved from `client.fetchApi` to `comfyApiFetch`, which
   // returns a 4xx instead of throwing. Routed to the SAME spy so every
   // existing "which route did we ask for" assertion still pins the same thing.
