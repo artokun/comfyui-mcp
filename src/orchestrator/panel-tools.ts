@@ -26206,16 +26206,15 @@ CHECKED FOR YOU: the graph read this message prescribes was just run, and it ` +
           // double-applied write. Still BOUNDED, never Infinity, so a genuinely
           // frozen tab fails — at 90 s instead of 20 s.
           //
-          // ONE-SHOT ACROSS RECONNECTS, deliberately. Being a read now also makes
-          // this command eligible for the bridge's park-and-resume, and that
-          // resume re-dispatches on `tabId` alone — but a `wf:` route key recurs,
-          // and the hello handler's own #486 rule is that "same key is not the
-          // same tab". A parked capture could be resumed onto a DIFFERENT browser
-          // tab that took the key over, and answer this caller with a picture of a
-          // canvas they never asked about. `maxReconnectRetries: 0` keeps it out
-          // of that branch: a mid-capture drop fails honestly, and re-asking for a
-          // screenshot costs nothing. The general resume-vs-incarnation gap is
-          // real and older than this call site; it is tracked in #2761.
+          // ONE-SHOT ACROSS RECONNECTS, deliberately — and still so after #2761.
+          // Being a read makes this command eligible for the bridge's
+          // park-and-resume. That resume now requires the returning connection to
+          // PROVE it is the tab that issued the read (#2761), so the wrong-canvas
+          // outcome this originally guarded against is closed at the bridge for
+          // every command in the set, not just this one. The budget stays zero
+          // regardless: a capture is free to re-ask, so it gains nothing from
+          // resuming, and keeping it out of the branch entirely means this call
+          // site does not depend on that rule staying correct.
           const res = (await ctx.bridge.send(cmd as { cmd: string }, {
             tabId: ctx.tabId,
             timeoutMs: OBJECT_INFO_REFRESH_ACK_TIMEOUT_MS,

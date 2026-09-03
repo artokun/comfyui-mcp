@@ -6,10 +6,12 @@ All notable changes to this project are documented here. This project adheres to
 
 ## Unreleased
 
+## [0.52.179] - 2026-09-02
+
 ### MCP
 
 #### Fixed
-- **the UI→API converter no longer shifts widgets past a `forceInput`-only input (#2753).**
+- **the UI→API converter no longer shifts widgets past a `forceInput`-only input (#2753, #2755).**
   A `["STRING", {forceInput: true}]` input is a socket on canvas, so ComfyUI writes no
   `widgets_values` slot for it; the converter classified it as a widget, consumed the first
   saved value, and reported every real widget with its neighbour's value — `get_workflow`
@@ -19,6 +21,15 @@ All notable changes to this project are documented here. This project adheres to
   value, so it is no longer guessed at — it is reported, naming the unmapped values.
   The deprecated `defaultInput` spelling is honoured the way the frontend migrates it:
   socket-only on an OPTIONAL input, widget kept on a REQUIRED one.
+- **`apply_manifest` now tracks Manager v4 custom-node enqueues that return an empty success body (#2725, #2749).** Already-enabled packs are satisfied without a duplicate enqueue, and an unverified empty-ack outcome remains pending instead of authorizing a speculative fallback.
+
+- a parked read resumes only for a tab that PROVES it is the one that issued it (#2769)
+- qwen-txt2img examples start 16-channel, matching the official Qwen Image template (#2767)
+- the tunnel/pairing listener reads the handshake Origin it was throwing away (#2766)
+- a 404 on both queue routes is not evidence that ComfyUI-Manager is missing (#2762)
+- a screenshot is a READ — stop calling its timeout a mutation, and give it the bounded read budget (#2760)
+- a pack workflow miss must not advertise the pack it just refused (#2750)
+
 
 #### Changed
 - the upload body and the bridge probe's socket chunks are typed so they still compile
@@ -32,7 +43,6 @@ All notable changes to this project are documented here. This project adheres to
 
 #### Fixed
 - support IPv6-only ComfyUI loopback targets when `COMFYUI_URL` uses `127.0.0.1`, for issue #2719 (#2747)
-
 
 ## [0.52.177] - 2026-09-02
 
