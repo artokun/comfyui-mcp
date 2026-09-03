@@ -367,6 +367,17 @@ const OWNERSHIP_PROBES = [
   "\u0000",
   "\u0000zz-comfyui-mcp-ownership-probe-zz",
   "zz-comfyui-mcp-ownership-probe-zz",
+  // Shaped like real ComfyUI class names — PascalCase, snake_case, and the two
+  // tag conventions. A pattern broad enough to match a name it has never seen is
+  // broad by SHAPE, and this catches it WITHOUT consulting the catalogue, which
+  // is what makes it work when the catalogue is too thin to be a control: against
+  // a near-empty catalogue the foreign-owner veto below has nothing to compare
+  // with, and absence of evidence was reading as evidence of narrowness.
+  // Rejects ^[A-Z] and its relatives; keeps all 39 real catalogue patterns.
+  "ZzqxOwnershipProbeNode",
+  "zzqx_ownership_probe_node",
+  "Zzqx Ownership Probe (zzqx)",
+  "Zzqx Ownership Probe [zzqx]",
 ];
 
 interface MappingIndex {

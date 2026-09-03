@@ -302,6 +302,32 @@ describe("#2765 a nodename_pattern that discriminates nothing owns nothing", () 
     expect(result.missingPacks).toEqual([]);
   });
 
+  /**
+   * codex gate round 2, P1 — the foreign-owner veto is evidence FROM the
+   * catalogue, so against a catalogue with no exact names it has nothing to
+   * compare with and returns "not broad". That read absence of evidence as
+   * evidence of narrowness, and a broad pattern owned the graph unopposed.
+   *
+   * The gate's own reproduction, verbatim: one entry, no exact names, empty
+   * /object_info, `^[A-Z]` against class_type "U". It resolved to "A" and
+   * install_deps queued it.
+   */
+  it("still refuses a broad pattern when the catalogue is too thin to judge it", async () => {
+    const wf: WorkflowJSON = { "1": { class_type: "U", inputs: {} } };
+    const mappings = {
+      "https://github.com/x/a": [[], { title: "A", nodename_pattern: "^[A-Z]" }],
+    };
+    const result = await extractWorkflowDependencies(wf, makeDeps({}, mappings));
+    expect(byType(result)["U"]).toMatchObject({ pack: null, source: "unresolved" });
+    expect(result.missingPacks).toEqual([]);
+
+    // …and the install path, which is where the harm actually lands.
+    const deps = makeDeps({}, mappings);
+    const install = await installWorkflowDependencies(wf, deps);
+    expect(deps.queueInstall).not.toHaveBeenCalled();
+    expect(install.installed).toEqual([]);
+  });
+
   it("tolerates ONE colliding owner, which is a fork of the same project", async () => {
     // `_jru$`, `- Ostris$` and ` \(rgthree\)$` each collide with exactly one
     // other catalogue entry — a sibling repo by the same author. Vetoing at one
