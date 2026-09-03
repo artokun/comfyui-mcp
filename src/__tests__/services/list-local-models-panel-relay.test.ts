@@ -254,4 +254,29 @@ describe("#2511: list_local_models relays inventory through the connected panel"
     expect(panelRead.mock.calls.map(([operation]) => operation)).toContain("models/loras");
     expect(panelRead.mock.calls.map(([operation]) => operation)).toContain("models/diffusion_models");
   });
+  it("a non-document object_info body is a FAILED read, not an empty inventory", async () => {
+    // The relay hands back whatever the panel sent. `null` parses fine, and the
+    // memo keyed on `!== undefined` used to cache it — so the call site's
+    // `info === undefined` guard passed and the walkers were handed a
+    // non-document. The listing then reported ZERO models as though the panel had
+    // answered, which is the failure mode #2511 exists to remove.
+    fetchApi.mockImplementation(async (path: string) => {
+      throw hostUnreachable(path);
+    });
+    panelRead.mockImplementation(async (operation: string) => {
+      if (operation === "models" || operation.startsWith("models/")) {
+        throw new Error(
+          "fetch_comfyui_read rejected the operation: operation must be one of history, system_stats, logs, object_info",
+        );
+      }
+      if (operation === "object_info") return panelBody(operation, null);
+      return undefined;
+    });
+
+    const loras = await listLocalModelsWithCoverage("loras");
+    expect(loras.models).toEqual([]);
+    // The point of the pin: "no source could answer", NOT "answered with nothing".
+    expect(loras.coverage.answered).not.toContain("loras");
+    expect(loras.coverage.noSourceAvailable).toBeDefined();
+  });
 });

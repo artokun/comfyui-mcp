@@ -449,9 +449,17 @@ function jsonModelsResponse(payload: unknown): Response {
 /** Per-listing memo so an allowlist-rejected `models/` op does not retry per category. */
 type ModelsPanelMemo = {
   modelsOpUnsupported?: boolean;
-  objectInfo?: unknown;
+  objectInfo?: ParsedObjectInfo;
   objectInfoFailed?: boolean;
 };
+
+/** A parsed `/object_info` document. Its INTERIOR is walked defensively by the
+ *  helpers below, so only its presence and object-ness are typed here. */
+type ParsedObjectInfo = Record<string, unknown>;
+
+function isObjectInfoDocument(value: unknown): value is ParsedObjectInfo {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
 
 function isUnsupportedModelsPanelRead(error: unknown): boolean {
   const parts: string[] = [];
@@ -514,7 +522,7 @@ function modelCategoriesFromObjectInfo(info: unknown): string[] {
   return [...cats];
 }
 
-async function panelObjectInfo(memo: ModelsPanelMemo): Promise<unknown | undefined> {
+async function panelObjectInfo(memo: ModelsPanelMemo): Promise<ParsedObjectInfo | undefined> {
   if (memo.objectInfoFailed) return undefined;
   if (memo.objectInfo !== undefined) return memo.objectInfo;
   try {
@@ -523,7 +531,16 @@ async function panelObjectInfo(memo: ModelsPanelMemo): Promise<unknown | undefin
       memo.objectInfoFailed = true;
       return undefined;
     }
-    memo.objectInfo = JSON.parse(relayed.body) as unknown;
+    const parsed: unknown = JSON.parse(relayed.body);
+    // A `null`, an array or a scalar is not an object_info document. Without this
+    // the memo would cache it (`null !== undefined`), the `info === undefined`
+    // guard at the call site would pass, and the walkers would be handed a
+    // non-document — reporting "no categories" as though the panel had answered.
+    if (!isObjectInfoDocument(parsed)) {
+      memo.objectInfoFailed = true;
+      return undefined;
+    }
+    memo.objectInfo = parsed;
     return memo.objectInfo;
   } catch {
     memo.objectInfoFailed = true;
