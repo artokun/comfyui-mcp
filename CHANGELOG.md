@@ -6,6 +6,15 @@ All notable changes to this project are documented here. This project adheres to
 
 ## Unreleased
 
+#### Added
+- `scripts/read-minidump.mjs` — read a Windows crash dump far enough to say WHICH crash it
+  is (panel#2023). That report needs the renderer dump symbolised, which needs a symbol
+  server and a Windows debugging toolchain, so it does not get done and reports arrive
+  quoting a browser error page. The exception code, the faulting address and the module
+  that owns it are already in the file: enough to tell an access violation from a
+  deliberate breakpoint or a Crashpad simulated dump, and to say whether the fault is even
+  in the module a hypothesis blames. Local read only — a dump contains process memory.
+
 ## [0.52.181] - 2026-09-03
 
 ### MCP
