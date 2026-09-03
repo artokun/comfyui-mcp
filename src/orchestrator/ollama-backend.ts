@@ -621,6 +621,104 @@ function unwrapParametersWrapper(
   return inner as Record<string, unknown>;
 }
 
+const PANEL_ROUTER_NAMES: ReadonlySet<string> = new Set([
+  "panel_list_tools",
+  "panel_describe_tool",
+  "panel_call_tool",
+]);
+
+function isPanelRouterName(name: string): boolean {
+  return PANEL_ROUTER_NAMES.has(name);
+}
+
+function asPlainObject(value: unknown): Record<string, unknown> | undefined {
+  if (value !== null && typeof value === "object" && !Array.isArray(value)) {
+    return value as Record<string, unknown>;
+  }
+  return undefined;
+}
+
+function stringArg(obj: Record<string, unknown>, key: string): string {
+  const v = obj[key];
+  return typeof v === "string" ? v.trim() : "";
+}
+
+/**
+ * Envelope keys that name the inner tool; leftover keys are that tool's args.
+ *
+ * `undefined` means the envelope carried an args value that is NOT an argument
+ * object — a string, an array, a number. The keyed branch at the call site already
+ * refuses that shape via `asPlainObject`; this path returned it as `unknown` and
+ * handed it on, so the two halves of the same decision disagreed. Same treatment
+ * for both now.
+ */
+function payloadMinusNameKeys(obj: Record<string, unknown>): Record<string, unknown> | undefined {
+  if ("args" in obj || "arguments" in obj || "parameters" in obj) {
+    const supplied = obj.args ?? obj.arguments ?? obj.parameters;
+    if (supplied === undefined || supplied === null) return {};
+    return asPlainObject(supplied);
+  }
+  const rest: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(obj)) {
+    if (k === "name" || k === "tool_name" || k === "tool") continue;
+    rest[k] = v;
+  }
+  return rest;
+}
+
+/**
+ * #2717 — when `panel_call_tool` is named as its own inner tool, recover a
+ * unique real panel tool from name-shaped keys (`tool_name` / `tool` / nested
+ * `name`) or a unique panel-tool-named key. Several inner names, a router name,
+ * an unknown name, or a non-object keyed payload stay refused.
+ */
+function recoverPanelRouterSelfCall(
+  outer: Record<string, unknown>,
+  inner: unknown,
+  nested: Record<string, unknown> | undefined,
+  isPanelTool: (name: string) => boolean,
+): { kind: "unwrap"; wanted: string; inner: unknown } | { kind: "refuse"; hint: string; ambiguous: string } {
+  const names: string[] = [];
+  const push = (v: string): void => {
+    if (v && !isPanelRouterName(v)) names.push(v);
+  };
+  push(stringArg(outer, "tool_name"));
+  push(stringArg(outer, "tool"));
+  if (typeof inner === "string" && !nested) push(inner.trim());
+  if (nested) {
+    push(stringArg(nested, "name"));
+    push(stringArg(nested, "tool_name"));
+    push(stringArg(nested, "tool"));
+    const keyHits = Object.keys(nested).filter((k) => isPanelTool(k) && !isPanelRouterName(k));
+    for (const k of keyHits) push(k);
+  }
+  const unique = [...new Set(names)];
+  if (unique.length > 1) {
+    return { kind: "refuse", hint: "", ambiguous: unique.join(", ") };
+  }
+  const candidate = unique[0] ?? "";
+  if (!candidate || !isPanelTool(candidate)) {
+    return { kind: "refuse", hint: "", ambiguous: "" };
+  }
+  if (nested && Object.prototype.hasOwnProperty.call(nested, candidate)) {
+    const keyed = nested[candidate];
+    const keyedObj = asPlainObject(keyed);
+    if (keyed !== undefined && keyedObj === undefined) {
+      return { kind: "refuse", hint: candidate, ambiguous: "" };
+    }
+    if (keyedObj) return { kind: "unwrap", wanted: candidate, inner: keyedObj };
+  }
+  if (nested) {
+    const stripped = payloadMinusNameKeys(nested);
+    if (!stripped) return { kind: "refuse", hint: candidate, ambiguous: "" };
+    return { kind: "unwrap", wanted: candidate, inner: stripped };
+  }
+  if (typeof inner === "string" && inner.trim() === candidate) {
+    return { kind: "unwrap", wanted: candidate, inner: {} };
+  }
+  return { kind: "unwrap", wanted: candidate, inner };
+}
+
 /** Does this id look like a model this backend can run? PanelAgent
  *  unconditionally passes the panel's Claude model as opts.model — this guard
  *  keeps the configured model in charge unless the panel explicitly picked one
@@ -1031,8 +1129,12 @@ export class OllamaBackend implements AgentBackend {
             parameters: {
               type: "object",
               properties: {
-                name: { type: "string", description: "Exact panel tool name." },
-                args: { description: "The tool's parameters as an object (JSON-encoded string also accepted)." },
+                name: {
+                  type: "string",
+                  description:
+                    "Inner panel tool to run (e.g. panel_graph_outline). Never panel_call_tool / panel_list_tools / panel_describe_tool — those are this router.",
+                },
+                args: { description: "The inner tool's parameters as an object (JSON-encoded string also accepted)." },
               },
               required: ["name"],
             },
@@ -1091,7 +1193,14 @@ export class OllamaBackend implements AgentBackend {
       }
       if (name === "panel_call_tool") {
         if (!this.panel) return { text: "panel tools are unavailable in this session.", isError: true };
-        let wanted = typeof args.name === "string" ? args.name : typeof args.tool_name === "string" ? (args.tool_name as string) : "";
+        let wanted =
+          typeof args.name === "string"
+            ? args.name
+            : typeof args.tool_name === "string"
+              ? args.tool_name
+              : typeof args.tool === "string"
+                ? args.tool
+                : "";
         // #1937 — `parameters` is the THIRD accepted spelling of the payload, for
         // the same reason #1824 added it to the headless `call_tool`: ChatGPT's
         // multi_tool_use.parallel names each recipient's payload `parameters`, and
@@ -1101,17 +1210,15 @@ export class OllamaBackend implements AgentBackend {
         // error … received undefined at node_id`, an error about arguments the
         // model had in fact written, one key away. `args` still wins a collision.
         let inner: unknown = args.args ?? args.arguments ?? args.parameters ?? {};
-        // #1297 — ROUTER SELF-NESTING: a malformed call wraps the real invocation
-        // in a second router envelope (panel_call_tool {"name": "panel_call_tool",
-        // "args": {"name": "<tool>", "args": {...}}}). The old reply — "Unknown
-        // panel tool 'panel_call_tool'" — was doubly unhelpful: the name IS known
-        // (it is this router itself), and the answer discarded a call whose inner
-        // tool and args were fully spelled out. Peek one envelope deep: when it
-        // carries a real panel tool, unwrap it and run exactly that; otherwise
-        // refuse with the correct shape. ONE level only — a deeper nest fails
-        // closed through the same refusal.
+        // #1297 / #2717 — ROUTER SELF-NESTING: a malformed call wraps the real
+        // invocation in a second router envelope, or names this router as `name`
+        // while the inner panel tool sits on `tool` / `tool_name` / a nested key.
+        // Peek one envelope deep: a unique real panel tool is unwrapped and run;
+        // several names, a router name, or an unknown name refuse with the
+        // correct shape (and name the inner tool when it is unique). ONE level
+        // only — a deeper nest fails closed through the same refusal.
         let unwrapped = false;
-        if (wanted === "panel_call_tool" || wanted === "panel_list_tools" || wanted === "panel_describe_tool") {
+        if (isPanelRouterName(wanted)) {
           let peek: unknown = inner;
           if (typeof peek === "string") {
             try {
@@ -1122,18 +1229,30 @@ export class OllamaBackend implements AgentBackend {
               peek = undefined;
             }
           }
-          const nested = peek !== null && typeof peek === "object" && !Array.isArray(peek) ? (peek as Record<string, unknown>) : undefined;
-          const nestedName = nested && typeof nested.name === "string" ? nested.name : "";
-          if (wanted === "panel_call_tool" && nested && this.panelTools.some((t) => t.name === nestedName)) {
-            wanted = nestedName;
-            inner = nested.args ?? nested.arguments ?? nested.parameters ?? {};
+          const nested = asPlainObject(peek);
+          const recovered = recoverPanelRouterSelfCall(args, inner, nested, (n) =>
+            this.panelTools.some((t) => t.name === n),
+          );
+          // Only `name: "panel_call_tool"` is a nested envelope we unwrap. A
+          // self-call of panel_list_tools / panel_describe_tool stays refused
+          // (those are sibling routers) — but if args uniquely name a real
+          // inner tool, the refusal cites that name instead of "<panel tool>".
+          if (wanted === "panel_call_tool" && recovered.kind === "unwrap") {
+            wanted = recovered.wanted;
+            inner = recovered.inner;
             unwrapped = true;
           } else {
+            const example =
+              recovered.kind === "unwrap" ? recovered.wanted : recovered.hint || "<panel tool>";
+            const extra =
+              recovered.kind === "refuse" && recovered.ambiguous
+                ? ` This call named more than one inner tool (${recovered.ambiguous}); pick one.`
+                : "";
             return {
               text:
                 `'${wanted}' is this router itself, not a panel tool — the router cannot run its own ` +
                 `panel_list_tools / panel_describe_tool / panel_call_tool. Pass the inner tool directly: ` +
-                `panel_call_tool {"name": "<panel tool>", "args": {...}}. Use panel_list_tools to see the tools.`,
+                `panel_call_tool {"name": "${example}", "args": {...}}.${extra} Use panel_list_tools to see the tools.`,
               isError: true,
             };
           }
