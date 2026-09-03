@@ -125,3 +125,35 @@ describe("#946: a non-JSON upload reply is diagnosed, not parsed at the caller",
     });
   });
 });
+
+// The upload BODY, not the target. `new Blob([buffer])` stopped compiling at
+// @types/node 26 (`Buffer<ArrayBufferLike>` is not a `BlobPart`), and the
+// obvious rewrites are not equivalent: `new Uint8Array(data.buffer)` ignores the
+// offset and length, so a POOLED Buffer — which is what Buffer.from returns once
+// the 8KB pool is in use — would upload the whole pool, silently, with the
+// caller's bytes somewhere inside it. These pin the bytes that leave.
+describe("the uploaded body is exactly the caller's bytes", () => {
+  /** A payload sitting at a non-zero byteOffset inside a larger pool. */
+  function pooled(text: string): Buffer {
+    const pool = Buffer.alloc(64, 0xff);
+    const payload = pool.subarray(8, 8 + text.length);
+    payload.write(text, "utf8");
+    expect(payload.byteOffset).toBeGreaterThan(0);
+    return payload;
+  }
+
+  it("sends the payload length, not the length of the pool behind it", async () => {
+    fetchApi.mockResolvedValue(okJson({ name: "a.png", subfolder: "", type: "input" }));
+    const payload = pooled("hello");
+    await uploadImageHttp("a.png", payload);
+    const part = sentForm().get("image") as File;
+    expect(part.size).toBe(payload.length);
+  });
+
+  it("sends the payload CONTENT, not the pool it was carved out of", async () => {
+    fetchApi.mockResolvedValue(okJson({ name: "a.png", subfolder: "", type: "input" }));
+    await uploadImageHttp("a.png", pooled("world!!"));
+    const part = sentForm().get("image") as File;
+    expect(await part.text()).toBe("world!!");
+  });
+});

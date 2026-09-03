@@ -1765,7 +1765,7 @@ export async function uploadImageHttp(
   // API actually has, which is also what the caller was asking for.
   const { subfolder, name } = splitUploadTarget(filename);
   const formData = new FormData();
-  const blob = new Blob([data], { type: mimeType });
+  const blob = new Blob([uploadBody(data)], { type: mimeType });
   formData.append("image", blob, name);
   formData.append("type", "input");
   formData.append("overwrite", String(overwrite));
@@ -1824,5 +1824,5 @@ export async function uploadImageHttp(
  * share it (cloud-client.ts cannot import from here without a circular
  * import); re-exported so existing imports keep working.
  */
-import { splitUploadTarget } from "./upload-target.js";
+import { splitUploadTarget, uploadBody } from "./upload-target.js";
 export { splitUploadTarget };
