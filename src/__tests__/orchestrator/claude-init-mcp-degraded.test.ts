@@ -596,14 +596,31 @@ describe("#1524 a server that keeps `connected` and stops contributing tools", (
     expect(hoisted.reconnectCalls).toEqual([]);
   });
 
-  it("stays silent when the reading carries no MCP tools at all", async () => {
-    // Indistinguishable from a harness that does not populate the field. Same
-    // deliberate blind spot the init check documents, and the reported signature
-    // has mcp__comfyui__* present throughout, so it is covered either way.
+  it("stays silent when the reading carries no MCP tools and none was ever seen", async () => {
+    // Indistinguishable from an API that does not populate the field, so a first
+    // empty reading says nothing. NOT justified by "the reports all had comfyui
+    // tools" any more -- that is evidence about earlier reports, not a property of
+    // the failure, and the sixth one may not have them. The latch below is what
+    // makes the total-failure case reachable.
     hoisted.statusPoll = CONNECTED;
     hoisted.usageQueue = [{ mcp_tools: [] }];
     const events = await driveTurns(deps, initWith(CONNECTED));
     expect(noticesOf(events)).toHaveLength(0);
+  });
+
+  it("reports EVERY server once a populated reading has been seen and then empties", async () => {
+    // The blind spot this closes: a failure that empties EVERY server produced the
+    // same empty list as an API that never reports them. One populated reading
+    // settles which it is, and after that an empty list is a real observation.
+    hoisted.statusPoll = CONNECTED;
+    hoisted.usageQueue = [BOTH_PRESENT, { mcp_tools: [] }];
+    // TWO turns: the first reading latches, the second is the empty one.
+    const events = await driveTurns(deps, initWith(CONNECTED), 2);
+    const text = noticesOf(events)
+      .map((n) => n.message)
+      .join(" ");
+    expect(text).toContain("panel");
+    expect(text).toContain("comfyui");
   });
 
   it("stays silent when getContextUsage cannot be read", async () => {

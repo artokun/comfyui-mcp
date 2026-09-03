@@ -448,6 +448,11 @@ export class ClaudeBackend implements AgentBackend {
    *  for why sharing mcpDown would close every episode on the turn it opened. */
   private mcpEmpty = new Map<string, boolean>();
   private mcpEmptyReported = new Set<string>();
+  /** Has `getContextUsage()` EVER returned a populated `mcp_tools`? Until it has,
+   *  an empty list is an API that does not report them, not a session with none —
+   *  the same distinction `serversWithoutTools` draws about the `mcp__` namespace.
+   *  Latches false -> true only, so this can widen the check but never narrow it. */
+  private sawPopulatedMcpUsage = false;
 
   /** Say — in the log — that this session does not have servers it was given.
    *  Shared by the init check and the turn-end watch so both report identically. */
@@ -544,7 +549,17 @@ private async pollEmptyToolsets(
     logger.debug(`[claude-backend] getContextUsage: ${msgOf(err)}`);
     return null;
   }
-  if (!Array.isArray(entries) || entries.length === 0) return null;
+  if (!Array.isArray(entries)) return null;
+  if (entries.length > 0) {
+    this.sawPopulatedMcpUsage = true;
+  } else if (!this.sawPopulatedMcpUsage) {
+    // Indistinguishable from an API that does not populate mcp_tools at all, and a
+    // false "your tools are gone" every turn is worse than this silence. Once we
+    // have seen it populated ONCE, an empty list is a real observation: every
+    // configured server contributed nothing, which is precisely the total failure
+    // the #2742 reports describe and the shape the init-time check used to miss too.
+    return null;
+  }
   const withTools = new Set<string>();
   for (const entry of entries) {
     if (typeof entry?.server_name === "string") withTools.add(entry.server_name);
