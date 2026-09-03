@@ -3377,8 +3377,10 @@ function proveDesktopSelfRelaunch(
  * field existed, or a code path that did not record it, gets the message it always
  * had rather than an empty "classified because: undefined".
  */
-function desktopEvidenceClause(info: ProcessInfo): string {
-  const why = info.desktopEvidence;
+export function desktopEvidenceClause(why: string | undefined): string {
+  // Takes the FIELD, not the whole ProcessInfo: the clause depends on exactly one
+  // value, and narrowing the parameter is what lets a test call this for real
+  // instead of asserting that the source file contains the right substring.
   if (!why) return "";
   return (
     `\n\nClassified as Desktop-managed by: ${why}. ` +
@@ -3467,7 +3469,7 @@ function assessDesktopSupervision(info: ProcessInfo): {
         // it. Say which signal decided, and say plainly that this one is
         // contestable — an argv NAME match is satisfied by a directory that merely
         // has the name.
-        desktopEvidenceClause(info),
+        desktopEvidenceClause(info.desktopEvidence),
     };
   }
   // #1647 — the host cannot read parentage AT ALL (the FIRST link failed), and the

@@ -71,33 +71,44 @@ describe("#2784 the Desktop classification names its evidence", () => {
 describe("#2784 the refusal carries the clause", () => {
   const src = new URL("../../services/process-control.ts", import.meta.url);
 
-  it("appends the evidence to the abandoned-supervisor refusal", async () => {
+  it("RENDERS the evidence it was given", async () => {
+    // A real call, not a grep of the source. The previous version of these three
+    // asserted that process-control.ts CONTAINED certain substrings, which cannot
+    // fail if the clause renders empty, if the field is never populated, or after
+    // a rename -- it pins the text, not the behaviour.
+    const { desktopEvidenceClause } = await import("../../services/process-control.js");
+    const out = desktopEvidenceClause("a ComfyUI Desktop binary among this process's ancestors");
+    expect(out).toContain("Classified as Desktop-managed by:");
+    expect(out).toContain("a ComfyUI Desktop binary among this process's ancestors");
+    expect(out).toContain("this refusal is wrong with it");
+  });
+
+  it("says NOTHING when no evidence was recorded", async () => {
+    // An install classified before this field existed must get the message it
+    // always had, not "classified because: undefined".
+    const { desktopEvidenceClause } = await import("../../services/process-control.js");
+    expect(desktopEvidenceClause(undefined)).toBe("");
+    expect(desktopEvidenceClause("")).toBe("");
+  });
+
+  it("marks the argv signal as a NAME match wherever it is produced", async () => {
+    // The weakest of the three signals must identify itself as contestable. This
+    // one stays a source check on purpose: the string is built inside
+    // detectDesktopLaunch, which needs a live process tree to reach.
+    const { readFileSync } = await import("node:fs");
+    const { fileURLToPath } = await import("node:url");
+    const text = readFileSync(fileURLToPath(src), "utf-8");
+    expect(text).toContain("a NAME match, which a directory merely CALLED that also satisfies");
+  });
+
+  it("appends the clause to the abandoned-supervisor refusal", async () => {
+    // Structural pin, and labelled as one: it proves the call site is still in the
+    // same template as the message, not that the message renders with evidence.
     const { readFileSync } = await import("node:fs");
     const { fileURLToPath } = await import("node:url");
     const text = readFileSync(fileURLToPath(src), "utf-8");
     const at = text.indexOf("ComfyUI Desktop started the server on port");
     expect(at).toBeGreaterThan(-1);
-    // Within the same template, not merely somewhere in the file.
-    expect(text.slice(at, at + 1600)).toContain("desktopEvidenceClause(info)");
-  });
-
-  it("says the argv signal is a NAME match, in the message the user reads", async () => {
-    const { readFileSync } = await import("node:fs");
-    const { fileURLToPath } = await import("node:url");
-    const text = readFileSync(fileURLToPath(src), "utf-8");
-    // The whole point: the weakest signal must identify itself as contestable.
-    expect(text).toContain("a NAME match, which a directory merely CALLED that also satisfies");
-    expect(text).toContain("Classified as Desktop-managed by:");
-  });
-
-  it("says NOTHING when no evidence was recorded", async () => {
-    const { readFileSync } = await import("node:fs");
-    const { fileURLToPath } = await import("node:url");
-    const text = readFileSync(fileURLToPath(src), "utf-8");
-    const at = text.indexOf("function desktopEvidenceClause");
-    expect(at).toBeGreaterThan(-1);
-    // An install classified before this field existed must get the message it
-    // always had, not "classified because: undefined".
-    expect(text.slice(at, at + 700)).toContain('if (!why) return "";');
+    expect(text.slice(at, at + 1600)).toContain("desktopEvidenceClause(info.desktopEvidence)");
   });
 });
