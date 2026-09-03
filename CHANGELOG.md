@@ -8,6 +8,7 @@ All notable changes to this project are documented here. This project adheres to
 
 ### MCP
 #### Fixed
+- **`panel_slice_workflow` seeds outputs inside nested overlapping groups (#2780).** Membership used the first containing box only, so a SaveImage inside both an outer group and a nested inner group was missed when slicing by the inner title. Any matching containing group now seeds, and a miss lists every containing title.
 - **`get_workflow` `action:"strip"` does not Win32-resolve a remote Linux path on the MCP host (#2782).** Against a remote ComfyUI, an absolute POSIX `path` such as `/mydata/.../models/workflows/example.json` is no longer opened as `C:\mydata\...`. Library-shaped tails (`user/default/workflows`, `user/workflows`, `models/workflows`) are fetched from that server's userdata API; any other remote absolute path is refused instead of a local ENOENT.
 
 ## [0.52.182] - 2026-09-03
