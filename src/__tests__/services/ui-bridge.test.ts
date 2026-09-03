@@ -1393,6 +1393,48 @@ describe("UiBridge (multi-tab)", () => {
       a2.close();
     });
 
+    it("REFUSES the fast path to an unproven stranger already live on the key", async () => {
+      // The gate's P1, and the case the other two anonymous tests CANNOT reach:
+      // there, the drop happens with nobody else on the key, so the "never park an
+      // unproven read" short circuit answers before the predicate is ever consulted.
+      // Here a second anonymous client is ALREADY live when the socket dies, so
+      // handleMidCommandDisconnect evaluates its fast path first — and the weaker
+      // "refuse only a provable takeover" rule hands the read straight to it,
+      // because two unproven identities never provably differ.
+      const a1 = await connectPanel(KEY, "wf");
+      await waitFor(() => expect(bridge.tabs()).toHaveLength(1));
+      const { promise } = await readInFlightOn(a1, "graph_serialize", 3000);
+
+      // B hellos while A is still open: the supersede closes A, so A's close
+      // handler runs with B live in `conns`.
+      const b = await connectPanel(KEY, "wf");
+      const seenByB = recordAndAnswer(b, "B");
+
+      await expect(promise).rejects.toThrow(/no browser-tab identity|could not prove/);
+      expect(seenByB.some((m) => m.cmd === "graph_serialize")).toBe(false);
+      b.close();
+    });
+
+    it("REFUSES to resume a PROVEN read onto an occupant that proves nothing", async () => {
+      // The mirror of the above at the resume site. An absent `tab_session_id` on
+      // the newcomer is not a point in its favour: it has not proved it is the tab
+      // that issued the read, which is the only question. Under the weaker rule
+      // this resumes, since an undefined identity never "provably differs".
+      const a1 = await connectPanel(KEY, "wf", { tabSessionId: "browser-tab-A" });
+      await waitFor(() => expect(bridge.tabs()).toHaveLength(1));
+      const { promise } = await readInFlightOn(a1, "graph_serialize", 1200);
+      a1.close();
+      await waitFor(() => expect(bridge.tabs()).toHaveLength(0));
+
+      const b = await connectPanel(KEY, "wf"); // anonymous occupant
+      const seenByB = recordAndAnswer(b, "B");
+      await waitFor(() => expect(bridge.tabs()).toHaveLength(1));
+
+      await expect(promise).rejects.toThrow(/could not prove it is the same browser tab/);
+      expect(seenByB.some((m) => m.cmd === "graph_serialize")).toBe(false);
+      b.close();
+    });
+
     it("resumes for the ORIGINAL tab if it reclaims the key inside the grace, after a stranger was refused", async () => {
       // A withheld read stays PARKED rather than being rejected on the spot, so the
       // tab that issued it can still be served if it wins its key back. That is the
