@@ -17,6 +17,14 @@ All notable changes to this project are documented here. This project adheres to
   distinguishes this from a connection failure and names the recovery that works —
   Disconnect then Connect keeps the same orchestrator process, so only restarting that
   process re-runs the registration. Detection only; the cause stays open on #2742.
+- **the same check now runs at every turn boundary, and can recover (#1524).** A server
+  that starts healthy and later stops contributing tools was invisible: the turn-end watch
+  reads `mcpServerStatus()`, which carries no tool information, so a `connected` server
+  with an empty toolset passed it. `getContextUsage()` reports the MCP tools actually in
+  the session's context, per server, so the drop is detected where the existing reconnect
+  already runs — and the same reading VERIFIES the attempt, which the init-time check
+  could not. One notice and one reconnect per episode, never re-narrated per turn. The
+  cause of the drop remains open.
 
 ## [0.52.180] - 2026-09-03
 
