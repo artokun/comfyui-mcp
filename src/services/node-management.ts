@@ -8,7 +8,13 @@ import {
   getComfyuiTargetGeneration,
   isRemoteMode,
 } from "../config.js";
-import { comfyuiFetch, defaultComfyTimeoutSignal, raceAbort } from "../comfyui/fetch.js";
+import {
+  comfyuiFetch,
+  defaultComfyTimeoutSignal,
+  describeComfyBodyTimeout,
+  isTimeoutAbort,
+  raceAbort,
+} from "../comfyui/fetch.js";
 import { resetObjectInfoCache } from "../comfyui/client.js";
 import { progressEnabled, reportDownloadProgress } from "./download-progress.js";
 import { parsePyproject } from "./node-authoring.js";
@@ -344,6 +350,12 @@ async function managerFetch<T>(
   const headers: Record<string, string> = {};
   if (body !== undefined) headers["Content-Type"] = "application/json";
 
+  // Mint the ceiling HERE and race only the body reads. Do NOT pass it into
+  // comfyuiFetch: that helper rewrites a timeout into describeComfyTimeout only
+  // when init.signal is undefined, so threading a signal through would silently
+  // drop the transport-timeout diagnosis for every Manager call (#2773).
+  const budget = defaultComfyTimeoutSignal();
+
   let res: Response;
   try {
     res = await comfyuiFetch(url, {
@@ -364,11 +376,13 @@ async function managerFetch<T>(
     );
   }
 
+  const readBody = (): Promise<string> => raceAbort(budget, () => res.text());
+
   if (!res.ok) {
     // unknown-ok: "" is interpolated into an ERROR MESSAGE and nothing else — the
     // HTTP status is reported either way, so an unreadable body costs detail in the
     // text, never a wrong conclusion. Verified there is no branch on this value.
-    const text = await res.text().catch(() => "");
+    const text = await readBody().catch(() => "");
     if (soft) {
       onSoftFailure?.(res.status);
       // A soft probe may ignore an absent route or a transient server error, but
@@ -399,7 +413,26 @@ async function managerFetch<T>(
   }
 
   // Some endpoints return empty bodies (e.g. queue ops). Parse defensively.
-  const raw = await res.text();
+  // Headers already arrived, so comfyuiFetch's describeComfyTimeout rewrite
+  // cannot run. A stall here used to escape as a bare TimeoutError (#2773).
+  let raw: string;
+  try {
+    raw = await readBody();
+  } catch (err) {
+    if (isTimeoutAbort(err)) {
+      if (soft) {
+        onSoftFailure?.(undefined);
+        onSoftTransportFailure?.();
+        return undefined;
+      }
+      const timeout = describeComfyBodyTimeout(url, method);
+      throw new NodeManagementError(timeout.message, {
+        url,
+        kind: "manager-body-timeout",
+      });
+    }
+    throw err;
+  }
   if (!raw.trim()) {
     if (soft) onSoftResponse?.(undefined);
     return undefined;
@@ -744,17 +777,10 @@ async function probeManagerVersionEvidence(base: string): Promise<ManagerVersion
   const kinds: ManagerQueueStatusKind[] = [];
   // ONE budget for the whole diagnosis, not one per route.
   //
-  // comfyuiFetch's default ceiling cancels the HTTP exchange but NOT the body
-  // read: once headers arrive, `await res.text()` inside managerFetch can stay
-  // pending for as long as the body takes, and the abort event fires without the
-  // read observing it. That is fetch.ts:575-584 (#1672), and raceAbort exists for
-  // exactly this. A ComfyUI mid-decode really does accept a request and then stall
-  // — and hanging HERE would be the worst place for it, because this is the
-  // diagnosis a caller reached after everything else had already failed.
-  //
-  // Scoped to the two probes this branch adds. managerFetch's unraced body read is
-  // pre-existing on every other call site in this file and is filed separately;
-  // fixing it there changes behaviour for every Manager operation.
+  // managerFetch now races its own body reads (#2773). raceAbort still wraps
+  // these two probes so a late inner settlement cannot hold the diagnosis open
+  // after this budget fires — this is the diagnosis a caller reached after
+  // everything else had already failed.
   const budget = defaultComfyTimeoutSignal();
   for (const path of MANAGER_VERSION_ROUTES) {
     let kind: ManagerQueueStatusKind = "hard-error";
@@ -789,12 +815,12 @@ async function probeManagerVersionEvidence(base: string): Promise<ManagerVersion
       // error with a secondary probe's — but classify it before moving on.
       //
       // NOT every throw here is an authentication refusal (codex gate round 3).
-      // Soft mode throws for 401/407, and it also lets a body-read rejection
-      // escape: `await res.text()` on a 2xx that stalls or resets is unguarded, so
-      // a `refused = true` in every catch would answer a broken pipe with
-      // "configure your gateway credentials". managerFetch runs onSoftFailure
-      // BEFORE the auth throw, and never runs it on a 2xx — so a status is here
-      // exactly when the response was a real, non-ok answer we can classify.
+      // Soft mode throws for 401/407, and a body-read rejection on a 2xx is not
+      // an auth status — a `refused = true` in every catch would answer a broken
+      // pipe with "configure your gateway credentials". managerFetch runs
+      // onSoftFailure BEFORE the auth throw, and never runs it on a 2xx — so a
+      // status is here exactly when the response was a real, non-ok answer we
+      // can classify.
       if (statusSeen !== undefined && explainManagerAuthenticationRequired(statusSeen) !== "") {
         refused = true;
         refusedStatus ??= statusSeen;

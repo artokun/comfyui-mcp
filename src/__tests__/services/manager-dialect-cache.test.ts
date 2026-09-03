@@ -407,10 +407,10 @@ describe("#646 Manager API dialect cache invalidation", () => {
   });
 
   it("settles instead of hanging on a version body that never ends (#2754, gate round 4)", async () => {
-    // comfyuiFetch's ceiling cancels the exchange but not the body read (#1672,
-    // fetch.ts:575-584), so a 200 whose body never closes leaves managerFetch's
-    // `await res.text()` pending forever. Without raceAbort around these two
-    // probes this test does not fail — it HANGS, which is the point.
+    // A 200 whose body never closes must still settle: undici errors the body
+    // when the fetch signal fires, and raceAbort bounds the enclosing probe
+    // (#2773). Without a ceiling this test does not fail — it HANGS, which is
+    // the point.
     const previousTimeout = process.env.COMFYUI_MCP_HTTP_TIMEOUT_S;
     process.env.COMFYUI_MCP_HTTP_TIMEOUT_S = "0.3";
     try {
