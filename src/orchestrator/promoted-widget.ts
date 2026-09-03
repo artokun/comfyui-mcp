@@ -630,8 +630,9 @@ function envelopeInvariant(invariant: string): { ok: false; invariant: string } 
  *
  * A node list is useful for a promoted write only when it names the wrapper the
  * caller asked about and contains exactly the advertised number of inner nodes.
- * The panel currently emits `truncated:false` for complete reads, but omission
- * remains accepted for older compatible replies; any asserted truncation is not.
+ * When that completeness proof holds (`node_count === nodes.length`), an omitted
+ * or null `truncated` flag is `false`. An asserted `truncated:true`, or a list
+ * that is actually short of `node_count`, stays fail-closed.
  */
 export function describePromotedSubgraphEnvelope(
   subgraph: Record<string, unknown> | null | undefined,
@@ -639,12 +640,6 @@ export function describePromotedSubgraphEnvelope(
 ): PromotedSubgraphEnvelopeResult {
   if (!isRecord(subgraph)) {
     return envelopeInvariant("the reply was not a JSON object");
-  }
-  if (subgraph.truncated !== undefined && subgraph.truncated !== false) {
-    return envelopeInvariant(
-      "the reply's `truncated` flag was not `false`, so the inner node list it carried " +
-        "cannot be taken as the whole subgraph",
-    );
   }
 
   const viewing = Object.prototype.hasOwnProperty.call(subgraph, "viewing")
@@ -697,6 +692,14 @@ export function describePromotedSubgraphEnvelope(
   if (nodes.length !== nodeCount) {
     return envelopeInvariant(
       `\`node_count\` claimed ${nodeCount as number} inner node(s) but \`nodes\` carried ${nodes.length}`,
+    );
+  }
+  // Completeness is proven from the list, not from the flag. Omitted/null
+  // `truncated` is then false; an asserted or malformed flag is not.
+  if (subgraph.truncated != null && subgraph.truncated !== false) {
+    return envelopeInvariant(
+      "the reply's `truncated` flag was not `false`, so the inner node list it carried " +
+        "cannot be taken as the whole subgraph",
     );
   }
 
