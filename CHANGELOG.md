@@ -6,6 +6,18 @@ All notable changes to this project are documented here. This project adheres to
 
 ## Unreleased
 
+### MCP
+
+#### Changed
+- **`train_doctor action:"build_image"` is asynchronous, so it can finish at all (#2723).**
+  It awaited a `docker build` of a CUDA + torch + ai-toolkit image — its own description
+  says "several minutes" — while the panel's call_tool transport hard-times out at 300s, so
+  the call always returned `timed out awaiting tools/call after 300s` and a follow-up doctor
+  still reported `image:false`. Local Docker LoRA training was unreachable, not slow. It now
+  returns a build id immediately and keeps building; `action:"doctor"` reports it under
+  `image_build`, and re-issuing while one runs adopts it instead of racing a second `docker
+  build` for the same tag.
+
 ## [0.52.180] - 2026-09-03
 
 ### MCP
