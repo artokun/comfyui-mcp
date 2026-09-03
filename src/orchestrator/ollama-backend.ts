@@ -643,10 +643,20 @@ function stringArg(obj: Record<string, unknown>, key: string): string {
   return typeof v === "string" ? v.trim() : "";
 }
 
-/** Envelope keys that name the inner tool; leftover keys are that tool's args. */
-function payloadMinusNameKeys(obj: Record<string, unknown>): unknown {
+/**
+ * Envelope keys that name the inner tool; leftover keys are that tool's args.
+ *
+ * `undefined` means the envelope carried an args value that is NOT an argument
+ * object — a string, an array, a number. The keyed branch at the call site already
+ * refuses that shape via `asPlainObject`; this path returned it as `unknown` and
+ * handed it on, so the two halves of the same decision disagreed. Same treatment
+ * for both now.
+ */
+function payloadMinusNameKeys(obj: Record<string, unknown>): Record<string, unknown> | undefined {
   if ("args" in obj || "arguments" in obj || "parameters" in obj) {
-    return obj.args ?? obj.arguments ?? obj.parameters ?? {};
+    const supplied = obj.args ?? obj.arguments ?? obj.parameters;
+    if (supplied === undefined || supplied === null) return {};
+    return asPlainObject(supplied);
   }
   const rest: Record<string, unknown> = {};
   for (const [k, v] of Object.entries(obj)) {
@@ -698,7 +708,11 @@ function recoverPanelRouterSelfCall(
     }
     if (keyedObj) return { kind: "unwrap", wanted: candidate, inner: keyedObj };
   }
-  if (nested) return { kind: "unwrap", wanted: candidate, inner: payloadMinusNameKeys(nested) };
+  if (nested) {
+    const stripped = payloadMinusNameKeys(nested);
+    if (!stripped) return { kind: "refuse", hint: candidate, ambiguous: "" };
+    return { kind: "unwrap", wanted: candidate, inner: stripped };
+  }
   if (typeof inner === "string" && inner.trim() === candidate) {
     return { kind: "unwrap", wanted: candidate, inner: {} };
   }
