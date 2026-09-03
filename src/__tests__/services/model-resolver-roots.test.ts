@@ -192,6 +192,55 @@ describe("resolveExistingModelFile — multi-root resolution", () => {
     expect(getExtraModelRootsMock).not.toHaveBeenCalled();
   });
 
+  it("finds a listed model under a launch-named Desktop extra root that is not the shared models root", async () => {
+    const sharedRoot = resolve("/ComfyUI-Shared/models/diffusion_models");
+    const desktopExtraRoot = resolve("/user-extra/models/diffusion_models");
+    const snapshot = {
+      reachable: true,
+      argv: [
+        "python",
+        "ComfyUI/main.py",
+        "--extra-model-paths-config",
+        "/live/shared_model_paths.yaml",
+      ],
+      processStartedAtMs: 1_000,
+    };
+    resolveModelsDirWithBasesMock.mockResolvedValueOnce({
+      modelsDir: resolve("/stale/ComfyUI", "models"),
+      baseDirs: [],
+      snapshot,
+      source: "configured-base",
+    });
+    getLaunchStateExtraModelRootsMock.mockResolvedValueOnce({
+      authoritative: true,
+      roots: [
+        { category: "diffusion_models", dir: sharedRoot, group: "desktop" },
+        { category: "diffusion_models", dir: desktopExtraRoot, group: "user_extra" },
+      ],
+    });
+    fsFixture([
+      resolve(
+        desktopExtraRoot,
+        "ltx-2.5-22b-distilled-transformer-comfy-int8-convrot.safetensors",
+      ),
+    ]);
+
+    const res = await resolveForRemoval(
+      "diffusion_models/ltx-2.5-22b-distilled-transformer-comfy-int8-convrot.safetensors",
+    );
+
+    expect(res.path).toBe(
+      resolve(
+        desktopExtraRoot,
+        "ltx-2.5-22b-distilled-transformer-comfy-int8-convrot.safetensors",
+      ),
+    );
+    expect(res.root).toBe(desktopExtraRoot);
+    expect(getLaunchStateExtraModelRootsMock).toHaveBeenCalledWith(snapshot);
+    expect(getLiveExtraModelRootsMock).not.toHaveBeenCalled();
+    expect(getExtraModelRootsMock).not.toHaveBeenCalled();
+  });
+
   it("finds a category-relative model in a launch-named shared extra root", async () => {
     const sharedRoot = resolve("/ComfyUI-Shared/models/diffusion_models");
     const snapshot = {

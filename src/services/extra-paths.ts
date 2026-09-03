@@ -1414,10 +1414,16 @@ export async function getExtraModelRoots(
  *   - every ABSOLUTE `--extra-model-paths-config` file the server was LAUNCHED with
  *     (raw argv values; a RELATIVE flag value is SKIPPED — it can't be resolved to
  *     the live server's file from the MCP process, so trusting it would let a stale
- *     local same-named config authorize; fail closed); and
+ *     local same-named config authorize; fail closed);
  *   - `<live main.py root>/extra_model_paths.yaml` — ComfyUI's auto-loaded default,
  *     anchored to the server's OWN install root (its main.py dir from argv), NOT an
- *     arbitrary base dir or the local workspace.
+ *     arbitrary base dir or the local workspace; and
+ *   - ComfyUI Desktop's app-data `extra_models_config.yaml`, but ONLY when the
+ *     connected snapshot already named a Desktop extra-path config (the generated
+ *     `shared_model_paths.yaml` or that same extra_models_config file). Desktop
+ *     inventory can list a file from that user extra-path file while argv only
+ *     names the shared yaml (#2739). The file is still launch-state-stamped for
+ *     deletion. Never guessed from a default :8188 origin.
  *
  * Relative `base_path` / category paths are resolved against the CONFIG FILE's own
  * directory, exactly as ComfyUI resolves them — never against the MCP process CWD —
@@ -1523,6 +1529,17 @@ export async function getLiveExtraModelRoots(
   // Launched flag files — ABSOLUTE values only (relative → fail closed, see docblock).
   for (const raw of parseExtraModelPathsConfigsFromArgvRaw(argv)) {
     if (isAbsolute(raw)) configPaths.add(resolve(raw));
+  }
+  // Desktop's user extra-path file is not always repeated on argv. The connected
+  // snapshot must already have named a Desktop extra-path config; we never probe
+  // a guessed :8188 origin to discover it (#2739).
+  if (!isRemoteMode()) {
+    for (const named of configPaths) {
+      if (looksLikeDesktopConfig(named)) {
+        configPaths.add(resolve(desktopConfigPath()));
+        break;
+      }
+    }
   }
   // Auto-loaded default in the LIVE install root (its main.py dir). Skip in remote
   // mode: the live root is a path on the remote host.

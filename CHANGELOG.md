@@ -7,26 +7,27 @@ All notable changes to this project are documented here. This project adheres to
 ## Unreleased
 
 ### MCP
-
 #### Fixed
 - **`extract_deps` no longer names a pack the catalogue cannot prove owns the node (#2765).**
-  It mapped `Power Lora Loader (rgthree)`, `Switch latent [Crystools]` and both Krea2Edit
-  nodes to one unrelated repository, then reported that repository as the missing
-  dependency of an approval-gated preflight — one step from installing unrelated
-  third-party code. A ComfyUI-Manager `nodename_pattern` was being read as an ownership
-  record; it is a naming convention anyone may publish about anyone. Measured against the
-  live catalogue (5,614 packs, 40,656 exactly-owned class names), one entry's `Hunyuan`
-  pattern captures 182 names belonging to 43 other packs, and `Inspire$` is published by
-  two different packs.
-  Now: for an INSTALLED node `/object_info`'s `python_module` wins outright — it is the
-  pack the class actually loaded from, and the only signal Manager's own catalogue cannot
-  launder; for a node that is not installed the catalogue answers only when a single
-  repository claims it, and otherwise the class is reported as ambiguous with every
-  claimant named and is never auto-installed. A pattern broad enough to match a name no
-  pack could own, or one that captures class names two other packs list explicitly, is
-  ignored. The same refusal now applies at the last step before an install, where two
-  repositories publishing the same catalogue title used to collapse into whichever
-  `/getlist` returned first.
+
+## [0.52.182] - 2026-09-03
+
+### MCP
+
+#### Fixed
+- **`panel_connect` wires an exposed subgraph INT rail to another INT widget input.** A Scene Seed rail that already fed KSampler.seed / FaceDetailer.seed was refused onto LocalWildcardText.seed as "INT is not compatible with INT" because the rail still carried numeric widget constraints as a COMBO-shaped socket type. Those specs are normalized to INT before compatibility; COMBO option lists and distinct concrete types are unchanged (#2778, #2808).
+- **`panel_set_widget` writes ordinary root widgets after a queue-busy refusal without a manual `panel_graph_outline` (#2730, #2807).** A correct queue-busy fence left the panel's subgraph registry stale, so the next idle `graph_set_widget` treated root `UNETLoader` nodes as unverifiable promoted containers. Mapping-unknown now refreshes once (or after the busy refusal clears) and retries the guard; still unverifiable stays fail-closed.
+- **`panel_save_workflow(name)` rebinds the session onto the Save-As dest canvas (#2768, #2805).** After a named save the live instance is dest, but the source tab id can still `canReach`; staying there left `panel_list_workflows` and `panel_set_workflow_target({mode:"current"})` stamped for the replaced instance. Dest is followed when this save replaced the session canvas, and dest's command stamp is refreshed from the save reply.
+- **`list_local_models` `action:"remove"` resolves against the same launch-proven extra-path files as inventory, including ComfyUI Desktop's `extra_models_config.yaml` (#2739, #2803).** Removal previously searched only the Desktop shared models yaml from argv, so a listed LTX file under another active extra root could not be deleted. Desktop extra roots are included only when the connected snapshot already named a Desktop extra-path config — never by probing a guessed :8188 origin — and still fail closed when that file cannot be proven unchanged since launch.
+
+
+## [0.52.181] - 2026-09-03
+
+### MCP
+
+#### Fixed
+- **`panel_set_widget` creates a documented `lora_N` row on an ordinary Power Lora Loader inside a live subgraph (#2394, #2794).** Current panels flatten parentheses in the `graph_get_subgraph` "is not a subgraph" line, so a live `Power Lora Loader (rgthree)` was reported as `Power Lora Loader rgthree` and the identity-fenced ordinary write refused it as a type change. The two types are compared after that flatten; the write still fences the real unflattened type.
+
 
 ## [0.52.180] - 2026-09-03
 
@@ -34,6 +35,7 @@ All notable changes to this project are documented here. This project adheres to
 
 #### Fixed
 - normalize saved workflow filenames (#2779)
+
 
 ## [0.52.179] - 2026-09-02
 
