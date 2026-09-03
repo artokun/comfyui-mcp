@@ -6,6 +6,11 @@ All notable changes to this project are documented here. This project adheres to
 
 ## Unreleased
 
+### MCP
+
+#### Fixed
+- list_local_models recovers remote inventory from panel object_info when fetch_comfyui_read rejects models/<category> as outside the panel allowlist (#2511)
+
 ## [0.52.180] - 2026-09-03
 
 ### MCP
