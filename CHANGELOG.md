@@ -8,7 +8,7 @@ All notable changes to this project are documented here. This project adheres to
 
 ### MCP
 #### Fixed
-#### Changed
+- **`panel_slice_workflow` seeds outputs inside nested overlapping groups (#2780).** Membership used the first containing box only, so a SaveImage inside both an outer group and a nested inner group was missed when slicing by the inner title. Any matching containing group now seeds, and a miss lists every containing title.
 - the upload body and the bridge probe's socket chunks are typed so they still compile
 
 ## [0.52.182] - 2026-09-03
