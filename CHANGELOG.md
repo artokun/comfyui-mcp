@@ -10,6 +10,14 @@ All notable changes to this project are documented here. This project adheres to
 
 #### Fixed
 - **`panel_set_widget` creates a documented `lora_N` row on an ordinary Power Lora Loader inside a live subgraph (#2394).** Current panels flatten parentheses in the `graph_get_subgraph` "is not a subgraph" line, so a live `Power Lora Loader (rgthree)` was reported as `Power Lora Loader rgthree` and the identity-fenced ordinary write refused it as a type change. The two types are compared after that flatten; the write still fences the real unflattened type.
+- **a Desktop restart refusal now names the evidence that classified the install (#2784).**
+  It asserted "ComfyUI Desktop started the server" on a ComfyUI-Easy-Install running an
+  embedded python, with nothing attached for the reader to check — so the reporter, who
+  could see it was wrong, filed a report whose redacted path made the cause
+  unreproducible. Three signals reach that verdict and they are not equally strong; the
+  weakest is a bare substring over the launch command, and it now says so, because a
+  directory merely NAMED like Desktop satisfies it. Diagnosis only — the classification
+  itself is unchanged and #2784 stays open.
 
 ## [0.52.180] - 2026-09-03
 
