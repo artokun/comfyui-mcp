@@ -4003,6 +4003,62 @@ describe("panel_set_widget promoted-subgraph recovery (#1655)", () => {
     expect(calls.map((c) => c.cmd)).not.toContain("graph_enter_subgraph");
   });
 
+  it.each([
+    ["omitted truncated", {}],
+    ["null truncated", { truncated: null }],
+  ])("writes a promoted BOOLEAN when the complete envelope has %s (#2783)", async (
+    _label,
+    truncatedField,
+  ) => {
+    const subgraph = {
+      subgraph_of: { node_id: 78, title: "Boolean pack" },
+      node_count: 1,
+      nodes: [
+        {
+          id: 12,
+          type: "PrimitiveBoolean",
+          widgets: { value: false },
+          inputs: [{ name: "value", type: "BOOLEAN" }],
+        },
+      ],
+      promoted_terminals: [
+        {
+          widget: "value_1",
+          parent_rail: { authoritative: true, widget: "value_1" },
+          immediate_node_id: 12,
+          immediate_widget: "value",
+          terminal_node_id: 12,
+          terminal_node_type: "PrimitiveBoolean",
+          terminal_widget: "value",
+          terminal_inputs: [{ name: "value", type: "BOOLEAN" }],
+          chain_depth: 0,
+        },
+      ],
+      ...truncatedField,
+    };
+    const { text, isError, calls, mutations } = await setWidget(
+      { node_id: 78, widget: "value_1", value: true },
+      {
+        firstWrite: "ok",
+        promotedTerminalWitnesses: true,
+        promotedDetail: {
+          text:
+            '1 match(es) of 1 in scope (viewing: 1 nodes)\n' +
+            '{"id":78,"type":"SubgraphNode","is_subgraph":true}',
+        },
+        subgraph,
+      },
+    );
+
+    expect(isError).toBe(false);
+    expect(mutations).toBe(1);
+    expect(text).not.toMatch(/truncated/);
+    expect(calls.filter((call) => call.cmd === "graph_enter_subgraph")).toHaveLength(0);
+    expect(calls.filter((call) => call.cmd === "graph_set_widget")).toEqual([
+      expect.objectContaining({ node_id: 78, widget: "value_1", value: true }),
+    ]);
+  });
+
   it("a failed subgraph read keeps the original refusal", async () => {
     const { text, isError, calls } = await setWidget(
       { node_id: 78, widget: "width", value: 1024 },
@@ -4508,6 +4564,16 @@ describe("#2688 describePromotedSubgraphEnvelope names the failed invariant", ()
     expect(describePromotedSubgraphEnvelope(VALID, 78).ok).toBe(true);
   });
 
+  // #2783 — a complete inner list is the completeness proof. The panel may omit
+  // `truncated:false` (or send JSON null) even though node_count === nodes.length.
+  it.each([
+    ["omitted truncated", { ...VALID, truncated: undefined }],
+    ["null truncated", { ...VALID, truncated: null }],
+  ])("accepts a complete envelope with %s", (_label, payload) => {
+    expect(describePromotedSubgraphEnvelope(payload, 78).ok).toBe(true);
+    expect(validatePromotedSubgraphEnvelope(payload, 78)).not.toBeNull();
+  });
+
   it.each([
     ["a non-object reply", "nope", 78, /the reply was not a JSON object/],
     [
@@ -4517,12 +4583,19 @@ describe("#2688 describePromotedSubgraphEnvelope names the failed invariant", ()
       /the reply's `truncated` flag was not `false`/,
     ],
     // A malformed flag is not evidence of a SHORT read, so the reason must not
-    // claim one. Same rejection, different established fact.
+    // claim one. Same rejection, different established fact. JSON null is
+    // omission (#2783), not this case.
     [
       "a malformed truncated flag",
-      { ...VALID, truncated: null },
+      { ...VALID, truncated: "yes" },
       78,
       /the reply's `truncated` flag was not `false`/,
+    ],
+    [
+      "an incomplete inner list even when truncated is omitted",
+      { ...VALID, truncated: undefined, node_count: 9 },
+      78,
+      /`node_count` claimed 9 inner node\(s\) but `nodes` carried 1/,
     ],
     [
       "a missing subgraph_of",
@@ -4620,6 +4693,7 @@ describe("#2688 describePromotedSubgraphEnvelope names the failed invariant", ()
       { ...VALID, viewing: undefined },
       { ...VALID, promoted_terminals: undefined },
       { ...VALID, truncated: undefined },
+      { ...VALID, truncated: null },
       { ...VALID, subgraph_of: { node_id: "78" } },
       withNodes([]),
       terminals([goodTerminal]),
