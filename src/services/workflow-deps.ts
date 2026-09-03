@@ -435,6 +435,31 @@ interface MappingIndex {
  * a pattern that looks like a class name and matches thousands of them.
  *
  * Counting stops at the second owner, so a broad pattern is rejected early.
+ *
+ * WHY NOT ONE (codex gate round 5, declined). The gate asked for a single
+ * foreign capture to disqualify, since one match does not prove shared
+ * ownership. It does not, but the catalogue cannot tell that case apart from a
+ * legitimate one — `rgthree-comfy`'s real entry is EXACTLY the shape the gate
+ * described, one foreign capture and no self-match:
+ *
+ *   pattern                 foreign owners   own matches
+ *   ` \(rgthree\)$`                      1             0   <- the gate's shape
+ *   `- Ostris$` (FlexTools)              1             0
+ *   `_jru$` (WordEmbeddings)             1             0
+ *
+ * Measured over the 39 live patterns, disqualifying at one vetoes NINE of them,
+ * including all three above — rgthree being a pack this issue names as an
+ * expected owner. The obvious alternative, "one foreign capture is fine if the
+ * pattern also matches its own listed names", is worse in the direction that
+ * matters: it readmits `Hunyuan` (44 foreign owners) and `PulidFlux` (5),
+ * because each does match a few of its own.
+ *
+ * So the residual risk is accepted knowingly: a pattern capturing one other
+ * repository's node can still name its own pack for an unknown class. What that
+ * cannot do is reproduce this issue — one repository standing in for several
+ * unrelated packs, and reported missing — which needs breadth this veto stops,
+ * on top of the shape probes, pattern unanimity, exact-claim precedence, and
+ * /object_info winning outright for anything installed.
  */
 function patternIsBroad(
   entry: { re: RegExp; key: string },
@@ -563,7 +588,11 @@ function resolveFromMappings(classType: string, index: MappingIndex): MappingRes
   }
   if (hits.size === 0) return { kind: "none" };
   if (hits.size > 1) {
-    return { kind: "ambiguous", candidates: [...new Set(hits.values())].sort() };
+    // Repository KEYS, exactly as the exact-claim branch above returns. Round 4
+    // fixed that branch and left this one deduplicating on the display title, so
+    // two repositories publishing " \(shared\)$" under one title still came back
+    // as a single un-choosable candidate (codex gate round 5).
+    return { kind: "ambiguous", candidates: [...hits.keys()].sort() };
   }
   return { kind: "resolved", pack: [...hits.values()][0] as string };
 }

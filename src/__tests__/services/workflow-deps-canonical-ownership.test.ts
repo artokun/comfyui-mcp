@@ -245,7 +245,10 @@ describe("#2765 an ambiguous class_type is refused, not guessed", () => {
     expect(byType(result)["SomethingInspire"]).toMatchObject({
       pack: null,
       source: "ambiguous",
-      candidates: ["ComfyUI Connection Helper", "Inspire Pack"],
+      candidates: [
+        "https://github.com/ltdrdata/ComfyUI-Inspire-Pack",
+        "https://github.com/other/connection-helper",
+      ],
     });
   });
 
@@ -466,6 +469,13 @@ describe("#2765 a nodename_pattern that discriminates nothing owns nothing", () 
     expect(byType(result)["ThingNode (shared)"]).toMatchObject({
       pack: null,
       source: "ambiguous",
+      // codex gate round 5 — round 4 switched the EXACT-claim branch to
+      // repository keys and left this one on display titles, so a shared title
+      // still collapsed to one un-choosable candidate.
+      candidates: [
+        "https://github.com/first/shared-title",
+        "https://github.com/second/shared-title",
+      ],
     });
     expect(result.missingPacks).toEqual([]);
   });
