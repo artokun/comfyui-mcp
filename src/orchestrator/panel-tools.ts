@@ -12254,7 +12254,20 @@ function refreshFenceFromOwnReply(ctx: PanelToolCtx, reply: ToolResult): Workflo
   const uuid = responseWorkflowUuid(parsed);
   if (!uuid) return null;
   try {
-    return refreshWorkflowUuid(ctx, parsed) ? { status: "refreshed", uuid, before } : null;
+    const destPath = saveDestWorkflowPath(parsed);
+    const destTab = destPath ? uniqueLiveTabForSaveDest(ctx, destPath) : undefined;
+    const adopted = refreshWorkflowUuid(ctx, parsed);
+    // #2768 — a SCOPE ctx.tabId never becomes dest. workflow_list stamps the
+    // routed tab's advertised identity (#1815), so dest must hold the new uuid
+    // or the next list/current-mode call is refused as a stale instance.
+    if (destTab && destTab !== ctx.tabId) {
+      try {
+        ctx.bridge.refreshWorkflowUuid?.(destTab, uuid);
+      } catch {
+        // dest restamp is best-effort; the session fence is the ctx adoption
+      }
+    }
+    return adopted ? { status: "refreshed", uuid, before } : null;
   } catch {
     return null; // never surface a throw here as worse than the existing fallback
   }
@@ -12337,6 +12350,30 @@ function routingIsUnsavedPredecessor(ctx: PanelToolCtx): boolean {
   return typeof pin?.path === "string" && pin.path.startsWith("tmp:");
 }
 
+/** The saved path this session was bound to before Save-As, if any. */
+function sessionSavedPath(ctx: PanelToolCtx): string | undefined {
+  const pin = ctx.workflowTarget?.get(ctx.tabId);
+  if (typeof pin?.path === "string" && pin.path.trim() && !pin.path.startsWith("tmp:")) {
+    return canonicalSavedWorkflowPath(pin.path) ?? pin.path.trim();
+  }
+  return savedPathFromTabId(ctx.tabId) ?? undefined;
+}
+
+/**
+ * #2768 — this Save-As replaced the canvas this session was editing.
+ * `workflow_instance_changed` is the panel's own signal; dest path ≠ the
+ * session's saved path is the same fact on a reply that omits the flag.
+ */
+function saveReplacedSessionCanvas(
+  ctx: PanelToolCtx,
+  parsed: Record<string, unknown>,
+  destPath: string,
+): boolean {
+  if (parsed.workflow_instance_changed === true) return true;
+  const from = sessionSavedPath(ctx);
+  return Boolean(from && from !== destPath);
+}
+
 function destPinnedTarget(
   pinned: { path?: string; filename?: string },
   destPath: string,
@@ -12381,9 +12418,14 @@ function adoptPinnedDestPath(
  * (`panel_set_todo`, `panel_canvas`) still address the old id.
  *
  * Follow dest when the current address is dead, when it already aliases onto
- * dest (same-socket tmp:→wf: / Save-As rename), or when it is the unsaved
+ * dest (same-socket tmp:→wf: / Save-As rename), when it is the unsaved
  * predecessor of dest (pinned tmp: canvas whose first save published a
- * `workflows/…` routing key). A live pin on a DIFFERENT saved tab is left
+ * `workflows/…` routing key), or when this Save-As replaced the canvas this
+ * session was editing (#2768 — dest path differs, or the panel set
+ * `workflow_instance_changed`). Leaving the session on the source id after
+ * that is a stale fence: dest is live, the source id may still canReach, and
+ * panel_list_workflows / mode:"current" then fail with instance mismatch.
+ * A live pin on a DIFFERENT saved tab that this save did not replace is left
  * alone — that is #1917 / #884.
  *
  * Matching is on the dest path the save reply proved, and only when exactly
@@ -12405,7 +12447,10 @@ function repointRoutingAfterSave(ctx: PanelToolCtx, reply: ToolResult): void {
   }
   const live = liveRoutingTab(ctx);
   const follow =
-    !live || live === destTab || routingIsUnsavedPredecessor(ctx);
+    !live ||
+    live === destTab ||
+    routingIsUnsavedPredecessor(ctx) ||
+    saveReplacedSessionCanvas(ctx, parsed, destPath);
   if (!follow) return;
   if (isScopeAddress(ctx.tabId)) {
     try {
@@ -25201,13 +25246,14 @@ export function buildPanelToolDefs(): PanelToolDef[] {
         // attempting rebindWorkflowFence's independent workflow_list round trip,
         // which can be refused by the exact fence this repairs.
         //
-        // #2419 — BEFORE the fence refresh so the stamp lands on the dest
-        // address. Save-As mints a new tab id; the fence repair re-stamps
-        // graph commands, but session-scoped commands (set_todo, graph_canvas)
-        // still address the old id unless routing is re-pointed. Follow dest
-        // when the current address is dead, aliases onto dest, or is the
-        // unsaved tmp: predecessor of dest. A live pin on a different saved
-        // tab is left alone (#1917 / #884).
+        // #2419 / #2768 — BEFORE the fence refresh so the stamp lands on the
+        // dest address. Save-As mints a new tab id; the fence repair re-stamps
+        // graph commands, but session-scoped commands (set_todo, graph_canvas,
+        // workflow_list) still address the old id unless routing is re-pointed.
+        // Follow dest when the current address is dead, aliases onto dest, is
+        // the unsaved tmp: predecessor of dest, or this Save-As replaced the
+        // canvas this session was editing. A live pin on a different saved tab
+        // that this save did not replace is left alone (#1917 / #884).
         repointRoutingAfterSave(ctx, res);
         const fenceRebind = refreshFenceFromOwnReply(ctx, res) ?? (await rebindWorkflowFence(ctx));
         let canMutateNow: boolean | undefined;
