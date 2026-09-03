@@ -329,6 +329,7 @@ describe("get_image: each action reaches exactly one service", () => {
       allowAttachment: true,
       // #1373 — the input dir legitimately holds workflow .json files.
       allowJson: true,
+      forInlinePreview: true,
     });
   });
 
@@ -338,6 +339,7 @@ describe("get_image: each action reaches exactly one service", () => {
       allowMedia: true,
       allowAttachment: true,
       allowJson: true,
+      forInlinePreview: true,
     });
   });
 
@@ -350,6 +352,7 @@ describe("get_image: each action reaches exactly one service", () => {
       allowMedia: true,
       allowAttachment: true,
       allowJson: true,
+      forInlinePreview: true,
     });
   });
 
@@ -675,6 +678,7 @@ describe("guards test ABSENCE, never falsiness", () => {
       allowMedia: true,
       allowAttachment: true,
       allowJson: true,
+      forInlinePreview: true,
     });
   });
 
