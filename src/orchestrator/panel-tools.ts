@@ -91,6 +91,7 @@ import {
 } from "../services/unexpose-host-link-shift.js";
 import { retryConnectAgainstLiveGraph } from "../services/connect-live-graph.js";
 import { verifyPrimitiveForceInputAfterConnect } from "../services/primitive-force-input-connect.js";
+import { rewriteMiniMaxH3DirectorPrimitiveAdvice } from "../services/minimax-h3-director-widget.js";
 import { retryRailSlotConnect } from "../services/rail-slot-connect.js";
 import { retryWildcardSlotConnect } from "../services/wildcard-slot-connect.js";
 import { retryExposeSubgraphInput } from "../services/expose-ae-wildcard.js";
@@ -506,7 +507,7 @@ import {
 } from "../config.js";
 import { normalizeInstallPathEnv } from "../utils/install-path-env.js";
 import { sliceWorkflow } from "../services/workflow-slicer.js";
-import { validateA2UISpecServer } from "../services/a2ui-spec.js";
+import { A2UI_CAPS, validateA2UISpecServer } from "../services/a2ui-spec.js";
 import type { UiWorkflow } from "../comfyui/types.js";
 
 /** #1700 — orchestrator wires this so panel_reload can fork-respawn the agent
@@ -6838,6 +6839,24 @@ function rewriteToolResultJson(
     ...res,
     content: res.content.map((c, i) =>
       i === idx && c.type === "text" ? { ...c, text: JSON.stringify(payload, null, 2) } : c,
+    ),
+  };
+}
+
+/** #2790 — the panel's MiniMaxH3Director derived-widget refusal still names a
+ *  frontend PrimitiveNode; rewrite that producer with panel_connect's helper. */
+function rewriteMiniMaxH3DirectorWidgetRefusal(res: ToolResult): ToolResult {
+  if (!res.isError) return res;
+  const idx = res.content.findIndex((c) => c.type === "text");
+  if (idx < 0) return res;
+  const block = res.content[idx];
+  if (block.type !== "text" || typeof block.text !== "string") return res;
+  const next = rewriteMiniMaxH3DirectorPrimitiveAdvice(block.text);
+  if (next === block.text) return res;
+  return {
+    ...res,
+    content: res.content.map((c, i) =>
+      i === idx && c.type === "text" ? { ...c, text: next } : c,
     ),
   };
 }
@@ -21667,7 +21686,7 @@ export function buildPanelToolDefs(): PanelToolDef[] {
     ),
     def(
       "panel_set_widget",
-      "Set a widget value on a node in the user's open graph (steps, cfg, seed, ckpt_name, text prompts, …). Returns the previous and new value (a string longer than 1000 chars is echoed as {chars, sha256, preview} so batched calls stay inside the outer tool-result budget — pass `echo: \"full\"` for the verbatim string). Undoable with Ctrl+Z. To CLEAR a text widget to an empty string, pass `clear: true` (some MCP clients drop an empty-string `value` from the serialized payload, so `value: \"\"` may not arrive — `clear: true` always works). For the LTXDirector timeline node (WhatDreamsCost CSGlide), set `timeline_data` with the FULL timeline JSON (segments + global_prompt) to drive its custom timeline UI — this re-syncs the editor and regenerates its derived `local_prompts`/`segment_lengths`/`guide_strength` widgets; setting those derived widgets directly is refused (they are silently reverted). For AnimaRegionalCanvasInline / Krea2RegionalCanvasInline (LC123), quality/scene/red/green/blue/negative prompt writes are refused: the custom textarea and node.properties.animaPrompts overwrite widget.value on APPLY. Drive quality/scene/negative via a PrimitiveStringMultiline wired into quality_prompt_in / scene_prompt_in / negative_prompt_in; red/green/blue have no socket. DaSiWa_LTX2LoraLoader's `stack_data` write is also refused: its custom multi-row widget reserializes its own JS state over `widget.value`, so the echoed write would be a false success; edit the stack rows in the node UI instead.",
+      "Set a widget value on a node in the user's open graph (steps, cfg, seed, ckpt_name, text prompts, …). Returns the previous and new value (a string longer than 1000 chars is echoed as {chars, sha256, preview} so batched calls stay inside the outer tool-result budget — pass `echo: \"full\"` for the verbatim string). Undoable with Ctrl+Z. To CLEAR a text widget to an empty string, pass `clear: true` (some MCP clients drop an empty-string `value` from the serialized payload, so `value: \"\"` may not arrive — `clear: true` always works). For the LTXDirector timeline node (WhatDreamsCost CSGlide), set `timeline_data` with the FULL timeline JSON (segments + global_prompt) to drive its custom timeline UI — this re-syncs the editor and regenerates its derived `local_prompts`/`segment_lengths`/`guide_strength` widgets; setting those derived widgets directly is refused (they are silently reverted). For AnimaRegionalCanvasInline / Krea2RegionalCanvasInline (LC123), quality/scene/red/green/blue/negative prompt writes are refused: the custom textarea and node.properties.animaPrompts overwrite widget.value on APPLY. Drive quality/scene/negative via a PrimitiveStringMultiline wired into quality_prompt_in / scene_prompt_in / negative_prompt_in; red/green/blue have no socket. DaSiWa_LTX2LoraLoader's `stack_data` write is also refused: its custom multi-row widget reserializes its own JS state over `widget.value`, so the echoed write would be a false success; edit the stack rows in the node UI instead. For MiniMaxH3Director, prompt / builder_state / timeline_data writes are refused (they are derived write-backs of the in-memory builderState). Drive the prompt via a backend STRING producer such as PrimitiveStringMultiline wired into external_prompt_overwrite — not a frontend PrimitiveNode; panel_connect refuses that forceInput-only STRING.",
       {
         node_id: nodeId().describe("Node id from panel_graph_outline / panel_query_graph."),
         widget: z.string().describe("Widget name (e.g. 'steps', 'cfg', 'text')."),
@@ -21763,8 +21782,9 @@ export function buildPanelToolDefs(): PanelToolDef[] {
           let mutationId: string | undefined;
           let dispatchTab = ctx.tabId;
           let dispatchConnection: SetWidgetReadbackConnection | undefined;
-          const written = await ctx.call(
-            {
+          const written = rewriteMiniMaxH3DirectorWidgetRefusal(
+            await ctx.call(
+              {
               cmd: "graph_set_widget",
               node_id: nodeId,
               widget,
@@ -21837,6 +21857,7 @@ export function buildPanelToolDefs(): PanelToolDef[] {
               }
             },
             beforeDispatch,
+            ),
           );
           const echoed = stripVerifiedLastObservedSchemaNote(
             summarizeSetWidgetEcho(written, echoFull),
@@ -29184,7 +29205,9 @@ CHECKED FOR YOU: the graph read this message prescribes was just run, and it ` +
     ),
     def(
       "panel_ui_render",
-      "Render an INTERACTIVE UI CARD in the panel chat from an A2UI-subset JSON spec — choice buttons, forms (TextField/Select/Checkbox + a submit Button), node-wiring diagrams (comfy:graph), and bar/line charts (comfy:chart). Use a card whenever the user must pick between options, confirm a plan, fill in parameters, or would understand a wiring explanation better as a diagram. The card is non-blocking: this returns { card_id } immediately; when the user clicks a button (or submits a form) their choice arrives as a NORMAL chat message (the button's `reply` text; submit buttons append 'name: value' lines) — so after rendering a card that asks a question, END YOUR TURN and wait. Set surface:'wide' for diagram-heavy cards (the panel widens and restores automatically). Spec shape: { surface?, title?, root: '<id>', components: [ {id, type, ...} ] } with children referenced by id. Types: Text{text}, Heading{text,level?}, Button{label,reply?,submit?,style?:'primary'|'secondary'}, Row/Column/Card{children:[ids]}, Divider, Image{src:/view-URL,caption?}, TextField{label,name,value?,placeholder?}, Select{label,name,options:[{label,value?}],value?}, Checkbox{label,name,checked?}, 'comfy:graph'{nodes:[{id,label,color?}],edges:[{from,to,label?}],direction?:'lr'|'tb'}, 'comfy:chart'{kind:'bar'|'line',series:[{label,values:[num]}],x?:[labels]}. Caps: ≤64 components, ≤30 graph nodes, ≤8×256 chart points. On a validation error, FIX the spec and retry.",
+      "Render an INTERACTIVE UI CARD in the panel chat from an A2UI-subset JSON spec — choice buttons, forms (TextField/Select/Checkbox + a submit Button), node-wiring diagrams (comfy:graph), and bar/line charts (comfy:chart). Use a card whenever the user must pick between options, confirm a plan, fill in parameters, or would understand a wiring explanation better as a diagram. The card is non-blocking: this returns { card_id } immediately; when the user clicks a button (or submits a form) their choice arrives as a NORMAL chat message (the button's `reply` text; submit buttons append 'name: value' lines) — so after rendering a card that asks a question, END YOUR TURN and wait. Set surface:'wide' for diagram-heavy cards (the panel widens and restores automatically). Spec shape: { surface?, title?, root: '<id>', components: [ {id, type, ...} ] } with children referenced by id. Types: Text{text}, Heading{text,level?}, Button{label,reply?,submit?,style?:'primary'|'secondary'}, Row/Column/Card{children:[ids]}, Divider, Image{src:/view-URL,caption?}, TextField{label,name,value?,placeholder?}, Select{label,name,options:[{label,value?}],value?}, Checkbox{label,name,checked?}, 'comfy:graph'{nodes:[{id,label,color?}],edges:[{from,to,label?}],direction?:'lr'|'tb'}, 'comfy:chart'{kind:'bar'|'line',series:[{label,values:[num]}],x?:[labels]}. Caps: ≤64 components, ≤" +
+        A2UI_CAPS.maxImages +
+        " Image components, ≤30 graph nodes, ≤8×256 chart points. On a validation error, FIX the spec and retry.",
       {
         spec: z
           .record(z.string(), z.unknown())
