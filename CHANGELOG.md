@@ -16,6 +16,7 @@ All notable changes to this project are documented here. This project adheres to
 - **`panel_ui_render` documents the four-Image cap the validator already enforces (#2796).** The declared manual listed the 64-component ceiling but omitted `maxImages: 4`, so a valid-looking five-image card was rejected as `too many images (5 > 4)` after an avoidable retry.
 
 
+- **`get_image` bounds a BATCH of inline images against the transport frame, and bounds `action:"view"` at all (#2692).** A batch whose individual images each fit could still exceed the frame once concatenated, and the `view` action was not bounded at all; both now share one frame budget so an oversized reply is refused with what to do instead of dying as an unattributed transport error.
 ## [0.52.183] - 2026-09-03
 
 ### MCP
