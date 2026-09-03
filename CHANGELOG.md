@@ -8,10 +8,19 @@ All notable changes to this project are documented here. This project adheres to
 
 ### MCP
 #### Fixed
-- **manga-director-codex MiniMax H3 adapter accepts documented `text_to_video`.** Native H3 T2V is `MiniMaxH3ImageToVideo` with both image sockets empty; the adapter omitted that mode and compilation refused a valid prompt spec. `text_to_video` is declared; I2V / FL2VA / L2VA / R2V modes are unchanged (#2786).
-- **`panel_slice_workflow` seeds outputs inside nested overlapping groups (#2780).** Membership used the first containing box only, so a SaveImage inside both an outer group and a nested inner group was missed when slicing by the inner title. Any matching containing group now seeds, and a miss lists every containing title.
-- panel_search_nodes no longer returns a raw Git URL as an install `id`, and panel_install_node refuses Git URLs before Manager v4 queueing rather than sending an unlisted URL as a registry lookup (#1539)
 - clarify MiniMax H3 source-video frame-rate conversion and complete ComfyMathExpression edits (#2479)
+
+## [0.52.183] - 2026-09-03
+
+### MCP
+#### Fixed
+- **stale `panel-op.lock` is reclaimed automatically when the owner process is gone (#2788, #2814).** Acquire takes the lock after the same proven-dead rename-aside path as `panel_action:"unlock"`; a living owner is never stolen, and an unreadable or reuse-ambiguous record still fails closed.
+- **`get_image` applies `max_preview_dimension` to a PNG that exceeds the 32 MB `/view` cap (#2785, #2815).** A 41.5 MB upscale previously died as `VIEW_TOO_LARGE` before the documented preview downscale ran. Still images requested for inline preview now use a 64 MB encoded-source ceiling (the same bound as `action:"convert"`), recover a local file in that window without an unbounded read, and fail closed with a size error that names convert when the original is still too large.
+- **parallel CivitAI downloads accept a proven shared extra-path `base_path` as `model_root` (#2787, #2813).** Category expansion still lists `E:\models\poses (poses)`, but omitting the configured group `base_path` made concurrent `download_model` `action:"download_civitai"` calls reject that same valid root while siblings wrote into it. Known-root discovery stays request-local, never probes a guessed `:8188` origin, and still refuses an unproven invented path.
+- **manga-director-codex MiniMax H3 adapter accepts documented `text_to_video`.** Native H3 T2V is `MiniMaxH3ImageToVideo` with both image sockets empty; the adapter omitted that mode and compilation refused a valid prompt spec. `text_to_video` is declared; I2V / FL2VA / L2VA / R2V modes are unchanged (#2786, #2812).
+- **`panel_slice_workflow` seeds outputs inside nested overlapping groups (#2780, #2806).** Membership used the first containing box only, so a SaveImage inside both an outer group and a nested inner group was missed when slicing by the inner title. Any matching containing group now seeds, and a miss lists every containing title.
+- panel_search_nodes no longer returns a raw Git URL as an install `id`, and panel_install_node refuses Git URLs before Manager v4 queueing rather than sending an unlisted URL as a registry lookup (#1539, #2795)
+
 
 ## [0.52.182] - 2026-09-03
 
