@@ -3944,20 +3944,25 @@ export class PanelAgentManager {
    *  means this process starts fresh but an orchestrator restart could resume
    *  the cleared conversation, which the caller must disclose rather than
    *  report a clean New chat (codex confirming-gate P1: false-success). */
-  reset(tabId: string): { durableCleared: boolean } {
+  /** `agentKey`, NOT a tab id: callers pass `agentKeyFor(tabId)`, which is
+   *  `<shared scope>::<backend>`. Naming it `tabId` invited a future caller to
+   *  hand over a real tab id, at which point every map operation in here would
+   *  silently miss — and this repo's standing invariant is that sessions are
+   *  orchestrator-scoped and never keyed on tab_id. */
+  reset(agentKey: string): { durableCleared: boolean } {
     // Unbind through the SHARED teardown seam (#468) — it is what guarantees a
     // run completion parked in held mail is handed back rather than discarded.
-    const agent = this.unbindAgent(tabId, { dropHeldMail: true, reason: "reset" });
-    this.pendingResume.delete(tabId);
+    const agent = this.unbindAgent(agentKey, { dropHeldMail: true, reason: "reset" });
+    this.pendingResume.delete(agentKey);
     // Forget the durable session too — a NEW chat must start fresh, so the disk
     // fallback in send() can't resurrect the conversation the user just cleared.
     // (resume_session calls reset() then setResume() with the chosen id, so the
     // historical session is re-armed right after and re-persisted on next onSession.)
-    const durableCleared = this.opts.sessionStore ? this.opts.sessionStore.clear(tabId) : true;
-    this.pendingEffortRestart.delete(tabId); // a reset supersedes any deferred restart
-    this.pendingMcpRestart.delete(tabId);
-    this.pendingForkOnRestart.delete(tabId);
-    this.pendingRetargetFrom.delete(tabId); // #1429 — nothing queued, nothing to classify
+    const durableCleared = this.opts.sessionStore ? this.opts.sessionStore.clear(agentKey) : true;
+    this.pendingEffortRestart.delete(agentKey); // a reset supersedes any deferred restart
+    this.pendingMcpRestart.delete(agentKey);
+    this.pendingForkOnRestart.delete(agentKey);
+    this.pendingRetargetFrom.delete(agentKey); // #1429 — nothing queued, nothing to classify
     // #2759 — the picker override SURVIVES a reset. It used to be dropped here, on
     // the rationale that a provider switch reset()s the old key and would otherwise
     // carry the old provider's model into the new backend's spawn. That rationale
@@ -3974,7 +3979,7 @@ export class PanelAgentManager {
     // A New chat is a CONVERSATION boundary. The model belongs to the tab and its
     // provider, not to the conversation, so it is not this boundary's to reset.
     if (agent) {
-      logger.info(`[panel-orchestrator] tab ${tabId.slice(0, 8)} reset — new session next message`);
+      logger.info(`[panel-orchestrator] tab ${agentKey.slice(0, 8)} reset — new session next message`);
       void agent.stop();
     }
     return { durableCleared };
