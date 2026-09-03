@@ -96,6 +96,11 @@ vi.mock("../../tools/workflow-lock.js", () => ({
   lockWorkflowAction: (...a: unknown[]) => mocks.lockWorkflowAction(...a),
   verifyWorkflowLockAction: (...a: unknown[]) => mocks.verifyWorkflowLockAction(...a),
 }));
+vi.mock("../../config.js", () => ({
+  getComfyUIBaseUrl: () => "http://127.0.0.1:8188",
+  isRemoteMode: () => false,
+  targetIsOnThisMachine: () => true,
+}));
 
 import { registerWorkflowLibraryTools } from "../../tools/workflow-library.js";
 

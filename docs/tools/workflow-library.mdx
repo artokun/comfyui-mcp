@@ -36,7 +36,7 @@ Return, list, summarize or query a SAVED workflow FILE — files on disk, named 
   Options: `ui`, `api`, `raw`.
 </ParamField>
 <ParamField path="path" type="string">
-  action:"strip" / "slice" / "query" — Absolute server-side path to a workflow .json on disk (e.g. C:\\Users\\you\\ComfyUI\\user\\default\\workflows\\pusa_extend.json). Read directly from disk — no library lookup. If a userdata path is missing the `workflows` segment after `user/default`, it is retried with that segment restored, preserving the filename exactly.
+  action:"strip" / "slice" / "query" — Absolute path to a workflow .json on the connected ComfyUI host (e.g. C:\\Users\\you\\ComfyUI\\user\\default\\workflows\\pusa_extend.json). LOCAL ComfyUI: read from this host's disk — no library lookup. If a userdata path is missing the `workflows` segment after `user/default`, it is retried with that segment restored, preserving the filename exactly. REMOTE ComfyUI: not opened on this MCP host (a POSIX path is not Win32-resolved). A path under user/default/workflows, user/workflows, or models/workflows is fetched from that server's userdata library; any other remote absolute path is refused.
 </ParamField>
 <ParamField path="graph" type="object">
   action:"strip" / "slice" / "query" — Inline workflow JSON (UI format for "strip"/"slice"; UI or API for "query"), as an alternative to path/filename.

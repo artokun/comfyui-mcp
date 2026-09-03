@@ -7,7 +7,7 @@ import { getObjectInfo, backfillObjectInfo, comfyApiFetch } from "../comfyui/cli
 import { bodyPrefixOf, describeStatus } from "../comfyui/json-guard.js";
 import { errorToToolResult, ValidationError } from "../utils/errors.js";
 import { logger } from "../utils/logger.js";
-import { getComfyUIBaseUrl } from "../config.js";
+import { getComfyUIBaseUrl, isRemoteMode, targetIsOnThisMachine } from "../config.js";
 import {
   isUiFormat,
   isApiFormat,
@@ -60,8 +60,16 @@ async function loadRawFromSource(
     throw new ValidationError("Provide exactly one of: path, filename, or graph.");
   }
   if (graph) return graph;
-  if (path) return JSON.parse(await readWorkflowFile(path));
+  if (path) {
+    if (!comfyFilesystemIsLocalToThisProcess()) {
+      return await fetchRemoteServerWorkflow(path);
+    }
+    return JSON.parse(await readWorkflowFile(path));
+  }
   if (filename && isAbsolute(filename)) {
+    if (!comfyFilesystemIsLocalToThisProcess()) {
+      return await fetchRemoteServerWorkflow(filename);
+    }
     const fromDisk = await tryReadWorkspaceWorkflow(filename);
     if (fromDisk !== undefined) return fromDisk;
   }
@@ -90,6 +98,69 @@ function isInsideRoot(root: string, candidate: string): boolean {
 
 function isEnoent(err: unknown): boolean {
   return (err as NodeJS.ErrnoException)?.code === "ENOENT";
+}
+
+/**
+ * True when a local `readFile` / `path.resolve` would be the connected
+ * ComfyUI's own disk. `isRemoteMode()` is the classification; the physical
+ * fact is `targetIsOnThisMachine()` (#742 — a LAN-addressed instance on this
+ * host is classified remote but the files are here).
+ */
+function comfyFilesystemIsLocalToThisProcess(): boolean {
+  return !isRemoteMode() || targetIsOnThisMachine();
+}
+
+/**
+ * #2782 — map a ComfyUI-host absolute path to a userdata library key without
+ * running it through this process's `path.resolve` (Win32 turns `/mydata/...`
+ * into `C:\mydata\...`). Markers are matched on slash-normalized text so a
+ * Linux path on a Windows MCP host, and a Windows path on a Linux MCP host,
+ * both keep their original filename bytes.
+ */
+export function userdataKeyFromServerPath(absPath: string): string | undefined {
+  const unix = absPath.replace(/\\/g, "/");
+  if (unix.split("/").includes("..")) return undefined;
+  const markers = ["/user/default/workflows/", "/user/workflows/", "/models/workflows/"];
+  for (const marker of markers) {
+    const i = unix.indexOf(marker);
+    if (i === -1) continue;
+    const rel = unix.slice(i + marker.length);
+    if (!rel || rel.endsWith("/")) continue;
+    return `workflows/${rel}`;
+  }
+  const dropped = "/user/default/";
+  const i = unix.indexOf(dropped);
+  if (i === -1) return undefined;
+  const rel = unix.slice(i + dropped.length);
+  if (!rel || rel.startsWith("workflows/") || rel.endsWith("/")) return undefined;
+  return `workflows/${rel}`;
+}
+
+function remoteAbsolutePathUnsupported(absPath: string): string {
+  return (
+    `Could NOT read "${absPath}": that is an absolute path on the connected ComfyUI host, ` +
+    `and this MCP process is not on that machine — it was not opened on this host's filesystem. ` +
+    `A POSIX remote path is not Win32-resolved here. Pass filename with a name from ` +
+    `get_workflow (action:"list"), or pass graph. Absolute remote disk reads are only ` +
+    `proxied when the path sits under user/default/workflows, user/workflows, or models/workflows ` +
+    `(fetched from that ComfyUI's userdata library).`
+  );
+}
+
+async function fetchRemoteServerWorkflow(absPath: string): Promise<unknown> {
+  const key = userdataKeyFromServerPath(absPath);
+  if (!key) {
+    throw new ValidationError(remoteAbsolutePathUnsupported(absPath));
+  }
+  const res = await comfyApiFetch(`/api/userdata/${encodeURIComponent(key)}`);
+  if (!res.ok) {
+    throw new ValidationError(
+      res.status === 404
+        ? `Could NOT read "${absPath}": that is a path on the connected ComfyUI host, and this MCP process is not on that machine — it was not opened on this host's filesystem. The userdata library does not contain "${key.slice("workflows/".length)}" (404). Pass filename with a name from get_workflow (action:"list"), or pass graph.`
+        : `Could NOT read "${absPath}" from the connected ComfyUI: the server answered ${describeStatus(res.status, res.statusText)}. That is not a report that it is missing — nothing was read.`,
+    );
+  }
+  return await res.json();
 }
 
 /**
@@ -149,6 +220,7 @@ async function tryReadWorkspaceWorkflow(
   filename: string,
 ): Promise<Record<string, unknown> | undefined> {
   if (!isAbsolute(filename)) return undefined;
+  if (!comfyFilesystemIsLocalToThisProcess()) return undefined;
   const workspace = await resolveEffectiveComfyUIBaseLive();
   if (!workspace) return undefined;
 
@@ -311,8 +383,8 @@ export function registerWorkflowLibraryTools(server: McpServer): void {
         .string()
         .optional()
         .describe(
-          'action:"strip" / "slice" / "query" — Absolute server-side path to a workflow .json on disk (e.g. ' +
-            "C:\\\\Users\\\\you\\\\ComfyUI\\\\user\\\\default\\\\workflows\\\\pusa_extend.json). Read directly from disk — no library lookup. If a userdata path is missing the `workflows` segment after `user/default`, it is retried with that segment restored, preserving the filename exactly.",
+          'action:"strip" / "slice" / "query" — Absolute path to a workflow .json on the connected ComfyUI host (e.g. ' +
+            "C:\\\\Users\\\\you\\\\ComfyUI\\\\user\\\\default\\\\workflows\\\\pusa_extend.json). LOCAL ComfyUI: read from this host's disk — no library lookup. If a userdata path is missing the `workflows` segment after `user/default`, it is retried with that segment restored, preserving the filename exactly. REMOTE ComfyUI: not opened on this MCP host (a POSIX path is not Win32-resolved). A path under user/default/workflows, user/workflows, or models/workflows is fetched from that server's userdata library; any other remote absolute path is refused.",
         ),
       graph: z
         .record(z.string(), z.any())
@@ -702,8 +774,11 @@ async function listWorkflowsAction(): Promise<TextResult> {
 
 /** `get_workflow (action:"get")` — the body of the surviving get_workflow tool. */
 async function getWorkflowAction(filename: string, format: "ui" | "api"): Promise<TextResult> {
-        const fromDisk = await tryReadWorkspaceWorkflow(filename);
         let raw: unknown;
+        if (isAbsolute(filename) && !comfyFilesystemIsLocalToThisProcess()) {
+          raw = await fetchRemoteServerWorkflow(filename);
+        } else {
+        const fromDisk = await tryReadWorkspaceWorkflow(filename);
         if (fromDisk !== undefined) {
           raw = fromDisk;
         } else {
@@ -738,6 +813,7 @@ async function getWorkflowAction(filename: string, format: "ui" | "api"): Promis
           }
 
           raw = await res.json();
+        }
         }
 
         // If API format requested and workflow is in UI format, convert
@@ -978,8 +1054,11 @@ async function loadWorkflowApi(filename: string): Promise<{
   /** Defined only for UI input, where zero means a valid empty conversion. */
   potentiallyExecutableNodeCount?: number;
 }> {
-  const fromDisk = await tryReadWorkspaceWorkflow(filename);
   let raw: unknown;
+  if (isAbsolute(filename) && !comfyFilesystemIsLocalToThisProcess()) {
+    raw = await fetchRemoteServerWorkflow(filename);
+  } else {
+  const fromDisk = await tryReadWorkspaceWorkflow(filename);
   if (fromDisk !== undefined) {
     raw = fromDisk;
   } else {
@@ -1001,6 +1080,7 @@ async function loadWorkflowApi(filename: string): Promise<{
     }
 
     raw = await res.json();
+  }
   }
 
   if (isUiFormat(raw)) {

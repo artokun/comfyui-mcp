@@ -61,6 +61,8 @@ vi.mock("../../tools/workflow-lock.js", () => ({
 }));
 vi.mock("../../config.js", () => ({
   getComfyUIBaseUrl: () => "http://127.0.0.1:8188",
+  isRemoteMode: () => false,
+  targetIsOnThisMachine: () => true,
 }));
 vi.mock("../../services/frontend-virtual-types.js", () => ({
   frontendVirtualTypesFor: () => new Set<string>(),
