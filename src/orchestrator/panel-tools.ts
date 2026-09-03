@@ -91,6 +91,7 @@ import {
 } from "../services/unexpose-host-link-shift.js";
 import { retryConnectAgainstLiveGraph } from "../services/connect-live-graph.js";
 import { verifyPrimitiveForceInputAfterConnect } from "../services/primitive-force-input-connect.js";
+import { rewriteMiniMaxH3DirectorPrimitiveAdvice } from "../services/minimax-h3-director-widget.js";
 import { retryRailSlotConnect } from "../services/rail-slot-connect.js";
 import { retryWildcardSlotConnect } from "../services/wildcard-slot-connect.js";
 import { retryExposeSubgraphInput } from "../services/expose-ae-wildcard.js";
@@ -177,6 +178,9 @@ import {
   resolveLegacyInnerPromotedTarget,
   promotedInnerWidgetIsLinkDriven,
   resolveInnerPromotedTarget,
+  resolveHostPromotedWidgetMapping,
+  resolveInnerFromHostPromotedMapping,
+  isHostProvenPromotedStringWrite,
   describePromotedSubgraphEnvelope,
   isInnerLinkDrivenWriteWarning,
   shapeParentAuthoritativePromotedWrite,
@@ -3461,6 +3465,37 @@ function currentPanelRestartTarget(ctx: PanelToolCtx): string | null {
   const observedOrigin = ctx.bridge?.tabServerOrigin?.(ctx.tabId);
   if (!sameHttpBase(observedOrigin, target)) return null;
   return target;
+}
+
+/**
+ * #2804 — a live panel tab whose SERVER-OBSERVED handshake Origin is a concrete
+ * non-loopback ComfyUI. The Manager reboot is sent to THIS tab, never to a
+ * guessed URL, and never via a local process restart of the configured
+ * 127.0.0.1 target. Loopback / `localhost` origins stay on the existing
+ * local-instance confirmation (including the tunnelled-loopback FORCE_REMOTE
+ * case).
+ */
+function currentPanelRemoteRestartOrigin(ctx: PanelToolCtx): string | null {
+  const origin = ctx.bridge?.tabServerOrigin?.(ctx.tabId);
+  if (!origin) return null;
+  if (isDnsAmbiguousLoopback(origin) || isLoopbackOrigin(origin)) return null;
+  try {
+    const u = new URL(origin);
+    if (u.protocol !== "http:" && u.protocol !== "https:") return null;
+    if (!u.hostname) return null;
+  } catch {
+    return null;
+  }
+  return origin.replace(/\/+$/, "");
+}
+
+function stillBoundPanelRemoteRestartOrigin(
+  ctx: PanelToolCtx,
+  previous: string | undefined,
+): string | undefined {
+  if (previous == null) return undefined;
+  const next = currentPanelRemoteRestartOrigin(ctx);
+  return next != null && sameHttpBase(next, previous) ? next : undefined;
 }
 
 /** Test injection for the #742 decline-probe recheck window, so tests don't
@@ -6842,6 +6877,24 @@ function rewriteToolResultJson(
   };
 }
 
+/** #2790 — the panel's MiniMaxH3Director derived-widget refusal still names a
+ *  frontend PrimitiveNode; rewrite that producer with panel_connect's helper. */
+function rewriteMiniMaxH3DirectorWidgetRefusal(res: ToolResult): ToolResult {
+  if (!res.isError) return res;
+  const idx = res.content.findIndex((c) => c.type === "text");
+  if (idx < 0) return res;
+  const block = res.content[idx];
+  if (block.type !== "text" || typeof block.text !== "string") return res;
+  const next = rewriteMiniMaxH3DirectorPrimitiveAdvice(block.text);
+  if (next === block.text) return res;
+  return {
+    ...res,
+    content: res.content.map((c, i) =>
+      i === idx && c.type === "text" ? { ...c, text: next } : c,
+    ),
+  };
+}
+
 /**
  * #2075 — a verified widget write that fell back to last-observed schema still
  * succeeded. The panel's `schema_note` (#1223) tells the agent the live probes
@@ -8262,7 +8315,22 @@ const PROMOTED_PREFLIGHT_READ_OPTIONS: PanelToolCallOptions = {
 type PromotedTargetProbe = {
   scope: QueriedNodeScope | null;
   rootGraphIdentity: string | null;
+  hostNode: Record<string, unknown> | null;
 };
+
+function matchingQueriedHostNode(
+  nodes: unknown,
+  nodeId: unknown,
+): Record<string, unknown> | null {
+  if (!Array.isArray(nodes) || nodes.length !== 1) return null;
+  const row = nodes[0];
+  if (!row || typeof row !== "object" || Array.isArray(row)) return null;
+  const rec = row as Record<string, unknown>;
+  const id = canonicalQueriedNodeId(rec.id);
+  const requested = canonicalQueriedNodeId(nodeId);
+  if (!id || !requested || id !== requested) return null;
+  return rec;
+}
 
 async function readPromotedTargetScope(
   ctx: PanelToolCtx,
@@ -8275,14 +8343,16 @@ async function readPromotedTargetScope(
     fields: "detail",
     limit: 1,
   }, undefined, undefined, undefined, options);
-  if (probe.isError) return { scope: null, rootGraphIdentity: null };
+  if (probe.isError) return { scope: null, rootGraphIdentity: null, hostNode: null };
   const payload = parseToolResultJson(probe);
   if (parseViewingScope(payload?.viewing)?.scope === "root") {
     rememberLiveRootViewing(ctx, payload?.viewing);
   }
+  const normalized = normalizeGraphQueryResult(probe);
   return {
     scope: parseVerifiedQueriedNodeScope(payload, nodeId),
     rootGraphIdentity: parseRootGraphIdentity(payload),
+    hostNode: matchingQueriedHostNode(normalized.nodes, nodeId),
   };
 }
 
@@ -8957,6 +9027,7 @@ async function preparePromotedWidgetWrite(
     PROMOTED_PREFLIGHT_READ_OPTIONS,
   );
   let targetScope = targetProbe.scope;
+  let hostNode = targetProbe.hostNode;
   const rootGraphIdentity = targetProbe.rootGraphIdentity;
   // #2518 — a live root query names the current root workflow instance. Do not
   // enter the promoted-subgraph identity path for an ordinary (or unproven)
@@ -9050,6 +9121,7 @@ async function preparePromotedWidgetWrite(
           PROMOTED_PREFLIGHT_READ_OPTIONS,
         );
         targetScope = targetProbe.scope;
+        hostNode = targetProbe.hostNode;
         if (targetScope?.activeView === "root" && targetScope.node === "ordinary") {
           const driftAfterMapping = panelBindingDriftReason(
             ctx,
@@ -9259,23 +9331,39 @@ async function preparePromotedWidgetWrite(
       "graph_get_subgraph did not publish a verifiable workflow and viewing-scope identity",
     );
   }
-  const inner = resolvePromotedWriteTarget(
+  let inner = resolvePromotedWriteTarget(
     payload,
     widget,
     nodeId as number | string,
     publishesCompleteTerminalWitness,
   );
+  // #2791 — official Qwen Image host 76 lists input label `prompt` on widget
+  // `text`. When the terminal witness is incomplete, that unique host mapping
+  // (and optional proxyWidgets inner id) is the rail to write. Do not unpack.
+  const hostMapping = resolveHostPromotedWidgetMapping(hostNode, widget);
+  if (hostMapping && !inner?.parentRail) {
+    const mappedInner = resolveInnerFromHostPromotedMapping(
+      payload,
+      hostMapping,
+      nodeId as number | string,
+    );
+    if (mappedInner) inner = mappedInner;
+  }
+  const hostProvenString = isHostProvenPromotedStringWrite(hostMapping, inner);
   const terminalEvidenceError = promotedTerminalEvidenceError(payload, widget);
   if (terminalEvidenceError) {
     // #2393 — an incomplete OWN entry may still uniquely name a rail-backed
-    // inner COMBO. Any other witness error, including an unadvertised duplicate
-    // that would otherwise fall through to the legacy same-name scan, stays a
+    // inner COMBO. #2791 — a host-proven STRING rail writes the enclosing
+    // subgraph widget instead of that inner. Any other witness error stays a
     // hard refusal.
     const railBackedCombo =
       terminalEvidenceError === "the promoted-terminal witness was incomplete or unresolved" &&
       inner?.terminal?.chainDepth === 0 &&
-      !inner.parentRail;
-    if (!railBackedCombo) return promotedWriteRefusal(widget, terminalEvidenceError);
+      !inner.parentRail &&
+      !hostProvenString;
+    if (!railBackedCombo && !hostProvenString) {
+      return promotedWriteRefusal(widget, terminalEvidenceError);
+    }
   }
   if (!inner) {
     if (publishesCompleteTerminalWitness) {
@@ -9394,18 +9482,22 @@ async function preparePromotedWidgetWrite(
   return {
     kind: "promoted-write",
     outerNodeId: nodeId as number | string,
-    hostWidget: inner.parentRail?.widget ?? widget,
+    hostWidget: hostProvenString && hostMapping
+      ? hostMapping.hostWidget
+      : inner.parentRail?.widget ?? widget,
     ...(outerScope ? { outerScope } : {}),
     ...(outerNodeType ? { outerNodeType } : {}),
     ...(outerNodeIdentity ? { outerNodeIdentity } : {}),
     inner,
     innerNodeType,
-    innerLinkDriven: promotedInnerWidgetIsLinkDriven(
-      innerNode,
-      inner.widget,
-      inner.terminal,
-      inner.parentRail,
-    ),
+    innerLinkDriven:
+      hostProvenString ||
+      promotedInnerWidgetIsLinkDriven(
+        innerNode,
+        inner.widget,
+        inner.terminal,
+        inner.parentRail,
+      ),
     ...(inner.terminal ? { terminal: inner.terminal } : {}),
     scope,
     binding: {
@@ -21667,7 +21759,7 @@ export function buildPanelToolDefs(): PanelToolDef[] {
     ),
     def(
       "panel_set_widget",
-      "Set a widget value on a node in the user's open graph (steps, cfg, seed, ckpt_name, text prompts, …). Returns the previous and new value (a string longer than 1000 chars is echoed as {chars, sha256, preview} so batched calls stay inside the outer tool-result budget — pass `echo: \"full\"` for the verbatim string). Undoable with Ctrl+Z. To CLEAR a text widget to an empty string, pass `clear: true` (some MCP clients drop an empty-string `value` from the serialized payload, so `value: \"\"` may not arrive — `clear: true` always works). For the LTXDirector timeline node (WhatDreamsCost CSGlide), set `timeline_data` with the FULL timeline JSON (segments + global_prompt) to drive its custom timeline UI — this re-syncs the editor and regenerates its derived `local_prompts`/`segment_lengths`/`guide_strength` widgets; setting those derived widgets directly is refused (they are silently reverted). For AnimaRegionalCanvasInline / Krea2RegionalCanvasInline (LC123), quality/scene/red/green/blue/negative prompt writes are refused: the custom textarea and node.properties.animaPrompts overwrite widget.value on APPLY. Drive quality/scene/negative via a PrimitiveStringMultiline wired into quality_prompt_in / scene_prompt_in / negative_prompt_in; red/green/blue have no socket. DaSiWa_LTX2LoraLoader's `stack_data` write is also refused: its custom multi-row widget reserializes its own JS state over `widget.value`, so the echoed write would be a false success; edit the stack rows in the node UI instead.",
+      "Set a widget value on a node in the user's open graph (steps, cfg, seed, ckpt_name, text prompts, …). Returns the previous and new value (a string longer than 1000 chars is echoed as {chars, sha256, preview} so batched calls stay inside the outer tool-result budget — pass `echo: \"full\"` for the verbatim string). Undoable with Ctrl+Z. To CLEAR a text widget to an empty string, pass `clear: true` (some MCP clients drop an empty-string `value` from the serialized payload, so `value: \"\"` may not arrive — `clear: true` always works). For the LTXDirector timeline node (WhatDreamsCost CSGlide), set `timeline_data` with the FULL timeline JSON (segments + global_prompt) to drive its custom timeline UI — this re-syncs the editor and regenerates its derived `local_prompts`/`segment_lengths`/`guide_strength` widgets; setting those derived widgets directly is refused (they are silently reverted). For AnimaRegionalCanvasInline / Krea2RegionalCanvasInline (LC123), quality/scene/red/green/blue/negative prompt writes are refused: the custom textarea and node.properties.animaPrompts overwrite widget.value on APPLY. Drive quality/scene/negative via a PrimitiveStringMultiline wired into quality_prompt_in / scene_prompt_in / negative_prompt_in; red/green/blue have no socket. DaSiWa_LTX2LoraLoader's `stack_data` write is also refused: its custom multi-row widget reserializes its own JS state over `widget.value`, so the echoed write would be a false success; edit the stack rows in the node UI instead. For MiniMaxH3Director, prompt / builder_state / timeline_data writes are refused (they are derived write-backs of the in-memory builderState). Drive the prompt via a backend STRING producer such as PrimitiveStringMultiline wired into external_prompt_overwrite — not a frontend PrimitiveNode; panel_connect refuses that forceInput-only STRING.",
       {
         node_id: nodeId().describe("Node id from panel_graph_outline / panel_query_graph."),
         widget: z.string().describe("Widget name (e.g. 'steps', 'cfg', 'text')."),
@@ -21763,8 +21855,9 @@ export function buildPanelToolDefs(): PanelToolDef[] {
           let mutationId: string | undefined;
           let dispatchTab = ctx.tabId;
           let dispatchConnection: SetWidgetReadbackConnection | undefined;
-          const written = await ctx.call(
-            {
+          const written = rewriteMiniMaxH3DirectorWidgetRefusal(
+            await ctx.call(
+              {
               cmd: "graph_set_widget",
               node_id: nodeId,
               widget,
@@ -21837,6 +21930,7 @@ export function buildPanelToolDefs(): PanelToolDef[] {
               }
             },
             beforeDispatch,
+            ),
           );
           const echoed = stripVerifiedLastObservedSchemaNote(
             summarizeSetWidgetEcho(written, echoFull),
@@ -26774,7 +26868,7 @@ CHECKED FOR YOU: the graph read this message prescribes was just run, and it ` +
     ),
     def(
       "panel_restart_comfyui",
-      "Restart the user's ComfyUI server via the built-in Manager — needed to load newly installed/updated custom nodes. CALL THIS DIRECTLY when a restart is needed: it pops a confirm card and only restarts on a yes (don't ask separately first). If the user has already explicitly authorized automatic restarts in the conversation, pass already_authorized:true to skip only that card; this does NOT imply force and does not bypass any target, relaunch, or busy guard. ComfyUI and this agent go down briefly, then the panel auto-reconnects and you resume. ⚠️ BUSY GUARD: a restart ABORTS any in-progress or queued generation — if ComfyUI is generating, this tool REFUSES and tells you (it does NOT restart). When that happens, tell the user a render is running and WAIT for it (poll panel_node_queue_status), or pass force:true ONLY if the user explicitly confirms they want to kill the running generation. Best practice: before restarting after an install, check the queue is idle first. Only call when a restart is actually needed. If a crash takes the panel bridge offline so the confirmation card cannot be shown, this tool falls back to a headless restart of the configured local process (or COMFYUI_RESTART_COMMAND) instead of depending on the dead bridge — it still refuses a readable busy queue without force:true, and still refuses when a relaunch cannot be proven. On an externally-managed install whose relaunch can't be proven from here (e.g. Pinokio), the restart is REFUSED before anything is stopped — restart from the launcher that owns the server instead, or set COMFYUI_RESTART_COMMAND to the exact command that restarts the instance (e.g. `docker restart <container>`): the restart then runs through that command (the busy guard above still applies) instead of needing the launch path.",
+      "Restart the user's ComfyUI server via the built-in Manager — needed to load newly installed/updated custom nodes. CALL THIS DIRECTLY when a restart is needed: it pops a confirm card and only restarts on a yes (don't ask separately first). If the user has already explicitly authorized automatic restarts in the conversation, pass already_authorized:true to skip only that card; this does NOT imply force and does not bypass any target, relaunch, or busy guard. When this panel tab is authoritatively bound to a remote ComfyUI (server-observed non-loopback Origin), the restart is the Manager reboot of THAT instance — not a local 127.0.0.1 process, and not a guessed origin. Unbound local tabs still require local-instance confirmation. ComfyUI and this agent go down briefly, then the panel auto-reconnects and you resume. ⚠️ BUSY GUARD: a restart ABORTS any in-progress or queued generation — if ComfyUI is generating, this tool REFUSES and tells you (it does NOT restart). When that happens, tell the user a render is running and WAIT for it (poll panel_node_queue_status), or pass force:true ONLY if the user explicitly confirms they want to kill the running generation. Best practice: before restarting after an install, check the queue is idle first. Only call when a restart is actually needed. If a crash takes the panel bridge offline so the confirmation card cannot be shown, this tool falls back to a headless restart of the configured local process (or COMFYUI_RESTART_COMMAND) instead of depending on the dead bridge — it still refuses a readable busy queue without force:true, and still refuses when a relaunch cannot be proven. On an externally-managed install whose relaunch can't be proven from here (e.g. Pinokio), the restart is REFUSED before anything is stopped — restart from the launcher that owns the server instead, or set COMFYUI_RESTART_COMMAND to the exact command that restarts the instance (e.g. `docker restart <container>`): the restart then runs through that command (the busy guard above still applies) instead of needing the launch path.",
       { force: z.boolean().optional(), already_authorized: z.boolean().optional() },
       // panel#1554 — `note` rides WHICHEVER reply this handler returns, so a decision
       // recovered from an earlier confirmation card is disclosed on every branch, not
@@ -26812,6 +26906,11 @@ CHECKED FOR YOU: the graph read this message prescribes was just run, and it ` +
         // authenticated relative Manager dispatch; it is never a health or
         // headless-restart target.
         let panelRestartTarget: string | undefined;
+        // #2804: a live tab whose handshake Origin is a concrete non-loopback
+        // ComfyUI. Authorizes only the Manager reboot on THIS tab — never a
+        // guessed origin and never a local kill of the configured 127.0.0.1
+        // target. Loopback tabs stay on the local-instance confirmation below.
+        let panelRemoteRestartOrigin: string | undefined;
         // #1819: resolve instance identity BEFORE the confirmation card. Asking the
         // user to confirm a restart, then refusing because we cannot tell which
         // ComfyUI this tab fronts, is two contradictory outcomes (timeout vs refuse)
@@ -26834,11 +26933,19 @@ CHECKED FOR YOU: the graph read this message prescribes was just run, and it ` +
             if (proxyRestartTarget == null) {
               panelRestartTarget = currentPanelRestartTarget(ctx) ?? undefined;
             }
+            if (proxyRestartTarget == null && panelRestartTarget == null) {
+              panelRemoteRestartOrigin = currentPanelRemoteRestartOrigin(ctx) ?? undefined;
+            }
             const tabStillHere =
               typeof ctx.bridge?.canReach === "function"
                 ? ctx.bridge.canReach(ctx.tabId) === true
                 : true;
-            if (tabStillHere && proxyRestartTarget == null && panelRestartTarget == null) {
+            if (
+              tabStillHere &&
+              proxyRestartTarget == null &&
+              panelRestartTarget == null &&
+              panelRemoteRestartOrigin == null
+            ) {
               return restartRefusedPreservingBinding(
                 ctx,
                 unboundLocalRestartRefusalNote(ctx, identityHealthBase, identityBinding.blocker),
@@ -27477,7 +27584,12 @@ CHECKED FOR YOU: the graph read this message prescribes was just run, and it ` +
         // wedge itself) refuses without force, because "cannot check" is not
         // "idle" and a restart aborts whatever is running.
         const configuredRestartCommand = config.comfyuiRestartCommand;
-        if (configuredRestartCommand && !isRemoteMode() && !isCloudMode()) {
+        if (
+          configuredRestartCommand &&
+          !isRemoteMode() &&
+          !isCloudMode() &&
+          panelRemoteRestartOrigin == null
+        ) {
           if (proxyRestartTarget != null) {
             const refreshedProxy = await panelVerifiedProxyRestartTarget();
             proxyRestartTarget = proxyTargetBindsPanel(ctx, refreshedProxy)
@@ -27636,6 +27748,12 @@ CHECKED FOR YOU: the graph read this message prescribes was just run, and it ` +
               ? refreshedPanelTarget
               : undefined;
         }
+        if (proxyRestartTarget == null && panelRestartTarget == null) {
+          panelRemoteRestartOrigin = stillBoundPanelRemoteRestartOrigin(
+            ctx,
+            panelRemoteRestartOrigin,
+          );
+        }
         const preflightBinding = resolveRebootHealthBinding(ctx);
         const preflightHealthBase =
           proxyRestartTarget?.backendBase ?? panelRestartTarget ?? preflightBinding.base;
@@ -27644,6 +27762,7 @@ CHECKED FOR YOU: the graph read this message prescribes was just run, and it ` +
           panelRestartTarget != null ||
           (preflightHealthBase != null &&
             sameHttpBase(getComfyUIBaseUrl(), preflightHealthBase));
+        const remotePanelBound = panelRemoteRestartOrigin != null;
         // #848: what the instance was OBSERVED running with, taken from the preflight
         // that already had to resolve it. Nothing new is probed before the dispatch —
         // the no-await invariant between the binding capture and the reboot stands.
@@ -27664,7 +27783,7 @@ CHECKED FOR YOU: the graph read this message prescribes was just run, and it ` +
         // local process to assess, and the Manager reboot is their ONLY restart path —
         // a supervised remote (the tunnelled Desktop app) restarts through it by
         // design, so refusing there would remove a path that works.
-        if (!preflightBound && !isRemoteMode() && !isCloudMode()) {
+        if (!preflightBound && !remotePanelBound && !isRemoteMode() && !isCloudMode()) {
           // Identity was proven before the card; landing here means the binding
           // was lost during the confirm wait. Same refusal, and the tab that is
           // still here must stay usable (#1819).
@@ -27673,7 +27792,7 @@ CHECKED FOR YOU: the graph read this message prescribes was just run, and it ` +
             unboundLocalRestartRefusalNote(ctx, preflightHealthBase, preflightBinding.blocker),
           );
         }
-        if (preflightBound) {
+        if (preflightBound && !remotePanelBound) {
           // Snapshot the target GENERATION at the decision (r11): a final-state
           // base comparison (A vs A) cannot detect an intervening A→B→A
           // retarget, so stability is judged by the monotonic epoch bumped on
@@ -27816,6 +27935,12 @@ CHECKED FOR YOU: the graph read this message prescribes was just run, and it ` +
               ? dispatchPanelTarget
               : undefined;
         }
+        if (proxyRestartTarget == null && panelRestartTarget == null) {
+          panelRemoteRestartOrigin = stillBoundPanelRemoteRestartOrigin(
+            ctx,
+            panelRemoteRestartOrigin,
+          );
+        }
         const healthBase =
           proxyRestartTarget?.backendBase ?? captureRebootHealthBase(ctx);
         // THE BINDING RULE APPLIES AT THE DISPATCH POINT, NOT ONLY BEFORE THE AWAIT.
@@ -27829,12 +27954,15 @@ CHECKED FOR YOU: the graph read this message prescribes was just run, and it ` +
         // may not act on; this one is what actually holds the line.
         //
         // Same rule, same exclusions: only a LOCAL target we cannot tie to the
-        // instance this server accounts for is refused.
+        // instance this server accounts for is refused. A still-bound remote
+        // panel origin (#2804) is the Manager reboot of that tab, not a local
+        // process we have to identify.
         const dispatchBound =
           proxyRestartTarget != null ||
           (healthBase != null && sameHttpBase(getComfyUIBaseUrl(), healthBase)) ||
           (panelRestartTarget != null &&
-            sameHttpBase(getComfyUIBaseUrl(), panelRestartTarget));
+            sameHttpBase(getComfyUIBaseUrl(), panelRestartTarget)) ||
+          panelRemoteRestartOrigin != null;
         if (!dispatchBound && !isRemoteMode() && !isCloudMode()) {
           return restartRefusedPreservingBinding(
             ctx,
@@ -28003,7 +28131,7 @@ CHECKED FOR YOU: the graph read this message prescribes was just run, and it ` +
           // stop/resume bills, interrupts everything else on the box, and on a spot
           // instance may not come back — that is the user's call, not a side effect
           // of asking to restart ComfyUI.
-          if (isRemoteMode() && rebootNoEndpoint(res)) {
+          if ((isRemoteMode() || panelRemoteRestartOrigin != null) && rebootNoEndpoint(res)) {
             return ok({
               rebooting: false,
               ready: false,
@@ -28027,6 +28155,7 @@ CHECKED FOR YOU: the graph read this message prescribes was just run, and it ` +
           }
           if (
             !isRemoteMode() &&
+            panelRemoteRestartOrigin == null &&
             rebootNoEndpoint(res) &&
             // ENDPOINT BINDING: restartComfyUI() acts on the orchestrator's GLOBAL config
             // target (a hello can retarget it). Only run it when the bound tab fronts our
