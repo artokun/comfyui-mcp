@@ -31,6 +31,9 @@ import {
   parseSubgraphScopeRefusal,
   promotedInnerWidgetIsLinkDriven,
   resolveInnerPromotedTarget,
+  resolveHostPromotedWidgetMapping,
+  resolveInnerFromHostPromotedMapping,
+  isHostProvenPromotedStringWrite,
   describePromotedSubgraphEnvelope,
   validatePromotedSubgraphEnvelope,
 } from "../../orchestrator/promoted-widget.js";
@@ -1051,6 +1054,88 @@ const UNet_COMBO_TEMPLATE_DETAIL = {
   text:
     '1 match(es) of 1 in scope (viewing: 1 nodes)\n' +
     '{"id":472,"type":"SubgraphNode","is_subgraph":true}',
+};
+
+/** #2791 — official Comfy-Org Qwen Image host 76. Input label `prompt` maps to
+ * widget `text`; proxyWidgets names inner CLIPTextEncode 6. The negative
+ * CLIPTextEncode 7 also has a `text` widget, so same-name uniqueness fails
+ * unless the host mapping (or the rail) is used. */
+const QWEN_IMAGE_HOST_NODE = {
+  id: 76,
+  type: "SubgraphNode",
+  is_subgraph: true,
+  widgets: { text: "a vibrant street" },
+  inputs: [
+    { label: "prompt", name: "text", type: "STRING", widget: { name: "text" } },
+    { label: "lightning_lora", name: "lora_name", type: "COMBO", widget: { name: "lora_name" } },
+    { label: "enable_turbo_mode", name: "value", type: "BOOLEAN", widget: { name: "value" } },
+  ],
+  properties: {
+    proxyWidgets: [
+      ["6", "text"],
+      ["58", "width"],
+      ["3", "seed"],
+      ["37", "unet_name"],
+      ["73", "lora_name"],
+      ["86", "value"],
+    ],
+  },
+};
+
+const QWEN_IMAGE_HOST_DETAIL = {
+  nodes: [QWEN_IMAGE_HOST_NODE],
+};
+
+const QWEN_IMAGE_POSITIVE = {
+  id: 6,
+  type: "CLIPTextEncode",
+  widgets: { text: "a vibrant street" },
+  inputs: [
+    { name: "clip", type: "CLIP" },
+    { name: "text", type: "STRING", connected_from: { node_id: -10, output_slot: 0 } },
+  ],
+};
+
+const QWEN_IMAGE_NEGATIVE = {
+  id: 7,
+  type: "CLIPTextEncode",
+  widgets: { text: "" },
+  inputs: [{ name: "clip", type: "CLIP" }],
+};
+
+const QWEN_IMAGE_INCOMPLETE_TERMINALS = [
+  {
+    widget: "text",
+    immediate_node_id: 6,
+    immediate_widget: "text",
+    error: "the promoted parent rail was missing, externally linked, or not authoritative",
+  },
+  {
+    widget: "lora_name",
+    error:
+      "properties.proxyWidgets named a promoted relation that had no live node.widgets/_subgraphSlot projection",
+  },
+];
+
+const QWEN_IMAGE_PROMPT_SUBGRAPH = {
+  subgraph_of: { node_id: 76, title: "Text to Image (Qwen-Image)" },
+  node_count: 2,
+  nodes: [QWEN_IMAGE_POSITIVE, QWEN_IMAGE_NEGATIVE],
+  promoted_terminals: QWEN_IMAGE_INCOMPLETE_TERMINALS,
+};
+
+const QWEN_IMAGE_PROMPT_SUBGRAPH_NO_RAIL = {
+  ...QWEN_IMAGE_PROMPT_SUBGRAPH,
+  nodes: [
+    {
+      ...QWEN_IMAGE_POSITIVE,
+      inputs: [
+        { name: "clip", type: "CLIP" },
+        { name: "text", type: "STRING" },
+      ],
+    },
+    QWEN_IMAGE_NEGATIVE,
+  ],
 };
 
 /** #2488 — inner PrimitiveInt.length exposed as host frame_counts. The inner
@@ -4690,6 +4775,163 @@ describe("#2393 promoted COMBO unet_name after official template load", () => {
             UNet_COMBO_TEMPLATE_SUBGRAPH.nodes[1],
           ],
         },
+      },
+    );
+
+    expect(isError).toBe(true);
+    expect(text).toMatch(/witness was incomplete or unresolved/);
+    expect(calls.filter((call) => call.cmd === "graph_set_widget")).toHaveLength(0);
+  });
+});
+
+describe("#2791 official Qwen Image promoted prompt", () => {
+  it("maps host label prompt onto widget text and inner CLIPTextEncode 6", () => {
+    expect(resolveHostPromotedWidgetMapping(QWEN_IMAGE_HOST_NODE, "prompt")).toEqual({
+      hostWidget: "text",
+      label: "prompt",
+      type: "STRING",
+      innerNodeId: "6",
+    });
+    expect(resolveHostPromotedWidgetMapping(QWEN_IMAGE_HOST_NODE, "text")).toEqual({
+      hostWidget: "text",
+      label: "prompt",
+      type: "STRING",
+      innerNodeId: "6",
+    });
+    const inner = resolveInnerFromHostPromotedMapping(
+      QWEN_IMAGE_PROMPT_SUBGRAPH_NO_RAIL,
+      {
+        hostWidget: "text",
+        label: "prompt",
+        type: "STRING",
+        innerNodeId: "6",
+      },
+      76,
+    );
+    expect(inner).toEqual(
+      expect.objectContaining({
+        innerNodeId: 6,
+        widget: "text",
+        terminal: expect.objectContaining({
+          nodeId: 6,
+          nodeType: "CLIPTextEncode",
+          widget: "text",
+          chainDepth: 0,
+        }),
+      }),
+    );
+    expect(isHostProvenPromotedStringWrite(
+      { hostWidget: "text", type: "STRING", innerNodeId: "6" },
+      inner,
+    )).toBe(true);
+  });
+
+  it("stays fail-closed when the host input has no widget binding or is ambiguous", () => {
+    expect(
+      resolveHostPromotedWidgetMapping(
+        {
+          id: 76,
+          inputs: [{ label: "prompt", name: "text", type: "STRING" }],
+        },
+        "text",
+      ),
+    ).toBeNull();
+    expect(
+      resolveHostPromotedWidgetMapping(
+        {
+          id: 76,
+          inputs: [
+            { label: "prompt", name: "text", type: "STRING", widget: { name: "text" } },
+            { label: "text", name: "caption", type: "STRING", widget: { name: "caption" } },
+          ],
+        },
+        "text",
+      ),
+    ).toBeNull();
+  });
+
+  it.each(["text", "prompt"] as const)(
+    "writes the enclosing subgraph widget text when addressed as %s",
+    async (widget) => {
+      const { text, isError, calls, mutations } = await setWidget(
+        { node_id: 76, widget, value: "a red bicycle at dusk" },
+        {
+          ownerNodeId: 76,
+          firstWrite: "ok",
+          promotedTerminalWitnesses: true,
+          promotedDetail: QWEN_IMAGE_HOST_DETAIL,
+          subgraph: QWEN_IMAGE_PROMPT_SUBGRAPH_NO_RAIL,
+        },
+      );
+
+      expect(isError).toBe(false);
+      expect(mutations).toBe(1);
+      expect(calls.filter((call) => call.cmd === "graph_unpack_subgraph")).toHaveLength(0);
+      expect(calls.filter((call) => call.cmd === "graph_enter_subgraph")).toHaveLength(0);
+      expect(calls.filter((call) => call.cmd === "graph_set_widget")).toEqual([
+        expect.objectContaining({ node_id: 76, widget: "text", value: "a red bicycle at dusk" }),
+      ]);
+      expect(calls.some((call) => Number(call.node_id) === 6)).toBe(false);
+      expect(text).toMatch(/enclosing subgraph node 76 widget "text"/);
+      expect(text).not.toMatch(/witness was incomplete or unresolved/);
+    },
+  );
+
+  it("still writes the host when the inner CLIPTextEncode is uniquely rail-backed", async () => {
+    const { isError, calls, mutations } = await setWidget(
+      { node_id: 76, widget: "text", value: "a red bicycle at dusk" },
+      {
+        ownerNodeId: 76,
+        firstWrite: "ok",
+        promotedTerminalWitnesses: true,
+        promotedDetail: QWEN_IMAGE_HOST_DETAIL,
+        subgraph: QWEN_IMAGE_PROMPT_SUBGRAPH,
+      },
+    );
+
+    expect(isError).toBe(false);
+    expect(mutations).toBe(1);
+    expect(calls.filter((call) => call.cmd === "graph_set_widget")).toEqual([
+      expect.objectContaining({ node_id: 76, widget: "text", value: "a red bicycle at dusk" }),
+    ]);
+    expect(calls.some((call) => Number(call.node_id) === 6)).toBe(false);
+  });
+
+  it("still refuses when the host detail does not prove the promoted STRING input", async () => {
+    const { text, isError, calls } = await setWidget(
+      { node_id: 76, widget: "text", value: "a red bicycle at dusk" },
+      {
+        ownerNodeId: 76,
+        firstWrite: "ok",
+        promotedTerminalWitnesses: true,
+        promotedDetail: {
+          nodes: [{ id: 76, type: "SubgraphNode", is_subgraph: true }],
+        },
+        subgraph: QWEN_IMAGE_PROMPT_SUBGRAPH_NO_RAIL,
+      },
+    );
+
+    expect(isError).toBe(true);
+    expect(text).toMatch(/witness was incomplete or unresolved/);
+    expect(calls.filter((call) => call.cmd === "graph_set_widget")).toHaveLength(0);
+  });
+
+  it("still refuses when proxyWidgets names an inner the envelope does not retain", async () => {
+    const { text, isError, calls } = await setWidget(
+      { node_id: 76, widget: "text", value: "a red bicycle at dusk" },
+      {
+        ownerNodeId: 76,
+        firstWrite: "ok",
+        promotedTerminalWitnesses: true,
+        promotedDetail: {
+          nodes: [
+            {
+              ...QWEN_IMAGE_HOST_NODE,
+              properties: { proxyWidgets: [["99", "text"]] },
+            },
+          ],
+        },
+        subgraph: QWEN_IMAGE_PROMPT_SUBGRAPH_NO_RAIL,
       },
     );
 
