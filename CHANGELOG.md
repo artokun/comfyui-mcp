@@ -20,6 +20,13 @@ All notable changes to this project are documented here. This project adheres to
   The deprecated `defaultInput` spelling is honoured the way the frontend migrates it:
   socket-only on an OPTIONAL input, widget kept on a REQUIRED one.
 - **`apply_manifest` now tracks Manager v4 custom-node enqueues that return an empty success body (#2725, #2749).** Already-enabled packs are satisfied without a duplicate enqueue, and an unverified empty-ack outcome remains pending instead of authorizing a speculative fallback.
+- **download_model action:"status" now reports what the download cache is holding (#1477).**
+  The cache is a second copy of every model ever downloaded, on the home volume, and with
+  COMFYUI_LRU_CACHE_SIZE_GB unset nothing evicts it — two reporters found 2.96 GB and then
+  37.63 GB of it with a disk-usage treemap, because no output named the directory. Status
+  now gives the path, the retained size, whether eviction is on, and both env levers.
+  Resumable partials are counted separately from retained entries, since eviction skips
+  them. The default limit is unchanged and still unbounded; that decision stays open.
 
 ## [0.52.178] - 2026-09-02
 

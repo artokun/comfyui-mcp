@@ -28,7 +28,28 @@ vi.hoisted(() => {
   process.env.COMFYUI_MCP_DATA_DIR = mkdtempSync(j(osTmp(), "cmcp-1477-"));
 });
 
+// The listing render (as opposed to the empty-listing note) needs a tracked job,
+// and startDownloadJob resolves a destination and routing before it streams. Stub
+// just those three so no live server is required — the same three the sibling
+// model-management tool tests stub, for the same reason.
+vi.mock("../../services/model-resolver.js", async () => {
+  const actual = await vi.importActual<typeof import("../../services/model-resolver.js")>(
+    "../../services/model-resolver.js",
+  );
+  return {
+    ...actual,
+    downloadModel: () => new Promise<string>(() => {}), // never settles: the job stays live
+    shouldDispatchDownloadToManager: async () => false,
+    resolveDownloadTarget: async (url: string, sub: string, filename?: string) => {
+      const name = filename ?? String(url).split("/").pop() ?? "model.safetensors";
+      return { targetDir: `/m/${sub}`, filename: name, targetPath: `/m/${sub}/${name}` };
+    },
+  };
+});
+
 import { downloadCacheFootprint } from "../../services/download-cache.js";
+import { setProgressDir } from "../../services/download-progress.js";
+import { resetDownloadJobs, startDownloadJob } from "../../services/download-jobs.js";
 import { registerModelManagementTools } from "../../tools/model-management.js";
 
 type ToolHandler = (args: Record<string, unknown>) => Promise<{
@@ -137,5 +158,30 @@ describe('#1477 the WIRING: download_model action:"status" says it out loud', ()
     await mkdir(cacheDir, { recursive: true });
     const text = (await downloadTool()({ action: "status" })).content[0].text;
     expect(text).not.toContain("Download cache");
+  });
+
+  // The two call sites are separate exits and a test that only reaches one leaves
+  // the other free to be deleted silently — verified by mutating each alone. This
+  // is also the surface that matters most: someone watching a transfer is exactly
+  // who should see the second copy of it accumulating.
+  it("reaches the LISTING render too, not just the empty-listing note", async () => {
+    const progressDir = await mkdtemp(join(tmpdir(), "cmcp-1477-progress-"));
+    const savedUrl = process.env.COMFYUI_URL;
+    process.env.COMFYUI_URL = "http://127.0.0.1:8188";
+    setProgressDir(progressDir);
+    resetDownloadJobs();
+    try {
+      await seedCache();
+      await startDownloadJob("https://example.com/live.safetensors", "checkpoints");
+      const text = (await downloadTool()({ action: "status" })).content[0].text;
+      expect(text).toContain("## Downloads");
+      expect(text).toContain("Download cache");
+      expect(text).toContain(cacheDir);
+    } finally {
+      resetDownloadJobs();
+      if (savedUrl === undefined) delete process.env.COMFYUI_URL;
+      else process.env.COMFYUI_URL = savedUrl;
+      await rm(progressDir, { recursive: true, force: true });
+    }
   });
 });
