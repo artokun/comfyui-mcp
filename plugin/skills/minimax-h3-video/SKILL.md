@@ -183,6 +183,9 @@ optional first_frame / last_frame ─────→   → CONDITIONING + LATENT
 
 `MiniMaxH3ImageToVideo` **is** T2V when both image sockets are empty, I2V with
 `first_frame`, FL2VA with both frames. Do not add a second T2V-only node.
+The manga-director-codex MiniMax H3 prompt adapter
+(`prompt_adapters/minimax_h3.json`) declares that as mode `text_to_video`
+alongside I2V / FL2VA / L2VA / R2V (#2786).
 
 R2V replaces the UNet with **ref2va** and the conditioner with
 `MiniMaxH3ReferenceToVideo`. Do not load fl2va into an R2V graph.
