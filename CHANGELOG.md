@@ -8,8 +8,25 @@ All notable changes to this project are documented here. This project adheres to
 
 ### MCP
 #### Fixed
+- **`panel_restart_comfyui` restarts the panel's bound remote ComfyUI via Manager instead of refusing it as a foreign local instance (#2804).** A live tab whose server-observed Origin is a concrete non-loopback host no longer requires `COMFYUI_MCP_FORCE_REMOTE`; the busy guard still applies, a guessed origin is never restarted, and unbound/local identity confirmation is unchanged.
+- **`upload_image` concurrent `action:"stage"` POSTs no longer die as outcome-unknown EPIPE (#2801).** Uploads to one ComfyUI target run one at a time. A write EPIPE/ECONNRESET is settled against `/view` of the intended input before the tool returns: matching bytes count as committed, a 404 is retried once, and only an unprovable miss stays unknown.
+- **`panel_set_widget` writes the official Qwen Image subgraph prompt from the host input/widget mapping (#2791).** Live host node 76 lists input label `prompt` on widget `text`, but an incomplete promoted-terminal witness refused the STRING write. The unique host mapping (and `proxyWidgets` inner CLIPTextEncode) now authorizes the enclosing subgraph widget; official subgraphs are not unpacked. Still unverifiable mappings stay fail-closed.
+- **`panel_set_widget` MiniMaxH3Director prompt workaround recommends PrimitiveStringMultiline, not PrimitiveNode (#2790).** The panel correctly refuses a direct `prompt` / `builder_state` / `timeline_data` write, but its recovery instruction used to name a frontend PrimitiveNode for `external_prompt_overwrite`; `panel_connect` rejects that forceInput-only STRING. The producer advice now shares the same helper as `panel_connect`.
+- **`panel_ui_render` documents the four-Image cap the validator already enforces (#2796).** The declared manual listed the 64-component ceiling but omitted `maxImages: 4`, so a valid-looking five-image card was rejected as `too many images (5 > 4)` after an avoidable retry.
 - **an MCP server that connects and registers NO tools is now reported (#2742).**
 - **the same check now runs at every turn boundary, and can recover (#1524).** A server
+
+## [0.52.183] - 2026-09-03
+
+### MCP
+#### Fixed
+- **stale `panel-op.lock` is reclaimed automatically when the owner process is gone (#2788, #2814).** Acquire takes the lock after the same proven-dead rename-aside path as `panel_action:"unlock"`; a living owner is never stolen, and an unreadable or reuse-ambiguous record still fails closed.
+- **`get_image` applies `max_preview_dimension` to a PNG that exceeds the 32 MB `/view` cap (#2785, #2815).** A 41.5 MB upscale previously died as `VIEW_TOO_LARGE` before the documented preview downscale ran. Still images requested for inline preview now use a 64 MB encoded-source ceiling (the same bound as `action:"convert"`), recover a local file in that window without an unbounded read, and fail closed with a size error that names convert when the original is still too large.
+- **parallel CivitAI downloads accept a proven shared extra-path `base_path` as `model_root` (#2787, #2813).** Category expansion still lists `E:\models\poses (poses)`, but omitting the configured group `base_path` made concurrent `download_model` `action:"download_civitai"` calls reject that same valid root while siblings wrote into it. Known-root discovery stays request-local, never probes a guessed `:8188` origin, and still refuses an unproven invented path.
+- **manga-director-codex MiniMax H3 adapter accepts documented `text_to_video`.** Native H3 T2V is `MiniMaxH3ImageToVideo` with both image sockets empty; the adapter omitted that mode and compilation refused a valid prompt spec. `text_to_video` is declared; I2V / FL2VA / L2VA / R2V modes are unchanged (#2786, #2812).
+- **`panel_slice_workflow` seeds outputs inside nested overlapping groups (#2780, #2806).** Membership used the first containing box only, so a SaveImage inside both an outer group and a nested inner group was missed when slicing by the inner title. Any matching containing group now seeds, and a miss lists every containing title.
+- panel_search_nodes no longer returns a raw Git URL as an install `id`, and panel_install_node refuses Git URLs before Manager v4 queueing rather than sending an unlisted URL as a registry lookup (#1539, #2795)
+
 
 ## [0.52.182] - 2026-09-03
 
@@ -21,14 +38,12 @@ All notable changes to this project are documented here. This project adheres to
 - **`panel_save_workflow(name)` rebinds the session onto the Save-As dest canvas (#2768, #2805).** After a named save the live instance is dest, but the source tab id can still `canReach`; staying there left `panel_list_workflows` and `panel_set_workflow_target({mode:"current"})` stamped for the replaced instance. Dest is followed when this save replaced the session canvas, and dest's command stamp is refreshed from the save reply.
 - **`list_local_models` `action:"remove"` resolves against the same launch-proven extra-path files as inventory, including ComfyUI Desktop's `extra_models_config.yaml` (#2739, #2803).** Removal previously searched only the Desktop shared models yaml from argv, so a listed LTX file under another active extra root could not be deleted. Desktop extra roots are included only when the connected snapshot already named a Desktop extra-path config — never by probing a guessed :8188 origin — and still fail closed when that file cannot be proven unchanged since launch.
 
-
 ## [0.52.181] - 2026-09-03
 
 ### MCP
 
 #### Fixed
 - **`panel_set_widget` creates a documented `lora_N` row on an ordinary Power Lora Loader inside a live subgraph (#2394, #2794).** Current panels flatten parentheses in the `graph_get_subgraph` "is not a subgraph" line, so a live `Power Lora Loader (rgthree)` was reported as `Power Lora Loader rgthree` and the identity-fenced ordinary write refused it as a type change. The two types are compared after that flatten; the write still fences the real unflattened type.
-
 
 ## [0.52.180] - 2026-09-03
 

@@ -4,6 +4,21 @@ import { PANEL_IMAGE_RELAY_MAX_BYTES } from "../services/panel-image-relay.js";
 export const MAX_VIEW_RESPONSE_BYTES = PANEL_IMAGE_RELAY_MAX_BYTES;
 
 /**
+ * Encoded-source ceiling when the caller will downscale instead of inlining
+ * the original /view body. Still a hard cap — never an unbounded read.
+ * Matches get_image action:"convert"'s default source limit.
+ */
+export const MAX_PREVIEW_SOURCE_BYTES = 64 * 1024 * 1024;
+
+/** Clamp a caller-supplied /view body ceiling onto the preview-source hard cap. */
+export function clampViewResponseBytes(maxBytes?: number): number {
+  if (maxBytes === undefined || !Number.isFinite(maxBytes) || maxBytes < 1) {
+    return MAX_VIEW_RESPONSE_BYTES;
+  }
+  return Math.min(Math.floor(maxBytes), MAX_PREVIEW_SOURCE_BYTES);
+}
+
+/**
  * Ceiling for a ComfyUI history document before it reaches JSON.parse().
  * History repeats prompt graphs and output metadata for completed jobs, so it
  * can grow much faster than the prompt-scoped responses used by most callers.
