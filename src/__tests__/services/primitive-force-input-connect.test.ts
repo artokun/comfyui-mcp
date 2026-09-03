@@ -10,6 +10,7 @@ import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 
 import {
+  backendStringProducerConnectAdvice,
   findTargetConnectInput,
   hasSerializableWidgetBinding,
   isForceInputOnlyNonWidget,
@@ -136,6 +137,7 @@ describe("PrimitiveNode widget-binding helpers (#2536)", () => {
     expect(text).toMatch(/lora_path/);
     expect(text).toMatch(/forceInput-only/);
     expect(text).toMatch(/PrimitiveStringMultiline/);
+    expect(text).toContain(backendStringProducerConnectAdvice("lora_path"));
     expect(text).toMatch(/disconnected/);
     expect(text).toMatch(/#2536/);
   });
