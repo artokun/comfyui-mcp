@@ -37,6 +37,13 @@ vi.mock("../../services/process-control.js", async (importOriginal) => {
   return { ...actual, restartComfyUI: hoisted.restart };
 });
 
+// #1263 — restartViaManagerReboot would otherwise open a real WebSocket to
+// COMFYUI_URL. Stub the witness so CI and a machine with ComfyUI running agree.
+vi.mock("../../services/instance-witness.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../../services/instance-witness.js")>()),
+  acquireInstanceWitness: async () => undefined,
+}));
+
 const { buildPanelToolDefs, __panelToolsTestHooks } = await import(
   "../../orchestrator/panel-tools.js"
 );
