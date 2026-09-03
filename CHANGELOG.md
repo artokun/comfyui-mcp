@@ -19,6 +19,13 @@ All notable changes to this project are documented here. This project adheres to
   Resumable partials are counted separately from retained entries, since eviction skips
   them. The default limit is unchanged and still unbounded; that decision stays open.
 
+## [0.52.181] - 2026-09-03
+
+### MCP
+
+#### Fixed
+- **`panel_set_widget` creates a documented `lora_N` row on an ordinary Power Lora Loader inside a live subgraph (#2394, #2794).** Current panels flatten parentheses in the `graph_get_subgraph` "is not a subgraph" line, so a live `Power Lora Loader (rgthree)` was reported as `Power Lora Loader rgthree` and the identity-fenced ordinary write refused it as a type change. The two types are compared after that flatten; the write still fences the real unflattened type.
+
 ## [0.52.180] - 2026-09-03
 
 ### MCP
