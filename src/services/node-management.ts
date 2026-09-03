@@ -331,9 +331,13 @@ export function explainManagerAuthenticationRequired(status: number): string {
 
 /** Same 120s ceiling as fetch.ts, minted locally so tests that mock
  *  `comfyui/fetch.js` without `defaultComfyTimeoutSignal` still load. */
-function managerBodyTimeoutSignal(): AbortSignal {
+export function managerBodyTimeoutSeconds(): number {
   const raw = Number(process.env.COMFYUI_MCP_HTTP_TIMEOUT_S);
-  const seconds = Number.isFinite(raw) && raw > 0 ? raw : 120;
+  return Number.isFinite(raw) && raw > 0 ? raw : 120;
+}
+
+function managerBodyTimeoutSignal(): AbortSignal {
+  const seconds = managerBodyTimeoutSeconds();
   return AbortSignal.timeout(Math.round(seconds * 1000));
 }
 
