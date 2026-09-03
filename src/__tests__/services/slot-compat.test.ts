@@ -3,6 +3,7 @@ import {
   compatibilityRank,
   isLiteGraphWildcardType,
   isTypeCompatible,
+  normalizeSlotType,
   RANK_EXACT,
   RANK_INCOMPATIBLE,
   RANK_WILDCARD,
@@ -59,5 +60,26 @@ describe("slot-compat", () => {
     // an array never matches a plain type (and vice versa)
     expect(compatibilityRank(["a"], "a")).toBe(RANK_INCOMPATIBLE);
     expect(compatibilityRank("a", ["a"])).toBe(RANK_INCOMPATIBLE);
+  });
+
+  it("normalizes INT widget-spec rails to scalar INT (#2778)", () => {
+    const spec = ["INT", { default: 0, min: 0, max: 1_125_899_906_842_624, step: 1 }];
+    expect(normalizeSlotType(spec)).toBe("INT");
+    expect(normalizeSlotType(["INT"])).toBe("INT");
+    expect(normalizeSlotType("INT,[object Object]")).toBe("INT");
+    expect(compatibilityRank(spec, "INT")).toBe(RANK_EXACT);
+    expect(isTypeCompatible(spec, "INT")).toBe(true);
+    expect(isTypeCompatible("INT", spec)).toBe(true);
+  });
+
+  it("does not treat a COMBO option list as INT", () => {
+    expect(normalizeSlotType(["fixed", "increment", "decrement", "randomize"])).toEqual([
+      "fixed",
+      "increment",
+      "decrement",
+      "randomize",
+    ]);
+    expect(isTypeCompatible(["fixed", "increment"], "INT")).toBe(false);
+    expect(isTypeCompatible("MODEL", "INT")).toBe(false);
   });
 });
