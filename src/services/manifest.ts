@@ -1048,7 +1048,7 @@ async function resolveLocalManifestCustomNodesBase(): Promise<string | undefined
 
 /**
  * Manager can report a successful-but-empty enqueue or an empty queue/status
- * response after a warm dialect cache. For apply_manifest, both are
+ * response after a warm dialect cache. For apply_manifest, these are
  * deliberately tagged UNKNOWN by node-management: the request may already
  * have reached the host, so no caller may reissue it or authorize a local
  * clone. Keep that meaning intact when apply_manifest assembles its
@@ -1059,7 +1059,11 @@ function isUnknownManagerInstallOutcome(err: unknown): boolean {
   const details = (err as { details?: unknown }).details;
   if (!details || typeof details !== "object") return false;
   const kind = (details as { kind?: unknown }).kind;
-  return kind === "manager-enqueue-empty-success" || kind === "manager-queue-empty-status";
+  return (
+    kind === "manager-enqueue-empty-success" ||
+    kind === "manager-enqueue-empty-unverified" ||
+    kind === "manager-queue-empty-status"
+  );
 }
 
 async function applyManifestSections(
@@ -1263,10 +1267,16 @@ async function applyManifestSections(
       ...(isGitManifestSource
         ? { localCloneFallback: "verified-only" as const }
         : {}),
-      // A budget timeout may return apply_manifest while the Manager enqueue
-      // is still unresolved. Keep an empty enqueue UNKNOWN/fail-closed here
-      // so a late completion cannot authorize a background local clone.
-      ...(isGitManifestSource ? { allowEmptyV2Enqueue: false } : {}),
+      // Manager v4 can accept a git install with an empty 2xx body. Let the
+      // install path explicitly start and track that queue, but keep the
+      // apply_manifest budget boundary fail-closed: an empty-ack task with no
+      // matching post-state may not authorize a late background clone.
+      ...(isGitManifestSource
+        ? {
+            allowEmptyV2Enqueue: true,
+            allowLocalFallbackAfterEmptyV2Enqueue: false,
+          }
+        : {}),
       managerBase,
       targetGeneration,
       localFallbackBinding: fallbackBinding,

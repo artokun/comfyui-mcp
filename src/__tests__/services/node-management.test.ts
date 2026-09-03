@@ -264,8 +264,10 @@ type QueueStatusFixture = {
   pending_count?: number;
 };
 
+type InstalledBodyFixture = Record<string, object> | object[];
+
 function stubFetch(opts: {
-  installedBody?: unknown;
+  installedBody?: InstalledBodyFixture | (() => InstalledBodyFixture);
   statusSequence?: QueueStatusFixture[] | (() => QueueStatusFixture);
   /** Fires when a queue op is submitted — lets a test make the install REAL. */
   onQueue?: () => void;
@@ -319,7 +321,10 @@ function stubFetch(opts: {
         return jsonResponse(opts.registryDetails ?? {});
       }
       if (path.startsWith("/v2/customnode/installed")) {
-        return jsonResponse(opts.installedBody ?? {});
+        const installedBody = typeof opts.installedBody === "function"
+          ? opts.installedBody()
+          : opts.installedBody ?? {};
+        return jsonResponse(installedBody);
       }
       // #2754 — "absent" means a host with NO ComfyUI-Manager, and such a host
       // 404s the version routes exactly as it 404s the queue routes. Without this
@@ -338,6 +343,11 @@ function stubFetch(opts: {
         if (opts.queueStatusNull) {
           // This is intentionally a status response, not an enqueue response:
           // the accepted task has already crossed the Manager boundary.
+          return jsonResponse(null);
+        }
+        if (opts.managerQueueStatus === "manager-unavailable-null") {
+          // This is a status response, not an enqueue response: the accepted
+          // task has already crossed the Manager boundary.
           return jsonResponse(null);
         }
         if (opts.managerQueueStatus === "absent") {
@@ -404,11 +414,6 @@ function stubFetch(opts: {
         if (opts.queueOpEmpty && isInstallOp) {
           opts.onQueue?.();
           return new Response("", { status: 200 });
-        }
-        if (opts.managerQueueStatus === "manager-unavailable-null") {
-          // A JSON null is a successful response with no queue evidence. It
-          // must take the same fail-closed path as the empty 200 body.
-          return jsonResponse(null);
         }
         // A 405 on the unified task route is retried through v2-batch; model
         // that downgrade as an acknowledged enqueue for the existing race
@@ -739,6 +744,150 @@ describe("node-management service", () => {
       expect(calls.some((c) => c.url.endsWith("/v2/manager/queue/start"))).toBe(
         true,
       );
+    });
+
+    it("#2725 skips already-enabled manifest packs without re-enqueueing them", async () => {
+      const { calls } = stubFetch({
+        installedBody: {
+          "rgthree-comfy": { cnr_id: "rgthree-comfy", enabled: true },
+          "ComfyUI-KJNodes": { cnr_id: "comfyui-kjnodes", enabled: true },
+          "ComfyUI-Krea2T-Enhancer": {
+            cnr_id: "comfyui-krea2t-enhancer",
+            enabled: true,
+          },
+          "ComfyUI-RBG-SmartSeedVariance": {
+            cnr_id: "comfyui-rbg-smartseedvariance",
+            enabled: true,
+          },
+        },
+      });
+
+      const result = await applyManifest({
+        manifest: {
+          custom_nodes: [
+            "https://github.com/rgthree/rgthree-comfy",
+            "https://github.com/kijai/ComfyUI-KJNodes",
+            "https://github.com/capitan01R/ComfyUI-Krea2T-Enhancer",
+            "https://github.com/RamonGuthrie/ComfyUI-RBG-SmartSeedVariance",
+          ],
+        },
+      });
+
+      expect(result.success).toBe(true);
+      expect(result.summary).toMatchObject({ applied: 0, skipped: 4, failed: 0, pending: 0 });
+      expect(result.results.every((entry) => entry.status === "skipped")).toBe(true);
+      expect(calls.some((c) => c.url.includes("/v2/manager/queue/task"))).toBe(false);
+      expect(calls.some((c) => c.url.endsWith("/v2/manager/queue/start"))).toBe(false);
+    });
+
+    it("#2725 starts and tracks a Manager-v4 empty-ack manifest install", async () => {
+      let installedListReads = 0;
+      const { calls } = stubFetch({
+        queueOpEmpty: true,
+        installedBody: () =>
+          installedListReads++ === 0
+            ? {}
+            : { "rgthree-comfy": { cnr_id: "rgthree-comfy", enabled: true } },
+      });
+
+      const result = await applyManifest({
+        manifest: {
+          custom_nodes: ["https://github.com/rgthree/rgthree-comfy"],
+        },
+      });
+
+      expect(result.success).toBe(true);
+      expect(result.results).toEqual([
+        expect.objectContaining({
+          item: "https://github.com/rgthree/rgthree-comfy",
+          action: "custom_node",
+          status: "applied",
+        }),
+      ]);
+      expect(calls.some((c) => c.url.endsWith("/v2/manager/queue/task"))).toBe(true);
+      expect(calls.some((c) => c.url.endsWith("/v2/manager/queue/start"))).toBe(true);
+      expect(calls.some((c) => c.url.endsWith("/v2/manager/queue/status"))).toBe(true);
+      expect(installedListReads).toBeGreaterThanOrEqual(2);
+    });
+
+    it("#2725 keeps an empty-ack install UNKNOWN when no post-state is visible", async () => {
+      const { calls } = stubFetch({
+        queueOpEmpty: true,
+        installedBody: {},
+      });
+
+      const result = await applyManifest({
+        manifest: {
+          custom_nodes: ["https://github.com/rgthree/rgthree-comfy"],
+        },
+      });
+
+      expect(result.success).toBe(false);
+      expect(result.summary).toMatchObject({ applied: 0, skipped: 0, failed: 0, pending: 1 });
+      expect(result.results[0]).toMatchObject({ status: "pending" });
+      expect(result.results[0].message).toMatch(/UNKNOWN/i);
+      expect(result.partial).toMatchObject({
+        still_installing: ["https://github.com/rgthree/rgthree-comfy"],
+        outcome_unknown: ["https://github.com/rgthree/rgthree-comfy"],
+      });
+      expect(calls.some((c) => c.url.endsWith("/v2/manager/queue/task"))).toBe(true);
+      expect(calls.some((c) => c.url.endsWith("/v2/manager/queue/start"))).toBe(true);
+      expect(mockedExec.mock.calls.find((c) => c[0] === "git" && (c[1] as string[])[0] === "clone"))
+        .toBeUndefined();
+    });
+
+    it("#2725 does not clone when an empty-ack Manager record is absent on disk", async () => {
+      let installedListReads = 0;
+      fsCtl.readdirSync = () => [];
+      const { calls } = stubFetch({
+        queueOpEmpty: true,
+        installedBody: () =>
+          installedListReads++ === 0
+            ? {}
+            : { "rgthree-comfy": { cnr_id: "rgthree-comfy", enabled: true } },
+      });
+
+      const result = await applyManifest({
+        manifest: {
+          custom_nodes: ["https://github.com/rgthree/rgthree-comfy"],
+        },
+      });
+
+      expect(result.success).toBe(false);
+      expect(result.summary).toMatchObject({ applied: 0, failed: 0, pending: 1 });
+      expect(result.results[0]).toMatchObject({ status: "pending" });
+      expect(result.results[0].message).toMatch(/UNKNOWN/i);
+      expect(result.results[0].message).toMatch(/no local fallback is authorized/i);
+      expect(calls.some((c) => c.url.endsWith("/v2/manager/queue/task"))).toBe(true);
+      expect(
+        mockedExec.mock.calls.find((c) => c[0] === "git" && (c[1] as string[])[0] === "clone"),
+      ).toBeUndefined();
+    });
+
+    it("#2725 keeps an empty-ack install UNKNOWN when its installed list is unreadable", async () => {
+      let installedListReads = 0;
+      const { calls } = stubFetch({
+        queueOpEmpty: true,
+        installedBody: () =>
+          installedListReads++ === 0 ? {} : { error: {} },
+      });
+
+      const result = await applyManifest({
+        manifest: {
+          custom_nodes: ["https://github.com/rgthree/rgthree-comfy"],
+        },
+      });
+
+      expect(result.success).toBe(false);
+      expect(result.summary).toMatchObject({ applied: 0, failed: 0, pending: 1 });
+      expect(result.results[0]).toMatchObject({ status: "pending" });
+      expect(result.results[0].message).toMatch(/installed-pack list could not be read/i);
+      expect(result.results[0].message).toMatch(/UNKNOWN/i);
+      expect(result.results[0].message).toMatch(/no local fallback is authorized/i);
+      expect(calls.some((c) => c.url.endsWith("/v2/manager/queue/task"))).toBe(true);
+      expect(
+        mockedExec.mock.calls.find((c) => c[0] === "git" && (c[1] as string[])[0] === "clone"),
+      ).toBeUndefined();
     });
 
     it("throws when a registry id is queued but never lands (silent no-op)", async () => {

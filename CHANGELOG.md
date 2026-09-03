@@ -19,6 +19,7 @@ All notable changes to this project are documented here. This project adheres to
   value, so it is no longer guessed at — it is reported, naming the unmapped values.
   The deprecated `defaultInput` spelling is honoured the way the frontend migrates it:
   socket-only on an OPTIONAL input, widget kept on a REQUIRED one.
+- **`apply_manifest` now tracks Manager v4 custom-node enqueues that return an empty success body (#2725, #2749).** Already-enabled packs are satisfied without a duplicate enqueue, and an unverified empty-ack outcome remains pending instead of authorizing a speculative fallback.
 - panel_load_workflow path: loads API/prompt graphs (including graph.api.json) onto the canvas instead of refusing them as non-UI (panel#2011)
 
 ## [0.52.178] - 2026-09-02
@@ -27,7 +28,6 @@ All notable changes to this project are documented here. This project adheres to
 
 #### Fixed
 - support IPv6-only ComfyUI loopback targets when `COMFYUI_URL` uses `127.0.0.1`, for issue #2719 (#2747)
-
 
 ## [0.52.177] - 2026-09-02
 
