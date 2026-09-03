@@ -43,7 +43,9 @@ import {
 } from "../services/panel-image-relay.js";
 import {
   BoundedResponseError,
+  clampViewResponseBytes,
   MAX_HISTORY_RESPONSE_BYTES,
+  MAX_PREVIEW_SOURCE_BYTES,
   MAX_VIEW_RESPONSE_BYTES as SHARED_MAX_VIEW_RESPONSE_BYTES,
   readResponseBodyBounded,
 } from "./bounded-response.js";
@@ -1559,6 +1561,17 @@ export async function getHistory(
 
 /** A /view response is saved and may later be previewed, so bound the first read too. */
 export const MAX_VIEW_RESPONSE_BYTES = SHARED_MAX_VIEW_RESPONSE_BYTES;
+export { MAX_PREVIEW_SOURCE_BYTES };
+
+export interface FetchImageOptions {
+  signal?: AbortSignal;
+  /**
+   * Encoded-body ceiling for this /view read. Capped at MAX_PREVIEW_SOURCE_BYTES
+   * so a caller cannot ask for an unbounded download. Defaults to
+   * MAX_VIEW_RESPONSE_BYTES (32 MB).
+   */
+  maxBytes?: number;
+}
 
 function validateViewResponseOrigin(res: Response, expectedOrigin: string, label: string): void {
   if (res.url) {
@@ -1586,11 +1599,11 @@ function validateViewResponseOrigin(res: Response, expectedOrigin: string, label
   }
 }
 
-function viewTooLarge(filename: string): ComfyUIError {
+function viewTooLarge(filename: string, maxBytes: number): ComfyUIError {
   return new ComfyUIError(
-    `ComfyUI /view response for "${filename}" exceeds the ${MAX_VIEW_RESPONSE_BYTES / 1024 ** 2} MB safety limit.`,
+    `ComfyUI /view response for "${filename}" exceeds the ${maxBytes / 1024 ** 2} MB safety limit.`,
     "VIEW_TOO_LARGE",
-    { filename, maxBytes: MAX_VIEW_RESPONSE_BYTES },
+    { filename, maxBytes },
   );
 }
 
@@ -1599,12 +1612,14 @@ async function readViewResponseBounded(
   filename: string,
   timeoutMs: number,
   signal?: AbortSignal,
+  maxBytes = MAX_VIEW_RESPONSE_BYTES,
 ): Promise<Buffer> {
+  const limit = clampViewResponseBytes(maxBytes);
   try {
-    return await readResponseBodyBounded(res, timeoutMs, MAX_VIEW_RESPONSE_BYTES, signal);
+    return await readResponseBodyBounded(res, timeoutMs, limit, signal);
   } catch (error) {
     if (error instanceof BoundedResponseError) {
-      if (error.kind === "too-large") throw viewTooLarge(filename);
+      if (error.kind === "too-large") throw viewTooLarge(filename, limit);
       throw new ComfyUIError(
         `ComfyUI /view did not finish sending "${filename}" within ${timeoutMs / 1000}s; the response was aborted.`,
         "VIEW_READ_TIMEOUT",
@@ -1623,7 +1638,7 @@ export async function fetchImage(
   filename: string,
   type: "output" | "input" | "temp" = "output",
   subfolder = "",
-  options: { signal?: AbortSignal } = {},
+  options: FetchImageOptions = {},
 ): Promise<{ base64: string; mimeType: string }> {
   if (isCloudMode()) return cloudClient.fetchImage(filename, type, subfolder, options);
   const client = getClient();
@@ -1739,7 +1754,13 @@ export async function fetchImage(
   }
   const contentType = res.headers.get("content-type") ?? "image/png";
   const mimeType = contentType.split(";")[0].trim();
-  const bytes = await readViewResponseBounded(res, filename, responseReadTimeoutMs, options.signal);
+  const bytes = await readViewResponseBounded(
+    res,
+    filename,
+    responseReadTimeoutMs,
+    options.signal,
+    options.maxBytes,
+  );
   const base64 = bytes.toString("base64");
   return { base64, mimeType };
 }
