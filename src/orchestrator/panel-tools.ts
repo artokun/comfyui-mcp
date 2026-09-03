@@ -87,6 +87,7 @@ import {
 } from "../services/unexpose-host-link-shift.js";
 import { retryConnectAgainstLiveGraph } from "../services/connect-live-graph.js";
 import { verifyPrimitiveForceInputAfterConnect } from "../services/primitive-force-input-connect.js";
+import { retryRailSlotConnect } from "../services/rail-slot-connect.js";
 import { retryWildcardSlotConnect } from "../services/wildcard-slot-connect.js";
 import { retryExposeSubgraphInput } from "../services/expose-ae-wildcard.js";
 import {
@@ -21666,7 +21667,7 @@ export function buildPanelToolDefs(): PanelToolDef[] {
     ),
     def(
       "panel_connect",
-      "Connect an output slot of one node to an input slot of another in the user's open graph. Slots accept a name ('MODEL', 'samples') or numeric index. If both slot args are omitted the panel picks the first type-compatible pairing. On failure the error lists every slot with its type and [connected] flag — re-check with panel_query_graph ({ids:[node_id], fields:'detail'}). LiteGraph wildcard-to-wildcard (`*` → `*`) pairings are compatible (a PrimitiveNode 'connect to widget input' output can land on LogicIF.when_true / when_false so the primitive becomes typed from the destination). A frontend PrimitiveNode only serializes through a target widget; connecting one to a forceInput-only / non-widget STRING is refused (panel_run would omit the required input) — use a backend STRING producer such as PrimitiveStringMultiline instead. Undoable.",
+      "Connect an output slot of one node to an input slot of another in the user's open graph. Slots accept a name ('MODEL', 'samples') or numeric index. If both slot args are omitted the panel picks the first type-compatible pairing. On failure the error lists every slot with its type and [connected] flag — re-check with panel_query_graph ({ids:[node_id], fields:'detail'}). LiteGraph wildcard-to-wildcard (`*` → `*`) pairings are compatible (a PrimitiveNode 'connect to widget input' output can land on LogicIF.when_true / when_false so the primitive becomes typed from the destination). An exposed subgraph INT rail (e.g. Scene Seed) is compatible with another INT widget input (LocalWildcardText.seed) — numeric widget min/max/step on the rail socket are not a different type. A frontend PrimitiveNode only serializes through a target widget; connecting one to a forceInput-only / non-widget STRING is refused (panel_run would omit the required input) — use a backend STRING producer such as PrimitiveStringMultiline instead. Undoable.",
       {
         from_node_id: nodeId().describe("Source node id."),
         from_output: slotRef
@@ -21701,7 +21702,8 @@ export function buildPanelToolDefs(): PanelToolDef[] {
         };
         const call = (cmd: Record<string, unknown>, timeoutMs?: number) => ctx.call(cmd, timeoutMs);
         const connected = await retryConnectAgainstLiveGraph(connectArgs, call);
-        const afterWildcard = await retryWildcardSlotConnect(connectArgs, connected, call);
+        const afterRail = await retryRailSlotConnect(connectArgs, connected, call);
+        const afterWildcard = await retryWildcardSlotConnect(connectArgs, afterRail, call);
         return verifyPrimitiveForceInputAfterConnect(connectArgs, afterWildcard, call);
       },
     ),
