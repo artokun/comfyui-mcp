@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { mkdtemp, rm, stat as statFile, utimes, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, stat as statFile, utimes, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
@@ -7,14 +7,22 @@ import { join, resolve } from "node:path";
 // reachable, server-authoritative config may authorize an escaping-symlink download.
 // It takes the SINGLE live /system_stats snapshot the caller already used (one
 // consistent server state) and trusts ONLY: ABSOLUTE --extra-model-paths-config flag
-// files + the live install's own extra_model_paths.yaml (its main.py dir). A relative
-// flag value, a stale local workspace config, or an unreachable server authorize
-// nothing (codex P0d).
+// files + the live install's own extra_model_paths.yaml (its main.py dir) + Desktop's
+// extra_models_config.yaml when that snapshot already named a Desktop extra-path
+// config. A relative flag value, a stale local workspace config, or an unreachable
+// server authorize nothing (codex P0d).
 
 vi.mock("../../config.js", () => ({
   config: { comfyuiPath: undefined as string | undefined },
   isRemoteMode: () => false,
 }));
+
+// Pin win32 so Desktop extra_models_config.yaml is reached via APPDATA, not
+// ~/Library or XDG, and tests never read the developer's real extra-path file.
+vi.mock("node:os", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("node:os")>();
+  return { ...actual, platform: () => "win32" };
+});
 
 import {
   getLaunchStateExtraModelRoots,
@@ -27,6 +35,7 @@ import {
 } from "../../services/workspace-env.js";
 
 let dirs: string[] = [];
+const originalAppData = process.env.APPDATA;
 async function trackTmp(): Promise<string> {
   const dir = await mkdtemp(join(tmpdir(), "comfyui-live-roots-"));
   dirs.push(dir);
@@ -38,12 +47,15 @@ const reachable = (argv: string[], cwd?: string): LiveServerSnapshot => ({
   cwd,
 });
 
-beforeEach(() => {
+beforeEach(async () => {
   dirs = [];
   resetLocalComfyUILaunchState(); // default: server NOT MCP-launched → env untrusted
+  process.env.APPDATA = await trackTmp();
 });
 afterEach(async () => {
   resetLocalComfyUILaunchState();
+  if (originalAppData === undefined) delete process.env.APPDATA;
+  else process.env.APPDATA = originalAppData;
   await Promise.all(dirs.map((d) => rm(d, { recursive: true, force: true })));
 });
 
@@ -105,6 +117,97 @@ describe("getLiveExtraModelRoots — fail-closed authorization", () => {
 
     expect(res.authoritative).toBe(false);
     expect(res.roots).toEqual([]);
+  });
+
+  it("includes Desktop extra_models_config.yaml when argv already named a Desktop extra-path config", async () => {
+    const appData = process.env.APPDATA!;
+    const desktopDir = join(appData, "Comfy Desktop");
+    const sharedCfg = join(desktopDir, "shared_model_paths.yaml");
+    const extraCfg = join(appData, "ComfyUI", "extra_models_config.yaml");
+    const sharedRoot = resolve("/ComfyUI-Shared/models/diffusion_models");
+    const extraRoot = resolve("/user-extra/models/diffusion_models");
+    await mkdir(desktopDir, { recursive: true });
+    await mkdir(join(appData, "ComfyUI"), { recursive: true });
+    await writeFile(sharedCfg, ["desktop:", `  diffusion_models: ${sharedRoot}`].join("\n"), "utf-8");
+    await writeFile(extraCfg, ["user_extra:", `  diffusion_models: ${extraRoot}`].join("\n"), "utf-8");
+    const created = await statFile(extraCfg);
+    const processStartedAtMs = Math.max(created.mtimeMs, created.ctimeMs) + 1;
+
+    const res = await getLaunchStateExtraModelRoots({
+      ...reachable(["python", "main.py", "--extra-model-paths-config", sharedCfg]),
+      processStartedAtMs,
+    });
+
+    expect(res.authoritative).toBe(true);
+    expect(res.roots).toContainEqual({
+      category: "diffusion_models",
+      dir: sharedRoot,
+      group: "desktop",
+    });
+    expect(res.roots).toContainEqual({
+      category: "diffusion_models",
+      dir: extraRoot,
+      group: "user_extra",
+    });
+  });
+
+  it("does not invent Desktop extra_models_config.yaml from a non-Desktop extra-path flag", async () => {
+    const appData = process.env.APPDATA!;
+    const extraCfg = join(appData, "ComfyUI", "extra_models_config.yaml");
+    const extraRoot = resolve("/user-extra/models/diffusion_models");
+    await mkdir(join(appData, "ComfyUI"), { recursive: true });
+    await writeFile(extraCfg, ["user_extra:", `  diffusion_models: ${extraRoot}`].join("\n"), "utf-8");
+    const cfgDir = await trackTmp();
+    const cfgPath = join(cfgDir, "shared_model_paths.yaml");
+    const sharedRoot = resolve("/not-desktop/models/diffusion_models");
+    await writeFile(cfgPath, ["comfyui:", `  diffusion_models: ${sharedRoot}`].join("\n"), "utf-8");
+
+    const res = await getLiveExtraModelRoots(
+      reachable(["python", "main.py", "--extra-model-paths-config", cfgPath]),
+    );
+    expect(res.roots).toContainEqual({
+      category: "diffusion_models",
+      dir: sharedRoot,
+      group: "comfyui",
+    });
+    expect(res.roots).not.toContainEqual({
+      category: "diffusion_models",
+      dir: extraRoot,
+      group: "user_extra",
+    });
+  });
+
+  it("does not authorize Desktop extra_models_config.yaml changed after launch", async () => {
+    const appData = process.env.APPDATA!;
+    const desktopDir = join(appData, "Comfy Desktop");
+    const sharedCfg = join(desktopDir, "shared_model_paths.yaml");
+    const extraCfg = join(appData, "ComfyUI", "extra_models_config.yaml");
+    const sharedRoot = resolve("/ComfyUI-Shared/models/diffusion_models");
+    await mkdir(desktopDir, { recursive: true });
+    await mkdir(join(appData, "ComfyUI"), { recursive: true });
+    await writeFile(sharedCfg, ["desktop:", `  diffusion_models: ${sharedRoot}`].join("\n"), "utf-8");
+    await writeFile(extraCfg, ["user_extra:", "  diffusion_models: /launch/extra"].join("\n"), "utf-8");
+    const sharedStat = await statFile(sharedCfg);
+    const extraStat = await statFile(extraCfg);
+    const processStartedAtMs =
+      Math.max(sharedStat.mtimeMs, sharedStat.ctimeMs, extraStat.mtimeMs, extraStat.ctimeMs) + 1;
+    await writeFile(extraCfg, ["user_extra:", "  diffusion_models: /mutable/extra"].join("\n"), "utf-8");
+    const changedAt = processStartedAtMs + 2_000;
+    await utimes(extraCfg, new Date(changedAt), new Date(changedAt));
+
+    const res = await getLaunchStateExtraModelRoots({
+      ...reachable(["python", "main.py", "--extra-model-paths-config", sharedCfg]),
+      processStartedAtMs,
+    });
+
+    expect(res.authoritative).toBe(true);
+    expect(res.roots).toContainEqual({
+      category: "diffusion_models",
+      dir: sharedRoot,
+      group: "desktop",
+    });
+    expect(res.roots.map((r) => r.dir)).not.toContain(resolve("/launch/extra"));
+    expect(res.roots.map((r) => r.dir)).not.toContain(resolve("/mutable/extra"));
   });
 
   it("does not authorize an implicit config beside an OS-observed root", async () => {
