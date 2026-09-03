@@ -8,6 +8,7 @@ All notable changes to this project are documented here. This project adheres to
 
 ### MCP
 #### Fixed
+- **`panel_set_widget` accepts a complete promoted-subgraph ownership envelope that omits `truncated:false` (#2783).** `graph_get_subgraph` already proves completeness when `node_count === nodes.length`; an omitted or null `truncated` flag is then `false`. An asserted `truncated:true`, or a list shorter than `node_count`, stays fail-closed.
 - the upload body and the bridge probe's socket chunks are typed so they still compile
 
 ## [0.52.184] - 2026-09-03
