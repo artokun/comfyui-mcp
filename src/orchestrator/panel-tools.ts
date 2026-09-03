@@ -26208,16 +26208,13 @@ CHECKED FOR YOU: the graph read this message prescribes was just run, and it ` +
           //
           // ONE-SHOT ACROSS RECONNECTS, deliberately — and still so after #2761.
           // Being a read makes this command eligible for the bridge's
-          // park-and-resume. That resume no longer hands a parked read to a tab
-          // that PROVED itself a different browser tab (#2761 taught both resume
-          // sites the takeover rule), so the wrong-canvas outcome this originally
-          // guarded against is closed at the bridge. What is NOT closed, and
-          // cannot be, is the unproven case: a panel that omits `tab_session_id`
-          // (#2104) leaves no evidence either way, and the bridge resumes it
-          // rather than break park/resume for those installs. A screenshot is
-          // exactly the read where that residual risk is not worth taking — it is
-          // free to re-ask, and a picture of someone else's canvas is a silent
-          // wrong answer, not a visible failure. So the budget stays zero.
+          // park-and-resume. That resume now requires the returning connection to
+          // PROVE it is the tab that issued the read (#2761), so the wrong-canvas
+          // outcome this originally guarded against is closed at the bridge for
+          // every command in the set, not just this one. The budget stays zero
+          // regardless: a capture is free to re-ask, so it gains nothing from
+          // resuming, and keeping it out of the branch entirely means this call
+          // site does not depend on that rule staying correct.
           const res = (await ctx.bridge.send(cmd as { cmd: string }, {
             tabId: ctx.tabId,
             timeoutMs: OBJECT_INFO_REFRESH_ACK_TIMEOUT_MS,

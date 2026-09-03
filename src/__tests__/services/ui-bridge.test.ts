@@ -1192,8 +1192,15 @@ describe("UiBridge (multi-tab)", () => {
     await expect(promise).rejects.toThrow(/graph_run/);
   });
 
+  // #2761 — these park/resume fixtures carry a `tab_session_id` because every
+  // panel that routes at all sends one: `createTabRouteIdentity` yields either a
+  // Web Locks lease or, where the API is absent, a per-page-load id, and the third
+  // outcome (a lease another tab holds) makes the panel refuse to route rather
+  // than hello anonymously. A resume now requires that proof, so an identity-less
+  // fixture would be testing a client that no current build produces — the
+  // anonymous case has its own test below, asserting the refusal.
   it("an IDEMPOTENT read dropped mid-command RESUMES when the tab reconnects (#450)", async () => {
-    const a1 = await connectPanel("tab-aaaa-1111");
+    const a1 = await connectPanel("tab-aaaa-1111", "workflow-a", { tabSessionId: "browser-tab-450" });
     await waitFor(() => expect(bridge.tabs()).toHaveLength(1));
     // No autoReply on a1 → the read stays in-flight (un-acked) when we drop it.
     const promise = bridge.send({ cmd: "graph_get_errors" }, { timeoutMs: 5000 });
@@ -1201,7 +1208,7 @@ describe("UiBridge (multi-tab)", () => {
     await new Promise((r) => setTimeout(r, 50));
     a1.close();
     // Same tab reconnects within the grace window and answers the resumed read.
-    const a2 = await connectPanel("tab-aaaa-1111");
+    const a2 = await connectPanel("tab-aaaa-1111", "workflow-a", { tabSessionId: "browser-tab-450" });
     autoReply(a2, "A2");
     await expect(promise).resolves.toMatchObject({ from: "A2", cmd: "graph_get_errors" });
     a2.close();
@@ -1238,9 +1245,10 @@ describe("UiBridge (multi-tab)", () => {
   // wrong-tab `graph_serialize` is the worst of the set: an agent edits against it.
   //
   // These tests pin BOTH refusal sites (resumeAwaitingReconnect and
-  // handleMidCommandDisconnect's already-reconnected fast path) AND the three
-  // shapes that must keep resuming — the #2104 half is the reason this is a
-  // proof-of-takeover rule and not an incarnation-match rule.
+  // handleMidCommandDisconnect's already-reconnected fast path), the shape that
+  // must keep resuming (a proven return), and the PRICE of the rule — a client
+  // that advertises no identity can never prove a return, so it stops resuming at
+  // all and fails immediately instead of stalling for the grace.
   describe("a parked read is never answered by a tab that merely took the route key over (#2761)", () => {
     const KEY = "wf:recurring-2761.json";
 
@@ -1298,7 +1306,7 @@ describe("UiBridge (multi-tab)", () => {
       // The load-bearing assertion: B is never even ASKED. Asserting only on the
       // rejection would pass against a "fix" that dispatched to B and discarded
       // the answer — B's canvas would still have been read.
-      await expect(promise).rejects.toThrow(/DIFFERENT browser tab/);
+      await expect(promise).rejects.toThrow(/could not prove it is the same browser tab/);
       expect(seenByB.some((m) => m.cmd === "graph_serialize")).toBe(false);
       b.close();
     });
@@ -1315,7 +1323,7 @@ describe("UiBridge (multi-tab)", () => {
       const b = await connectPanel(KEY, "wf", { tabSessionId: "browser-tab-B" });
       const seenByB = recordAndAnswer(b, "B");
 
-      await expect(promise).rejects.toThrow(/DIFFERENT browser tab/);
+      await expect(promise).rejects.toThrow(/could not prove it is the same browser tab/);
       expect(seenByB.some((m) => m.cmd === "graph_outline")).toBe(false);
       b.close();
     });
@@ -1334,35 +1342,44 @@ describe("UiBridge (multi-tab)", () => {
       a2.close();
     });
 
-    it("still resumes when NEITHER side proved an identity — the #2104 panel keeps working", async () => {
-      // A panel whose Web Locks lease is refused or unreadable omits `tab_session_id`
-      // entirely, and the bridge mints it a fresh per-CONNECTION `anon:<n>`. So every
-      // genuine reconnect of such a panel presents a new incarnation: an
-      // incarnation-match rule would refuse this resume forever, converting a working
-      // feature into an unconditional failure for those installs. The rule refuses
-      // only on PROOF, and there is none here in either direction.
+    it("REFUSES to resume when neither side proved an identity, and does not park at all", async () => {
+      // The rule is positive proof, so an anonymous client can never earn a resume:
+      // no future hello could match it. #2761 proposed sparing this case, on the
+      // premise that a panel unable to prove uniqueness omits `tab_session_id` —
+      // the panel source says otherwise (see `isProvenSameTab`), so the anonymous
+      // population is old builds, which `tabConnectionIdentity` already fails
+      // closed on. Parking would burn the caller's whole budget on a wait with no
+      // reachable success, so it fails NOW and names the reason.
       const a1 = await connectPanel(KEY, "wf");
       await waitFor(() => expect(bridge.tabs()).toHaveLength(1));
-      const firstAnon = bridge.tabIncarnation(KEY);
-      expect(firstAnon).toMatch(/^anon:/);
-      const { promise } = await readInFlightOn(a1, "graph_serialize", 3000);
-      a1.close();
-      await waitFor(() => expect(bridge.tabs()).toHaveLength(0));
-
-      const a2 = await connectPanel(KEY, "wf");
-      autoReply(a2, "A2");
-      await waitFor(() => expect(bridge.tabs()).toHaveLength(1));
-      // The reconnect really does look like a stranger to an incarnation test…
       expect(bridge.tabIncarnation(KEY)).toMatch(/^anon:/);
-      expect(bridge.tabIncarnation(KEY)).not.toBe(firstAnon);
-      // …and is resumed anyway, because nothing proved that it was one.
-      await expect(promise).resolves.toMatchObject({ from: "A2", cmd: "graph_serialize" });
+      const { promise } = await readInFlightOn(a1, "graph_serialize", 30_000);
+
+      const started = Date.now();
+      a1.close();
+      const err = await promise.then(
+        () => null,
+        (e: Error) => e,
+      );
+      expect(err?.message).toMatch(/advertised no browser-tab identity/);
+      expect(err?.message).toMatch(/cannot be proven to be the same tab/);
+      // Immediate, not after the 4 s grace — and far inside the 30 s budget it was
+      // given, which is what proves it was never parked rather than merely expiring.
+      expect(Date.now() - started).toBeLessThan(2000);
+
+      // And the replacement is never asked, however it identifies itself.
+      const a2 = await connectPanel(KEY, "wf");
+      const seen = recordAndAnswer(a2, "A2");
+      await waitFor(() => expect(bridge.tabs()).toHaveLength(1));
+      await new Promise((r) => setTimeout(r, 60));
+      expect(seen.some((m) => m.cmd === "graph_serialize")).toBe(false);
       a2.close();
     });
 
-    it("still resumes when only ONE side proved an identity (no evidence either way)", async () => {
-      // The same browser tab can fail to take its lock on one connection and take it
-      // on the next, so proven-after-anonymous is not proof of a different tab.
+    it("REFUSES to resume when only the RETURNING side proves an identity", async () => {
+      // Proof has to be a MATCH, not merely present on the connection that showed
+      // up: a stranger that can prove who IT is has still not proved it is the tab
+      // that issued the read.
       const a1 = await connectPanel(KEY, "wf");
       await waitFor(() => expect(bridge.tabs()).toHaveLength(1));
       const { promise } = await readInFlightOn(a1, "graph_serialize", 3000);
@@ -1370,8 +1387,9 @@ describe("UiBridge (multi-tab)", () => {
       await waitFor(() => expect(bridge.tabs()).toHaveLength(0));
 
       const a2 = await connectPanel(KEY, "wf", { tabSessionId: "browser-tab-late-proof" });
-      autoReply(a2, "A2");
-      await expect(promise).resolves.toMatchObject({ from: "A2", cmd: "graph_serialize" });
+      const seen = recordAndAnswer(a2, "A2");
+      await expect(promise).rejects.toThrow(/no browser-tab identity|could not prove/);
+      expect(seen.some((m) => m.cmd === "graph_serialize")).toBe(false);
       a2.close();
     });
 
@@ -1399,7 +1417,7 @@ describe("UiBridge (multi-tab)", () => {
       a2.close();
     });
 
-    it("says a takeover happened rather than calling a visibly-live panel 'genuinely gone'", async () => {
+    it("names the unproven occupant rather than calling a visibly-live panel 'genuinely gone'", async () => {
       const a = await connectPanel(KEY, "wf", { tabSessionId: "browser-tab-A" });
       await waitFor(() => expect(bridge.tabs()).toHaveLength(1));
       const { promise } = await readInFlightOn(a, "graph_serialize", 900);
@@ -1412,7 +1430,7 @@ describe("UiBridge (multi-tab)", () => {
         () => null,
         (e: Error) => e,
       );
-      expect(err?.message).toMatch(/DIFFERENT browser tab has since taken its route key over/);
+      expect(err?.message).toMatch(/could not prove it is the same browser tab/);
       expect(err?.message).toMatch(/Re-issue it against the tab you meant/);
       // The old wording would send an operator staring at a live panel off to wait
       // for a tab that is sitting right there in front of them.
@@ -1422,7 +1440,7 @@ describe("UiBridge (multi-tab)", () => {
   });
 
   it("dropQueuedDeliveries CANCELS a parked read so it is NOT re-dispatched onto a replacement (#570 P0)", async () => {
-    const a1 = await connectPanel("wf:foo.json");
+    const a1 = await connectPanel("wf:foo.json", "workflow-a", { tabSessionId: "browser-tab-570" });
     await waitFor(() => expect(bridge.tabs()).toHaveLength(1));
     // Workflow A has an idempotent read in flight (no autoReply → un-acked).
     const promise = bridge.send({ cmd: "graph_get_errors" }, { tabId: "wf:foo.json", timeoutMs: 5000 });
@@ -1459,20 +1477,20 @@ describe("UiBridge (multi-tab)", () => {
   });
 
   it("resumes a read addressed by tab-id PREFIX after reconnect (canonical key) (#450)", async () => {
-    const a1 = await connectPanel("tab-aaaa-1111");
+    const a1 = await connectPanel("tab-aaaa-1111", "workflow-a", { tabSessionId: "browser-tab-450p" });
     await waitFor(() => expect(bridge.tabs()).toHaveLength(1));
     // Address by prefix — parking must key on the canonical resolved id, not "tab-aaaa".
     const promise = bridge.send({ cmd: "graph_get_errors" }, { tabId: "tab-aaaa", timeoutMs: 5000 });
     await new Promise((r) => setTimeout(r, 50));
     a1.close();
-    const a2 = await connectPanel("tab-aaaa-1111");
+    const a2 = await connectPanel("tab-aaaa-1111", "workflow-a", { tabSessionId: "browser-tab-450p" });
     autoReply(a2, "A2");
     await expect(promise).resolves.toMatchObject({ from: "A2" });
     a2.close();
   });
 
   it("resumes nodes_search as a read with a fresh dispatch RID (#2145)", async () => {
-    const a1 = await connectPanel("tab-2145");
+    const a1 = await connectPanel("tab-2145", "workflow-a", { tabSessionId: "browser-tab-2145" });
     await waitFor(() => expect(bridge.tabs()).toHaveLength(1));
     const frames: Array<Record<string, unknown>> = [];
     a1.on("message", (buf) => {
@@ -1487,7 +1505,7 @@ describe("UiBridge (multi-tab)", () => {
     await waitFor(() => expect(frames).toHaveLength(1));
     a1.close();
 
-    const a2 = await connectPanel("tab-2145");
+    const a2 = await connectPanel("tab-2145", "workflow-a", { tabSessionId: "browser-tab-2145" });
     a2.on("message", (buf) => {
       const msg = JSON.parse(buf.toString()) as Record<string, unknown>;
       if (msg.cmd === "nodes_search") {
@@ -1507,7 +1525,7 @@ describe("UiBridge (multi-tab)", () => {
     expect(BRIDGE_READONLY_CMDS.has("nodes_queue_status")).toBe(true);
     expect(defaultBridgeTimeoutMs("nodes_queue_status")).toBe(BRIDGE_READ_DEFAULT_TIMEOUT_MS);
 
-    const a1 = await connectPanel("tab-2181");
+    const a1 = await connectPanel("tab-2181", "workflow-a", { tabSessionId: "browser-tab-2181" });
     await waitFor(() => expect(bridge.tabs()).toHaveLength(1));
     const frames: Array<Record<string, unknown>> = [];
     a1.on("message", (buf) => {
@@ -1522,7 +1540,7 @@ describe("UiBridge (multi-tab)", () => {
     await waitFor(() => expect(frames).toHaveLength(1));
     a1.close();
 
-    const a2 = await connectPanel("tab-2181");
+    const a2 = await connectPanel("tab-2181", "workflow-a", { tabSessionId: "browser-tab-2181" });
     a2.on("message", (buf) => {
       const msg = JSON.parse(buf.toString()) as Record<string, unknown>;
       if (msg.cmd === "nodes_queue_status") {
@@ -1538,7 +1556,7 @@ describe("UiBridge (multi-tab)", () => {
   });
 
   it("does NOT extend the caller's deadline when a read resumes (#450)", async () => {
-    const a1 = await connectPanel("tab-aaaa-1111");
+    const a1 = await connectPanel("tab-aaaa-1111", "workflow-a", { tabSessionId: "browser-tab-450d" });
     await waitFor(() => expect(bridge.tabs()).toHaveLength(1));
     // Short deadline. Drop, reconnect with a tab that NEVER replies → must reject
     // near the original 300ms deadline, not restart a fresh full timeout.
@@ -1546,14 +1564,14 @@ describe("UiBridge (multi-tab)", () => {
     const promise = bridge.send({ cmd: "graph_get_errors" }, { timeoutMs: 300 });
     await new Promise((r) => setTimeout(r, 30));
     a1.close();
-    const a2 = await connectPanel("tab-aaaa-1111"); // reconnects but never autoReplies
+    const a2 = await connectPanel("tab-aaaa-1111", "workflow-a", { tabSessionId: "browser-tab-450d" }); // reconnects but never autoReplies
     await expect(promise).rejects.toThrow(/did not reply|genuinely gone/);
     expect(Date.now() - started).toBeLessThan(2000);
     a2.close();
   });
 
   it("an idempotent read whose tab never returns fails as genuinely gone (#450)", async () => {
-    const a = await connectPanel("tab-aaaa-1111");
+    const a = await connectPanel("tab-aaaa-1111", "workflow-a", { tabSessionId: "browser-tab-450g" });
     // BOUNDED UNDER THIS TEST'S OWN BUDGET (#1325). The helper's 15s default is larger
     // than the 10s below, so a stuck connect would be killed by the runner and reported as
     // vitest's generic "test timed out" instead of naming the wait. This connect is local
