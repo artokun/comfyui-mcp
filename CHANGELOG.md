@@ -12,6 +12,13 @@ All notable changes to this project are documented here. This project adheres to
 
 - panel_load_workflow path: loads API/prompt graphs (including graph.api.json) onto the canvas instead of refusing them as non-UI (panel#2011)
 
+## [0.52.180] - 2026-09-03
+
+### MCP
+
+#### Fixed
+- normalize saved workflow filenames (#2779)
+
 ## [0.52.179] - 2026-09-02
 
 ### MCP
