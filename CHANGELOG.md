@@ -18,6 +18,13 @@ All notable changes to this project are documented here. This project adheres to
   Disconnect then Connect keeps the same orchestrator process, so only restarting that
   process re-runs the registration. Detection only; the cause stays open on #2742.
 
+## [0.52.180] - 2026-09-03
+
+### MCP
+
+#### Fixed
+- normalize saved workflow filenames (#2779)
+
 ## [0.52.179] - 2026-09-02
 
 ### MCP
