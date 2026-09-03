@@ -108,6 +108,20 @@ type SendCtx = {
   deadline: number;
   /** Remaining bridge-owned reconnect re-dispatches for this send. */
   reconnectRetriesRemaining: number;
+  /**
+   * #2761 — the PROVEN browser-tab identity of the connection this command was
+   * issued to, captured at dispatch. Present only when that hello carried a
+   * `tab_session_id`; absent when the panel could not prove one.
+   *
+   * Exists so a park-and-resume can tell "the same tab came back" from "a
+   * different tab took this recurring `wf:` route key over". `Conn.incarnationId`
+   * is deliberately NOT what is stored here: it is always populated, falling back
+   * to a per-CONNECTION `anon:<n>`, so a panel whose Web Locks lease is refused or
+   * unreadable (#2104) presents a fresh incarnation on every genuine reconnect.
+   * `tabSessionId` is the field whose contract is "a proof, absent when unproven"
+   * (#709), which is exactly the question the resume has to ask.
+   */
+  issuedToTabSessionId?: string;
   /** #570 — the trusted per-instance workflow uuid this command was ISSUED FOR (the
    *  caller's intended tab), stamped onto the outgoing frame so the panel can refuse to
    *  EXECUTE it against a DIFFERENT workflow it has since switched to. Undefined for a tab
@@ -123,6 +137,65 @@ type SendCtx = {
    */
   siblingReply?: string;
 };
+
+/** An idempotent read parked by handleMidCommandDisconnect, waiting a bounded
+ *  grace for its tab to come back so it can be re-dispatched. */
+type AwaitingReconnectEntry = {
+  ctx: SendCtx;
+  graceTimer: ReturnType<typeof setTimeout>;
+  /** #2761 — set when a hello for this route key was declined as a resume target
+   *  because it could not prove it is the tab that issued the read. Only changes
+   *  the message the grace timer eventually rejects with: "gone" is a lie when
+   *  the operator can see a live tab sitting on the key. */
+  refusedUnprovenReturn?: boolean;
+};
+
+/**
+ * #2761 — may a read parked by `ctx` be resumed onto `conn`? ONLY when `conn`
+ * PROVES it is the browser tab that issued it: both carry a `tab_session_id`
+ * and they match.
+ *
+ * This is a POSITIVE proof, not "refuse when they provably differ", and the
+ * difference is the whole decision. A `wf:` route key RECURS (#486) — another
+ * browser tab opening the same saved workflow takes it over — so holding the key
+ * is not evidence of anything. An UNPROVEN connection is therefore not neutral:
+ * it is a connection that cannot rule out being a stranger, and resuming onto it
+ * answers the departed caller with a canvas that may not be theirs.
+ *
+ * The cost is real and falls on one population: a panel that never advertises
+ * `tab_session_id` can never prove a return, so park-and-resume does nothing for
+ * it and a mid-command drop fails instead of recovering. That is deliberate, and
+ * it is the side this codebase already takes at every adjacent site:
+ *
+ *   - `tabConnectionIdentity` returns undefined for exactly these panels rather
+ *     than "fabricating graph-tool readiness" for the restart gate.
+ *   - the hello handler (#486) counts a differing anonymous incarnation as a
+ *     TAKEOVER and retires the departed tab's asks.
+ *   - the panel's own `bridge-route.js`, on this same trade: "Losing a resume is
+ *     recoverable; delivering a command to the wrong canvas is not."
+ *
+ * #2761 proposed sparing the unproven case, on the premise that a panel which
+ * cannot prove uniqueness omits the field. THE PANEL SOURCE SAYS OTHERWISE, and
+ * that is why this does not follow the suggestion: `createTabRouteIdentity` has
+ * three outcomes, and two of them send an id — an exclusive Web Locks lease, or,
+ * where `navigator.locks` does not exist (plain http:// on a LAN), a
+ * never-persisted per-page-load id. The third, a lease actively refused by
+ * another tab, makes the panel REFUSE TO ROUTE AT ALL rather than hello
+ * anonymously. So a current panel that is talking to us has always proved
+ * something; the anonymous population is old builds, and old builds are exactly
+ * who `tabConnectionIdentity` already fails closed on.
+ *
+ * Note this also makes a page-instance RELOAD (new id each load) a non-return,
+ * which is correct and already true elsewhere: the hello handler fires
+ * `onTabTakenOver` for it, and the panel documents the cost as "route stability,
+ * not uniqueness".
+ */
+function isProvenSameTab(ctx: SendCtx, conn: Conn): boolean {
+  return (
+    ctx.issuedToTabSessionId !== undefined &&
+    ctx.issuedToTabSessionId === conn.tabSessionId
+  );
+}
 
 type Pending = {
   resolve: (v: unknown) => void;
@@ -1227,34 +1300,24 @@ export const BRIDGE_READONLY_CMDS: ReadonlySet<string> = new Set<string>([
   // Two ledgers said read; the one that writes the message said mutation.
   //
   // THE CONSEQUENCE, written down because it is NOT free and a reviewer should
-  // not have to reconstruct it. Membership here also makes a command eligible
-  // for handleMidCommandDisconnect's park-and-resume, and that resume keys on
-  // `ctx.tabId` ALONE: `resumeAwaitingReconnect` looks up `conns.get(tabId)` and
-  // re-dispatches, without consulting the connection's incarnation.
+  // not have to reconstruct it. Membership here also makes a command eligible for
+  // handleMidCommandDisconnect's park-and-resume — and that resume used to key on
+  // `ctx.tabId` ALONE, so a route key that RECURS (#486: "same key is not the same
+  // tab") could hand a parked read to whichever tab happened to hold the key at
+  // resume time. #2761 closed that at both resume sites: a parked read now resumes
+  // only onto a connection that PROVES it is the tab that issued it (see
+  // `isProvenSameTab`). A wrong-tab SERIALIZE — worse than a wrong-tab picture,
+  // because it drives edits — can no longer resolve the departed caller's promise.
   //
-  // A route key RECURS. The hello handler says so itself (#486): "a `wf:` route
-  // key recurs, so a DIFFERENT tab opening the same saved workflow takes it
-  // over … Same key is not the same tab; only the same incarnation coming back
-  // is a proven return." It fires `onTabTakenOver` on exactly that, so the
-  // bridge already knows how to tell an occupant change from a reconnect — the
-  // resume path just does not ask. A parked read can therefore be handed to the
-  // stranger and its reply resolve the departed caller's promise.
+  // The price, paid knowingly: a panel that advertises no `tab_session_id` can
+  // never prove a return, so membership here no longer buys it reconnect survival
+  // — its mid-command drop fails immediately instead. Every current panel that
+  // routes at all sends one, so this falls on old builds, and it is the same side
+  // `tabConnectionIdentity` already takes for them.
   //
-  // That hole is the SET'S and predates this entry: the park branch is gated on
-  // `!ctx.mutating`, so graph_serialize, graph_outline, graph_query,
-  // graph_get_errors and graph_view_selected have all resumed this way for as
-  // long as they have been listed — and a wrong-tab SERIALIZE is worse than a
-  // wrong-tab picture, because it drives edits. Fixing it means teaching the
-  // resume the incarnation rule without breaking panels that legitimately have
-  // no proven identity (#2104: a refused or unreadable lock manager omits
-  // `tab_session_id`, so every reconnect looks like a new occupant). That is its
-  // own change, with its own blast radius, and is tracked in #2761.
-  //
-  // So this entry takes the half it needs and declines the half it does not: the
-  // panel_screenshot call site passes `maxReconnectRetries: 0`, which keeps the
-  // command out of the park branch entirely. A screenshot that drops mid-capture
-  // fails honestly and is free to re-ask; it is never answered with a picture of
-  // someone else's canvas.
+  // This entry declines the park branch outright anyway: the panel_screenshot call
+  // site passes `maxReconnectRetries: 0`. A screenshot that drops mid-capture fails
+  // honestly and is free to re-ask, so it has nothing to gain from resuming.
   "graph_screenshot",
   "graph_prompt_director_audit",
   "graph_query",
@@ -2516,7 +2579,7 @@ export class UiBridge {
   /** In-flight IDEMPOTENT reads whose socket dropped mid-command, parked per tabId
    *  waiting a bounded grace for that tab to reconnect so we can re-dispatch them
    *  (resume) instead of hard-failing. Never holds mutating commands. */
-  private awaitingReconnect = new Map<string, Array<{ ctx: SendCtx; graceTimer: ReturnType<typeof setTimeout> }>>();
+  private awaitingReconnect = new Map<string, AwaitingReconnectEntry[]>();
   /** How long a dropped idempotent read waits for its tab to re-hello before we
    *  declare the panel genuinely gone. Bounded so a caller never hangs. */
   private static readonly RECONNECT_GRACE_MS = 4000;
@@ -6481,6 +6544,10 @@ export class UiBridge {
           // read cannot itself produce the reporter's 30 s false timeout (#2069).
           deadline: Date.now() + timeoutMs,
           reconnectRetriesRemaining,
+          // #2761 — captured HERE, on the connection that actually receives the
+          // frame, not read back later from `conns` (by resume time the key may be
+          // held by somebody else, which is the whole point of storing it).
+          issuedToTabSessionId: live.tabSessionId,
           // #570 — graph ops resolve from the CALLER'S intended tab (opts.tabId), NOT
           // the canonical conn.tabId: after a same-socket switch the two differ, and
           // we must stamp the workflow the command was ISSUED FOR (so the panel, now
@@ -6879,8 +6946,22 @@ export class UiBridge {
       // hello landed before this dead socket's close handler ran — so resume already
       // fired and won't fire again). Re-dispatch straight onto it instead of parking
       // and expiring as "gone". Safe: idempotent read, un-acked.
+      //
+      // #2761 — "a replacement socket is live under this key" is NOT "this tab is
+      // back". `isProvenSameTab` is the same test resumeAwaitingReconnect applies;
+      // without it this fast path is the earlier of the two ways a stranger gets
+      // handed the read, and it fires FIRST (its hello beat the close handler), so
+      // fixing only the resume would leave the race that is hardest to reproduce.
+      // Unproven, fall through and park: if the issuing tab proves a return inside
+      // the grace it still resumes, and if it does not, the timer below rejects —
+      // which is the honest outcome.
       const live = this.conns.get(ctx.tabId);
-      if (live && live.sock !== pend.sock && live.sock.readyState === WebSocket.OPEN) {
+      if (
+        live &&
+        live.sock !== pend.sock &&
+        live.sock.readyState === WebSocket.OPEN &&
+        isProvenSameTab(ctx, live)
+      ) {
         ctx.reconnectRetriesRemaining -= 1;
         logger.info(
           `[ui-bridge] tab ${short} already reconnected — resuming "${cmd}" on the live socket`,
@@ -6888,16 +6969,45 @@ export class UiBridge {
         this.dispatch(live, ctx);
         return;
       }
+      // #2761 — a read issued to a tab that never advertised a `tab_session_id`
+      // can NEVER be resumed: no future hello can prove it is that tab. Parking it
+      // would burn the caller's whole remaining budget on a wait with no reachable
+      // success, so fail now and say why. This is the visible cost of the proof
+      // rule, and it is deliberately loud rather than a silent stall.
+      if (ctx.issuedToTabSessionId === undefined) {
+        logger.info(
+          `[ui-bridge] tab ${short} dropped mid-command ("${cmd}") without a browser-tab identity — a reconnect on this route key could not be proven to be the same tab, so it is not parked`,
+        );
+        ctx.reject(
+          new Error(
+            `panel tab ${short} disconnected mid-command ("${cmd}") and advertised no browser-tab identity, so a reconnect on this route key cannot be proven to be the same tab — the read was not resumed rather than risk answering with a different canvas. Retry once a tab is connected; updating the panel restores automatic resume.`,
+          ),
+        );
+        return;
+      }
+      const unprovenAtDrop = live !== undefined;
+      if (unprovenAtDrop) {
+        logger.info(
+          `[ui-bridge] tab ${short} route key is held by a connection that did not prove it is the same browser tab — not resuming "${cmd}" onto it; parking for a proven return`,
+        );
+      }
       ctx.reconnectRetriesRemaining -= 1;
       const list = this.awaitingReconnect.get(ctx.tabId) ?? [];
       const graceMs = Math.max(0, Math.min(UiBridge.RECONNECT_GRACE_MS, ctx.deadline - Date.now()));
-      const entry = {
+      const entry: AwaitingReconnectEntry = {
         ctx,
+        refusedUnprovenReturn: unprovenAtDrop,
         graceTimer: setTimeout(() => {
           this.removeAwaiting(ctx.tabId, entry);
           ctx.reject(
             new Error(
-              `panel tab ${short} disconnected mid-command ("${cmd}") and did not reconnect within ${graceMs} ms — panel genuinely gone; retry once a tab is connected`,
+              // #2761 — "genuinely gone" is only true when nobody proved up on the
+              // key. If a different browser tab did, say THAT: an operator looking
+              // at a live panel would otherwise be told it had vanished, and the
+              // remedy is different (re-issue against the tab you meant, not wait).
+              entry.refusedUnprovenReturn
+                ? `panel tab ${short} disconnected mid-command ("${cmd}") and the connection now holding its route key could not prove it is the same browser tab — the read was NOT resumed onto it, because its answer could describe a different canvas. Re-issue it against the tab you meant.`
+                : `panel tab ${short} disconnected mid-command ("${cmd}") and did not reconnect within ${graceMs} ms — panel genuinely gone; retry once a tab is connected`,
             ),
           );
         }, graceMs),
@@ -6940,10 +7050,7 @@ export class UiBridge {
     }
   }
 
-  private removeAwaiting(
-    tabId: string,
-    entry: { ctx: SendCtx; graceTimer: ReturnType<typeof setTimeout> },
-  ): void {
+  private removeAwaiting(tabId: string, entry: AwaitingReconnectEntry): void {
     const list = this.awaitingReconnect.get(tabId);
     if (!list) return;
     const i = list.indexOf(entry);
@@ -6952,19 +7059,50 @@ export class UiBridge {
   }
 
   /** A tab re-helloed: resume any idempotent reads parked for it on a mid-command
-   *  disconnect by re-dispatching them onto the fresh socket. */
+   *  disconnect by re-dispatching them onto the fresh socket.
+   *
+   *  #2761 — "a hello arrived for this key" is not "this tab is back". A `wf:`
+   *  route key RECURS, so the connection now holding it may be a different browser
+   *  tab that opened the same saved workflow; handing it a parked `graph_serialize`
+   *  answers the departed caller with a stranger's canvas, and an agent then edits
+   *  against it. So an entry resumes only onto a connection that PROVES it is the
+   *  tab that issued it (`isProvenSameTab`). Everything else stays parked — its own
+   *  grace timer decides — so a proven return later in the window is still served,
+   *  and an unproven one never is. */
   private resumeAwaitingReconnect(tabId: string): void {
     const list = this.awaitingReconnect.get(tabId);
     if (!list || list.length === 0) return;
     const conn = this.conns.get(tabId);
     if (!conn) return;
+    // Clear the key BEFORE dispatching, exactly as this did before #2761: a
+    // re-dispatch that fails and re-parks must land in a fresh list, not be
+    // clobbered by a write-back of the list we are iterating. Withheld entries
+    // are merged onto whatever is there when the loop ends.
     this.awaitingReconnect.delete(tabId);
+    const withheld: AwaitingReconnectEntry[] = [];
     for (const entry of list) {
+      if (!isProvenSameTab(entry.ctx, conn)) {
+        entry.refusedUnprovenReturn = true;
+        withheld.push(entry);
+        logger.warn(
+          `[ui-bridge] tab ${tabId.slice(0, 8)} did not prove it is the browser tab that issued "${entry.ctx.command.cmd}" — withholding the parked read rather than answering its caller with another tab's canvas`,
+        );
+        continue;
+      }
       clearTimeout(entry.graceTimer);
       logger.info(
         `[ui-bridge] tab ${tabId.slice(0, 8)} reconnected — resuming "${entry.ctx.command.cmd}"`,
       );
       this.dispatch(conn, entry.ctx);
+    }
+    // Withheld entries keep their LIVE grace timers, so they must stay in the
+    // map: the timer alone would still reject the caller, but dropping the entry
+    // here would put it out of reach of a later resume (the original tab
+    // reclaiming its key inside the grace) and of dropQueuedDeliveries/stop(),
+    // which cancel parked reads by walking this map.
+    if (withheld.length > 0) {
+      const reparked = this.awaitingReconnect.get(tabId);
+      this.awaitingReconnect.set(tabId, reparked ? [...reparked, ...withheld] : withheld);
     }
   }
 
