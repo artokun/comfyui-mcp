@@ -321,6 +321,33 @@ describe("#646 Manager API dialect cache invalidation", () => {
     expect((error.details as { managerVersionMajor?: number }).managerVersionMajor).toBe(3);
   });
 
+  it("does not tell a busy Manager its queue module failed to register (#2754, gate round 6)", async () => {
+    // Manager is up (V4.2.2) and its queue routes 503. The queue side gets the
+    // same treatment as the version side: 503 is a route we could not read, not a
+    // queue API that is absent, so the "queue module failed to register" reading
+    // is withheld.
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string): Promise<Response> => {
+        const path = new URL(url).pathname;
+        if (path === "/v2/manager/version") return new Response("V4.2.2", { status: 200 });
+        if (path.endsWith("/manager/queue/status")) {
+          return new Response("upstream down", { status: 503 });
+        }
+        return new Response("404: Not Found", { status: 404 });
+      }),
+    );
+
+    const error = await detectionError();
+    expect(error.message).toMatch(/ComfyUI-Manager IS answering/i);
+    expect(error.message).toMatch(/generation 4\.x/);
+    // The claim withheld: nothing here establishes the queue API is absent.
+    expect(error.message).not.toMatch(/serves NO queue API/i);
+    expect(error.message).not.toMatch(/failed to register/i);
+    expect(error.message).toMatch(/server-error/);
+    expect(error.message).toMatch(/could not READ/i);
+  });
+
   it("reports the v4 generation when /v2/manager/version is the one answering (#2754)", async () => {
     stubQueuelessManager({ path: "/v2/manager/version", body: "V4.2.2" });
 

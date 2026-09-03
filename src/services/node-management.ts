@@ -827,17 +827,29 @@ function managerQueueDetectionMessage(
   version: ManagerVersionEvidence,
 ): string {
   if (version.kind === "version") {
-    return (
+    const lede =
       `ComfyUI-Manager IS answering on ${base} — its version route reports generation ` +
-      `${version.major}.x — but it serves NO queue API: neither /v2/manager/queue/status ` +
-      "nor /manager/queue/status answered with a queue status. So this is NOT a missing or " +
-      "disabled Manager, and neither installing the pip comfyui_manager package nor adding " +
-      "--enable-manager will fix it. What fits the evidence is a Manager whose queue routes " +
-      "specifically are absent: a partial or older Manager server build, a Manager whose " +
-      "queue module failed to register, or a proxy in front of ComfyUI that forwards only " +
-      "some /manager routes. Check the ComfyUI log around Manager's startup, and retry once " +
-      "it serves a queue surface."
-    );
+      `${version.major}.x — so this is NOT a missing or disabled Manager, and neither ` +
+      "installing the pip comfyui_manager package nor adding --enable-manager will fix it. ";
+    // The queue side deserves the same care as the version side (codex gate round
+    // 6). Two 404s mean the queue routes are genuinely not registered; a 503, a
+    // 405 or a timeout means we could not READ them, and a Manager that is merely
+    // busy or briefly sick must not be told its queue module failed to register.
+    return queueStatusKinds.every((kind) => kind === "not-found")
+      ? lede +
+          "It serves NO queue API: both /v2/manager/queue/status and /manager/queue/status " +
+          "answered 404. What fits that is a Manager whose queue routes specifically are " +
+          "absent — a partial or older Manager server build, a queue module that failed to " +
+          "register, or a proxy in front of ComfyUI forwarding only some /manager routes. " +
+          "Check the ComfyUI log around Manager's startup, and retry once it serves a queue " +
+          "surface."
+      : lede +
+          "Its queue routes did not answer with a queue status either, but they did not say " +
+          `they are absent: /v2/manager/queue/status and /manager/queue/status came back ` +
+          `"${queueStatusKinds.join(", ")}". That is a queue surface we could not READ — a ` +
+          "5xx, a wrong-method reply, a timeout — not a Manager that lacks one, so this may " +
+          "well clear on its own. Check that ComfyUI is healthy and retry before concluding " +
+          "anything about Manager's queue API.";
   }
   if (version.kind === "refused") {
     return (
