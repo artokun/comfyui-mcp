@@ -90,12 +90,12 @@ function makeCtx(opts: {
       tabServerOrigin: () => origin.current,
       tabIsLocal: () => opts.isLocal === true,
       canReach: () => true,
-    } as unknown as PanelToolCtx["bridge"],
+    } as PanelToolCtx["bridge"],
     tabId: "remote-tab",
     panelConnectionIdentity: () => ({ generation: 1, tabSessionId: "browser-tab-remote" }),
     awaitPostRestartReachable: async () => true,
     tabCanMutateGraph: () => true,
-  } as unknown as PanelToolCtx;
+  } as PanelToolCtx;
   return { ctx, sends, confirm };
 }
 
