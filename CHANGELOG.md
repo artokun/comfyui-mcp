@@ -6,6 +6,12 @@ All notable changes to this project are documented here. This project adheres to
 
 ## Unreleased
 
+### MCP
+
+#### Fixed
+
+- **`panel_set_widget` creates a documented `lora_N` row on an ordinary Power Lora Loader inside a live subgraph (#2394).** Current panels flatten parentheses in the `graph_get_subgraph` "is not a subgraph" line, so a live `Power Lora Loader (rgthree)` was reported as `Power Lora Loader rgthree` and the identity-fenced ordinary write refused it as a type change. The two types are compared after that flatten; the write still fences the real unflattened type.
+
 ### Documentation
 
 - clarify MiniMax H3 source-video frame-rate conversion and complete ComfyMathExpression edits (#2479)
