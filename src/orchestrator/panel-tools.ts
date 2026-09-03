@@ -26658,13 +26658,17 @@ CHECKED FOR YOU: the graph read this message prescribes was just run, and it ` +
         // queued `{repository: url}` and Manager resolved the bare name. Legacy
         // 3.x / v2-batch keep the direct `files:[url]` path.
         if (typeof cmdArgs.repository === "string" && cmdArgs.repository.length > 0) {
-          let api: ManagerApi;
+          let api: ManagerApi | undefined;
           try {
             api = await detectManagerApi();
           } catch {
-            api = "v2";
+            // The dialect is UNKNOWN, not v4. Refusing here would be an unproven
+            // claim — and it would block a legacy 3.x `files:[url]` install that
+            // still works, with a message naming the wrong cause. Fall through and
+            // let the dispatch below report whatever actually failed.
+            api = undefined;
           }
-          if (managerDialectQueuesGitUrlAsRegistryLookup(api)) {
+          if (api !== undefined && managerDialectQueuesGitUrlAsRegistryLookup(api)) {
             return fail(v4GitUrlQueueRefusal(cmdArgs.repository));
           }
         }

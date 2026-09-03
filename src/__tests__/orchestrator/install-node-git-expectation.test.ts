@@ -99,9 +99,13 @@ afterEach(() => resetManagerApiCacheForTests());
 
 async function dispatchInstall(
   args: Record<string, unknown>,
-  dialect: "legacy" | "v2" | "v2-batch" = "legacy",
+  dialect: "legacy" | "v2" | "v2-batch" | "unknown" = "legacy",
 ): Promise<{ sent: Record<string, unknown> | undefined; text: string; isError: boolean }> {
-  resetManagerApiCacheForTests(dialect);
+  // "unknown" primes NOTHING, so detectManagerApi has to probe — and with no
+  // Manager behind it, that probe fails. That is the shape this file needs to
+  // cover: dialect UNDETERMINED, which is not the same as dialect v4.
+  if (dialect === "unknown") resetManagerApiCacheForTests();
+  else resetManagerApiCacheForTests(dialect);
   let sent: Record<string, unknown> | undefined;
   const bridge = {
     send: async (cmd: Record<string, unknown>) => {
@@ -142,6 +146,27 @@ async function dispatchLegacyInstall(
   if (!out.sent) throw new Error("nodes_install was never dispatched");
   return { sent: out.sent, text: out.text };
 }
+
+describe("the v4 git-URL refusal requires POSITIVE evidence of v4 (#1539)", () => {
+  it("does not refuse when the Manager dialect could not be determined", async () => {
+    // Regression: the guard first read `catch { api = "v2" }`, so ANY failure to
+    // reach the Manager was treated as proof of v4. That refused legacy 3.x
+    // `files:[url]` installs that still work, told the caller the wrong cause,
+    // and broke nine tests in the #1129 suite — which installs by `repository`
+    // and stubs no Manager at all. An unknown dialect is not evidence of v4.
+    const out = await dispatchInstall({ repository: REPORTED_URL }, "unknown");
+    expect(out.text).not.toContain("Refusing to queue");
+    expect(out.text).not.toContain(v4GitUrlQueueRefusal(REPORTED_URL));
+  });
+
+  it("still refuses once v4 is actually detected", async () => {
+    // The other direction, so the test above cannot be satisfied by deleting the
+    // guard outright.
+    const out = await dispatchInstall({ repository: REPORTED_URL }, "v2");
+    expect(out.isError).toBe(true);
+    expect(out.text).toContain("Refusing to queue");
+  });
+});
 
 describe("legacy direct-URL normalization remains intact (#1539)", () => {
   it("normalizes the reporter's URL for the legacy direct-URL route", () => {
