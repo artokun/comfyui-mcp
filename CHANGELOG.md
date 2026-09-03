@@ -6,6 +6,19 @@ All notable changes to this project are documented here. This project adheres to
 
 ## Unreleased
 
+### MCP
+
+#### Fixed
+- **a ComfyUI-Manager catalogue regex no longer outranks the pack a node actually loaded
+  from (#2765).** `extract_deps` returned one unrelated repository as the owner of four
+  distinct nodes and then reported that pack missing — one step from installing unrelated
+  third-party code. For an installed node `/object_info`'s `python_module` now wins; a
+  pattern match must be unanimous; and a pattern that mostly captures class names other
+  entries explicitly list is ignored (measured against the live catalogue, one entry's
+  `Hunyuan` takes 182 of the 188 names it matches from other packs). A regex-derived owner
+  is labelled "matched by catalogue PATTERN" so the weaker claim is visible before
+  `install_deps` acts on it.
+
 ## [0.52.179] - 2026-09-02
 
 ### MCP

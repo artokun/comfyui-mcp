@@ -338,10 +338,7 @@ function packFromPythonModule(pythonModule: string | undefined): {
 interface PatternClaim {
   re: RegExp;
   pack: string;
-  /** The regex source, which is how a claim published twice is recognised. */
-  source: string;
-  /** Two different packs publish this same regex, so it selects neither. */
-  contested?: boolean;
+
   /** Memoised isOverBroad verdict; undefined until first asked. */
   overBroad?: boolean;
 }
@@ -378,7 +375,6 @@ function buildMappingIndex(mappings: ManagerMappings): MappingIndex {
   const exact = new Map<string, string>();
   const owners = new Map<string, Set<string>>();
   const patterns: PatternClaim[] = [];
-  const bySource = new Map<string, Set<string>>();
   for (const [repoOrId, value] of Object.entries(mappings)) {
     if (!Array.isArray(value)) continue;
     const [classNames, meta] = value;
@@ -395,19 +391,12 @@ function buildMappingIndex(mappings: ManagerMappings): MappingIndex {
     const pattern = meta?.nodename_pattern;
     if (typeof pattern === "string" && pattern) {
       try {
-        patterns.push({ re: new RegExp(pattern), pack, source: pattern });
-        let packs = bySource.get(pattern);
-        if (!packs) bySource.set(pattern, (packs = new Set()));
-        packs.add(pack);
+        patterns.push({ re: new RegExp(pattern), pack });
       } catch {
         // Ignore malformed patterns from the Manager DB.
       }
     }
   }
-  // A regex published by two different packs cannot select between them, so it
-  // selects nothing. Measured against the live catalogue this drops three:
-  // `_jru$`, `Inspire$` and `- Ostris$` are each claimed twice.
-  for (const p of patterns) p.contested = (bySource.get(p.source)?.size ?? 1) > 1;
   return { exact, owners, patterns };
 }
 
@@ -457,7 +446,6 @@ function resolveFromMappings(classType: string, index: MappingIndex): MappingHit
   if (exact) return { pack: exact, via: "exact" };
   const packs = new Set<string>();
   for (const p of index.patterns) {
-    if (p.contested) continue;
     if (!p.re.test(classType)) continue;
     if (isOverBroad(p, index)) continue;
     packs.add(p.pack);

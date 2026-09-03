@@ -667,7 +667,13 @@ describe("#2765 pack ownership prefers evidence over a catalogue guess", () => {
 
   it("ignores a regex two different packs publish", async () => {
     // Live catalogue: `_jru$`, `Inspire$` and `- Ostris$` are each published twice.
-    // The same string cannot select between its own claimants.
+    // Same unanimity rule as above rather than a rule of its own — an earlier draft
+    // had a dedicated `contested` flag, and mutating it away killed no test because
+    // it could not: where BOTH claimants survive, unanimity already refuses, and
+    // where one is disqualified as over-broad the survivor is the right answer, so
+    // refusing there threw a correct mapping away. Against the live catalogue that
+    // is the difference between `SomethingInspire` resolving to Inspire Pack and
+    // resolving to nothing.
     const deps = makeDeps({
       fetchObjectInfo: vi.fn(async () => ({})),
       fetchManagerMappings: vi.fn(
