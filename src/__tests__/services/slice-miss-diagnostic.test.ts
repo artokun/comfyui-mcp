@@ -131,7 +131,7 @@ describe("slice seeds from nested overlapping groups (#2780)", () => {
       { title: "Save Group", bounding: [0, 0, 200, 200] },
       { title: "#Save Draft 📐", bounding: [25, 25, 75, 75] },
     ],
-  } as unknown as UiWorkflow;
+  } as UiWorkflow;
 
   it("slices when the output is inside a nested inner group that overlaps a larger outer group", () => {
     const { stats, workflow } = sliceWorkflow(nestedOverlapWf, ["save draft"]);
