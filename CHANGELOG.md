@@ -8,6 +8,7 @@ All notable changes to this project are documented here. This project adheres to
 
 ### MCP
 #### Fixed
+- **`panel_call_tool` recovers a unique inner panel tool from a self-referential call (#2717).** `name: "panel_call_tool"` with the real tool on `tool` / `tool_name`, a nested key, or sibling fields unwraps once and runs that tool. Several inner names, a non-object keyed payload, or a nested router still fail closed; the refusal names the inner tool when it is unique. The schema now says `name` is the inner tool, never this router.
 - **`panel_set_widget` accepts a complete promoted-subgraph ownership envelope that omits `truncated:false` (#2783).** `graph_get_subgraph` already proves completeness when `node_count === nodes.length`; an omitted or null `truncated` flag is then `false`. An asserted `truncated:true`, or a list shorter than `node_count`, stays fail-closed.
 - panel_load_workflow path: loads API/prompt graphs (including graph.api.json) onto the canvas instead of refusing them as non-UI (panel#2011)
 
