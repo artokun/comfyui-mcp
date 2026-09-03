@@ -380,7 +380,9 @@ export function registerImageManagementTools(server: McpServer): void {
               args.type ?? "output",
               args.subfolder ?? "",
               // #1373 — the input dir legitimately holds workflow .json files.
-              { allowMedia: true, allowAttachment: true, allowJson: true },
+              // #2785 — still images use the 64 MB preview-source cap so
+              // max_preview_dimension can run instead of VIEW_TOO_LARGE at 32 MB.
+              { allowMedia: true, allowAttachment: true, allowJson: true, forInlinePreview: true },
             );
 
             // The bytes are already in hand at this point. Saving them is a SEPARATE

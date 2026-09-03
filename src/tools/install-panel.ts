@@ -289,14 +289,13 @@ export async function panelAction(
   }
 
   if (action === "unlock") {
-    // Recovery for the wedge from #760: a crashed/killed orchestrator
-    // leaves panel-op.lock behind and the acquire path deliberately never
-    // auto-reclaims it (#779). This is the explicit recovery the timeout
-    // message names — it re-verifies the recorded owner is provably dead
-    // before deleting anything (#1953: a fresh lock whose owner already
-    // exited is abandoned; the 10-minute window does not protect it), and
-    // says exactly what it observed when it refuses. It does NOT take the
-    // lock itself: a wedged lock is the very case this exists for.
+    // An explicit RE-CHECK and report, not a force. It runs the same proof as
+    // acquire, so a lock whose owner cannot be proven dead (unreadable /
+    // reuse-ambiguous) is REFUSED here too -- that case is recovered by hand,
+    // after confirming no orchestrator still runs. What this adds over acquire
+    // is an on-demand verdict: acquire reclaims a proven-dead owner on its own
+    // (#2788), while this re-verifies on request (#1953: a fresh lock whose
+    // owner already exited is abandoned) and does NOT take the lock itself.
     return json({ action: "unlock", ...reclaimAbandonedPanelLock() });
   }
 
