@@ -32,6 +32,7 @@ import {
   type DownloadJob,
 } from "../services/download-jobs.js";
 import {
+  downloadCacheFootprint,
   observeSegmentScratchAtPath,
   observeStagedPartialAtPath,
   type StagedPartialObservation,
@@ -1155,6 +1156,52 @@ async function downloadAction(args: {
 }
 
 /** ← the retired standalone download-status tool (now action:"status"). */
+const CACHE_GB = 1024 ** 3;
+
+/**
+ * What the download cache is costing on disk, appended to action:"status" (#1477).
+ *
+ * The cache is a second, content-addressed copy of every model ever downloaded. It
+ * lives under the HOME volume while the models land wherever ComfyUI keeps them,
+ * and with COMFYUI_LRU_CACHE_SIZE_GB unset nothing ever evicts it. Both reporters
+ * found it with a disk-usage treemap — 0.24 + 2.72 GB, then 37.63 GB across 11
+ * entries on C: while the models were on D: — because no output this server
+ * produced had ever mentioned the directory. This does not decide what the limit
+ * ought to be; it stops the growth being invisible.
+ *
+ * Silent when there is nothing to report, so polling a download does not accrete a
+ * paragraph of unchanging text. The STAGED figure is deliberately included while a
+ * transfer runs: it is read from the filesystem, not from the in-memory progress
+ * row, and a 10x divergence between those two is the same report's other half.
+ */
+async function cacheFootprintNote(): Promise<string> {
+  let f;
+  try {
+    f = await downloadCacheFootprint();
+  } catch {
+    return "";
+  }
+  if (f.unreadable || (f.retainedBytes === 0 && f.stagedBytes === 0)) return "";
+  const gb = (n: number) => (n / CACHE_GB).toFixed(2);
+  const parts: string[] = [];
+  if (f.retainedEntries > 0) {
+    const plural = f.retainedEntries === 1 ? "entry" : "entries";
+    parts.push(`${gb(f.retainedBytes)} GB retained across ${f.retainedEntries} ${plural}`);
+  }
+  if (f.stagedEntries > 0) {
+    const plural = f.stagedEntries === 1 ? "partial" : "partials";
+    parts.push(`${gb(f.stagedBytes)} GB staged in ${f.stagedEntries} resumable ${plural}`);
+  }
+  const levers =
+    f.limitBytes > 0
+      ? `Eviction is ON at ${gb(f.limitBytes)} GB (COMFYUI_LRU_CACHE_SIZE_GB).`
+      : "Eviction is OFF — COMFYUI_LRU_CACHE_SIZE_GB is unset, so nothing here is removed " +
+        "automatically. Set it to bound the cache, or COMFYUI_DOWNLOAD_CACHE_DIR to stage on " +
+        "a different volume. A retained entry is a COPY kept to avoid a re-download: once a " +
+        "model has landed at its destination, deleting its cache file costs only that.";
+  return `\n\n### Download cache\n\n\`${f.dir}\` — ${parts.join(", ")}.\n${levers}`;
+}
+
 async function statusAction(args: {
   id?: string;
   tray_id?: string;
@@ -1222,7 +1269,7 @@ async function statusAction(args: {
                   // reconnect empties it while transfers keep streaming.
                   : emptyDownloadListingNote({
                       storeCreatedMs: describeRecordStore().createdMs,
-                    }),
+                    }) + (await cacheFootprintNote()),
               },
             ],
           };
@@ -1391,7 +1438,11 @@ async function statusAction(args: {
           collidingIds.length > 0
             ? `## Downloads\n\nNOTE: ${collidingIds.length} id(s) below name MORE THAN ONE download (same destination file, different source URLs). Use the \`tray_id\` shown on each row — not the id alone — with \`action:"status"\` and \`action:"cancel"\`.\n`
             : "## Downloads\n";
-        return { content: [{ type: "text", text: `${header}\n${lines.join("\n")}` }] };
+        return {
+          content: [
+            { type: "text", text: `${header}\n${lines.join("\n")}${await cacheFootprintNote()}` },
+          ],
+        };
       } catch (err) {
         return errorToToolResult(err);
       }

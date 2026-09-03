@@ -3492,6 +3492,79 @@ async function materializeCacheFile(
   }
 }
 
+/** What the download cache is holding right now (#1477).
+ *
+ * Retention is the POINT of a cache, but with COMFYUI_LRU_CACHE_SIZE_GB unset the
+ * limit is 0, which evictLruIfNeeded reads as "never evict" — so the default is an
+ * unbounded second copy of every model ever downloaded, sitting on the HOME volume
+ * while the models themselves land wherever ComfyUI keeps them. Two reporters found
+ * it the same way: a disk-usage treemap (0.24 + 2.72 GB, then 37.63 GB across 11
+ * entries on C: while the models were on D:). Nothing this server printed had ever
+ * said the directory existed, which is the part that is fixable without first
+ * deciding what the limit ought to be.
+ *
+ * Counted with evictLruIfNeeded's OWN filter so the two cannot disagree about what
+ * is evictable: plain files only. Staged partials are reported separately because
+ * they are dot-prefixed, which is exactly why eviction skips them — a resumable
+ * download in progress is not retention, and reporting it as such would tell a
+ * user to delete the bytes they are waiting on.
+ *
+ * Best-effort and never throws. This decorates a status call that is about
+ * something else; an unreadable cache directory must not fail it.
+ */
+export interface DownloadCacheFootprint {
+  dir: string;
+  /** Completed entries — exactly what eviction would consider. */
+  retainedBytes: number;
+  retainedEntries: number;
+  /** Resumable staging, which eviction never touches. */
+  stagedBytes: number;
+  stagedEntries: number;
+  /** COMFYUI_LRU_CACHE_SIZE_GB in bytes. 0 means eviction is OFF. */
+  limitBytes: number;
+  /** The directory could not be listed at all (missing, or unreadable). */
+  unreadable: boolean;
+}
+
+export async function downloadCacheFootprint(): Promise<DownloadCacheFootprint> {
+  const dir = cacheDir();
+  const base = {
+    dir,
+    retainedBytes: 0,
+    retainedEntries: 0,
+    stagedBytes: 0,
+    stagedEntries: 0,
+    limitBytes: cacheSizeLimitBytes(),
+  };
+  let entries;
+  try {
+    entries = await downloadCacheFs.readdir(dir, { withFileTypes: true });
+  } catch {
+    return { ...base, unreadable: true };
+  }
+  const out = { ...base, unreadable: false };
+  for (const entry of entries) {
+    if (!entry.isFile()) continue;
+    let size: number;
+    try {
+      size = (await downloadCacheFs.stat(join(dir, entry.name))).size;
+    } catch {
+      // A file that vanished between readdir and stat is a live eviction or a
+      // finishing download, not an error worth surfacing here.
+      continue;
+    }
+    // The same predicate evictLruIfNeeded uses, so "retained" means "evictable".
+    if (!entry.name.startsWith(".")) {
+      out.retainedBytes += size;
+      out.retainedEntries += 1;
+    } else if (entry.name.endsWith(".partial")) {
+      out.stagedBytes += size;
+      out.stagedEntries += 1;
+    }
+  }
+  return out;
+}
+
 async function evictLruIfNeeded(): Promise<void> {
   const limit = cacheSizeLimitBytes();
   if (limit <= 0) return;
