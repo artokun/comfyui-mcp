@@ -76,12 +76,21 @@ export function sliceWorkflow(
   const links = new Map<number, WLink>(allLinks.map((l) => [l[0], l]));
   const groups = g.groups ?? [];
 
+  // #2780 — a node can sit inside several overlapping/nested boxes. `find`
+  // attributed it only to the first, so a SaveImage inside both "Save Group"
+  // and "#Save Draft" was missed when the caller asked for the inner title.
+  const groupsOf = (n: WNode): string[] =>
+    groups.filter((gr) => inBox(n.pos, gr.bounding)).map((gr) => gr.title ?? "");
+  const wantNode = (n: WNode): boolean =>
+    groupsOf(n).some((title) => {
+      const t = title.toLowerCase();
+      return want.some((w) => t.includes(w));
+    });
   const groupOf = (n: WNode): string =>
-    groups.find((gr) => inBox(n.pos, gr.bounding))?.title ?? "";
-  const wantNode = (n: WNode): boolean => {
-    const t = groupOf(n).toLowerCase();
-    return want.some((w) => t.includes(w));
-  };
+    groupsOf(n)
+      .map((t) => t.trim())
+      .filter(Boolean)
+      .join(" / ");
 
   // Set/Get bus maps (keyed by the bus name in widgets_values[0]).
   const setByBus = new Map<unknown, number>();
