@@ -10,6 +10,7 @@ All notable changes to this project are documented here. This project adheres to
 
 #### Fixed
 
+- **`panel_set_widget` creates a documented `lora_N` row on an ordinary Power Lora Loader inside a live subgraph (#2394).** Current panels flatten parentheses in the `graph_get_subgraph` "is not a subgraph" line, so a live `Power Lora Loader (rgthree)` was reported as `Power Lora Loader rgthree` and the identity-fenced ordinary write refused it as a type change. The two types are compared after that flatten; the write still fences the real unflattened type.
 - **an MCP server that connects and registers NO tools is now reported (#2742).**
   The session-health check compared connection STATUS, so the variant five reporters
   hit passed it: panel=connected in every session with zero panel_* tools reaching the

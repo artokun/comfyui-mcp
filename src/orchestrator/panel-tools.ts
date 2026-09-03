@@ -7949,6 +7949,26 @@ function definitiveNonPromotedNodeType(res: ToolResult): string | null {
   return unwrapped || null;
 }
 
+/** Panel `graph_get_subgraph` flattens parentheses in the node type before
+ * embedding it in the definitive ordinary-node refusal (panel#1941), so a live
+ * `Power Lora Loader (rgthree)` is reported as `Power Lora Loader rgthree`.
+ * The scope probe still publishes the real type. Compare after that flatten;
+ * the write fence must keep the unflattened scope type (#2394). */
+function flattenDefinitiveOrdinaryNodeType(type: string): string {
+  return type.replace(/[()]/g, " ").replace(/\s+/g, " ").trim();
+}
+
+function sameDefinitiveOrdinaryNodeType(
+  fromSubgraphRead: string | null,
+  fromScopeProbe: string,
+): boolean {
+  if (!fromSubgraphRead) return false;
+  if (fromSubgraphRead === fromScopeProbe) return true;
+  const left = flattenDefinitiveOrdinaryNodeType(fromSubgraphRead);
+  const right = flattenDefinitiveOrdinaryNodeType(fromScopeProbe);
+  return left.length > 0 && left === right;
+}
+
 type PromotedSubgraphReadErrorKind = "definitive-ordinary" | "transient" | "permanent";
 
 /** The promoted-write refresh is deliberately narrower than the broad panel
@@ -8895,7 +8915,7 @@ async function preparePromotedWidgetWrite(
         // available.
         if (!targetScope.nodeIdentity) return null;
         const expectedNodeType = definitiveNonPromotedNodeType(sub);
-        if (expectedNodeType !== targetScope.nodeType) {
+        if (!sameDefinitiveOrdinaryNodeType(expectedNodeType, targetScope.nodeType)) {
           return promotedWriteRefusal(
             widget,
             "the ordinary node type changed between the scope and subgraph reads",
