@@ -6,6 +6,12 @@ All notable changes to this project are documented here. This project adheres to
 
 ## Unreleased
 
+### MCP
+
+#### Fixed
+- **`list_local_models` `action:"remove"` resolves against the same launch-proven extra-path files as inventory, including ComfyUI Desktop's `extra_models_config.yaml` (#2739).** Removal previously searched only the Desktop shared models yaml from argv, so a listed LTX file under another active extra root could not be deleted. Desktop extra roots are included only when the connected snapshot already named a Desktop extra-path config — never by probing a guessed :8188 origin — and still fail closed when that file cannot be proven unchanged since launch.
+
+
 ## [0.52.181] - 2026-09-03
 
 ### MCP
