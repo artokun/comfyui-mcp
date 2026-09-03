@@ -2661,10 +2661,11 @@ export class PanelAgentManager {
   /** Per-key model/effort OVERRIDE set by the picker (set_options). Keyed by the
    *  COMPOSITE agent key `tabId::backend`, so a model/effort chosen for one
    *  provider NEVER bleeds into another: a Codex "gpt-5.5" pick must not become the
-   *  Claude spawn's model (which errors "model gpt-5.5 may not exist"). A provider
-   *  switch calls reset(oldKey), which drops that key's override, so the new
-   *  backend falls back to its OWN default. A same-provider reconnect reuses the
-   *  same key, so the user's pick persists. */
+   *  Claude spawn's model (which errors "model gpt-5.5 may not exist"). The
+   *  composite key is what guarantees that, on its own — the new backend reads a
+   *  different key, so there is nothing of the old provider's to inherit. A
+   *  same-provider reconnect reuses the same key, so the user's pick persists, and
+   *  #2759 is what it cost when reset() contradicted that by deleting the entry. */
   private modelByKey = new Map<string, string>();
   private effortByKey = new Map<string, Effort | undefined>();
 
@@ -3957,10 +3958,21 @@ export class PanelAgentManager {
     this.pendingMcpRestart.delete(tabId);
     this.pendingForkOnRestart.delete(tabId);
     this.pendingRetargetFrom.delete(tabId); // #1429 — nothing queued, nothing to classify
-    // Drop this key's picker override so a provider switch (which reset()s the old
-    // key) can't carry the old provider's model/effort into the new backend's spawn.
-    this.modelByKey.delete(tabId);
-    this.effortByKey.delete(tabId);
+    // #2759 — the picker override SURVIVES a reset. It used to be dropped here, on
+    // the rationale that a provider switch reset()s the old key and would otherwise
+    // carry the old provider's model into the new backend's spawn. That rationale
+    // does not hold, twice over: this map is keyed by the composite agent key,
+    // whose last segment IS the backend (agentKeyFor in index.ts), so the new
+    // provider reads a different key and structurally cannot inherit the old
+    // provider's pick; and the only two callers of reset() are
+    // `new_session` and `resume_session`, neither of which is a provider switch.
+    // What the delete actually did was clobber the SAME-provider case — the one the
+    // key doc above promises persists — so a New chat silently spawned on the global
+    // default while the picker went on showing the user's choice. A subscription user
+    // picked Sonnet and burned Opus limits with no signal anywhere.
+    //
+    // A New chat is a CONVERSATION boundary. The model belongs to the tab and its
+    // provider, not to the conversation, so it is not this boundary's to reset.
     if (agent) {
       logger.info(`[panel-orchestrator] tab ${tabId.slice(0, 8)} reset — new session next message`);
       void agent.stop();
