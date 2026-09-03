@@ -370,18 +370,18 @@ describe("withPanelMutationLock — a FILE lock, so it holds across processes", 
     expect(order).toEqual(["holder:start", "nested", "holder:end", "outsider"]);
   });
 
-  it("does NOT auto-reclaim a fresh lock even when its recorded pid is dead", async () => {
-    // #779: the acquire loop never deletes. A young dead-owner lock is
-    // reclaimable via unlock / hello auto-sync (#1953); this path times out
-    // and leaves the file, naming that recovery.
-    writeFileSync(panelLockPath(), JSON.stringify({ pid: 999999 }));
+  it("auto-reclaims a fresh lock whose recorded pid is dead (#2788)", async () => {
+    // 0x7fffffff, the sentinel the rest of this file uses, NOT 999999: Linux
+    // allows pid_max up to 4194304, so a seven-digit pid can name a real live
+    // process and turn this into a flake that never exercises reclaim at all.
+    writeFileSync(panelLockPath(), JSON.stringify({ pid: 0x7fffffff }));
     await expect(
-      withPanelMutationLock(async () => "should not run", { timeoutMs: 300 }),
-    ).rejects.toThrow(/Timed out .* waiting for the panel operation lock/);
-    expect(existsSync(panelLockPath())).toBe(true);
+      withPanelMutationLock(async () => "reclaimed", { timeoutMs: 1_000 }),
+    ).resolves.toBe("reclaimed");
+    expect(existsSync(panelLockPath())).toBe(false);
   });
 
-  it("fails closed on a stale dead-owner lock and names the safe recovery boundary", async () => {
+  it("auto-reclaims a stale dead-owner lock so the waiter proceeds (#2788)", async () => {
     const path = panelLockPath();
     writeFileSync(path, JSON.stringify({ pid: 0x7fffffff }));
     const old = new Date(Date.now() - 60 * 60_000);
@@ -389,9 +389,9 @@ describe("withPanelMutationLock — a FILE lock, so it holds across processes", 
     utimesSync(path, old, old);
 
     await expect(
-      withPanelMutationLock(async () => "must not run", { timeoutMs: 300 }),
-    ).rejects.toThrow(/stop or restart every comfyui-mcp orchestrator.*delete this exact lock file/i);
-    expect(existsSync(path)).toBe(true);
+      withPanelMutationLock(async () => "reclaimed", { timeoutMs: 1_000 }),
+    ).resolves.toBe("reclaimed");
+    expect(existsSync(path)).toBe(false);
   });
 
   it("does NOT reclaim an old lock whose owner is still ALIVE", async () => {
@@ -455,27 +455,24 @@ describe("withPanelMutationLock — a FILE lock, so it holds across processes", 
     expect(observedByNextAcquisition).toEqual(["side effect committed"]);
   });
 
-  it("the timeout error reports the OBSERVED lock state and names the unlock remedy (#760)", async () => {
-    // The recurrence reports on #760 hit this blind: a 60s timeout with no lock
-    // owner, no age, and no remedy short of hand-deleting an internal file. The
-    // message must say what was actually observed and what to do about it.
+  it("the timeout error reports an UNPROVEN lock and names the unlock remedy (#760)", async () => {
+    // A dead pid is auto-reclaimed (#2788). The timeout path is for a lock
+    // whose owner cannot be proven gone: unreadable content, not a missing
+    // process. The message must still say what was observed and what to do.
     const path = panelLockPath();
-    writeFileSync(
-      path,
-      JSON.stringify({ pid: 0x7fffffff, startedAt: "2026-08-02T10:06:42.831Z" }),
-    );
+    writeFileSync(path, "not json");
     const old = new Date(Date.now() - 60 * 60_000);
     const { utimesSync } = await import("node:fs");
     utimesSync(path, old, old);
 
     const err = await withPanelMutationLock(async () => "must not run", {
       timeoutMs: 300,
-    }).catch((e: Error) => e);
+    }).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(Error);
     const message = (err as Error).message;
-    expect(message).toContain(String(0x7fffffff));
-    expect(message).toMatch(/no longer running/);
+    expect(message).toMatch(/not valid JSON/);
+    expect(message).toMatch(/unproven owner is left in place/);
     expect(message).toContain("install_comfyui(action:'panel', panel_action:'unlock')");
-    // The manual boundary stays as the fallback.
     expect(message).toMatch(
       /stop or restart every comfyui-mcp orchestrator.*delete this exact lock file/i,
     );
@@ -545,6 +542,31 @@ describe("reclaimAbandonedPanelLock — the explicit recovery for a wedged lock 
     const res = reclaimAbandonedPanelLock();
     expect(res.outcome).toBe("no-lock");
     expect(res.detail).toMatch(/nothing to reclaim/i);
+  });
+
+  it("still reclaims a DEAD owner with the process-table probe withheld (#2788 review)", async () => {
+    // The load-bearing claim behind throttling that probe: `kill(0)` alone
+    // already proves a dead owner, so the once-a-second poll can skip the
+    // synchronous `tasklist.exe` / `ps` spawn WITHOUT slowing reclaim down. If
+    // this ever fails, the throttle is trading correctness for cost and the
+    // interval must go back to matching the liveness poll.
+    await plantLock(
+      JSON.stringify({ pid: DEAD_PID, startedAt: "2026-08-02T10:06:42.831Z" }),
+      60 * 60_000,
+    );
+    const res = reclaimAbandonedPanelLock({ allowProcessTableProbe: false });
+    expect(res.outcome).toBe("reclaimed");
+  });
+
+  it("withholding the probe never turns an unproven owner into a reclaim", async () => {
+    // The other direction: the option may only ever make reclaim MORE
+    // conservative. An unreadable record has no owner whose death could be
+    // shown, and that verdict must not change with the probe disabled.
+    await plantLock(JSON.stringify({ note: "no pid here" }), 60 * 60_000);
+    const withProbe = reclaimAbandonedPanelLock();
+    const withoutProbe = reclaimAbandonedPanelLock({ allowProcessTableProbe: false });
+    expect(withProbe.outcome).toBe("refused");
+    expect(withoutProbe.outcome).toBe("refused");
   });
 
   it("reclaims a lock that is BOTH old AND owned by a dead pid — and a new op proceeds", async () => {

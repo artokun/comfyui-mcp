@@ -207,6 +207,33 @@ function joinCategoryEntryToBase(base: string, entry: string): string {
 const RESERVED_KEYS = new Set(["base_path", "is_default"]);
 const SAFE_KEY_RE = /^[A-Za-z0-9_.-]+$/;
 const CONTROL_RE = /[\x00\r\n]/;
+/** YAML / extra-paths key for a generic models tree (not a per-category folder). */
+const GENERIC_MODELS_CATEGORY = "models";
+const CODE_EXTRA_CATEGORIES = new Set(["custom_nodes"]);
+
+function isProvenAbsolutePath(p: string): boolean {
+  return isAbsolute(p) || /^[a-zA-Z]:[\\/]/.test(p) || p.startsWith("\\\\");
+}
+
+function groupServesModelDownloads(categories: readonly ExtraPathCategory[]): boolean {
+  return categories.some((c) => !CODE_EXTRA_CATEGORIES.has(c.category.trim().toLowerCase()));
+}
+
+/**
+ * list_paths reports each group's configured `base_path`. Category expansion
+ * still happens; omitting the base made concurrent `download_civitai` calls
+ * reject that same proven model_root while siblings accepted it (#2787).
+ * Relative bases stay out — they are unproven from this process.
+ */
+function pushProvenGroupBase(
+  roots: ExtraModelRoot[],
+  group: string,
+  categories: readonly ExtraPathCategory[],
+  base: string | undefined,
+): void {
+  if (!base || !groupServesModelDownloads(categories) || !isProvenAbsolutePath(base)) return;
+  roots.push({ category: GENERIC_MODELS_CATEGORY, dir: resolve(base), group });
+}
 
 function assertSafeKey(value: string, label: string): string {
   const trimmed = value.trim();
@@ -1384,6 +1411,7 @@ export async function getExtraModelRoots(
   const roots: ExtraModelRoot[] = [];
   for (const group of info.groups) {
     const base = group.base_path?.trim();
+    pushProvenGroupBase(roots, group.name, group.categories, base);
     for (const category of group.categories) {
       for (const p of category.paths) {
         const dir = isAbsolute(p)
@@ -1611,6 +1639,7 @@ export async function getLiveExtraModelRoots(
         if (expanded === undefined) continue; // unresolvable base_path → skip this group
         base = isAbsolute(expanded) ? resolve(expanded) : resolve(cfgDir, expanded);
       }
+      pushProvenGroupBase(roots, name, group.categories, base);
       for (const category of group.categories) {
         for (const p of category.paths) {
           // With a base_path, EVERY entry is os.path.join'd to it (incl. the Windows

@@ -2566,6 +2566,10 @@ async function listKnownDownloadModelRoots(
     known.push({ dir: resolved, category: cat });
   };
   try {
+    // Request-local: each download builds its own list. Extra roots include
+    // category dirs AND each group's proven base_path as a generic models
+    // root, so parallel download_civitai calls share the same list_paths
+    // model_root (#2787). Live extras use THIS snapshot — never a guessed :8188.
     for (const er of await getExtraModelRoots()) add(er.dir, er.category);
   } catch {
     // Extra roots are additive; an unreadable config just contributes none.

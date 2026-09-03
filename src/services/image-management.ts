@@ -5,6 +5,7 @@ import {
   getHistory,
   getObjectInfo,
   resetObjectInfoCache,
+  MAX_PREVIEW_SOURCE_BYTES,
   MAX_VIEW_RESPONSE_BYTES,
 } from "../comfyui/client.js";
 import type { ObjectInfo } from "../comfyui/types.js";
@@ -698,8 +699,11 @@ function localViewMimeType(filename: string): string {
   );
 }
 
-/** Read at most the shared /view limit, including when the file grows after stat(). */
-async function readLocalViewFileBounded(path: string): Promise<Buffer | undefined> {
+/** Read at most `maxBytes`, including when the file grows after stat(). */
+async function readLocalViewFileBounded(
+  path: string,
+  maxBytes: number,
+): Promise<Buffer | undefined> {
   const handle = await open(path, "r");
   const chunks: Buffer[] = [];
   let total = 0;
@@ -707,12 +711,12 @@ async function readLocalViewFileBounded(path: string): Promise<Buffer | undefine
     for (;;) {
       // Read one byte beyond the limit so growth after the initial stat is
       // refused rather than silently truncated into a valid-looking payload.
-      const capacity = Math.min(64 * 1024, MAX_VIEW_RESPONSE_BYTES - total + 1);
+      const capacity = Math.min(64 * 1024, maxBytes - total + 1);
       const chunk = Buffer.allocUnsafe(capacity);
       const { bytesRead } = await handle.read(chunk, 0, capacity, null);
       if (bytesRead === 0) return Buffer.concat(chunks, total);
       total += bytesRead;
-      if (total > MAX_VIEW_RESPONSE_BYTES) return undefined;
+      if (total > maxBytes) return undefined;
       chunks.push(chunk.subarray(0, bytesRead));
     }
   } finally {
@@ -731,6 +735,7 @@ async function readLocalViewFallback(
   filename: string,
   type: "output" | "input" | "temp",
   subfolder: string,
+  maxBytes: number = MAX_VIEW_RESPONSE_BYTES,
 ): Promise<{ base64: string; mimeType: string } | undefined> {
   if (isRemoteMode() || isCloudMode()) return undefined;
 
@@ -758,8 +763,8 @@ async function readLocalViewFallback(
     ]);
     if (!isStrictlyInside(realRoot, realCandidate)) return undefined;
     const candidateStat = await stat(realCandidate);
-    if (!candidateStat.isFile() || candidateStat.size > MAX_VIEW_RESPONSE_BYTES) return undefined;
-    const data = await readLocalViewFileBounded(realCandidate);
+    if (!candidateStat.isFile() || candidateStat.size > maxBytes) return undefined;
+    const data = await readLocalViewFileBounded(realCandidate, maxBytes);
     if (!data) return undefined;
     return { base64: data.toString("base64"), mimeType: localViewMimeType(filename) };
   } catch {
@@ -775,6 +780,21 @@ function isViewBadRequest(error: unknown): error is ComfyUIError {
     typeof error.details === "object" &&
     error.details !== null &&
     (error.details as { status?: unknown }).status === 400
+  );
+}
+
+function isViewTooLarge(error: unknown): error is ComfyUIError {
+  return error instanceof ComfyUIError && error.code === "VIEW_TOO_LARGE";
+}
+
+function viewTooLargeForPreview(filename: string, maxBytes: number): ComfyUIError {
+  return new ComfyUIError(
+    `ComfyUI /view response for "${filename}" exceeds the ${maxBytes / 1024 ** 2} MB safety limit, ` +
+      `so it was not loaded into memory and the inline preview (max_preview_dimension) could not be built. ` +
+      `If the file is on this machine, use get_image action:"convert" with its path under the ComfyUI output directory. ` +
+      `The output is still intact on the ComfyUI server — do not re-run the render.`,
+    "VIEW_TOO_LARGE",
+    { filename, maxBytes },
   );
 }
 
@@ -1080,25 +1100,49 @@ export async function getOutputImage(
      */
     requireImageContent = false,
     signal,
+    /**
+     * get_image action:"get" will downscale the inline payload. Raise the
+     * encoded-body ceiling for still images so a 32–64 MB PNG can be previewed
+     * instead of dying as VIEW_TOO_LARGE before max_preview_dimension runs.
+     * Videos/attachments keep the default 32 MB /view cap.
+     */
+    forInlinePreview = false,
   }: {
     allowMedia?: boolean;
     allowAttachment?: boolean;
     allowJson?: boolean;
     requireImageContent?: boolean;
     signal?: AbortSignal;
+    forInlinePreview?: boolean;
   } = {},
 ): Promise<{ base64: string; mimeType: string; filename: string }> {
   ({ filename, subfolder } = normalizeViewRef(filename, subfolder));
+  const ext = extname(filename).toLowerCase();
+  const maxBytes =
+    forInlinePreview && IMAGE_EXTENSIONS.has(ext) ? MAX_PREVIEW_SOURCE_BYTES : MAX_VIEW_RESPONSE_BYTES;
+  const fetchOpts = {
+    ...(signal ? { signal } : {}),
+    ...(maxBytes !== MAX_VIEW_RESPONSE_BYTES ? { maxBytes } : {}),
+  };
   let result: { base64: string; mimeType: string };
   try {
-    result = signal
-      ? await fetchImage(filename, type, subfolder, { signal })
-      : await fetchImage(filename, type, subfolder);
+    result =
+      Object.keys(fetchOpts).length > 0
+        ? await fetchImage(filename, type, subfolder, fetchOpts)
+        : await fetchImage(filename, type, subfolder);
   } catch (error) {
-    if (!isViewBadRequest(error)) throw error;
-    const local = await readLocalViewFallback(filename, type, subfolder);
-    if (!local) throw error;
-    result = local;
+    if (isViewTooLarge(error) || isViewBadRequest(error)) {
+      const local = await readLocalViewFallback(filename, type, subfolder, maxBytes);
+      if (local) {
+        result = local;
+      } else if (isViewTooLarge(error)) {
+        throw viewTooLargeForPreview(filename, maxBytes);
+      } else {
+        throw error;
+      }
+    } else {
+      throw error;
+    }
   }
 
   // Guard against non-image /view payloads. ComfyUI (or a reverse proxy in
@@ -1123,7 +1167,6 @@ export async function getOutputImage(
   const imageContentOk =
     !requireImageContent || (isImage && (await hasActualImageContent(result.base64, filename)));
   const sniffedFormat = allowMedia ? sniffMediaFormat(result.base64) : null;
-  const ext = extname(filename).toLowerCase();
   // The sniffed format must satisfy EVERY claim present: the declared
   // content-type (exact subtype match), and the requested filename's
   // extension whenever we can classify it — audio/wav bytes requested as
