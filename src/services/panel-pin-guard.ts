@@ -638,17 +638,17 @@ export interface PanelLockReclaimResult {
  * already gone is abandoned: the 10-minute window protects a slow
  * ComfyUI-Manager op, not a process that has already exited.
  *
- * This is the explicit, operator/agent-invoked recovery that the acquire
- * path's timeout message names. The acquire loop itself NEVER reclaims
- * automatically (#779): Node has no atomic compare-and-rename, so between a
- * stale observation and a delete, a concurrent (e.g. pre-upgrade)
- * orchestrator could replace the path with a fresh lock and have it stolen.
- * The same race is bounded here by RENAMING the file aside first and
- * comparing its bytes against the observed ones: a lock that was replaced
- * between observation and reclaim does not match and is never deleted. The
- * restore is a HARD LINK, not a rename — rename would silently overwrite a
- * fresh lock that appeared at the path in the meantime, while linkSync fails
- * with EEXIST and both files are reported, nothing destroyed.
+ * Acquire uses this same function when the recorded owner is gone (#2788),
+ * so a crashed orchestrator does not wedge every later panel mutation behind
+ * `panel_action:"unlock"`. A living owner is never stolen; an unproven owner
+ * is left in place. Node has no atomic compare-and-rename, so between a
+ * stale observation and a delete a concurrent orchestrator could replace the
+ * path with a fresh lock. That race is bounded here by RENAMING the file
+ * aside first and comparing its bytes against the observed ones: a lock that
+ * was replaced between observation and reclaim does not match and is never
+ * deleted. The restore is a HARD LINK, not a rename — rename would silently
+ * overwrite a fresh lock that appeared at the path in the meantime, while
+ * linkSync fails with EEXIST and both files are reported, nothing destroyed.
  */
 export function reclaimAbandonedPanelLock(): PanelLockReclaimResult {
   const path = panelLockPath();
@@ -913,33 +913,17 @@ export function releaseOwnedPanelLock(): PanelLockReleaseResult {
   };
 }
 
-/** The `token` from a lock record, or undefined when it cannot be read. Used to
- *  identify a lock across observations (#1489); pid+startedAt alone cannot. */
-function lockRecordToken(obs: { raw?: string }): string | undefined {
-  if (typeof obs.raw !== "string") return undefined;
-  try {
-    const t = (JSON.parse(obs.raw) as { token?: unknown }).token;
-    return typeof t === "string" ? t : undefined;
-  } catch {
-    return undefined;
-  }
-}
-
 async function acquireFileLock(timeoutMs: number): Promise<() => void> {
   const path = panelLockPath();
   assertNotWritingRealHomeInTests(path, "the panel operation lock");
   mkdirSync(dirname(path), { recursive: true });
   const deadline = Date.now() + timeoutMs;
-  // #1489 — throttle for the dead-owner probe below. The poll runs every 100 ms
-  // and `observePanelLock` does a stat + read, so probing on every tick would be
-  // ~600 syscall pairs over a full wait to answer a question that cannot change
-  // that fast. First probe fires immediately (the common case is a lock left by
-  // an orchestrator that died some time ago, and that is answerable at once).
+  // Throttle the dead-owner reclaim probe. The poll runs every 100 ms, and
+  // reclaim re-opens the file (and may consult the process table). First
+  // probe fires immediately: the common case is a lock left by an
+  // orchestrator that already died, and that is answerable at once (#2788).
   const LIVENESS_PROBE_MS = 1_000;
   let nextLivenessProbe = 0;
-  /** `pid@startedAt` of a dead+stale lock seen on the PREVIOUS probe. The fast
-   *  path fires only when the next probe sees the same one — see below. */
-  let deadOwnerCandidate: string | undefined;
 
   for (;;) {
     try {
@@ -1107,7 +1091,23 @@ async function acquireFileLock(timeoutMs: number): Promise<() => void> {
           }. Refusing to mutate the panel without it.`,
         );
       }
+      // #2788 — a proven-dead owner is abandoned: take the lock via the same
+      // rename-aside + byte-compare path as `panel_action:"unlock"`. A living
+      // owner is never stolen. An unreadable / reuse-ambiguous record cannot
+      // prove death, so it stays until timeout (fail closed).
+      if (Date.now() >= nextLivenessProbe) {
+        nextLivenessProbe = Date.now() + LIVENESS_PROBE_MS;
+        const reclaim = reclaimAbandonedPanelLock();
+        if (reclaim.outcome === "reclaimed" || reclaim.outcome === "no-lock") {
+          continue;
+        }
+      }
       if (Date.now() >= deadline) {
+        // Last chance: the owner may have died after the previous probe.
+        const lastChance = reclaimAbandonedPanelLock();
+        if (lastChance.outcome === "reclaimed" || lastChance.outcome === "no-lock") {
+          continue;
+        }
         // Report the OBSERVED state of the lock that blocked us — the remedy
         // differs by whether its owner is alive, and "another operation is in
         // progress" is a claim we could not verify without looking.
@@ -1131,88 +1131,14 @@ async function acquireFileLock(timeoutMs: number): Promise<() => void> {
         }
         throw new Error(
           `Timed out after ${timeoutMs}ms waiting for the panel operation lock. ` +
-            `${describeObservedLock(path, obs)} The lock is never auto-reclaimed: a ` +
-            `concurrent pre-upgrade orchestrator could replace an observed stale path ` +
-            `with a fresh lock. To recover a proven abandoned lock, run ` +
+            `${describeObservedLock(path, obs)} It was not auto-reclaimed: a living ` +
+            `owner is never stolen, and an unproven owner is left in place. To ` +
+            `recover a lock whose owner cannot be identified, run ` +
             `install_comfyui(action:'panel', panel_action:'unlock') — it re-verifies that the recorded owner is ` +
             `dead before deleting anything, and refuses otherwise. ` +
             `Or do it by hand: stop or restart every comfyui-mcp orchestrator, verify ` +
             `none remain, delete this exact lock file, then retry.`,
         );
-      }
-      // #1489 — a PROVABLY DEAD owner is knowable now, so do not spend the rest
-      // of the 60 s discovering it. This is a latency narrowing ONLY: the outcome
-      // is the same refusal with the same remedy, delivered when it is first
-      // provable instead of at the deadline.
-      //
-      // Deliberately NOT an auto-reclaim. #779 made stale-lock recovery
-      // fail closed on purpose — a concurrent pre-upgrade orchestrator can
-      // replace an observed stale path with a fresh lock, so deleting on our own
-      // observation can destroy a live holder's lock. `panel_action:"unlock"`
-      // re-verifies under its own rules and stays the only path that removes
-      // anything.
-      //
-      // ONLY `alive === false` short-circuits. `"unsure"` is a recycled-pid
-      // maybe and MUST keep waiting — treating it as dead is the exact
-      // existence-for-identity fold `pidLiveness` was written to stop. `true`
-      // means a real operation may still be running.
-      // Acquire still age-gates the fast-fail: this loop must NOT delete, and a
-      // young lock whose owner is dead is now reclaimable via unlock / hello
-      // auto-sync (`reclaimAbandonedPanelLock` is owner-aware as of #1953).
-      // Short-cutting only the STALE case keeps the acquire path from holding
-      // a second opinion about freshness while still covering a lock that has
-      // been blocking long enough to need a manual unlock.
-      if (Date.now() >= nextLivenessProbe) {
-        nextLivenessProbe = Date.now() + LIVENESS_PROBE_MS;
-        const early = observePanelLock(path);
-        // TWO CONSISTENT OBSERVATIONS, a probe interval apart (review finding).
-        //
-        // One reading is not enough to cut a wait short. Between observing a
-        // dead+stale lock and raising the refusal, another process can release
-        // and a third can take a FRESH one at the same path — and we would then
-        // reject a legitimate current holder while asserting its owner is dead.
-        // The deadline path does not have this problem: by then the full budget
-        // is spent and the refusal is owed regardless of what sits there now.
-        //
-        // Identity is `pid + startedAt` from the record, not the path. A
-        // replacement changes it and resets the candidate, so the fast path only
-        // fires on a lock that was demonstrably the same one for a full probe
-        // interval. It cannot close the window absolutely — nothing short of an
-        // atomic take can — but it converts "one glance" into "unchanged across
-        // a second", and the failure it protects is a false refusal, never a
-        // deletion.
-        // The record's `token` is what makes a lock IDENTIFIABLE rather than
-        // merely attributable — it exists because pid+startedAt cannot
-        // distinguish two locks taken by the same process, and a replacement
-        // could in principle reuse both (review finding). Include it, and fall
-        // back to the raw record when it cannot be parsed, so an unreadable
-        // record can never fingerprint-match a different unreadable one.
-        const fingerprint =
-          early && early.alive === false && early.ageMs >= STALE_LOCK_MS
-            ? `${String(early.pid)}@${String(early.startedAt)}#${lockRecordToken(early) ?? `raw:${String(early.raw)}`}`
-            : undefined;
-        const confirmed = fingerprint !== undefined && fingerprint === deadOwnerCandidate;
-        deadOwnerCandidate = fingerprint;
-        if (confirmed && early) {
-          // Stated as an OBSERVATION, not as present-tense fact. The lock can
-          // still be replaced between this read and this throw — that window is
-          // inherent to observe-then-act and no amount of re-reading removes it
-          // (review, round 2). What two matching probes DO establish is that the
-          // sentence below was true for a full interval, which is a claim this
-          // can actually keep. The cost of being overtaken is one spurious error
-          // on a retryable operation; nothing is deleted either way.
-          throw new Error(
-            `The panel operation lock at ${path} was held, for at least the last ` +
-              `${Math.round(LIVENESS_PROBE_MS / 1000)}s, by a process that is no longer ` +
-              `running. ${describeObservedLock(path, early)} Not waiting out the remaining ` +
-              `timeout, and not deleting it either: a concurrent orchestrator could have ` +
-              `replaced it since it was observed. To clear a proven abandoned lock, run ` +
-              `install_comfyui(action:'panel', panel_action:'unlock') — it re-verifies that the recorded ` +
-              `owner is dead before deleting anything, and refuses ` +
-              `otherwise. Or do it by hand: stop or restart every comfyui-mcp orchestrator, ` +
-              `verify none remain, delete this exact lock file, then retry.`,
-          );
-        }
       }
       await sleep(POLL_MS);
     }

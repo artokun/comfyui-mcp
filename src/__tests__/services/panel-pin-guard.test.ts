@@ -370,18 +370,15 @@ describe("withPanelMutationLock — a FILE lock, so it holds across processes", 
     expect(order).toEqual(["holder:start", "nested", "holder:end", "outsider"]);
   });
 
-  it("does NOT auto-reclaim a fresh lock even when its recorded pid is dead", async () => {
-    // #779: the acquire loop never deletes. A young dead-owner lock is
-    // reclaimable via unlock / hello auto-sync (#1953); this path times out
-    // and leaves the file, naming that recovery.
+  it("auto-reclaims a fresh lock whose recorded pid is dead (#2788)", async () => {
     writeFileSync(panelLockPath(), JSON.stringify({ pid: 999999 }));
     await expect(
-      withPanelMutationLock(async () => "should not run", { timeoutMs: 300 }),
-    ).rejects.toThrow(/Timed out .* waiting for the panel operation lock/);
-    expect(existsSync(panelLockPath())).toBe(true);
+      withPanelMutationLock(async () => "reclaimed", { timeoutMs: 1_000 }),
+    ).resolves.toBe("reclaimed");
+    expect(existsSync(panelLockPath())).toBe(false);
   });
 
-  it("fails closed on a stale dead-owner lock and names the safe recovery boundary", async () => {
+  it("auto-reclaims a stale dead-owner lock so the waiter proceeds (#2788)", async () => {
     const path = panelLockPath();
     writeFileSync(path, JSON.stringify({ pid: 0x7fffffff }));
     const old = new Date(Date.now() - 60 * 60_000);
@@ -389,9 +386,9 @@ describe("withPanelMutationLock — a FILE lock, so it holds across processes", 
     utimesSync(path, old, old);
 
     await expect(
-      withPanelMutationLock(async () => "must not run", { timeoutMs: 300 }),
-    ).rejects.toThrow(/stop or restart every comfyui-mcp orchestrator.*delete this exact lock file/i);
-    expect(existsSync(path)).toBe(true);
+      withPanelMutationLock(async () => "reclaimed", { timeoutMs: 1_000 }),
+    ).resolves.toBe("reclaimed");
+    expect(existsSync(path)).toBe(false);
   });
 
   it("does NOT reclaim an old lock whose owner is still ALIVE", async () => {
@@ -455,27 +452,24 @@ describe("withPanelMutationLock — a FILE lock, so it holds across processes", 
     expect(observedByNextAcquisition).toEqual(["side effect committed"]);
   });
 
-  it("the timeout error reports the OBSERVED lock state and names the unlock remedy (#760)", async () => {
-    // The recurrence reports on #760 hit this blind: a 60s timeout with no lock
-    // owner, no age, and no remedy short of hand-deleting an internal file. The
-    // message must say what was actually observed and what to do about it.
+  it("the timeout error reports an UNPROVEN lock and names the unlock remedy (#760)", async () => {
+    // A dead pid is auto-reclaimed (#2788). The timeout path is for a lock
+    // whose owner cannot be proven gone: unreadable content, not a missing
+    // process. The message must still say what was observed and what to do.
     const path = panelLockPath();
-    writeFileSync(
-      path,
-      JSON.stringify({ pid: 0x7fffffff, startedAt: "2026-08-02T10:06:42.831Z" }),
-    );
+    writeFileSync(path, "not json");
     const old = new Date(Date.now() - 60 * 60_000);
     const { utimesSync } = await import("node:fs");
     utimesSync(path, old, old);
 
     const err = await withPanelMutationLock(async () => "must not run", {
       timeoutMs: 300,
-    }).catch((e: Error) => e);
+    }).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(Error);
     const message = (err as Error).message;
-    expect(message).toContain(String(0x7fffffff));
-    expect(message).toMatch(/no longer running/);
+    expect(message).toMatch(/not valid JSON/);
+    expect(message).toMatch(/unproven owner is left in place/);
     expect(message).toContain("install_comfyui(action:'panel', panel_action:'unlock')");
-    // The manual boundary stays as the fallback.
     expect(message).toMatch(
       /stop or restart every comfyui-mcp orchestrator.*delete this exact lock file/i,
     );
