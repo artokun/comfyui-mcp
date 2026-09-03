@@ -147,7 +147,16 @@ function remoteAbsolutePathUnsupported(absPath: string): string {
   );
 }
 
-async function fetchRemoteServerWorkflow(absPath: string): Promise<unknown> {
+/** A workflow document as it comes off the wire. WHICH dialect it is (UI graph
+ *  vs API prompt) is decided downstream; all this layer proves is that the body
+ *  parsed and is an object. */
+type FetchedWorkflowDocument = Record<string, unknown>;
+
+function isWorkflowDocument(value: unknown): value is FetchedWorkflowDocument {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+async function fetchRemoteServerWorkflow(absPath: string): Promise<FetchedWorkflowDocument> {
   const key = userdataKeyFromServerPath(absPath);
   if (!key) {
     throw new ValidationError(remoteAbsolutePathUnsupported(absPath));
@@ -160,7 +169,17 @@ async function fetchRemoteServerWorkflow(absPath: string): Promise<unknown> {
         : `Could NOT read "${absPath}" from the connected ComfyUI: the server answered ${describeStatus(res.status, res.statusText)}. That is not a report that it is missing — nothing was read.`,
     );
   }
-  return await res.json();
+  const parsed: unknown = await res.json();
+  if (!isWorkflowDocument(parsed)) {
+    // A 200 whose body is `null`, an array or a scalar is not a workflow. It used
+    // to be handed back as one, and that surfaced much later as an unreadable
+    // graph rather than as "that is not a workflow".
+    throw new ValidationError(
+      `Could NOT read "${absPath}" from the connected ComfyUI: the server answered 200 but the ` +
+        `body is not a workflow document. Nothing was loaded.`,
+    );
+  }
+  return parsed;
 }
 
 /**

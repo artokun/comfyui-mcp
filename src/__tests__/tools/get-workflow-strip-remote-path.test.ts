@@ -162,6 +162,28 @@ describe("#2782 get_workflow strip does not open a remote POSIX path locally", (
     expect(text(res)).not.toMatch(/ENOENT/);
   });
 
+  it("a 200 whose body is not a workflow document is refused, not returned", async () => {
+    // The userdata endpoint answering 200 with `null` (or an array, or a scalar)
+    // used to be handed straight back as a workflow. The failure then surfaced
+    // much later as an unreadable graph, naming the wrong thing.
+    mocks.fetchApi.mockResolvedValue({
+      ok: true,
+      status: 200,
+      statusText: "OK",
+      json: async () => null,
+    });
+
+    const res = await getHandler()({
+      action: "strip",
+      path: REMOTE_MODELS_WF,
+      format: "raw",
+    });
+
+    expect(res.isError).toBe(true);
+    expect(text(res)).toMatch(/not a workflow document/i);
+    expect(text(res)).toMatch(/Nothing was loaded/i);
+  });
+
   it("refuses an unmapped remote absolute path without a local Win32 ENOENT", async () => {
     const remote = "/mydata/workcode/ComfyUI/custom_nodes/expert.json";
     const res = await getHandler()({ action: "strip", path: remote, format: "raw" });
