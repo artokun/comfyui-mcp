@@ -449,6 +449,11 @@ describe("actions call the same services with the same arguments", () => {
     expect(out).toContain("### Ambiguous ownership (1)");
     expect(out).toContain("claimed by: Anomalous_Model_Browser, comfyui-krea2edit");
     expect(out).toContain("will not install them");
+    // codex gate P1 — an ambiguous-only workflow has zero requiredPacks, and the
+    // summary used to open by declaring the graph all-built-in. That is the
+    // reassuring reading, printed ABOVE the warning that contradicts it.
+    expect(out).not.toContain("All node types are core/built-in");
+    expect(out).toContain("No custom node pack could be attributed to 1");
     // The per-node line must not present one claimant as the answer.
     expect(out).toContain("`Krea2EditGroundedEncode` → AMBIGUOUS");
     // And it must NOT be laundered through the missing-pack remediation path.
@@ -474,6 +479,10 @@ describe("actions call the same services with the same arguments", () => {
     const out = text(res);
     expect(out).toContain("### Not installed — ambiguous ownership (1)");
     expect(out).toContain("claimed by: Anomalous_Model_Browser, comfyui-krea2edit");
+    // Nothing was installed BECAUSE we could not tell what to install — the
+    // opposite of "no packs needed".
+    expect(out).not.toContain("No packs needed installation");
+    expect(out).toContain("Nothing installed — 1 node type(s) have no attributable pack");
   });
 
   it('action:"generate_skill" forwards source + refresh and keeps structuredContent', async () => {

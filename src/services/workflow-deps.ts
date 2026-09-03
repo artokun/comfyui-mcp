@@ -380,7 +380,55 @@ interface MappingIndex {
    * path stays a plain string lookup.
    */
   conflicts: Map<string, string[]>;
-  patterns: Array<{ re: RegExp; pack: string }>;
+  /**
+   * `key` is the catalogue key (repository identity); `pack` is only the label.
+   * Claimants must be counted by KEY — two distinct repositories can carry the
+   * same `title`, and deduping on the label would silently merge them back into
+   * one "unambiguous" owner.
+   *
+   * `broad` is the memoized verdict from `patternIsBroad`, computed lazily
+   * because most analyses never reach a pattern at all.
+   */
+  patterns: Array<{ re: RegExp; pack: string; key: string; broad?: boolean }>;
+  /** class_type -> catalogue key, for attributing an exact name to its owner. */
+  exactOwner: Map<string, string>;
+}
+
+/**
+ * #2765 — is this `nodename_pattern` describing a TOPIC rather than an owner?
+ *
+ * A tag pattern (` \(mtb\)$`, `^ttN `, ` \[Crystools\]$`) matches its own pack's
+ * nodes and nobody else's. A substring pattern (`Hunyuan`) sweeps up whatever
+ * the ecosystem happens to have named that way.
+ *
+ * The separator is the number of DISTINCT other packs whose exactly-owned class
+ * names the pattern captures, and on the live catalogue it separates perfectly:
+ *
+ *   0 foreign owners: 29 patterns — every well-formed tag pattern
+ *   1 foreign owner:   7 patterns — each a fork/sibling by the SAME author
+ *                                   (`_jru$`, `- Ostris$`, ` \(rgthree\)$`)
+ *   2+ foreign owners: 3 patterns — `Inspire$` from connection-helper (101
+ *                                   names), `PulidFlux` (13), `Hunyuan` (182)
+ *
+ * So "2+ independent owners" is not a tuned threshold: one collision is a fork
+ * of the same project, two or more is a claim staked across the ecosystem. It
+ * also catches the shapes the probe cannot, such as `^[A-Z][A-Za-z0-9_()]*$` —
+ * a pattern that looks like a class name and matches thousands of them.
+ *
+ * Counting stops at the second owner, so a broad pattern is rejected early.
+ */
+function patternIsBroad(
+  entry: { re: RegExp; key: string },
+  exactOwner: Map<string, string>,
+): boolean {
+  const foreign = new Set<string>();
+  for (const [className, owner] of exactOwner) {
+    if (owner === entry.key) continue;
+    if (!entry.re.test(className)) continue;
+    foreign.add(owner);
+    if (foreign.size > 1) return true;
+  }
+  return false;
 }
 
 /** Build a class_type -> pack lookup from Manager mappings (incl. regex patterns). */
@@ -391,7 +439,8 @@ function buildMappingIndex(mappings: ManagerMappings): MappingIndex {
   // repositories can carry the same `title`, and deduping on the display name
   // would merge them and hide the conflict.
   const claimedBy = new Map<string, Set<string>>();
-  const patterns: Array<{ re: RegExp; pack: string }> = [];
+  const exactOwner = new Map<string, string>();
+  const patterns: MappingIndex["patterns"] = [];
   for (const [repoOrId, value] of Object.entries(mappings)) {
     if (!Array.isArray(value)) continue;
     const [classNames, meta] = value;
@@ -403,6 +452,7 @@ function buildMappingIndex(mappings: ManagerMappings): MappingIndex {
         if (!keys) {
           claimedBy.set(cn, new Set([repoOrId]));
           exact.set(cn, pack);
+          exactOwner.set(cn, repoOrId);
           continue;
         }
         // Same entry listing the same name twice is not a conflict.
@@ -431,13 +481,13 @@ function buildMappingIndex(mappings: ManagerMappings): MappingIndex {
         // ` \(lab\)$` — i.e. precisely the well-formed ones this issue expects
         // to keep working, while `Hunyuan` still over-claims 96 names.
         if (OWNERSHIP_PROBES.some((probe) => re.test(probe))) continue;
-        patterns.push({ re, pack });
+        patterns.push({ re, pack, key: repoOrId });
       } catch {
         // Ignore malformed patterns from the Manager DB.
       }
     }
   }
-  return { exact, conflicts, patterns };
+  return { exact, conflicts, patterns, exactOwner };
 }
 
 /**
@@ -463,13 +513,20 @@ function resolveFromMappings(classType: string, index: MappingIndex): MappingRes
   // two packs matching one name is a real conflict rather than a tie to break.
   // `Inspire$`, `_jru$` and `- Ostris$` are each declared by two different
   // packs in the live catalogue today.
-  const hits = new Set<string>();
-  for (const { re, pack } of index.patterns) {
-    if (re.test(classType)) hits.add(pack);
+  const hits = new Map<string, string>();
+  for (const entry of index.patterns) {
+    if (!entry.re.test(classType)) continue;
+    // Lazy, memoized: most analyses never reach a pattern, and only a pattern
+    // that actually matched is worth the scan.
+    entry.broad ??= patternIsBroad(entry, index.exactOwner);
+    if (entry.broad) continue;
+    hits.set(entry.key, entry.pack);
   }
   if (hits.size === 0) return { kind: "none" };
-  if (hits.size > 1) return { kind: "ambiguous", candidates: [...hits].sort() };
-  return { kind: "resolved", pack: [...hits][0] as string };
+  if (hits.size > 1) {
+    return { kind: "ambiguous", candidates: [...new Set(hits.values())].sort() };
+  }
+  return { kind: "resolved", pack: [...hits.values()][0] as string };
 }
 
 /** #2765 — render a catalogue answer as a dependency, refusing to pick a winner. */
@@ -527,6 +584,7 @@ export async function extractWorkflowDependencies(
     exact: new Map(),
     conflicts: new Map(),
     patterns: [],
+    exactOwner: new Map(),
   };
   // #1136 — this catch used to be the whole story: log at warn, carry on, and
   // let every unmapped class_type render as "neither installed nor known to

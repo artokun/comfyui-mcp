@@ -930,7 +930,18 @@ async function extractDepsAction(input: string | Record<string, unknown>): Promi
   lines.push(`## Workflow dependencies (${result.classTypes.length} node type(s))`, "");
 
   if (result.requiredPacks.length === 0) {
-    lines.push("All node types are core/built-in ComfyUI nodes. No custom node packs required.");
+    // #2765 — "all built-in" is a claim about every node in the graph, so it may
+    // only be made when nothing was left unattributed. A workflow whose custom
+    // nodes were ALL ambiguous produces zero requiredPacks, and this line used to
+    // announce it as needing nothing — the reassuring reading, printed above the
+    // warning that contradicts it.
+    const unattributed = result.ambiguous.length + result.unresolved.length;
+    lines.push(
+      unattributed === 0
+        ? "All node types are core/built-in ComfyUI nodes. No custom node packs required."
+        : `No custom node pack could be attributed to ${unattributed} of these node type(s) — ` +
+          `see below. The rest are core/built-in ComfyUI nodes.`,
+    );
   } else {
     lines.push(`### Required custom node packs (${result.requiredPacks.length})`);
     for (const pack of result.requiredPacks) {
@@ -1021,7 +1032,16 @@ async function installDepsAction(input: string | Record<string, unknown>): Promi
       "",
     );
   } else {
-    lines.push("## No packs needed installation", "");
+    // #2765 — same contradiction one layer down: an install whose every custom
+    // node was ambiguous queues nothing, and "no packs needed" is the opposite
+    // of what happened. Nothing was installed BECAUSE we could not tell what to
+    // install.
+    lines.push(
+      result.ambiguous.length > 0
+        ? `## Nothing installed — ${result.ambiguous.length} node type(s) have no attributable pack`
+        : "## No packs needed installation",
+      "",
+    );
   }
 
   if (result.alreadyInstalled.length > 0) {

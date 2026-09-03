@@ -270,6 +270,87 @@ describe("#2765 a nodename_pattern that discriminates nothing owns nothing", () 
     },
   );
 
+  /**
+   * codex gate P1 — the probe only catches patterns that match arbitrary junk.
+   * A pattern shaped like a plausible class name slips past it and still sweeps
+   * up the whole ecosystem, which is the same defect wearing a disguise.
+   *
+   * The veto: a pattern that captures class names EXACTLY owned by 2+ other
+   * packs is describing a topic, not an owner.
+   */
+  it("refuses a pattern that looks like a class name but claims the ecosystem", async () => {
+    const wf: WorkflowJSON = { "1": { class_type: "KSamplerCustom", inputs: {} } };
+    const result = await extractWorkflowDependencies(
+      wf,
+      makeDeps({}, {
+        "https://github.com/DemonGatanjieu/Anomalous_Model_Browser": [
+          [],
+          {
+            title: "Anomalous_Model_Browser",
+            nodename_pattern: "^[A-Z][A-Za-z0-9_()]*$",
+          },
+        ],
+        // Two INDEPENDENT packs whose exactly-owned names the pattern captures.
+        "https://github.com/a/pack-a": [["AlphaNode"], { title: "Pack-A" }],
+        "https://github.com/b/pack-b": [["BetaNode"], { title: "Pack-B" }],
+      }),
+    );
+    expect(byType(result)["KSamplerCustom"]).toMatchObject({
+      pack: null,
+      source: "unresolved",
+    });
+    expect(result.missingPacks).toEqual([]);
+  });
+
+  it("tolerates ONE colliding owner, which is a fork of the same project", async () => {
+    // `_jru$`, `- Ostris$` and ` \(rgthree\)$` each collide with exactly one
+    // other catalogue entry — a sibling repo by the same author. Vetoing at one
+    // collision would disable them; the ecosystem-wide claim starts at two.
+    const wf: WorkflowJSON = { "1": { class_type: "Text2Image_jru", inputs: {} } };
+    const result = await extractWorkflowDependencies(
+      wf,
+      makeDeps({}, {
+        "https://github.com/jtrue/ComfyUI-JaRue": [
+          [],
+          { title: "ComfyUI-JaRue", nodename_pattern: "_jru$" },
+        ],
+        "https://github.com/jtrue/ComfyUI-WordEmbedding": [
+          ["YouTube2Prompt_jru"],
+          { title: "ComfyUI-WordEmbedding" },
+        ],
+      }),
+    );
+    expect(byType(result)["Text2Image_jru"]).toMatchObject({
+      pack: "ComfyUI-JaRue",
+      source: "manager_mappings",
+    });
+  });
+
+  it("counts pattern claimants by REPOSITORY, not by display title", async () => {
+    // codex gate P1 — two distinct repositories sharing a `title` collapsed into
+    // one "unambiguous" owner, and install then picked the first catalogue entry
+    // matching that name.
+    const wf: WorkflowJSON = { "1": { class_type: "ThingNode (shared)", inputs: {} } };
+    const result = await extractWorkflowDependencies(
+      wf,
+      makeDeps({}, {
+        "https://github.com/first/shared-title": [
+          [],
+          { title: "Shared Title", nodename_pattern: " \\(shared\\)$" },
+        ],
+        "https://github.com/second/shared-title": [
+          [],
+          { title: "Shared Title", nodename_pattern: " \\(shared\\)$" },
+        ],
+      }),
+    );
+    expect(byType(result)["ThingNode (shared)"]).toMatchObject({
+      pack: null,
+      source: "ambiguous",
+    });
+    expect(result.missingPacks).toEqual([]);
+  });
+
   it("keeps the well-formed SUFFIX-TAG patterns working", async () => {
     // The two real catalogue suffix-tag entries are catalogue entries and are
     // the issue's own expected owners. They must still resolve when the node is
