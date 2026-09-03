@@ -533,10 +533,11 @@ function resolveFromMappings(classType: string, index: MappingIndex): MappingRes
   //    exactly-owned class names, so the corpus is never thin; and the case where
   //    the catalogue genuinely answers nothing is already covered upstream by
   //    `mappings_unavailable`.
-  //  - It would break pattern-only packs, which are normal. `rgthree-comfy`
-  //    declares ` \(rgthree\)$` and ZERO exact class names — refusing to certify
-  //    a pattern against a thin corpus un-resolves the very pack this issue names
-  //    as an expected owner.
+  //  - It would break pattern-only packs, which are normal: 7 of the 39 packs
+  //    declaring a `nodename_pattern` list NO exact class names at all, and one
+  //    of them is `ComfyUI-Crystools` (` \[Crystools\]$`) — a pack this very
+  //    issue names as an expected owner. Refusing to certify a pattern against a
+  //    thin corpus un-resolves it.
   //
   // A bare literal like `Krea` is the catalogue author asserting their own naming
   // convention, with no rival claiming otherwise; against a real corpus the
