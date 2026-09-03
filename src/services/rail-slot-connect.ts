@@ -95,7 +95,7 @@ function collectDetailRows(payload: Record<string, unknown>): unknown[] {
   return rows;
 }
 
-function liveSlotType(slots: unknown, name: string): unknown {
+function liveSlotType(slots: unknown, name: string) {
   if (!Array.isArray(slots)) return undefined;
   const want = name.toLowerCase();
   for (const entry of slots) {
@@ -106,7 +106,7 @@ function liveSlotType(slots: unknown, name: string): unknown {
   return undefined;
 }
 
-function liveTargetInputType(payload: unknown, nodeId: unknown, inputName: string): unknown {
+function liveTargetInputType(payload: unknown, nodeId: unknown, inputName: string) {
   const rec = asRecord(payload);
   if (!rec) return undefined;
   const want = canonicalConnectNodeId(nodeId);
@@ -119,7 +119,7 @@ function liveTargetInputType(payload: unknown, nodeId: unknown, inputName: strin
   return undefined;
 }
 
-function liveRailOutputType(payload: unknown, railName: string): unknown {
+function liveRailOutputType(payload: unknown, railName: string) {
   const rec = asRecord(payload);
   const rails = asRecord(rec?.rails);
   const input = asRecord(rails?.input);
