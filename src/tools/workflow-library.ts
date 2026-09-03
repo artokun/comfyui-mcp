@@ -36,6 +36,7 @@ import {
 import { convertToMermaid } from "../services/mermaid-converter.js";
 import { analyzeGraphHealth } from "../services/workflow-health.js";
 import { extractWorkflowFromImage } from "../services/image-management.js";
+import { normalizeWorkflowFilename } from "../services/workflow-filename.js";
 import { promptDirectorInspectAction } from "./prompt-director.js";
 import { lockWorkflowAction, verifyWorkflowLockAction } from "./workflow-lock.js";
 
@@ -500,7 +501,8 @@ export function registerWorkflowLibraryTools(server: McpServer): void {
         .optional()
         .describe(
           "Workflow filename in the ComfyUI user library (e.g. 'my_workflow.json'). REQUIRED for every action. " +
-            'For action:"save" this OVERWRITES an existing file of the same name; for "lock"/"verify_lock" the lock ' +
+            'A missing `.json` suffix is appended before use; extension case and forward-slash subfolders are preserved. ' +
+            'The name must be a safe relative path. For action:"save" this OVERWRITES an existing file of the same canonical name; for "lock"/"verify_lock" the lock ' +
             "is read/written as '<filename>.lock.json' alongside it.",
         ),
       workflow: z
@@ -513,8 +515,8 @@ export function registerWorkflowLibraryTools(server: McpServer): void {
     async (args) => {
       try {
         // `filename` is required by all three actions but cannot be schema-required
-        // in a flat shape. ABSENCE only: `filename: ""` passed z.string() before and
-        // reached the userdata POST/GET, which answers for itself.
+        // in a flat shape. Check ABSENCE before the shared normalizer so the error
+        // can name the missing field; explicit values are then validated uniformly.
         if (args.filename === undefined) {
           throw new Error(
             `save_workflow action:"${args.action}" requires \`filename\` — the workflow library name to write.`,
@@ -527,12 +529,12 @@ export function registerWorkflowLibraryTools(server: McpServer): void {
                 'save_workflow action:"save" requires `workflow` — the workflow JSON to write.',
               );
             }
-            return await saveWorkflowAction(args.filename, args.workflow);
+            return await saveWorkflowAction(normalizeWorkflowFilename(args.filename), args.workflow);
           }
           case "lock":
-            return await lockWorkflowAction(args.filename);
+            return await lockWorkflowAction(normalizeWorkflowFilename(args.filename));
           case "verify_lock":
-            return await verifyWorkflowLockAction(args.filename);
+            return await verifyWorkflowLockAction(normalizeWorkflowFilename(args.filename));
           default: {
             const exhaustive: never = args.action;
             throw new Error(
