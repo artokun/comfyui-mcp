@@ -20,6 +20,12 @@ All notable changes to this project are documented here. This project adheres to
   The deprecated `defaultInput` spelling is honoured the way the frontend migrates it:
   socket-only on an OPTIONAL input, widget kept on a REQUIRED one.
 
+#### Changed
+- the upload body and the bridge probe's socket chunks are typed so they still compile
+  under @types/node 26 (#2676). No behaviour change: `uploadBody` keeps the Buffer's
+  offset and length, so a pooled Buffer still uploads its own bytes rather than the
+  whole 8KB pool the obvious rewrite would have sent.
+
 ## [0.52.178] - 2026-09-02
 
 ### MCP
