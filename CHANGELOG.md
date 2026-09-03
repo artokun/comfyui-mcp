@@ -7,10 +7,10 @@ All notable changes to this project are documented here. This project adheres to
 ## Unreleased
 
 ### MCP
-
 #### Fixed
 - **`panel_call_tool` recovers a unique inner panel tool from a self-referential call (#2717).** `name: "panel_call_tool"` with the real tool on `tool` / `tool_name`, a nested key, or sibling fields unwraps once and runs that tool. Several inner names, a non-object keyed payload, or a nested router still fail closed; the refusal names the inner tool when it is unique. The schema now says `name` is the inner tool, never this router.
 - **`panel_set_widget` accepts a complete promoted-subgraph ownership envelope that omits `truncated:false` (#2783).** `graph_get_subgraph` already proves completeness when `node_count === nodes.length`; an omitted or null `truncated` flag is then `false`. An asserted `truncated:true`, or a list shorter than `node_count`, stays fail-closed.
+- **`get_image` bounds a BATCH of inline images against the transport frame, and bounds `action:"view"` at all (#2692).** A batch whose individual images each fit could still exceed the frame once concatenated, and the `view` action was not bounded at all; both now share one frame budget so an oversized reply is refused with what to do instead of dying as an unattributed transport error.
 
 ## [0.52.184] - 2026-09-03
 
@@ -24,7 +24,6 @@ All notable changes to this project are documented here. This project adheres to
 - **`panel_ui_render` documents the four-Image cap the validator already enforces (#2796, #2818).** The declared manual listed the 64-component ceiling but omitted `maxImages: 4`, so a valid-looking five-image card was rejected as `too many images (5 > 4)` after an avoidable retry.
 
 
-- **`get_image` bounds a BATCH of inline images against the transport frame, and bounds `action:"view"` at all (#2692).** A batch whose individual images each fit could still exceed the frame once concatenated, and the `view` action was not bounded at all; both now share one frame budget so an oversized reply is refused with what to do instead of dying as an unattributed transport error.
 ## [0.52.183] - 2026-09-03
 
 ### MCP
