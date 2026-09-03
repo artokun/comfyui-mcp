@@ -6,6 +6,10 @@ All notable changes to this project are documented here. This project adheres to
 
 ## Unreleased
 
+
+### MCP
+#### Fixed
+- the Manager-dialect guard's unit tests no longer probe the developer's real ComfyUI: three orchestrator test files passed on CI (nothing listening) and failed on any machine with ComfyUI actually running, because detection then succeeded and the git-URL guard refused the installs the fixtures are built on (test-only)
 ## [0.52.184] - 2026-09-03
 
 ### MCP
