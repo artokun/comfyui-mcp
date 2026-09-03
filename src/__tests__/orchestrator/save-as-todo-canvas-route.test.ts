@@ -8,9 +8,10 @@
 //
 // The two updates are separate. The fence is already repaired. This file
 // drives the ROUTING half: re-point the session onto the dest tab when the
-// current address is dead, aliases onto dest, or is the unsaved tmp:
-// predecessor of dest. A live pin on a different saved tab is left alone
-// (#1917 / #884).
+// current address is dead, aliases onto dest, is the unsaved tmp:
+// predecessor of dest, or this Save-As replaced the session canvas (#2768).
+// A live pin on a different saved tab that this save did not replace is
+// left alone (#1917 / #884).
 //
 // Workaround that already worked: panel_set_workflow_target({mode:"current"}).
 // That tool is the only writer of the routing target; this makes Save-As do
@@ -217,6 +218,27 @@ describe("#2419 Save-As re-points a dead real-tab address onto the dest canvas",
 
     expect(res.isError).toBeFalsy();
     expect(ctx.tabId).toBe(OLD_TAB);
+  });
+
+  it("follows dest when Save-As replaces this canvas even if the source id still reaches (#2768)", async () => {
+    const b = bridgeFor({ keepOldTab: true });
+    const origSend = b.send;
+    b.send = async (c, extra) => {
+      const out = await origSend(c, extra);
+      if (c.cmd === "workflow_save_as") {
+        liveTabs = [
+          { tab_id: OLD_TAB, title: "Untitled 1", connected_at: 0 },
+          { tab_id: NEW_TAB, title: "photo_to_anime_main", connected_at: 1 },
+        ];
+        reachable = new Set([OLD_TAB, NEW_TAB]);
+      }
+      return out;
+    };
+    const ctx = makePanelToolCtx(b, OLD_TAB, new WorkflowTargetStore());
+    const res = await toolNamed("panel_save_workflow").handler({ name: "photo_to_anime_main" }, ctx);
+
+    expect(res.isError).toBeFalsy();
+    expect(ctx.tabId).toBe(NEW_TAB);
   });
 });
 
