@@ -250,6 +250,49 @@ describe("getLiveExtraModelRoots — fail-closed authorization", () => {
     expect(res.roots).toContainEqual({ category: "loras", dir: external, group: "grp" });
   });
 
+  it("retains the configured group base_path as a generic models root (#2787)", async () => {
+    const liveRoot = await trackTmp();
+    const extraModels = resolve("/Volumes/Shared/models");
+    await writeFile(
+      join(liveRoot, "extra_model_paths.yaml"),
+      ["shared:", `  base_path: ${extraModels}`, "  poses: poses/"].join("\n"),
+      "utf-8",
+    );
+    const res = await getLiveExtraModelRoots(reachable(["python", join(liveRoot, "main.py")]));
+    expect(res.authoritative).toBe(true);
+    expect(res.roots).toContainEqual({
+      category: "models",
+      dir: extraModels,
+      group: "shared",
+    });
+    expect(res.roots).toContainEqual({
+      category: "poses",
+      dir: resolve(extraModels, "poses"),
+      group: "shared",
+    });
+  });
+
+  it("does not treat a custom_nodes-only group base_path as a models download root (#2787)", async () => {
+    const liveRoot = await trackTmp();
+    const codeRoot = resolve("/opt/custom-nodes-base");
+    await writeFile(
+      join(liveRoot, "extra_model_paths.yaml"),
+      ["code:", `  base_path: ${codeRoot}`, "  custom_nodes: nodes/"].join("\n"),
+      "utf-8",
+    );
+    const res = await getLiveExtraModelRoots(reachable(["python", join(liveRoot, "main.py")]));
+    expect(res.roots).toContainEqual({
+      category: "custom_nodes",
+      dir: resolve(codeRoot, "nodes"),
+      group: "code",
+    });
+    expect(res.roots).not.toContainEqual({
+      category: "models",
+      dir: codeRoot,
+      group: "code",
+    });
+  });
+
   it("resolves a RELATIVE base_path against the config file's OWN dir (like ComfyUI), not the MCP cwd", async () => {
     const liveRoot = await trackTmp();
     await writeFile(

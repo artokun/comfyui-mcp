@@ -171,6 +171,7 @@ describe("extra-paths resolves the live root the OS can see (#1621)", () => {
     hoisted.liveProcess.mockReturnValue({ pid: 99, python: nestedPython });
 
     await expect(getExtraModelRoots()).resolves.toEqual([
+      { category: "models", dir: resolve(models), group: "mine" },
       { category: "loras", dir: resolve(models, "loras"), group: "mine" },
     ]);
   });
