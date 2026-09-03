@@ -191,6 +191,80 @@ describe("#2499 extra-model root selector when the live server is unreachable", 
     ).rejects.toThrow(/not a known model root/);
   });
 
+  it("lands under the extra-path group base_path when that is the model_root (#2787)", async () => {
+    const comfy = await trackTmp();
+    const extraModels = await trackTmp();
+    await mkdir(join(comfy, "models", "poses"), { recursive: true });
+    await mkdir(join(extraModels, "poses"), { recursive: true });
+    await writeFile(
+      join(comfy, "extra_model_paths.yaml"),
+      `shared:\n  base_path: ${yamlPath(extraModels)}\n  poses: poses/\n`,
+      "utf-8",
+    );
+    config.comfyuiPath = comfy;
+    process.env.COMFYUI_PATH = comfy;
+
+    const res = await resolveDownloadTarget(
+      URL_,
+      "poses",
+      "pose.safetensors",
+      extraModels,
+    );
+    expect(res.targetDir).toBe(resolve(extraModels, "poses"));
+    expect(res.targetPath).toBe(resolve(extraModels, "poses", "pose.safetensors"));
+  });
+
+  it("accepts that same proven base_path from concurrent download resolutions (#2787)", async () => {
+    const comfy = await trackTmp();
+    const extraModels = await trackTmp();
+    await mkdir(join(comfy, "models", "poses"), { recursive: true });
+    await mkdir(join(extraModels, "poses"), { recursive: true });
+    await writeFile(
+      join(comfy, "extra_model_paths.yaml"),
+      `shared:\n  base_path: ${yamlPath(extraModels)}\n  poses: poses/\n`,
+      "utf-8",
+    );
+    config.comfyuiPath = comfy;
+    process.env.COMFYUI_PATH = comfy;
+
+    const results = await Promise.all(
+      Array.from({ length: 11 }, (_, i) =>
+        resolveDownloadTarget(URL_, "poses", `pose-${i}.safetensors`, extraModels),
+      ),
+    );
+    for (const res of results) {
+      expect(res.targetDir).toBe(resolve(extraModels, "poses"));
+    }
+  });
+
+  it("still refuses an unproven invented path while siblings accept the shared base_path (#2787)", async () => {
+    const comfy = await trackTmp();
+    const extraModels = await trackTmp();
+    await mkdir(join(comfy, "models", "poses"), { recursive: true });
+    await mkdir(join(extraModels, "poses"), { recursive: true });
+    await writeFile(
+      join(comfy, "extra_model_paths.yaml"),
+      `shared:\n  base_path: ${yamlPath(extraModels)}\n  poses: poses/\n`,
+      "utf-8",
+    );
+    config.comfyuiPath = comfy;
+    process.env.COMFYUI_PATH = comfy;
+    const invented = resolve(await trackTmp(), "not-a-known-root");
+
+    const [ok, bad] = await Promise.allSettled([
+      resolveDownloadTarget(URL_, "poses", "ok.safetensors", extraModels),
+      resolveDownloadTarget(URL_, "poses", "bad.safetensors", invented),
+    ]);
+    expect(ok.status).toBe("fulfilled");
+    if (ok.status === "fulfilled") {
+      expect(ok.value.targetDir).toBe(resolve(extraModels, "poses"));
+    }
+    expect(bad.status).toBe("rejected");
+    if (bad.status === "rejected") {
+      expect(String(bad.reason)).toMatch(/not a known model root/);
+    }
+  });
+
   it("refuses a category extra root that does not match the target subfolder", async () => {
     const comfy = await trackTmp();
     const extra = await trackTmp();

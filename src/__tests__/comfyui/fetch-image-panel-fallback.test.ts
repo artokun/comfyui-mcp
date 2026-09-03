@@ -9,7 +9,7 @@ vi.mock("../../config.js", () => ({
   isRemoteMode: () => true,
 }));
 
-import { fetchImage, MAX_VIEW_RESPONSE_BYTES, resetClient } from "../../comfyui/client.js";
+import { fetchImage, MAX_PREVIEW_SOURCE_BYTES, MAX_VIEW_RESPONSE_BYTES, resetClient } from "../../comfyui/client.js";
 import {
   connectedPanelFallbackOriginsNow,
   setConnectedPanelFallbackOrigins,
@@ -259,6 +259,30 @@ describe("fetchImage connected-panel fallback (#2149)", () => {
     );
 
     await expect(fetchImage("huge.png")).rejects.toMatchObject({ code: "VIEW_TOO_LARGE" });
+    expect(calls).toHaveLength(2);
+  });
+
+  it("accepts a 33 MB panel /view body when the preview-source cap is requested (#2785)", async () => {
+    setConnectedPanelFallbackOrigins(() => [PANEL]);
+    const size = MAX_VIEW_RESPONSE_BYTES + 1;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        calls.push({ input });
+        if (calls.length === 1) throw transportFailure();
+        const body = new ReadableStream<Uint8Array>({
+          start(controller) {
+            controller.enqueue(new Uint8Array(size));
+            controller.close();
+          },
+        });
+        return new Response(body, { headers: { "content-type": "image/png" } });
+      }),
+    );
+
+    const r = await fetchImage("big.png", "output", "", { maxBytes: MAX_PREVIEW_SOURCE_BYTES });
+    expect(r.mimeType).toBe("image/png");
+    expect(Buffer.from(r.base64, "base64").length).toBe(size);
     expect(calls).toHaveLength(2);
   });
 
