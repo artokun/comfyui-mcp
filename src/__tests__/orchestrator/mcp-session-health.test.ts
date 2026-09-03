@@ -26,6 +26,8 @@
 import { describe, expect, it } from "vitest";
 import {
   degradedMcpNotice,
+  emptyToolsMcpNotice,
+  serversWithoutTools,
   inspectMcpServers,
   reconnectableMcpStatus,
   recoveredMcpNotice,
@@ -334,5 +336,106 @@ describe("reportedFromCodexMcpListing — live runtimeStatus, not cached tools (
     expect(reportedFromCodexMcpListing([{ name: "panel" }])).toEqual([
       { name: "panel", status: "connected" },
     ]);
+  });
+});
+
+// #2742 — the variant `inspectMcpServers` cannot see. Five reports across
+// 0.52.174-0.52.178: `panel=connected` every session, zero panel_* tools reaching
+// the model, no notice. The init message carries the tool list; the emptiness was
+// always there to read.
+describe("a server that connected and contributed NO tools (#2742)", () => {
+  const CONNECTED = [
+    { name: "comfyui", status: "connected" },
+    { name: "panel", status: "connected" },
+  ];
+
+  it("names the empty server", () => {
+    expect(
+      serversWithoutTools(["comfyui", "panel"], CONNECTED, [
+        "Read",
+        "mcp__comfyui__generate_image",
+      ]),
+    ).toEqual(["panel"]);
+  });
+
+  it("says nothing when every configured server contributed at least one tool", () => {
+    expect(
+      serversWithoutTools(["comfyui", "panel"], CONNECTED, [
+        "mcp__comfyui__generate_image",
+        "mcp__panel__panel_graph_outline",
+      ]),
+    ).toEqual([]);
+  });
+
+  it("is not fooled by a server whose name is a PREFIX of another's", () => {
+    // `mcp__panel_extra__x` must not satisfy `panel`, or a live server could mask
+    // an empty one whose name it happens to begin with.
+    expect(
+      serversWithoutTools(["panel"], [{ name: "panel", status: "connected" }], [
+        "mcp__panel_extra__x",
+      ]),
+    ).toEqual(["panel"]);
+  });
+
+  it("stays silent when the harness lists no MCP tools at all", () => {
+    // Indistinguishable from a harness that simply does not put MCP tools in this
+    // list, and a false "your tools are gone" on every healthy session is worse
+    // than the blind spot. Documented on the function.
+    expect(serversWithoutTools(["comfyui", "panel"], CONNECTED, ["Read", "Bash"])).toEqual([]);
+  });
+
+  it("stays silent with no tool list, or an empty one", () => {
+    expect(serversWithoutTools(["panel"], CONNECTED, undefined)).toEqual([]);
+    expect(serversWithoutTools(["panel"], CONNECTED, [])).toEqual([]);
+  });
+
+  it("does not double-report a server that is already degraded or pending", () => {
+    // It has no tools because it is not up. inspectMcpServers already says so, and
+    // two notices in different words read as two faults.
+    expect(
+      serversWithoutTools(
+        ["comfyui", "panel"],
+        [
+          { name: "comfyui", status: "connected" },
+          { name: "panel", status: "failed" },
+        ],
+        ["mcp__comfyui__generate_image"],
+      ),
+    ).toEqual([]);
+    expect(
+      serversWithoutTools(
+        ["comfyui", "panel"],
+        [
+          { name: "comfyui", status: "connected" },
+          { name: "panel", status: "pending" },
+        ],
+        ["mcp__comfyui__generate_image"],
+      ),
+    ).toEqual([]);
+  });
+});
+
+describe("the connected-but-empty notice (#2742)", () => {
+  it("is empty for an empty list", () => {
+    expect(emptyToolsMcpNotice([])).toBe("");
+  });
+
+  it("does NOT describe it as a session that started without the server", () => {
+    // degradedMcpNotice's wording would send the reader hunting a connection
+    // failure that did not happen — the distinction the whole report turns on.
+    const msg = emptyToolsMcpNotice(["panel"]);
+    expect(msg).not.toContain("started without");
+    expect(msg).toContain("connected");
+    expect(msg).toContain("ZERO tools");
+  });
+
+  it("names the recovery that works and the one that does not", () => {
+    const msg = emptyToolsMcpNotice(["panel"]);
+    expect(msg).toContain("Disconnect");
+    expect(msg).toContain("orchestrator process");
+  });
+
+  it("does not claim to know why", () => {
+    expect(emptyToolsMcpNotice(["panel"])).toContain("observation only");
   });
 });

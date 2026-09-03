@@ -25,7 +25,9 @@ import { buildAgentSpawnEnv } from "../services/panel-secrets.js";
 import { loadTurnRegistry, saveTurnRegistry, tombstoneTurn } from "./turn-registry.js";
 import {
   degradedMcpNotice,
+  emptyToolsMcpNotice,
   inspectMcpServers,
+  serversWithoutTools,
   reconnectableMcpStatus,
   recoveredMcpNotice,
   unrecoveredMcpNotice,
@@ -995,6 +997,26 @@ export class ClaudeBackend implements AgentBackend {
           if (health.degraded.length) {
             this.reportDegradedMcp(health.degraded, message.mcp_servers, message.session_id);
             yield { type: "error", sessionNotice: true, message: degradedMcpNotice(health.degraded) };
+          }
+          // #2742 — the check above compares STATUS, and the variant five reporters
+          // hit on 0.52.174-0.52.178 passes it: `panel=connected` in every session
+          // with zero panel_* tools reaching the model. `connected` was being read
+          // as proof of a usable toolset. The init message carries the tool list, so
+          // the emptiness is right there and was simply never looked at — which is
+          // why the reporters had to establish it with ToolSearch, and one
+          // reinstalled twice while every signal said the panel was fine.
+          const emptyServers = serversWithoutTools(
+            Object.keys(this.mcpServersForRun() ?? {}),
+            message.mcp_servers,
+            message.tools,
+          );
+          if (emptyServers.length) {
+            logger.error(
+              `[claude-backend] session ${message.session_id.slice(0, 8)} started with MCP server(s) ` +
+                `${emptyServers.join(", ")} CONNECTED but contributing zero tools ` +
+                `(tools=${message.tools?.length ?? 0}, mcp tools=${(message.tools ?? []).filter((t) => t.startsWith("mcp__")).length})`,
+            );
+            yield { type: "error", sessionNotice: true, message: emptyToolsMcpNotice(emptyServers) };
           }
         } else if (message.subtype === "thinking_tokens") {
           // Live extended-thinking token count → drives a "thinking… (N)" meter
