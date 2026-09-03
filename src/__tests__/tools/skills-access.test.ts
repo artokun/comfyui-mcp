@@ -510,6 +510,35 @@ describe("actions call the same services with the same arguments", () => {
     expect(out).toContain("Nothing installed — 1 item(s) could not be resolved to a pack");
   });
 
+  // codex gate round 4, P1 — an ambiguous node that is ALREADY PRESENT was filed
+  // under "Not installed" and the reader told to go install it. Nothing needed
+  // installing; we just could not name the owner.
+  it('action:"install_deps" does not tell the user to install a node already present', async () => {
+    mocks.installWorkflowDependencies.mockResolvedValueOnce({
+      installed: [],
+      alreadyInstalled: [],
+      unresolved: [],
+      ambiguous: [
+        {
+          class_type: "PresentNode",
+          candidates: ["https://github.com/first/p", "https://github.com/second/p"],
+          installed: true,
+        },
+      ],
+    });
+    const out = text(
+      await handler()({
+        action: "install_deps",
+        workflow: { "1": { class_type: "PresentNode", inputs: {} } },
+      }),
+    );
+    expect(out).toContain("### Already present, owner unknown (1)");
+    expect(out).toContain("ALREADY AVAILABLE");
+    expect(out).not.toContain("### Not installed — ambiguous ownership");
+    // The candidates must still be the repositories, so a reader can identify them.
+    expect(out).toContain("https://github.com/first/p, https://github.com/second/p");
+  });
+
   it('action:"install_deps" reports what it deliberately did NOT install', async () => {
     mocks.installWorkflowDependencies.mockResolvedValueOnce({
       installed: [],

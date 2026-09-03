@@ -164,7 +164,12 @@ describe("#2765 an ambiguous class_type is refused, not guessed", () => {
       pack: null,
       installed: false,
       source: "ambiguous",
-      candidates: ["Anomalous_Model_Browser", "comfyui-krea2edit"],
+      // #2765 (gate round 4) — the REPOSITORY, not the display title. Two packs
+      // can publish the same title, and a reader handed `["Same"]` cannot pick.
+      candidates: [
+        "https://github.com/DemonGatanjieu/Anomalous_Model_Browser",
+        "https://github.com/lbouaraba/comfyui-krea2edit",
+      ],
     });
     expect(result.ambiguous.map((a) => a.class_type)).toEqual([
       "Krea2EditGroundedEncode",
@@ -352,6 +357,68 @@ describe("#2765 a nodename_pattern that discriminates nothing owns nothing", () 
     const install = await installWorkflowDependencies(wf, deps);
     expect(deps.queueInstall).not.toHaveBeenCalled();
     expect(install.installed).toEqual([]);
+  });
+
+  /**
+   * codex gate round 4, P1 — the breadth scan read a class_type -> FIRST-owner
+   * map, so a name two repositories both list counted as one owner. A pattern
+   * capturing it therefore looked like it had touched a single pack, passed the
+   * veto, and the unrelated pack was queued. The gate's own probe: pack A's
+   * pattern `Target`, packs B and C both listing `Target`, node `TargetNode`.
+   */
+  it("counts EVERY repository that lists a captured name, not just the first", async () => {
+    const wf: WorkflowJSON = { "1": { class_type: "TargetNode", inputs: {} } };
+    const mappings = {
+      "https://github.com/a/greedy": [[], { title: "A", nodename_pattern: "Target" }],
+      "https://github.com/b/real": [["Target"], { title: "B" }],
+      "https://github.com/c/also": [["Target"], { title: "C" }],
+    };
+    const result = await extractWorkflowDependencies(wf, makeDeps({}, mappings));
+    expect(byType(result)["TargetNode"]).toMatchObject({ pack: null, source: "unresolved" });
+    expect(result.missingPacks).toEqual([]);
+
+    const deps = makeDeps({}, mappings);
+    await installWorkflowDependencies(wf, deps);
+    expect(deps.queueInstall).not.toHaveBeenCalled();
+  });
+
+  it("names the REPOSITORY when two claimants share a display title", async () => {
+    // codex gate round 4, P1 — candidates were deduplicated to the title, so two
+    // repositories publishing `Same` handed back `["Same"]` and no way to choose.
+    const wf: WorkflowJSON = { "1": { class_type: "ThingNode", inputs: {} } };
+    const result = await extractWorkflowDependencies(
+      wf,
+      makeDeps({}, {
+        "https://github.com/first/thing": [["ThingNode"], { title: "Same" }],
+        "https://github.com/second/thing": [["ThingNode"], { title: "Same" }],
+      }),
+    );
+    expect(byType(result)["ThingNode"]).toMatchObject({
+      pack: null,
+      source: "ambiguous",
+      candidates: ["https://github.com/first/thing", "https://github.com/second/thing"],
+    });
+  });
+
+  it("marks an ambiguous node that is ALREADY INSTALLED as such", async () => {
+    // codex gate round 4, P1 — an /object_info-present node with no python_module
+    // and two claimants was reported under "Not installed" and the reader told to
+    // install it manually, when nothing needed installing at all.
+    const wf: WorkflowJSON = { "1": { class_type: "PresentNode", inputs: {} } };
+    const result = await extractWorkflowDependencies(
+      wf,
+      makeDeps({ PresentNode: def("PresentNode", undefined) }, {
+        "https://github.com/first/p": [["PresentNode"], { title: "P1" }],
+        "https://github.com/second/p": [["PresentNode"], { title: "P2" }],
+      }),
+    );
+    expect(result.ambiguous).toEqual([
+      {
+        class_type: "PresentNode",
+        candidates: ["https://github.com/first/p", "https://github.com/second/p"],
+        installed: true,
+      },
+    ]);
   });
 
   it("tolerates ONE colliding owner, which is a fork of the same project", async () => {

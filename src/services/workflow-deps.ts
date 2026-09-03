@@ -84,7 +84,15 @@ export interface NodeDependency {
 /** #2765 — a class_type the catalogue attributes to more than one pack. */
 export interface AmbiguousDependency {
   class_type: string;
+  /** Catalogue KEYS of every claimant — the identity, not the display title. */
   candidates: string[];
+  /**
+   * Whether the node is already present on the server. An ambiguous node can be
+   * INSTALLED (its /object_info entry carries no python_module, so only the
+   * catalogue can name its pack) — telling that reader to go install something
+   * is wrong, since nothing needs installing (codex gate round 4).
+   */
+  installed: boolean;
 }
 
 export interface ExtractDepsResult {
@@ -384,13 +392,15 @@ interface MappingIndex {
   /** class_type -> pack, for names claimed by exactly ONE catalogue entry. */
   exact: Map<string, string>;
   /**
-   * #2765 — class_type -> every claimant, for names claimed by 2+ entries.
+   * class_type -> EVERY catalogue key that exactly lists it, not just the first.
    *
-   * 4.51% of the catalogue's class names (1,833 of 40,656) are claimed by more
-   * than one pack. Only these pay for the extra array; the single-claimant hot
-   * path stays a plain string lookup.
+   * `exact` keeps only the first writer, which makes it unusable for judging a
+   * pattern: a pack that lost the first-writer race would look like a stranger
+   * to its own node, and a name claimed by two rivals would present as one
+   * (codex gate round 4 — a pattern matching two repositories was accepted
+   * because only one of them had been recorded).
    */
-  conflicts: Map<string, string[]>;
+  owners: Map<string, Set<string>>;
   /**
    * `key` is the catalogue key (repository identity); `pack` is only the label.
    * Claimants must be counted by KEY — two distinct repositories can carry the
@@ -401,8 +411,6 @@ interface MappingIndex {
    * because most analyses never reach a pattern at all.
    */
   patterns: Array<{ re: RegExp; pack: string; key: string; broad?: boolean }>;
-  /** class_type -> catalogue key, for attributing an exact name to its owner. */
-  exactOwner: Map<string, string>;
 }
 
 /**
@@ -430,14 +438,18 @@ interface MappingIndex {
  */
 function patternIsBroad(
   entry: { re: RegExp; key: string },
-  exactOwner: Map<string, string>,
+  owners: Map<string, Set<string>>,
 ): boolean {
   const foreign = new Set<string>();
-  for (const [className, owner] of exactOwner) {
-    if (owner === entry.key) continue;
+  for (const [className, claimants] of owners) {
+    // A name the pattern's OWN pack lists is its namespace, not a capture —
+    // even when a fork lists it too.
+    if (claimants.has(entry.key)) continue;
     if (!entry.re.test(className)) continue;
-    foreign.add(owner);
-    if (foreign.size > 1) return true;
+    for (const claimant of claimants) {
+      foreign.add(claimant);
+      if (foreign.size > 1) return true;
+    }
   }
   return false;
 }
@@ -445,12 +457,10 @@ function patternIsBroad(
 /** Build a class_type -> pack lookup from Manager mappings (incl. regex patterns). */
 function buildMappingIndex(mappings: ManagerMappings): MappingIndex {
   const exact = new Map<string, string>();
-  const conflicts = new Map<string, string[]>();
   // Claimant IDENTITY is the catalogue key, not the display name: two distinct
   // repositories can carry the same `title`, and deduping on the display name
   // would merge them and hide the conflict.
-  const claimedBy = new Map<string, Set<string>>();
-  const exactOwner = new Map<string, string>();
+  const owners = new Map<string, Set<string>>();
   const patterns: MappingIndex["patterns"] = [];
   for (const [repoOrId, value] of Object.entries(mappings)) {
     if (!Array.isArray(value)) continue;
@@ -459,19 +469,12 @@ function buildMappingIndex(mappings: ManagerMappings): MappingIndex {
     if (Array.isArray(classNames)) {
       for (const cn of classNames) {
         if (typeof cn !== "string" || !cn) continue;
-        const keys = claimedBy.get(cn);
-        if (!keys) {
-          claimedBy.set(cn, new Set([repoOrId]));
-          exact.set(cn, pack);
-          exactOwner.set(cn, repoOrId);
-          continue;
-        }
-        // Same entry listing the same name twice is not a conflict.
-        if (keys.has(repoOrId)) continue;
-        keys.add(repoOrId);
-        const rival = conflicts.get(cn);
-        if (rival) rival.push(pack);
-        else conflicts.set(cn, [exact.get(cn) as string, pack]);
+        // A Set keyed on the catalogue key, so one entry listing the same name
+        // twice is not a conflict and two entries always are.
+        const claimants = owners.get(cn);
+        if (claimants) claimants.add(repoOrId);
+        else owners.set(cn, new Set([repoOrId]));
+        if (!exact.has(cn)) exact.set(cn, pack);
       }
     }
     const pattern = meta?.nodename_pattern;
@@ -498,7 +501,7 @@ function buildMappingIndex(mappings: ManagerMappings): MappingIndex {
       }
     }
   }
-  return { exact, conflicts, patterns, exactOwner };
+  return { exact, owners, patterns };
 }
 
 /**
@@ -516,8 +519,14 @@ type MappingResolution =
   | { kind: "none" };
 
 function resolveFromMappings(classType: string, index: MappingIndex): MappingResolution {
-  const rival = index.conflicts.get(classType);
-  if (rival) return { kind: "ambiguous", candidates: [...new Set(rival)].sort() };
+  const claimants = index.owners.get(classType);
+  if (claimants && claimants.size > 1) {
+    // Candidates are the catalogue KEYS, not the display titles. The point of
+    // listing them is that the reader can pick the right repository, and two
+    // repositories can publish the same `title` — collapsing to it hands back
+    // `["Same"]` and no way to choose (codex gate round 4).
+    return { kind: "ambiguous", candidates: [...claimants].sort() };
+  }
   const exact = index.exact.get(classType);
   if (exact) return { kind: "resolved", pack: exact };
   // A `nodename_pattern` is a naming CONVENTION, not an ownership record, so
@@ -548,7 +557,7 @@ function resolveFromMappings(classType: string, index: MappingIndex): MappingRes
     if (!entry.re.test(classType)) continue;
     // Lazy, memoized: most analyses never reach a pattern, and only a pattern
     // that actually matched is worth the scan.
-    entry.broad ??= patternIsBroad(entry, index.exactOwner);
+    entry.broad ??= patternIsBroad(entry, index.owners);
     if (entry.broad) continue;
     hits.set(entry.key, entry.pack);
   }
@@ -612,9 +621,8 @@ export async function extractWorkflowDependencies(
   // is absent, falling back to object_info's python_module for installed nodes.
   let mappingIndex: MappingIndex = {
     exact: new Map(),
-    conflicts: new Map(),
+    owners: new Map(),
     patterns: [],
-    exactOwner: new Map(),
   };
   // #1136 — this catch used to be the whole story: log at warn, carry on, and
   // let every unmapped class_type render as "neither installed nor known to
@@ -712,7 +720,11 @@ export async function extractWorkflowDependencies(
     } else if (dep.source === "ambiguous") {
       // #2765 — reported whether or not the node is installed: an installed
       // node whose owner we cannot pin down is still a thing we must not name.
-      ambiguous.push({ class_type: dep.class_type, candidates: dep.candidates ?? [] });
+      ambiguous.push({
+        class_type: dep.class_type,
+        candidates: dep.candidates ?? [],
+        installed: dep.installed,
+      });
     } else if (!dep.installed) {
       unresolved.push(dep.class_type);
     }

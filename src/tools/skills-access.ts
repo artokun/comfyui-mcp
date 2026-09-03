@@ -992,13 +992,15 @@ async function extractDepsAction(input: string | Record<string, unknown>): Promi
   if (result.ambiguous.length > 0) {
     lines.push(
       `### Ambiguous ownership (${result.ambiguous.length})`,
-      "The ComfyUI-Manager catalogue attributes each of these class_types to MORE THAN ONE pack, " +
-        "so the owning pack cannot be determined and is deliberately not guessed. " +
+      "The ComfyUI-Manager catalogue attributes each of these class_types to MORE THAN ONE " +
+        "repository, so the owning pack cannot be determined and is deliberately not guessed. " +
         'They are excluded from the missing-pack list and `list_packs (action:"install_deps")` ' +
         "will not install them — installing the wrong candidate means running unrelated " +
-        "third-party code. Pick the correct pack yourself and install it by name.",
+        "third-party code.",
       ...result.ambiguous.map(
-        (a) => `- \`${a.class_type}\` — claimed by: ${a.candidates.join(", ")}`,
+        (a) =>
+          `- \`${a.class_type}\` — ${a.installed ? "already present, owner undetermined" : "NOT installed"}` +
+          ` — claimed by: ${a.candidates.join(", ")}`,
       ),
       "",
     );
@@ -1079,13 +1081,32 @@ async function installDepsAction(input: string | Record<string, unknown>): Promi
   // #2765 — say what was deliberately NOT installed. Silence here reads as
   // "everything needed was handled", which is the reading that let a preflight
   // report an unrelated pack as the missing dependency.
-  if (result.ambiguous.length > 0) {
+  // #2765 — split by whether the node is actually MISSING. An ambiguous node can
+  // already be present (its /object_info entry just carries no python_module), and
+  // telling that reader to go install a pack is wrong: nothing needs installing,
+  // we simply cannot name the owner (codex gate round 4).
+  const ambiguousMissing = result.ambiguous.filter((a) => !a.installed);
+  const ambiguousPresent = result.ambiguous.filter((a) => a.installed);
+  if (ambiguousMissing.length > 0) {
     lines.push(
-      `### Not installed — ambiguous ownership (${result.ambiguous.length})`,
-      "ComfyUI-Manager attributes each of these class_types to MORE THAN ONE pack. " +
+      `### Not installed — ambiguous ownership (${ambiguousMissing.length})`,
+      "ComfyUI-Manager attributes each of these class_types to MORE THAN ONE repository. " +
         "Installing a guess would run unrelated third-party code, so nothing was queued " +
-        "for them. Choose the right pack and install it by name:",
-      ...result.ambiguous.map(
+        "for them. Choose the right one and install it by name:",
+      ...ambiguousMissing.map(
+        (a) => `- \`${a.class_type}\` — claimed by: ${a.candidates.join(", ")}`,
+      ),
+      "",
+    );
+  }
+  if (ambiguousPresent.length > 0) {
+    lines.push(
+      `### Already present, owner unknown (${ambiguousPresent.length})`,
+      "These class_types are ALREADY AVAILABLE on the connected ComfyUI — nothing to " +
+        "install. The catalogue attributes each to more than one repository and " +
+        "`/object_info` does not say which one it loaded from, so the owning pack is " +
+        "reported as undetermined rather than guessed:",
+      ...ambiguousPresent.map(
         (a) => `- \`${a.class_type}\` — claimed by: ${a.candidates.join(", ")}`,
       ),
       "",
