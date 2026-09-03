@@ -8,6 +8,10 @@ All notable changes to this project are documented here. This project adheres to
 
 ### MCP
 
+#### Fixed
+
+- **`panel_set_widget` creates a documented `lora_N` row on an ordinary Power Lora Loader inside a live subgraph (#2394).** Current panels flatten parentheses in the `graph_get_subgraph` "is not a subgraph" line, so a live `Power Lora Loader (rgthree)` was reported as `Power Lora Loader rgthree` and the identity-fenced ordinary write refused it as a type change. The two types are compared after that flatten; the write still fences the real unflattened type.
+
 #### Changed
 
 - the upload body and the bridge probe's socket chunks are typed so they still compile
