@@ -3018,10 +3018,29 @@ export class UiBridge {
           cb(false, 401, "Unauthorized");
         },
       });
-      wss.on("connection", (sock) => {
+      wss.on("connection", (sock, req) => {
         this.missedPongs.set(sock, 0);
         sock.on("pong", () => this.missedPongs.set(sock, 0));
-        this.handleConnection(sock);
+        // #2757/#2752 — READ THE HANDSHAKE `Origin`, exactly as the primary
+        // listener does. This callback used to take `(sock)` alone and throw the
+        // upgrade request away, so every connection arriving here had
+        // `serverOrigin === undefined`.
+        //
+        // That is not an edge case: this is the listener the cloudflared
+        // quick-tunnel is put in front of (`ensureSecureBridge` calls
+        // `addListener("0.0.0.0", tunnelPort, tunnelToken)`), so it carries EVERY
+        // remote-pod panel tab. cloudflared forwards the browser's `Origin`
+        // header on the upgrade untouched — the orchestrator simply never looked.
+        // The consequence is the reported wedge: `workflowIdentityParts()` gates
+        // on an origin being PRESENT, so no tunnel-fronted tab could ever adopt a
+        // workflow fence, and `panel_set_workflow_target({mode:"current"})`
+        // applied the mode while refusing the rebind — permanently, for the whole
+        // session.
+        //
+        // `local` stays false. This listener is token-gated and reachable off the
+        // machine; the origin is identity/diagnostic metadata, never a
+        // trusted-local or authorization signal (see handleConnection's doc).
+        this.handleConnection(sock, false, normalizeHandshakeOrigin(req?.headers?.origin));
       });
       wss.on("listening", () => {
         settled = true;
@@ -7092,10 +7111,13 @@ export class UiBridge {
    * rather than only to stderr.
    *
    * It matters here more than a diagnostic usually would, because one of those
-   * gates can be structurally unsatisfiable: a relay-backend connection carries
-   * no server Origin (attachRelayConnection has none to pass), so
+   * gates can be structurally unsatisfiable: without a server Origin,
    * workflowIdentityParts can NEVER validate and the fence can never be adopted,
-   * no matter how many times the user refreshes the tab.
+   * no matter how many times the user refreshes the tab. The two transports that
+   * used to land there have both been given one — the relay derives it from
+   * COMFYUI_URL (#1077/#1240) and the token-gated tunnel/pairing listener now
+   * reads it off the upgrade (#2757) — so what is left here is a genuinely
+   * origin-less client: a non-browser one, or a proxy that strips the header.
    */
   lastFenceRefusal(tabId: string): string | undefined {
     return this.fenceRefusals.get(tabId);
