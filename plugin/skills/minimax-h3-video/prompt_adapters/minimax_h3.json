@@ -1,0 +1,11 @@
+{
+  "adapter": "minimax_h3",
+  "adapter_version": "1.0.2",
+  "supported_modes": [
+    "text_to_video",
+    "image_to_video",
+    "first_last_frame",
+    "last_frame_to_video",
+    "reference_to_video"
+  ]
+}
