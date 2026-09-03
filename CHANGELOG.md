@@ -8,12 +8,19 @@ All notable changes to this project are documented here. This project adheres to
 
 ### MCP
 #### Fixed
-- **`panel_restart_comfyui` restarts the panel's bound remote ComfyUI via Manager instead of refusing it as a foreign local instance (#2804).** A live tab whose server-observed Origin is a concrete non-loopback host no longer requires `COMFYUI_MCP_FORCE_REMOTE`; the busy guard still applies, a guessed origin is never restarted, and unbound/local identity confirmation is unchanged.
-- **`upload_image` concurrent `action:"stage"` POSTs no longer die as outcome-unknown EPIPE (#2801).** Uploads to one ComfyUI target run one at a time. A write EPIPE/ECONNRESET is settled against `/view` of the intended input before the tool returns: matching bytes count as committed, a 404 is retried once, and only an unprovable miss stays unknown.
-- **`panel_set_widget` writes the official Qwen Image subgraph prompt from the host input/widget mapping (#2791).** Live host node 76 lists input label `prompt` on widget `text`, but an incomplete promoted-terminal witness refused the STRING write. The unique host mapping (and `proxyWidgets` inner CLIPTextEncode) now authorizes the enclosing subgraph widget; official subgraphs are not unpacked. Still unverifiable mappings stay fail-closed.
-- **`panel_set_widget` MiniMaxH3Director prompt workaround recommends PrimitiveStringMultiline, not PrimitiveNode (#2790).** The panel correctly refuses a direct `prompt` / `builder_state` / `timeline_data` write, but its recovery instruction used to name a frontend PrimitiveNode for `external_prompt_overwrite`; `panel_connect` rejects that forceInput-only STRING. The producer advice now shares the same helper as `panel_connect`.
-- **`panel_ui_render` documents the four-Image cap the validator already enforces (#2796).** The declared manual listed the 64-component ceiling but omitted `maxImages: 4`, so a valid-looking five-image card was rejected as `too many images (5 > 4)` after an avoidable retry.
 - **`get_workflow` `action:"strip"` does not Win32-resolve a remote Linux path on the MCP host (#2782).** Against a remote ComfyUI, an absolute POSIX `path` such as `/mydata/.../models/workflows/example.json` is no longer opened as `C:\mydata\...`. Library-shaped tails (`user/default/workflows`, `user/workflows`, `models/workflows`) are fetched from that server's userdata API; any other remote absolute path is refused instead of a local ENOENT.
+
+## [0.52.184] - 2026-09-03
+
+### MCP
+
+#### Fixed
+- **`panel_restart_comfyui` restarts the panel's bound remote ComfyUI via Manager instead of refusing it as a foreign local instance (#2804, #2821).** A live tab whose server-observed Origin is a concrete non-loopback host no longer requires `COMFYUI_MCP_FORCE_REMOTE`; the busy guard still applies, a guessed origin is never restarted, and unbound/local identity confirmation is unchanged.
+- **`upload_image` concurrent `action:"stage"` POSTs no longer die as outcome-unknown EPIPE (#2801, #2820).** Uploads to one ComfyUI target run one at a time. A write EPIPE/ECONNRESET is settled against `/view` of the intended input before the tool returns: matching bytes count as committed, a 404 is retried once, and only an unprovable miss stays unknown.
+- **`panel_set_widget` writes the official Qwen Image subgraph prompt from the host input/widget mapping (#2791, #2822).** Live host node 76 lists input label `prompt` on widget `text`, but an incomplete promoted-terminal witness refused the STRING write. The unique host mapping (and `proxyWidgets` inner CLIPTextEncode) now authorizes the enclosing subgraph widget; official subgraphs are not unpacked. Still unverifiable mappings stay fail-closed.
+- **`panel_set_widget` MiniMaxH3Director prompt workaround recommends PrimitiveStringMultiline, not PrimitiveNode (#2790, #2819).** The panel correctly refuses a direct `prompt` / `builder_state` / `timeline_data` write, but its recovery instruction used to name a frontend PrimitiveNode for `external_prompt_overwrite`; `panel_connect` rejects that forceInput-only STRING. The producer advice now shares the same helper as `panel_connect`.
+- **`panel_ui_render` documents the four-Image cap the validator already enforces (#2796, #2818).** The declared manual listed the 64-component ceiling but omitted `maxImages: 4`, so a valid-looking five-image card was rejected as `too many images (5 > 4)` after an avoidable retry.
+
 
 ## [0.52.183] - 2026-09-03
 
