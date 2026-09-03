@@ -20,6 +20,7 @@ import {
   analyzeHistoryEntry,
   hasAffirmativeSuccessStatus,
   historyCompletionTimeMs,
+  historyTerminalTimeMs,
   normalizeHistoryMessages,
   type ExecutionStats,
   type ExecutionErrorDetails,
@@ -155,18 +156,14 @@ export function buildCompletionNotification(
   const messages = normalizeHistoryMessages(entry);
   const analysis = analyzeHistoryEntry(entry);
 
-  // Timing
-  const startMsg = messages.find((m) => m[0] === "execution_start");
-  const endMsg = messages.find(
-    (m) => m[0] === "execution_success" || m[0] === "execution_error",
-  );
-  const startTs = (startMsg?.[1] as { timestamp?: number })?.timestamp;
-  const endTs = (endMsg?.[1] as { timestamp?: number })?.timestamp;
+  // Timing — interrupt is a terminal end event, same as success/error (#2512).
+  // Duration and finished-at come from ComfyUI's execution record, never from
+  // the moment this notification is later delivered.
+  const observedAt = Date.now();
+  const terminalAt = historyTerminalTimeMs(entry, observedAt);
   const durationMs =
     analysis.execution_stats?.total_duration_ms ??
-    (startTs && endTs
-      ? (endTs - startTs) * 1000 // ComfyUI timestamps are seconds
-      : Date.now() - startTime);
+    (terminalAt !== undefined ? Math.max(0, terminalAt - startTime) : observedAt - startTime);
 
   // Status
   const errorMsg = messages.find((m) => m[0] === "execution_error");
@@ -242,7 +239,7 @@ export function buildCompletionNotification(
     prompt_id: promptId,
     status,
     duration_ms: Math.round(durationMs),
-    timestamp: new Date().toISOString(),
+    timestamp: new Date(terminalAt ?? observedAt).toISOString(),
     error,
     outputs,
     video_outputs,

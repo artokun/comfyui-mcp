@@ -156,6 +156,7 @@ type Handler = (args: Record<string, any>) => Promise<{
 
 interface Registered {
   name: string;
+  description: string;
   shape: z.ZodRawShape;
   handler: Handler;
 }
@@ -166,9 +167,9 @@ function registered(): Registered[] {
     // The SDK's `tool()` is overloaded: the callback is the LAST argument, and an
     // optional annotations object (#1106) sits before it. Resolve by TYPE the way the
     // real SDK does, so adding annotations to a tool cannot break this fake.
-    tool: (name: string, _desc: string, shape: z.ZodRawShape, ...rest: unknown[]) => {
+    tool: (name: string, description: string, shape: z.ZodRawShape, ...rest: unknown[]) => {
       const handler = rest.find((a) => typeof a === "function") as Handler;
-      tools.push({ name, shape, handler });
+      tools.push({ name, description, shape, handler });
     },
   };
   registerModelManagementTools(server as never);
@@ -253,6 +254,7 @@ describe("registration (14 → 2)", () => {
       "id",
       "limit",
       "model_id",
+      "model_root",
       "model_version_id",
       "nsfw",
       "query",
@@ -299,6 +301,15 @@ describe("registration (14 → 2)", () => {
     expect(json.required).toEqual(["action"]);
   });
 
+  it('describes action:"remove" as launch-state-authorized, not all configured roots', () => {
+    const description = tool("list_local_models").description;
+    expect(description).toMatch(/Removal searches only roots the connected local server itself names/);
+    expect(description).toMatch(/server-named\/launch-state-proven roots/);
+    expect(description).toMatch(/list_paths.*visible but unproven.*refuse/i);
+    expect(description).toMatch(/read-only list\/list_paths lookups can show configured roots/i);
+    expect(description).not.toContain("across ALL configured roots");
+  });
+
   it("an unknown action on either tool returns a clear error naming the valid ones", async () => {
     const a = await download()({ action: "bogus" });
     expect(a.isError).toBe(true);
@@ -339,6 +350,9 @@ describe("download_model dispatch", () => {
       "checkpoints",
       "x.safetensors",
       auth,
+      undefined,
+      undefined,
+      undefined,
     );
   });
 
@@ -448,6 +462,49 @@ describe("download_model dispatch", () => {
       "v.safetensors",
       auth,
       expect.any(Function), // postDownload completion hook (sidecars, not-a-model guard)
+      undefined,
+      undefined,
+    );
+  });
+
+  it('action:"download" / action:"download_civitai" forward model_root (#2499)', async () => {
+    const extra = "E:\\models";
+    await download()({
+      action: "download",
+      url: "https://example.com/x.safetensors",
+      target_subfolder: "loras",
+      filename: "x.safetensors",
+      model_root: extra,
+    });
+    expect(mocks.startDownloadJob).toHaveBeenCalledWith(
+      "https://example.com/x.safetensors",
+      "loras",
+      "x.safetensors",
+      undefined,
+      undefined,
+      undefined,
+      extra,
+    );
+
+    mocks.resolveCivitaiModelVersion.mockResolvedValueOnce({
+      downloadUrl: "https://civitai.com/api/download/models/55",
+      filename: "v.safetensors",
+      versionId: 55,
+    });
+    await download()({
+      action: "download_civitai",
+      model_version_id: 55,
+      target_subfolder: "loras",
+      model_root: extra,
+    });
+    expect(mocks.startDownloadJob).toHaveBeenLastCalledWith(
+      "https://civitai.com/api/download/models/55",
+      "loras",
+      "v.safetensors",
+      undefined,
+      expect.any(Function),
+      undefined,
+      extra,
     );
   });
 
@@ -517,7 +574,10 @@ describe("list_local_models dispatch", () => {
 
   it('action:"remove" resolves the path across roots and unlinks exactly that file', async () => {
     const res = await inventory()({ action: "remove", path: "loras/x.safetensors" });
-    expect(mocks.resolveExistingModelFile).toHaveBeenCalledWith("loras/x.safetensors");
+    expect(mocks.resolveExistingModelFile).toHaveBeenCalledWith(
+      "loras/x.safetensors",
+      { mode: "remove" },
+    );
     expect(mocks.unlink).toHaveBeenCalledWith("/comfy/models/loras/x.safetensors");
     expect(text(res)).toContain("Removed model:");
   });

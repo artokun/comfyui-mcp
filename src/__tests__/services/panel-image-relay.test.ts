@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createHmac } from "node:crypto";
 import { createServer } from "node:http";
 import { mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, truncateSync, utimesSync, writeFileSync } from "node:fs";
@@ -6,6 +6,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   PANEL_COMFYUI_READ_MAX_BYTES,
+  PANEL_COMFYUI_READ_OBJECT_INFO_MAX_BYTES,
+  PANEL_COMFYUI_READ_OBJECT_INFO_TIMEOUT_MS,
   PANEL_IMAGE_RELAY_MAX_BYTES,
   PANEL_IMAGE_RELAY_MAX_CONCURRENT,
   PANEL_IMAGE_RELAY_MAX_PENDING_REQUESTS,
@@ -26,12 +28,62 @@ import {
   startPanelImageRelayServer,
   verifyPanelImageRelayCapability,
   verifyPanelComfyUIReadRelayCapability,
+  isPanelComfyUIReadOperation,
   type PanelComfyUIReadRelayRequest,
   type PanelImageRelayRequest,
 } from "../../services/panel-image-relay.js";
 
 const dirs: string[] = [];
 const SECRET = "a".repeat(64);
+const TARGET_URL = "http://127.0.0.1:8188";
+const OTHER_TARGET_URL = "http://127.0.0.1:8189";
+const TARGET_GENERATION = 7;
+const PRODUCTION_OBJECT_INFO_DELAY_MS = 20_841;
+
+/** Model the Panel bridge's command dispatcher at the wire boundary: the MCP
+ * relay must send the authenticated command, tab binding, and route-specific
+ * deadline through this call before a Panel reply can exist. The delayed
+ * producer honors that deadline, so a regression to the generic 8s budget
+ * fails this documented 20.841s success case instead of merely recording it. */
+function productionShapedPanelDispatcher(
+  body: string,
+  recordTimeout: (timeoutMs: number) => void,
+): (command: { cmd: string; operation: string }, options: { tabId: string; timeoutMs: number }) => Promise<Record<string, unknown>> {
+  return async (command, options) => {
+    expect(command).toEqual({ cmd: "fetch_comfyui_read", operation: "object_info" });
+    expect(options.tabId).toBe("panel-tab");
+    recordTimeout(options.timeoutMs);
+    await new Promise<void>((resolve, reject) => {
+      let settled = false;
+      let deadlineTimer: ReturnType<typeof setTimeout>;
+      let producerTimer: ReturnType<typeof setTimeout>;
+      const finish = (error?: Error) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(deadlineTimer);
+        clearTimeout(producerTimer);
+        if (error) reject(error);
+        else resolve();
+      };
+      deadlineTimer = setTimeout(
+        () => finish(Object.assign(new Error("Panel bridge command timed out"), { code: "TIMEOUT" })),
+        options.timeoutMs,
+      );
+      producerTimer = setTimeout(() => finish(), PRODUCTION_OBJECT_INFO_DELAY_MS);
+    });
+    return {
+      operation: "object_info",
+      body,
+      contentType: "application/json",
+      bytes: Buffer.byteLength(body, "utf8"),
+      viewing: {
+        scope: "root",
+        workflow_uuid: "workflow-live-2283",
+        graph_identity: "graph:live-2283",
+      },
+    };
+  };
+}
 
 function tempChannel(): string {
   const dir = mkdtempSync(join(tmpdir(), "comfyui-mcp-image-relay-"));
@@ -45,6 +97,8 @@ function request(id: string, patch: Partial<PanelImageRelayRequest> = {}): Panel
   const value = {
     version: 1,
     requestId: id,
+    targetUrl: TARGET_URL,
+    targetGeneration: TARGET_GENERATION,
     filename: "render.png",
     subfolder: "shots",
     type: "output",
@@ -68,6 +122,8 @@ function readRequest(id: string, operation: PanelComfyUIReadRelayRequest["operat
   const value = {
     version: 1 as const,
     requestId: id,
+    targetUrl: TARGET_URL,
+    targetGeneration: TARGET_GENERATION,
     operation,
     createdAt,
     deadlineAt: createdAt + 8_000,
@@ -86,12 +142,19 @@ function readResponse(dir: string, id: string): Record<string, unknown> {
   return JSON.parse(readFileSync(responseFile(dir, id), "utf8")) as Record<string, unknown>;
 }
 
+beforeEach(() => {
+  process.env.COMFYUI_URL = TARGET_URL;
+  process.env.COMFYUI_MCP_TARGET_GENERATION = String(TARGET_GENERATION);
+});
+
 afterEach(() => {
   for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true });
   delete process.env.COMFYUI_MCP_PROGRESS_DIR;
   delete process.env.COMFYUI_MCP_TAB;
   delete process.env.COMFYUI_MCP_RELAY_SECRET;
   delete process.env.COMFYUI_MCP_RELAY_URL;
+  delete process.env.COMFYUI_URL;
+  delete process.env.COMFYUI_MCP_TARGET_GENERATION;
   vi.restoreAllMocks();
 });
 
@@ -116,6 +179,8 @@ describe("panel image relay child channel", () => {
       "filename",
       "requestId",
       "subfolder",
+      "targetGeneration",
+      "targetUrl",
       "type",
       "version",
     ]);
@@ -502,6 +567,8 @@ describe("authenticated loopback panel image relay", () => {
     const server = await startPanelImageRelayServer({
       resolvePanelAgent: (value) => verifyPanelImageRelayCapability(SECRET, value) ? { agentKey: "orchestrator::claude", secret: SECRET } : undefined,
       resolvePanelTab: (agentKey) => agentKey === "orchestrator::claude" ? "pinned-live-panel" : undefined,
+      resolveCurrentTarget: () => ({ url: TARGET_URL, generation: TARGET_GENERATION }),
+      resolvePanelTarget: () => ({ url: TARGET_URL, generation: TARGET_GENERATION }),
       bridge: { canReach: () => true, send },
     });
     try {
@@ -521,11 +588,222 @@ describe("authenticated loopback panel image relay", () => {
     }
   });
 
+  it("rejects a previous target before resolving or dispatching the live panel", async () => {
+    const resolvePanelTab = vi.fn(() => "victim-panel");
+    const send = vi.fn();
+    const server = await startPanelImageRelayServer({
+      resolvePanelAgent: (value) => verifyPanelImageRelayCapability(SECRET, value) ? { agentKey: "orchestrator::claude", secret: SECRET } : undefined,
+      resolvePanelTab,
+      resolveCurrentTarget: () => ({ url: TARGET_URL, generation: TARGET_GENERATION }),
+      resolvePanelTarget: () => ({ url: TARGET_URL, generation: TARGET_GENERATION }),
+      bridge: { canReach: () => true, send },
+    });
+    try {
+      const stale = request("stale-target-123456", {
+        targetUrl: TARGET_URL,
+        targetGeneration: TARGET_GENERATION - 1,
+      });
+      const response = await fetch(server.endpointUrl, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(stale),
+      });
+      expect(response.status).toBe(200);
+      expect(await response.json()).toMatchObject({ ok: false, error: "STALE_TARGET", requestId: stale.requestId });
+      expect(resolvePanelTab).not.toHaveBeenCalled();
+      expect(send).not.toHaveBeenCalled();
+    } finally {
+      await server.close();
+    }
+  });
+
+  it("refuses a valid target-B capability when the selected panel tab proves target A", async () => {
+    const send = vi.fn();
+    const resolvePanelTarget = vi.fn(() => ({ url: OTHER_TARGET_URL, generation: TARGET_GENERATION }));
+    const server = await startPanelImageRelayServer({
+      resolvePanelAgent: (value) => verifyPanelImageRelayCapability(SECRET, value) ? { agentKey: "orchestrator::claude", secret: SECRET } : undefined,
+      resolvePanelTab: () => "panel-A",
+      resolveCurrentTarget: () => ({ url: TARGET_URL, generation: TARGET_GENERATION }),
+      resolvePanelTarget,
+      bridge: { canReach: () => true, send },
+    });
+    try {
+      const targetB = request("cross-target-123456", { targetUrl: TARGET_URL, targetGeneration: TARGET_GENERATION });
+      const response = await fetch(server.endpointUrl, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(targetB),
+      });
+      expect(response.status).toBe(200);
+      expect(await response.json()).toMatchObject({ ok: false, error: "STALE_TARGET", requestId: targetB.requestId });
+      expect(resolvePanelTarget).toHaveBeenCalledWith("panel-A");
+      expect(send).not.toHaveBeenCalled();
+    } finally {
+      await server.close();
+    }
+  });
+
+  it("refuses missing or ambiguous per-tab target proof before dispatch", async () => {
+    for (const resolvePanelTarget of [
+      () => undefined,
+      () => { throw new Error("panel target identity is ambiguous"); },
+    ]) {
+      const send = vi.fn();
+      const server = await startPanelImageRelayServer({
+        resolvePanelAgent: (value) => verifyPanelImageRelayCapability(SECRET, value) ? { agentKey: "orchestrator::claude", secret: SECRET } : undefined,
+        resolvePanelTab: () => "panel-tab",
+        resolveCurrentTarget: () => ({ url: TARGET_URL, generation: TARGET_GENERATION }),
+        resolvePanelTarget,
+        bridge: { canReach: () => true, send },
+      });
+      try {
+        const response = await fetch(server.endpointUrl, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify(request("missing-panel-target-123456")),
+        });
+        expect(response.status).toBe(200);
+        expect(await response.json()).toMatchObject({ ok: false, error: "STALE_TARGET" });
+        expect(send).not.toHaveBeenCalled();
+      } finally {
+        await server.close();
+      }
+    }
+  });
+
+  it("drops a bridge result when the panel retargets during the in-flight request", async () => {
+    let currentTarget = { url: TARGET_URL, generation: TARGET_GENERATION };
+    let release: (() => void) | undefined;
+    const bridgeReply = new Promise<Record<string, unknown>>((resolve) => {
+      release = () => resolve({ ok: true, base64: "AQID", mimeType: "image/png", bytes: 3 });
+    });
+    const send = vi.fn(() => bridgeReply);
+    const server = await startPanelImageRelayServer({
+      resolvePanelAgent: (value) => verifyPanelImageRelayCapability(SECRET, value) ? { agentKey: "orchestrator::claude", secret: SECRET } : undefined,
+      resolvePanelTab: () => "panel-tab",
+      resolveCurrentTarget: () => currentTarget,
+      resolvePanelTarget: () => currentTarget,
+      bridge: { canReach: () => true, send },
+    });
+    try {
+      process.env.COMFYUI_MCP_RELAY_SECRET = SECRET;
+      process.env.COMFYUI_MCP_RELAY_URL = server.endpointUrl;
+      const pending = requestPanelImage("render.png", "output", "shots");
+      for (let i = 0; i < 100 && !send.mock.calls.length; i += 1) {
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+      expect(send).toHaveBeenCalledOnce();
+      currentTarget = { url: "http://127.0.0.1:8189", generation: TARGET_GENERATION + 1 };
+      release?.();
+      await expect(pending).rejects.toMatchObject({ code: "STALE_TARGET" });
+    } finally {
+      release?.();
+      await server.close();
+    }
+  });
+
+  it("refuses dispatch when the selected tab retargets before the final send fence", async () => {
+    let panelTarget = { url: TARGET_URL, generation: TARGET_GENERATION };
+    let reads = 0;
+    const send = vi.fn();
+    const server = await startPanelImageRelayServer({
+      resolvePanelAgent: (value) => verifyPanelImageRelayCapability(SECRET, value) ? { agentKey: "orchestrator::claude", secret: SECRET } : undefined,
+      resolvePanelTab: () => "panel-tab",
+      resolveCurrentTarget: () => ({ url: TARGET_URL, generation: TARGET_GENERATION }),
+      resolvePanelTarget: () => {
+        reads += 1;
+        if (reads === 2) panelTarget = { url: OTHER_TARGET_URL, generation: TARGET_GENERATION };
+        return panelTarget;
+      },
+      bridge: { canReach: () => true, send },
+    });
+    try {
+      const response = await fetch(server.endpointUrl, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(request("pre-retarget-123456")),
+      });
+      expect(response.status).toBe(200);
+      expect(await response.json()).toMatchObject({ ok: false, error: "STALE_TARGET" });
+      expect(reads).toBeGreaterThanOrEqual(2);
+      expect(send).not.toHaveBeenCalled();
+    } finally {
+      await server.close();
+    }
+  });
+
+  it("drops a bridge result when the selected tab retargets in flight", async () => {
+    let panelTarget = { url: TARGET_URL, generation: TARGET_GENERATION };
+    let release: (() => void) | undefined;
+    const bridgeReply = new Promise<Record<string, unknown>>((resolve) => {
+      release = () => resolve({ ok: true, base64: "AQID", mimeType: "image/png", bytes: 3 });
+    });
+    const send = vi.fn(() => bridgeReply);
+    const server = await startPanelImageRelayServer({
+      resolvePanelAgent: (value) => verifyPanelImageRelayCapability(SECRET, value) ? { agentKey: "orchestrator::claude", secret: SECRET } : undefined,
+      resolvePanelTab: () => "panel-tab",
+      resolveCurrentTarget: () => ({ url: TARGET_URL, generation: TARGET_GENERATION }),
+      resolvePanelTarget: () => panelTarget,
+      bridge: { canReach: () => true, send },
+    });
+    try {
+      process.env.COMFYUI_MCP_RELAY_SECRET = SECRET;
+      process.env.COMFYUI_MCP_RELAY_URL = server.endpointUrl;
+      const pending = requestPanelImage("render.png", "output", "shots");
+      for (let i = 0; i < 100 && !send.mock.calls.length; i += 1) {
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+      expect(send).toHaveBeenCalledOnce();
+      panelTarget = { url: OTHER_TARGET_URL, generation: TARGET_GENERATION };
+      release?.();
+      await expect(pending).rejects.toMatchObject({ code: "STALE_TARGET" });
+    } finally {
+      release?.();
+      await server.close();
+    }
+  });
+
+  it("fails closed when the live target identity is unavailable", async () => {
+    const resolvePanelTab = vi.fn(() => "panel-tab");
+    const send = vi.fn();
+    const server = await startPanelImageRelayServer({
+      resolvePanelAgent: (value) => verifyPanelImageRelayCapability(SECRET, value) ? { agentKey: "orchestrator::claude", secret: SECRET } : undefined,
+      resolvePanelTab,
+      resolveCurrentTarget: () => { throw new Error("target identity unavailable"); },
+      resolvePanelTarget: () => ({ url: TARGET_URL, generation: TARGET_GENERATION }),
+      bridge: { canReach: () => true, send },
+    });
+    try {
+      const response = await fetch(server.endpointUrl, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(request("ambiguous-target-123456")),
+      });
+      expect(response.status).toBe(200);
+      expect(await response.json()).toMatchObject({ ok: false, error: "STALE_TARGET", requestId: "ambiguous-target-123456" });
+      expect(resolvePanelTab).not.toHaveBeenCalled();
+      expect(send).not.toHaveBeenCalled();
+    } finally {
+      await server.close();
+    }
+  });
+
+  it("does not contact the relay when the child target identity is missing", async () => {
+    process.env.COMFYUI_MCP_RELAY_SECRET = SECRET;
+    process.env.COMFYUI_MCP_RELAY_URL = "http://127.0.0.1:9";
+    delete process.env.COMFYUI_URL;
+    const fetchSpy = vi.spyOn(globalThis, "fetch");
+    await expect(requestPanelImage("render.png", "output", "shots")).resolves.toBeUndefined();
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
   it("rejects forged HMACs before resolving or dispatching a panel tab", async () => {
     const send = vi.fn();
     const server = await startPanelImageRelayServer({
       resolvePanelAgent: (value) => verifyPanelImageRelayCapability(SECRET, value) ? { agentKey: "orchestrator::claude", secret: SECRET } : undefined,
       resolvePanelTab: () => "victim-panel",
+      resolveCurrentTarget: () => ({ url: TARGET_URL, generation: TARGET_GENERATION }),
+      resolvePanelTarget: () => ({ url: TARGET_URL, generation: TARGET_GENERATION }),
       bridge: { canReach: () => true, send },
     });
     try {
@@ -641,6 +919,8 @@ describe("authenticated loopback panel image relay", () => {
     const server = await startPanelImageRelayServer({
       resolvePanelAgent: (value) => verifyPanelImageRelayCapability(SECRET, value) ? { agentKey: "orchestrator::claude", secret: SECRET } : undefined,
       resolvePanelTab: () => "panel-tab",
+      resolveCurrentTarget: () => ({ url: TARGET_URL, generation: TARGET_GENERATION }),
+      resolvePanelTarget: () => ({ url: TARGET_URL, generation: TARGET_GENERATION }),
       bridge: {
         canReach: () => true,
         send: async (_command, options) => {
@@ -667,17 +947,35 @@ describe("authenticated loopback panel image relay", () => {
     }
   });
 
-  it.each(["history", "system_stats", "logs"] as const)(
+  it.each(["history", "system_stats", "logs", "object_info"] as const)(
     "relays the fixed %s ComfyUI read and authenticates/parses its reply",
     async (operation) => {
       const seen: Array<{ cmd: string; operation?: string }> = [];
-      const body = operation === "logs" ? "ERROR: render failed\n" : JSON.stringify({ operation });
+      const body = operation === "logs"
+        ? "ERROR: render failed\n"
+        : operation === "object_info"
+          ? JSON.stringify({
+              KSampler: {
+                input: { required: {} },
+                output: ["MODEL"],
+                output_is_list: [false],
+                output_name: ["model"],
+                name: "KSampler",
+                display_name: "KSampler",
+                description: "",
+                category: "sampling",
+                output_node: false,
+              },
+            })
+          : JSON.stringify({ operation });
       const server = await startPanelImageRelayServer({
         resolvePanelAgent: (value) =>
           "operation" in value && verifyPanelComfyUIReadRelayCapability(SECRET, value)
             ? { agentKey: "orchestrator::claude", secret: SECRET }
             : undefined,
         resolvePanelTab: () => "panel-tab",
+        resolveCurrentTarget: () => ({ url: TARGET_URL, generation: TARGET_GENERATION }),
+        resolvePanelTarget: () => ({ url: TARGET_URL, generation: TARGET_GENERATION }),
         bridge: {
           canReach: () => true,
           send: async (command) => {
@@ -687,6 +985,17 @@ describe("authenticated loopback panel image relay", () => {
               body,
               contentType: operation === "logs" ? "text/plain" : "application/json",
               bytes: Buffer.byteLength(body, "utf8"),
+              ...(operation === "object_info"
+                ? {
+                    // This is the exact metadata shape added by the Panel's
+                    // withViewingWitness dispatcher wrapper.
+                    viewing: {
+                      scope: "root",
+                      workflow_uuid: "workflow-live-2283",
+                      graph_identity: "graph:live-2283",
+                    },
+                  }
+                : {}),
             };
           },
         },
@@ -708,6 +1017,147 @@ describe("authenticated loopback panel image relay", () => {
     },
   );
 
+  it("relays models/checkpoints without widening the object_info contract", async () => {
+    expect(isPanelComfyUIReadOperation("models")).toBe(true);
+    expect(isPanelComfyUIReadOperation("models/checkpoints")).toBe(true);
+    expect(isPanelComfyUIReadOperation("models/../object_info")).toBe(false);
+    expect(isPanelComfyUIReadOperation("object_info")).toBe(true);
+    const seen: Array<{ cmd: string; operation?: string }> = [];
+    const body = JSON.stringify(["remote-ckpt.safetensors"]);
+    const server = await startPanelImageRelayServer({
+      resolvePanelAgent: (value) =>
+        "operation" in value && verifyPanelComfyUIReadRelayCapability(SECRET, value)
+          ? { agentKey: "orchestrator::claude", secret: SECRET }
+          : undefined,
+      resolvePanelTab: () => "panel-tab",
+      resolveCurrentTarget: () => ({ url: TARGET_URL, generation: TARGET_GENERATION }),
+      resolvePanelTarget: () => ({ url: TARGET_URL, generation: TARGET_GENERATION }),
+      bridge: {
+        canReach: () => true,
+        send: async (command) => {
+          seen.push(command);
+          return {
+            operation: "models/checkpoints",
+            body,
+            contentType: "application/json",
+            bytes: Buffer.byteLength(body, "utf8"),
+          };
+        },
+      },
+    });
+    try {
+      process.env.COMFYUI_MCP_RELAY_SECRET = SECRET;
+      process.env.COMFYUI_MCP_RELAY_URL = server.endpointUrl;
+      await expect(requestPanelComfyUIRead("models/checkpoints")).resolves.toEqual({
+        operation: "models/checkpoints",
+        body,
+        contentType: "application/json",
+        bytes: Buffer.byteLength(body, "utf8"),
+      });
+      expect(seen).toEqual([{ cmd: "fetch_comfyui_read", operation: "models/checkpoints" }]);
+    } finally {
+      await server.close();
+    }
+  });
+
+  it("rejects an invalid viewing witness instead of widening the read contract", async () => {
+    const body = JSON.stringify({ KSampler: { input: { required: {} } } });
+    const server = await startPanelImageRelayServer({
+      resolvePanelAgent: (value) =>
+        "operation" in value && verifyPanelComfyUIReadRelayCapability(SECRET, value)
+          ? { agentKey: "orchestrator::claude", secret: SECRET }
+          : undefined,
+      resolvePanelTab: () => "panel-tab",
+      resolveCurrentTarget: () => ({ url: TARGET_URL, generation: TARGET_GENERATION }),
+      resolvePanelTarget: () => ({ url: TARGET_URL, generation: TARGET_GENERATION }),
+      bridge: {
+        canReach: () => true,
+        send: async () => ({
+          operation: "object_info",
+          body,
+          contentType: "application/json",
+          bytes: Buffer.byteLength(body, "utf8"),
+          viewing: { scope: "root", graph_identity: 17 },
+        }),
+      },
+    });
+    try {
+      process.env.COMFYUI_MCP_RELAY_SECRET = SECRET;
+      process.env.COMFYUI_MCP_RELAY_URL = server.endpointUrl;
+      await expect(requestPanelComfyUIRead("object_info")).rejects.toMatchObject({ code: "MALFORMED_REPLY" });
+    } finally {
+      await server.close();
+    }
+  });
+
+  it("allows a documented large and slow object_info registry without widening other reads", async () => {
+    expect(PANEL_COMFYUI_READ_OBJECT_INFO_MAX_BYTES).toBeGreaterThan(25_104_088);
+    expect(PANEL_COMFYUI_READ_OBJECT_INFO_TIMEOUT_MS).toBeGreaterThan(20_840);
+    const body = JSON.stringify({
+      KSampler: {
+        input: { required: {} },
+        output: ["MODEL"],
+        output_is_list: [false],
+        output_name: ["model"],
+        name: "KSampler",
+        display_name: "KSampler",
+        description: "x".repeat(25_104_088),
+        category: "sampling",
+        output_node: false,
+      },
+    });
+    let bridgeTimeoutMs = 0;
+    const server = await startPanelImageRelayServer({
+      resolvePanelAgent: (value) =>
+        "operation" in value && verifyPanelComfyUIReadRelayCapability(SECRET, value)
+          ? { agentKey: "orchestrator::claude", secret: SECRET }
+          : undefined,
+      resolvePanelTab: () => "panel-tab",
+      resolveCurrentTarget: () => ({ url: TARGET_URL, generation: TARGET_GENERATION }),
+      resolvePanelTarget: () => ({ url: TARGET_URL, generation: TARGET_GENERATION }),
+      bridge: {
+        canReach: () => true,
+        send: productionShapedPanelDispatcher(body, (timeoutMs) => { bridgeTimeoutMs = timeoutMs; }),
+      },
+    });
+    try {
+      process.env.COMFYUI_MCP_RELAY_SECRET = SECRET;
+      process.env.COMFYUI_MCP_RELAY_URL = server.endpointUrl;
+      await expect(requestPanelComfyUIRead("object_info")).resolves.toMatchObject({
+        operation: "object_info",
+        bytes: body.length,
+      });
+      expect(bridgeTimeoutMs).toBeGreaterThan(PANEL_IMAGE_RELAY_TIMEOUT_MS);
+      expect(bridgeTimeoutMs).toBeLessThanOrEqual(PANEL_COMFYUI_READ_OBJECT_INFO_TIMEOUT_MS);
+    } finally {
+      await server.close();
+    }
+  }, 45_000);
+
+  it("fails closed for an object_info body over its route-specific cap", async () => {
+    const body = "x".repeat(PANEL_COMFYUI_READ_OBJECT_INFO_MAX_BYTES + 1);
+    const server = await startPanelImageRelayServer({
+      resolvePanelAgent: (value) =>
+        "operation" in value && verifyPanelComfyUIReadRelayCapability(SECRET, value)
+          ? { agentKey: "orchestrator::claude", secret: SECRET }
+          : undefined,
+      resolvePanelTab: () => "panel-tab",
+      resolveCurrentTarget: () => ({ url: TARGET_URL, generation: TARGET_GENERATION }),
+      resolvePanelTarget: () => ({ url: TARGET_URL, generation: TARGET_GENERATION }),
+      bridge: {
+        canReach: () => true,
+        send: async () => ({ operation: "object_info", body, contentType: "application/json", bytes: body.length }),
+      },
+    });
+    try {
+      process.env.COMFYUI_MCP_RELAY_SECRET = SECRET;
+      process.env.COMFYUI_MCP_RELAY_URL = server.endpointUrl;
+      await expect(requestPanelComfyUIRead("object_info")).rejects.toMatchObject({ code: "MALFORMED_REPLY" });
+    } finally {
+      await server.close();
+    }
+  }, 45_000);
+
   it("applies the read relay deadline to the authenticated bridge command", async () => {
     let timeoutMs = 0;
     const server = await startPanelImageRelayServer({
@@ -716,6 +1166,8 @@ describe("authenticated loopback panel image relay", () => {
           ? { agentKey: "orchestrator::claude", secret: SECRET }
           : undefined,
       resolvePanelTab: () => "panel-tab",
+      resolveCurrentTarget: () => ({ url: TARGET_URL, generation: TARGET_GENERATION }),
+      resolvePanelTarget: () => ({ url: TARGET_URL, generation: TARGET_GENERATION }),
       bridge: {
         canReach: () => true,
         send: async (_command, options) => {
@@ -745,10 +1197,45 @@ describe("authenticated loopback panel image relay", () => {
     }
   });
 
+  it("fails closed when a slow object_info read reaches its caller deadline", async () => {
+    const server = await startPanelImageRelayServer({
+      resolvePanelAgent: (value) =>
+        "operation" in value && verifyPanelComfyUIReadRelayCapability(SECRET, value)
+          ? { agentKey: "orchestrator::claude", secret: SECRET }
+          : undefined,
+      resolvePanelTab: () => "panel-tab",
+      resolveCurrentTarget: () => ({ url: TARGET_URL, generation: TARGET_GENERATION }),
+      resolvePanelTarget: () => ({ url: TARGET_URL, generation: TARGET_GENERATION }),
+      bridge: {
+        canReach: () => true,
+        send: async () => {
+          await new Promise((resolve) => setTimeout(resolve, 100));
+          return { operation: "object_info", body: "{}", contentType: "application/json", bytes: 2 };
+        },
+      },
+    });
+    try {
+      const short = readRequest("short-object-info-deadline", "object_info");
+      short.deadlineAt = short.createdAt + 30;
+      short.capability = makePanelComfyUIReadRelayCapability(SECRET, short);
+      const response = await fetch(server.endpointUrl, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(short),
+      });
+      expect(response.status).toBe(200);
+      expect(await response.json()).toMatchObject({ ok: false, error: "TIMEOUT", requestId: short.requestId });
+    } finally {
+      await server.close();
+    }
+  });
+
   it("rejects oversized HTTP requests and overloads without unbounded work", async () => {
     const server = await startPanelImageRelayServer({
       resolvePanelAgent: () => ({ agentKey: "orchestrator::claude", secret: SECRET }),
       resolvePanelTab: () => "panel-tab",
+      resolveCurrentTarget: () => ({ url: TARGET_URL, generation: TARGET_GENERATION }),
+      resolvePanelTarget: () => ({ url: TARGET_URL, generation: TARGET_GENERATION }),
       bridge: { canReach: () => true, send: vi.fn() },
     });
     try {

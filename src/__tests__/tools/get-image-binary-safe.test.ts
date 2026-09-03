@@ -119,7 +119,7 @@ describe("get_image — video/audio save-to-disk (#663)", () => {
       "I2V_HD_FaceLock_00036-audio.mp4",
       "output",
       "Eros",
-      { allowMedia: true, allowJson: true },
+      { allowMedia: true, allowAttachment: true, allowJson: true },
     );
     // Saved under the original filename/extension in the requested save_dir. The dir is
     // resolved first, so on Windows a rootless "/tmp/x" becomes the drive-qualified path

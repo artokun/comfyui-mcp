@@ -112,6 +112,7 @@ import {
   resolveLocalWorkspaceBase,
   resolveInstallInterpreter,
   resolveLiveComfyUIBase,
+  getLiveServerSnapshot,
   resolveLiveServerRoot,
   resolveRootInterpreter,
   torchVersionsAgree,
@@ -247,17 +248,37 @@ describe("resolveInstallInterpreter (#651)", () => {
     }
   });
 
+  /** Version + torch probes that agree with the running server (trusted). */
+  function mockTrustedInterpreterProbes(opts?: { version?: string; torch?: string }): void {
+    const version = opts?.version ?? "3.12.12";
+    const torch = opts?.torch ?? "2.13.0";
+    setExecFileResponder((_cmd, args) => {
+      if (args.includes("--version") || args.some((a) => a.includes("sys.version"))) {
+        return { stdout: `Python ${version}\n` };
+      }
+      if (args.includes("pip")) return { stdout: `Name: torch\nVersion: ${torch}\n` };
+      return new Error("nope");
+    });
+  }
+
   it("uses the OS-OBSERVED interpreter when the port owner corroborates the server argv (#401)", async () => {
     const root = await tmpDir();
     try {
       await writeFile(join(root, "main.py"), "", "utf-8");
       await makeVenvPython(root);
-      mockGetSystemStats.mockResolvedValue({ system: { argv: [join(root, "main.py")] } });
+      mockGetSystemStats.mockResolvedValue({
+        system: {
+          argv: [join(root, "main.py")],
+          python_version: "3.12.12",
+          pytorch_version: "2.13.0+cu130",
+        },
+      });
       h.mockLiveInterpreter.mockReturnValue({
         python: "D:/ComfyUI/.venv/Scripts/python.exe",
         source: "process-table",
         pid: 777,
       });
+      mockTrustedInterpreterProbes();
 
       await expect(resolveInstallInterpreter(root)).resolves.toMatchObject({
         python: "D:/ComfyUI/.venv/Scripts/python.exe",
@@ -449,6 +470,114 @@ describe("resolveInstallInterpreter (#651)", () => {
       });
     } finally {
       delete process.env.COMFYUI_PYTHON;
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("refuses an observed Stability Matrix BASE interpreter that has no torch while ComfyUI reports pytorch (#2530)", async () => {
+    // The reporter's shape: process-table argv[0] is the uv-managed base CPython
+    // (no torch, PEP 668), while the running ComfyUI imported torch 2.13.0+cu130.
+    // install_comfyui(environment) already sets python_probe_trusted:false; pip
+    // must not target that same interpreter.
+    const root = await tmpDir();
+    try {
+      await writeFile(join(root, "main.py"), "", "utf-8");
+      await makeVenvPython(root);
+      const basePy =
+        "A:/StabilityMatrix-win-x64/Data/Assets/Python/cpython-3.12.12-windows-x86_64-none/python.exe";
+      mockGetSystemStats.mockResolvedValue({
+        system: {
+          argv: [join(root, "main.py")],
+          python_version: "3.12.12",
+          pytorch_version: "2.13.0+cu130",
+        },
+      });
+      h.mockLiveInterpreter.mockReturnValue({
+        python: basePy,
+        source: "process-table",
+        pid: 4242,
+      });
+      setExecFileResponder((_cmd, args) => {
+        if (args.includes("--version") || args.some((a) => a.includes("sys.version"))) {
+          return { stdout: "Python 3.12.12\n" };
+        }
+        if (args.includes("pip")) {
+          return Object.assign(new Error("Command failed: exit 1"), {
+            stdout: "",
+            stderr:
+              "WARNING: Package(s) not found: torch, torchvision, torchaudio, xformers, numpy, transformers, diffusers, comfyui-frontend-package\n",
+          });
+        }
+        return new Error("nope");
+      });
+
+      const result = await resolveInstallInterpreter(root);
+
+      expect(result.source).toBe("undetermined");
+      expect(result.python).toBeUndefined();
+      expect(result.reason).toMatch(/none of torch/i);
+      expect(result.reason).toMatch(/2\.13\.0\+cu130/);
+      expect(result.reason).toMatch(/action:"fix"/);
+      expect(result.reason).not.toMatch(/-m pip install/);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("refuses an observed interpreter whose torch disagrees with the running ComfyUI (#2530)", async () => {
+    const root = await tmpDir();
+    try {
+      await writeFile(join(root, "main.py"), "", "utf-8");
+      await makeVenvPython(root);
+      mockGetSystemStats.mockResolvedValue({
+        system: {
+          argv: [join(root, "main.py")],
+          python_version: "3.12.12",
+          pytorch_version: "2.13.0+cu130",
+        },
+      });
+      h.mockLiveInterpreter.mockReturnValue({
+        python: "D:/wrong-venv/Scripts/python.exe",
+        source: "process-table",
+        pid: 99,
+      });
+      mockTrustedInterpreterProbes({ version: "3.12.12", torch: "2.4.0" });
+
+      const result = await resolveInstallInterpreter(root);
+      expect(result.source).toBe("undetermined");
+      expect(result.python).toBeUndefined();
+      expect(result.reason).toMatch(/does not match the running ComfyUI pytorch/i);
+      expect(result.reason).not.toMatch(/-m pip install/);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("still hands out an observed interpreter when its torch matches the running ComfyUI (#2530)", async () => {
+    const root = await tmpDir();
+    try {
+      await writeFile(join(root, "main.py"), "", "utf-8");
+      await makeVenvPython(root);
+      const venvPy = "D:/ComfyUI/.venv/Scripts/python.exe";
+      mockGetSystemStats.mockResolvedValue({
+        system: {
+          argv: [join(root, "main.py")],
+          python_version: "3.12.12",
+          pytorch_version: "2.13.0+cu130",
+        },
+      });
+      h.mockLiveInterpreter.mockReturnValue({
+        python: venvPy,
+        source: "process-table",
+        pid: 777,
+      });
+      mockTrustedInterpreterProbes({ version: "3.12.12", torch: "2.13.0" });
+
+      await expect(resolveInstallInterpreter(root)).resolves.toMatchObject({
+        python: venvPy,
+        source: "observed",
+      });
+    } finally {
       await rm(root, { recursive: true, force: true });
     }
   });
@@ -760,6 +889,7 @@ describe("getEnvironment", () => {
       expect(env.local.code_path).toBe(codeRoot);
       expect(env.local.code_path_source).toBe("env");
       expect(env.local.git).toEqual({ rev: "abc123", branch: "main" });
+      // No trusted interpreter, so no pip Manager version — custom_nodes is fallback (#2538).
       expect(env.local.comfyui_manager_version).toBe("3.41");
       expect(env.local.note).toMatch(/Split install/);
     } finally {
@@ -961,6 +1091,8 @@ describe("getEnvironment", () => {
       });
 
       const env = await getEnvironment();
+      // Offline / untrusted probe: no pip package list, so the custom_nodes
+      // checkout is the fallback — not a claim that this is the live Manager (#2538).
       expect(env.local.comfyui_manager_version).toBe("3.10.1");
       expect(env.local.git).toEqual({ rev: "abc1234", branch: "master" });
     } finally {
@@ -996,6 +1128,126 @@ describe("getEnvironment", () => {
       devices: [],
     });
   }
+
+  async function writeLegacyManager(install: string, version: string): Promise<void> {
+    await mkdir(join(install, "custom_nodes", "ComfyUI-Manager"), { recursive: true });
+    await writeFile(
+      join(install, "custom_nodes", "ComfyUI-Manager", "pyproject.toml"),
+      `[project]\nname = "comfyui-manager"\nversion = "${version}"\n`,
+      "utf-8",
+    );
+  }
+
+  // -------------------------------------------------------------------------
+  // #2538 — a leftover custom_nodes/ComfyUI-Manager checkout is not the live
+  // Manager when ComfyUI --enable-manager serves the pip package instead.
+  // -------------------------------------------------------------------------
+
+  it("prefers a trusted pip comfyui-manager over a leftover custom_nodes checkout (#2538)", async () => {
+    const dir = await tmpDir();
+    const exe = await stageWorkspace(dir);
+    const install = join(dir, "ComfyUI");
+    await writeLegacyManager(install, "3.41");
+    try {
+      statsReachable("3.12.11");
+      h.mockLiveInterpreter.mockReturnValue({
+        python: exe,
+        source: "launched-by-us",
+        pid: 4242,
+      });
+      setExecFileResponder((_cmd, args) => {
+        if (args.includes("--version")) return { stdout: "Python 3.12.11\n" };
+        if (args.includes("pip")) {
+          const records = ["Name: torch\nVersion: 2.5.0"];
+          // Only emit the pip Manager if the probe actually asked for it — otherwise
+          // this would pass on a KEY_PACKAGES list that still ignores comfyui-manager.
+          if (args.includes("comfyui-manager") || args.includes("comfyui_manager")) {
+            records.push("Name: comfyui-manager\nVersion: 4.2.2");
+          }
+          return { stdout: `${records.join("\n---\n")}\n` };
+        }
+        return new Error("nope");
+      });
+
+      const env = await getEnvironment();
+      expect(env.local.python_probe_trusted).toBe(true);
+      expect(env.local.packages?.["comfyui-manager"]).toBe("4.2.2");
+      expect(env.local.comfyui_manager_version).toBe("4.2.2");
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("falls back to custom_nodes when a trusted probe has no pip comfyui-manager (#2538)", async () => {
+    const dir = await tmpDir();
+    const exe = await stageWorkspace(dir);
+    const install = join(dir, "ComfyUI");
+    await writeLegacyManager(install, "3.41");
+    try {
+      statsReachable("3.12.11");
+      h.mockLiveInterpreter.mockReturnValue({
+        python: exe,
+        source: "launched-by-us",
+        pid: 4242,
+      });
+      setExecFileResponder((_cmd, args) => {
+        if (args.includes("--version")) return { stdout: "Python 3.12.11\n" };
+        if (args.includes("pip")) return { stdout: "Name: torch\nVersion: 2.5.0\n" };
+        return new Error("nope");
+      });
+
+      const env = await getEnvironment();
+      expect(env.local.python_probe_trusted).toBe(true);
+      expect(env.local.packages?.["comfyui-manager"]).toBeUndefined();
+      expect(env.local.comfyui_manager_version).toBe("3.41");
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("does not invent a pip Manager version after a trusted probe is withdrawn (#2538)", async () => {
+    const dir = await tmpDir();
+    const exe = await stageWorkspace(dir);
+    const install = join(dir, "ComfyUI");
+    await writeLegacyManager(install, "3.41");
+    try {
+      mockGetSystemStats.mockResolvedValueOnce({
+        system: {
+          os: "nt",
+          python_version: "3.12.11",
+          comfyui_version: "0.27.1",
+          pytorch_version: "2.9.0",
+          embedded_python: false,
+          argv: [],
+        },
+        devices: [],
+      });
+      h.mockLiveInterpreter.mockReturnValue({
+        python: exe,
+        source: "process-table",
+        pid: 99,
+      });
+      setExecFileResponder((_cmd, args) => {
+        if (args.includes("--version")) return { stdout: "Python 3.12.11\n" };
+        if (args.includes("pip")) {
+          const records = ["Name: torch\nVersion: 1.0.0"];
+          if (args.includes("comfyui-manager") || args.includes("comfyui_manager")) {
+            records.push("Name: comfyui-manager\nVersion: 4.2.2");
+          }
+          return { stdout: `${records.join("\n---\n")}\n` };
+        }
+        return new Error("nope");
+      });
+
+      const env = await getEnvironment();
+      expect(env.local.python_probe_trusted).toBe(false);
+      expect(env.local.packages).toBeUndefined();
+      // Fail-closed: a withdrawn probe's pip 4.2.2 must not be reported as live.
+      expect(env.local.comfyui_manager_version).toBe("3.41");
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
 
   it("reports UNKNOWN (never a package list) when the interpreter was not observed", async () => {
     const dir = await tmpDir();
@@ -1797,6 +2049,15 @@ describe("resolveLiveComfyUIBase (#490 / #463 — live connected install root)",
   it("returns undefined (never throws) when the server is unreachable", async () => {
     mockGetSystemStats.mockRejectedValue(new Error("ECONNREFUSED"));
     await expect(resolveLiveComfyUIBase()).resolves.toBeUndefined();
+  });
+
+  it("sanitizes malformed argv and cwd from the production JSON response", async () => {
+    mockGetSystemStats.mockResolvedValue({ system: { argv: [1], cwd: 42 } });
+    await expect(getLiveServerSnapshot()).resolves.toEqual({
+      reachable: true,
+      argv: undefined,
+      cwd: undefined,
+    });
   });
 });
 

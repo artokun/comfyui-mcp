@@ -128,6 +128,16 @@ function asUncheckedList(payload: Record<string, unknown>): UncheckedEntry[] {
     : [];
 }
 
+/** Red outlines are normally cosmetic, but a stale LoadImage outline can hide a
+ * current combo value that the panel would refuse to write. Keep this separate from
+ * unchecked_nodes: a stale flag is not itself an abstention and must remain untouched
+ * unless a fresh same-view graph/schema read proves the value is unavailable. */
+function asStaleFlags(payload: Record<string, unknown>): UncheckedEntry[] {
+  return Array.isArray(payload.stale_flags)
+    ? (payload.stale_flags as UncheckedEntry[])
+    : [];
+}
+
 /** An abstention a second batched read has a chance of retiring. */
 function isRetryableUnchecked(entry: UncheckedEntry): boolean {
   return typeof entry?.reason === "string" && RETRYABLE_UNCHECKED_RE.test(entry.reason);
@@ -204,6 +214,17 @@ function isUploadCombo(spec: unknown): boolean {
 function optionsLookLikeFiles(options: string[]): boolean {
   if (options.length === 0) return false;
   return options.filter((s) => FILE_LIKE.test(s)).length * 2 >= options.length;
+}
+
+/**
+ * Upload combos can carry paths that the combo list deliberately cannot
+ * enumerate. The panel's /view probe is the authority for those values, so a
+ * stale outline must remain unknown until that evidence exists. Root-level
+ * names are different: those are the values the refreshed list is expected to
+ * enumerate, which is the evidence #2587 needs for the missing-value report.
+ */
+function isNonEnumerableUploadPath(value: string): boolean {
+  return /^\[(?:input|output|temp)\]/i.test(value) || /[\\/]/.test(value);
 }
 
 function rewriteTextPayload(res: GetErrorsToolResult, payload: Record<string, unknown>): GetErrorsToolResult {
@@ -288,6 +309,11 @@ function inputSpecsOf(def: unknown): Record<string, unknown> {
 type ComboJudgement = {
   unavailable: Array<Record<string, unknown>>;
   stillUnchecked: UncheckedEntry[];
+};
+
+type StaleLoadImageJudgement = {
+  unavailable: Array<Record<string, unknown>>;
+  reclassifiedIds: Set<string>;
 };
 
 function judgeLeftoverCombos(
@@ -396,6 +422,58 @@ function judgeLeftoverCombos(
   }
 
   return { unavailable, stillUnchecked };
+}
+
+/**
+ * #2587 — a panel can leave a red LoadImage under `stale_flags` after its live
+ * scan has otherwise completed. A fresh whole `/object_info` plus a detail read
+ * of the same graph can turn that particular cosmetic flag into an actionable
+ * unavailable widget finding. This is deliberately narrower than the budget
+ * completion scanner: only the concrete LoadImage.image combo is reclassified,
+ * and only when both reads prove the current node and current view.
+ *
+ * Upload-input paths that are not enumerated by `/object_info` stay unknown here:
+ * only the panel's `/view`/existence evidence can distinguish a valid nested or
+ * annotated path from a missing file. A root-level value absent from the refreshed
+ * list is the #2587 case. Unreadable schema, missing node detail, a linked image
+ * input, and a value that is present in the list all preserve the original stale
+ * flag.
+ */
+function judgeStaleLoadImages(
+  staleFlags: UncheckedEntry[],
+  nodes: QueryNode[],
+  objectInfo: Record<string, unknown>,
+): StaleLoadImageJudgement {
+  const byId = new Map(nodes.map((n) => [String(n.id), n]));
+  const unavailable: Array<Record<string, unknown>> = [];
+  const reclassifiedIds = new Set<string>();
+
+  for (const flag of staleFlags) {
+    if (flag?.id == null || flag.type !== "LoadImage") continue;
+    const node = byId.get(String(flag.id));
+    if (!node || node.type !== "LoadImage" || node.linkedInputs.has("image")) continue;
+    const def = Object.hasOwn(objectInfo, "LoadImage") ? objectInfo.LoadImage : undefined;
+    const specs = inputSpecsOf(def);
+    const options = comboOptions(specs.image);
+    if (!options || !Object.hasOwn(node.widgets, "image")) continue;
+    const value = node.widgets.image;
+    if (typeof value !== "string" || value === "") continue;
+    if (options.includes(value)) continue;
+    if (isUploadCombo(specs.image) && isNonEnumerableUploadPath(value)) continue;
+
+    unavailable.push({
+      id: node.id,
+      type: "LoadImage",
+      widget: "image",
+      value,
+      option_count: options.length,
+      kind: options.length === 0 || optionsLookLikeFiles(options) ? "missing_asset" : "invalid_value",
+      source: "orchestrator_completion",
+    });
+    reclassifiedIds.add(String(flag.id));
+  }
+
+  return { unavailable, reclassifiedIds };
 }
 
 function mergeUnavailable(
@@ -540,7 +618,15 @@ function viewingIdentity(payload: Record<string, unknown> | null): ViewingIdenti
   const raw = payload?.viewing;
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
   const v = raw as ViewingIdentity;
-  const keys = ["workflow_uuid", "workflow", "kind", "scope", "owner_node_id", "title"];
+  const keys = [
+    "workflow_uuid",
+    "workflow",
+    "graph_identity",
+    "kind",
+    "scope",
+    "owner_node_id",
+    "title",
+  ];
   const identity = Object.fromEntries(keys.filter((key) => key in v).map((key) => [key, v[key]]));
   return Object.keys(identity).length > 0 ? identity : null;
 }
@@ -579,14 +665,30 @@ function sameViewingIdentity(
   if ("workflow" in a || "workflow" in b) {
     if (!("workflow" in a) || !("workflow" in b) || !Object.is(a.workflow, b.workflow)) return false;
   }
+  // Ownerless subgraphs in one workflow are still distinct graphs. A graph
+  // replacement/reconnect can also retain the workflow UUID while changing
+  // this object-keyed identity, so never let an omitted or mismatched witness
+  // retire the primary read's leftovers.
+  if ("graph_identity" in a || "graph_identity" in b) {
+    if (
+      typeof a.graph_identity !== "string" ||
+      typeof b.graph_identity !== "string" ||
+      a.graph_identity.length === 0 ||
+      b.graph_identity.length === 0 ||
+      !Object.is(a.graph_identity, b.graph_identity)
+    ) {
+      return false;
+    }
+  }
   const shared = Object.keys(a).filter((key) => key in b);
   return shared.length > 0 && shared.every((key) => Object.is(a[key], b[key]));
 }
 
 /**
- * After a budget-exhausted graph_get_errors, finish leftover combo checks from
- * one batched object_info + bounded targeted graph_query pages, then present completeness
- * honestly. Never throws: a failed follow-up still returns the incomplete audit.
+ * After a graph_get_errors, finish retryable combo checks and stale LoadImage
+ * reclassification from one batched object_info + bounded targeted graph_query
+ * pages, then present completeness honestly. Never throws: a failed follow-up
+ * leaves the original audit untouched.
  *
  * A payload the panel already finished still goes through presentGetErrorsAudit.
  * Completeness is not consistency: `errored_count: 0` plus a translated
@@ -602,7 +704,8 @@ export async function completeGetErrorsAudit(
 ): Promise<GetErrorsToolResult> {
   const payload = parseToolResultJson(res);
   if (!payload) return res;
-  if (!isGetErrorsAuditIncomplete(payload)) {
+  const staleLoadImageFlags = asStaleFlags(payload).filter((entry) => entry?.type === "LoadImage");
+  if (!isGetErrorsAuditIncomplete(payload) && staleLoadImageFlags.length === 0) {
     return rewriteTextPayload(res, presentGetErrorsAudit(payload));
   }
 
@@ -610,15 +713,24 @@ export async function completeGetErrorsAudit(
   const leftoverIds = [
     ...new Set(leftover.map((e) => e.id).filter((id) => id != null)),
   ];
+  const staleLoadImageIds = staleLoadImageFlags
+    .map((entry) => entry.id)
+    .filter((id) => id != null);
+  const candidateIds = [
+    ...new Map(
+      [...leftoverIds, ...staleLoadImageIds]
+        .filter((id) => id != null)
+        .map((id) => [String(id), id] as const),
+    ).values(),
+  ];
 
-  if (leftoverIds.length > 0) {
+  if (candidateIds.length > 0) {
     // graph_query has no cursor/offset, and a single detail reply can be cut by
     // max_chars even when its limit is high. Page by explicit ids so every normal
     // 50-node workflow gets a complete detail read within one bounded follow-up
     // pass. A truncated page stays wholly unchecked below; it must never silently
     // retire only the rows that happened to fit in the reply.
     const deadlineAt = Date.now() + Math.max(0, timeoutMs);
-    const queryIds = leftoverIds.slice(0, LIMIT_CEILING);
     const infoRead = await followUpJson(
       ctx,
       { cmd: "graph_get_object_info" },
@@ -630,7 +742,7 @@ export async function completeGetErrorsAudit(
     const objectInfo = infoReply ? objectInfoFromReply(infoReply) : null;
     const queryReads: Array<{ ids: unknown[]; read: FollowUpRead }> = [];
     if (objectInfo && infoRead.stayedOnPrimaryTab) {
-      for (const ids of chunks(queryIds, GET_ERRORS_QUERY_PAGE_SIZE)) {
+      for (const ids of chunks(candidateIds.slice(0, LIMIT_CEILING), GET_ERRORS_QUERY_PAGE_SIZE)) {
         const read = await followUpJson(
           ctx,
           {
@@ -649,7 +761,7 @@ export async function completeGetErrorsAudit(
       }
     }
     const incompletePageIds = new Set(
-      leftoverIds.slice(LIMIT_CEILING).map((id) => String(id)),
+      candidateIds.slice(LIMIT_CEILING).map((id) => String(id)),
     );
     const nodes = queryReads.flatMap(({ ids, read }) => {
       if (queryReplyWasTruncated(read.payload)) {
@@ -666,6 +778,14 @@ export async function completeGetErrorsAudit(
     if (sameGraph && objectInfo && nodes.length > 0) {
       const judgeable = leftover.filter((entry) => !incompletePageIds.has(String(entry.id)));
       const judged = judgeLeftoverCombos(judgeable, nodes, objectInfo);
+      const judgeableStaleLoadImages = staleLoadImageFlags.filter(
+        (entry) => !incompletePageIds.has(String(entry.id)),
+      );
+      const judgedStaleLoadImages = judgeStaleLoadImages(
+        judgeableStaleLoadImages,
+        nodes,
+        objectInfo,
+      );
       // Non-retryable abstentions (the probe cap, a failed lookup, an unenumerable
       // path the panel already disclosed) stay; retryable leftovers are replaced by
       // whatever this pass still could not judge.
@@ -686,8 +806,19 @@ export async function completeGetErrorsAudit(
         delete payload.unchecked_budget_exhausted;
         delete payload.unchecked_class_limit;
       }
-      if (judged.unavailable.length) {
-        const merged = mergeUnavailable(payload.unavailable_widget_values, judged.unavailable);
+      if (judgedStaleLoadImages.reclassifiedIds.size > 0) {
+        const remainingStaleFlags = asStaleFlags(payload).filter(
+          (entry) => !judgedStaleLoadImages.reclassifiedIds.has(String(entry.id)),
+        );
+        if (remainingStaleFlags.length > 0) payload.stale_flags = remainingStaleFlags;
+        else delete payload.stale_flags;
+      }
+      const completionUnavailable = [
+        ...judged.unavailable,
+        ...judgedStaleLoadImages.unavailable,
+      ];
+      if (completionUnavailable.length) {
+        const merged = mergeUnavailable(payload.unavailable_widget_values, completionUnavailable);
         const added = merged.length - (Array.isArray(payload.unavailable_widget_values)
           ? (payload.unavailable_widget_values as unknown[]).length
           : 0);
@@ -699,10 +830,9 @@ export async function completeGetErrorsAudit(
         if (added > 0) {
           payload.unavailable_widget_values_note =
             `LIVE SCAN + ORCHESTRATOR COMPLETION: ${merged.length} widget value(s) the server ` +
-            `does not offer, ${added} of them judged after the panel's scan ran out of budget, ` +
-            `from one batched /object_info read and marked source:"orchestrator_completion". ` +
-            `Values on an UPLOAD input that the combo list cannot enumerate were NOT judged ` +
-            `here — those stay in unchecked_nodes.`;
+            `does not offer, ${added} of them judged from one fresh /object_info read and ` +
+            `same-view graph detail read; entries added here are marked ` +
+            `source:"orchestrator_completion".`;
         }
       }
       payload.audit_completed_by = "orchestrator";

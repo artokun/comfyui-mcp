@@ -1,7 +1,30 @@
 import { describe, expect, it } from "vitest";
-import { parseComfyUIUrl } from "../../transport/comfyui-url.js";
+import {
+  formatComfyUIConnectionHost,
+  formatComfyUIHost,
+  formatComfyUIUrl,
+  parseComfyUIUrl,
+} from "../../transport/comfyui-url.js";
 
 describe("parseComfyUIUrl", () => {
+  it("formats URL authorities without changing configured identity", () => {
+    expect(formatComfyUIHost("127.0.0.1")).toBe("127.0.0.1");
+    expect(formatComfyUIConnectionHost("127.0.0.1")).toBe("localhost");
+    expect(formatComfyUIHost("[::1]")).toBe("[::1]");
+    expect(formatComfyUIHost("2001:db8::1")).toBe("[2001:db8::1]");
+    expect(formatComfyUIUrl("http://127.0.0.1:8189/api")).toBe("http://localhost:8189/api");
+    expect(formatComfyUIUrl("http://192.168.1.50:8189/api")).toBe("http://192.168.1.50:8189/api");
+  });
+
+  it("parses an IPv6 loopback URL", () => {
+    expect(parseComfyUIUrl("http://[::1]:8189")).toEqual({
+      host: "[::1]",
+      port: 8189,
+      ssl: false,
+      basePath: "",
+    });
+  });
+
   it("parses http with explicit port", () => {
     expect(parseComfyUIUrl("http://127.0.0.1:8188")).toEqual({
       host: "127.0.0.1",

@@ -219,6 +219,24 @@ describe("buildCompletionNotification", () => {
       },
     ]);
   });
+
+  it("#2512 interrupted duration/finished-at come from execution_interrupted, not delivery time", () => {
+    const interruptAt = START + 21 * 60 * 1000 + 8 * 1000;
+    const notification = buildCompletionNotification(
+      PROMPT_ID,
+      historyEntry(
+        [
+          ["execution_start", { prompt_id: PROMPT_ID, timestamp: START }],
+          ["execution_interrupted", { prompt_id: PROMPT_ID, timestamp: interruptAt }],
+        ],
+        "error",
+      ),
+      START,
+    );
+    expect(notification.status).toBe("interrupted");
+    expect(notification.duration_ms).toBe(interruptAt - START);
+    expect(Date.parse(notification.timestamp)).toBe(interruptAt);
+  });
 });
 
 function sampleWorkflow(): WorkflowJSON {

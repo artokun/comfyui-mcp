@@ -126,6 +126,10 @@ class FakePanel {
     public open: Wf[],
     public activeIdx: number,
     public listShape: ListShape = "full",
+    /** When false, skip the same-socket re-hello so tab ids still name the
+     *  pre-switch workflow — the delayed-hello shape that made #2531 report
+     *  pin success while turn routing retained the previous key. */
+    public rehello = true,
   ) {}
 
   get active(): Wf {
@@ -259,7 +263,7 @@ class FakePanel {
         });
         // A real panel re-helloes under the NEW workflow's route id on the SAME
         // socket when the active workflow changes (per-workflow routes, #640).
-        setTimeout(() => this.hello(`wf:r1:${this.active.path}`), 5);
+        if (this.rehello) setTimeout(() => this.hello(`wf:r1:${this.active.path}`), 5);
         return;
       }
       case "graph_outline":
@@ -486,5 +490,73 @@ describe("panel#1529 — a pin may not claim a graph target it did not establish
     const outline = await tool("panel_graph_outline").handler({}, ctx);
     expect(outline.isError, textOf(outline)).toBeFalsy();
     expect(textOf(outline)).toContain("SeedanceVideoExtendApi");
+  });
+});
+
+describe("mcp#2531 — a verified open/pin aligns turn routing onto the switched canvas", () => {
+  const flushMicrotasks = () => new Promise<void>((r) => setTimeout(r, 0));
+
+  it("does not report pin success while retaining the pre-open routing key", async () => {
+    // Delayed hello: the socket switched to B but still advertises A's route id,
+    // so named-dest matching cannot see B and the #884 healthy-pin gate used to
+    // decline. The tool then said the graph target moved AND that turn routing
+    // stayed on A.
+    const page = new FakePanel("wf:r1:workflows/wan_video_edit.json", [A, B], 0, "full", false);
+    await page.connect();
+    tabStamp.set(page.tabId, A.uuid);
+    tracker.recordForMid("m-origin", A.uuid, page.tabId);
+    tracker.onSeen(SCOPE, "m-origin");
+    await flushMicrotasks();
+    const ctx = ctxFor(SCOPE);
+
+    const opened = await tool("panel_open_workflow").handler({ path: B.path }, ctx);
+    expect(opened.isError, textOf(opened)).toBeFalsy();
+    await settle();
+
+    const res = await pin(ctx, B);
+    expect(res.isError, textOf(res)).toBeFalsy();
+    const body = jsonOf(res);
+    expect(body.pin_verified_active).toBe(true);
+    expect(body.turn_routing).toBe("repinned");
+    expect(String(body.note ?? "")).toContain("turn routing now follows this workflow");
+    expect(String(body.note ?? "")).not.toMatch(/NOT re-pinned/);
+
+    const outline = await tool("panel_graph_outline").handler({}, ctx);
+    expect(outline.isError, textOf(outline)).toBeFalsy();
+    expect(textOf(outline)).toContain("SeedanceVideoExtendApi");
+  });
+
+  it("the next origin-less turn inherits the switched canvas, not a later tab still showing the old workflow", async () => {
+    const page = new FakePanel("wf:r1:workflows/wan_video_edit.json", [A, B], 0, "full", false);
+    await page.connect();
+    tabStamp.set(page.tabId, A.uuid);
+    // In-flight pin without a lastOrigin (repinTo does not write one — that's
+    // the pre-#2531 state after a healthy pin was left alone). A later tab
+    // showing A must not become the inherited route.
+    tracker.repinTo(SCOPE, page.tabId);
+    const ctx = ctxFor(SCOPE);
+
+    const opened = await tool("panel_open_workflow").handler({ path: B.path }, ctx);
+    expect(opened.isError, textOf(opened)).toBeFalsy();
+    const pinned = await pin(ctx, B);
+    expect(pinned.isError, textOf(pinned)).toBeFalsy();
+    await settle();
+
+    const other = new FakePanel("wf:r2:workflows/wan_video_edit.json", [A], 0, "full", false);
+    await other.connect();
+    tabStamp.set(other.tabId, A.uuid);
+
+    tracker.turnEnded(SCOPE);
+    const mid = tracker.mintInheritedOrigin();
+    tracker.onSeen(SCOPE, mid);
+    await flushMicrotasks();
+
+    expect(tracker.pinOf(SCOPE)).toBe(page.tabId);
+    expect(tracker.pinOf(SCOPE)).not.toBe(other.tabId);
+
+    const outline = await tool("panel_graph_outline").handler({}, ctxFor(SCOPE));
+    expect(outline.isError, textOf(outline)).toBeFalsy();
+    expect(textOf(outline)).toContain("SeedanceVideoExtendApi");
+    expect(other.seen.filter((f) => f.cmd.startsWith("graph_"))).toHaveLength(0);
   });
 });

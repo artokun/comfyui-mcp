@@ -63,6 +63,15 @@ const liveServerSnapshot = vi.hoisted(() => ({
   value: { reachable: true, argv: undefined as string[] | undefined } as { reachable: boolean; argv?: string[] },
 }));
 
+/** Proven live custom_nodes scan root for uninstall disk verification (#2485).
+ *  Default undefined = requireLive cannot prove a scan root, so uninstall falls
+ *  back to the configured workspace. `throwUnavailable` models a declared
+ *  --base-directory that is currently missing. */
+const liveCustomNodesScan = vi.hoisted(() => ({
+  value: undefined as string | undefined,
+  throwUnavailable: false,
+}));
+
 vi.mock("../../services/workspace-env.js", async () => {
   const actual = await vi.importActual<
     typeof import("../../services/workspace-env.js")
@@ -76,6 +85,18 @@ vi.mock("../../services/workspace-env.js", async () => {
     resolveEffectiveComfyUICodeBase: () =>
       config.comfyuiCodePath ?? config.comfyuiPath ?? savedDefault.value,
     getLiveServerSnapshot: async () => liveServerSnapshot.value,
+    resolveCustomNodesScanBaseLiveStrict: async (
+      options?: { requireLive?: boolean },
+    ) => {
+      if (liveCustomNodesScan.throwUnavailable) {
+        throw new Error(
+          'The connected ComfyUI declares --base-directory "missing" but that directory is currently unavailable.',
+        );
+      }
+      if (liveCustomNodesScan.value !== undefined) return liveCustomNodesScan.value;
+      if (options?.requireLive) return undefined;
+      return config.comfyuiPath ?? savedDefault.value;
+    },
   };
 });
 
@@ -156,7 +177,7 @@ process.env.COMFYUI_MCP_PANEL_PIN = "off";
 
 import { join, resolve } from "node:path";
 import { tmpdir } from "node:os";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import { existsSync } from "node:fs";
 import { config } from "../../config.js";
 import {
@@ -184,6 +205,7 @@ import { applyManifest } from "../../services/manifest.js";
 import { getManifestPartialLeftover } from "../../services/manifest-partial.js";
 
 const mockedExec = vi.mocked(execFileSync);
+const mockedSpawn = vi.mocked(spawnSync);
 const mockedExists = vi.mocked(existsSync);
 let priorComfyuiPathEnv: string | undefined;
 
@@ -298,6 +320,19 @@ function stubFetch(opts: {
       }
       if (path.startsWith("/v2/customnode/installed")) {
         return jsonResponse(opts.installedBody ?? {});
+      }
+      // #2754 — "absent" means a host with NO ComfyUI-Manager, and such a host
+      // 404s the version routes exactly as it 404s the queue routes. Without this
+      // they fell through to the empty-200 catchall below, which models a server
+      // that answers every unknown path — the one shape that is neither a 404 nor
+      // a Manager. Detection reads the version routes now, so the fixture has to
+      // be honest about them or "confirmed absent" is asserted against a host that
+      // never confirmed anything.
+      if (
+        opts.managerQueueStatus === "absent" &&
+        (path === "/v2/manager/version" || path === "/manager/version")
+      ) {
+        return new Response("missing", { status: 404 });
       }
       if (path === "/v2/manager/queue/status" || path === "/manager/queue/status") {
         if (opts.queueStatusNull) {
@@ -442,6 +477,21 @@ describe("node-management service", () => {
     // below and must then provide a call-scoped or verified live root.
     process.env.COMFYUI_PATH = "/fake/comfy";
     mockedExec.mockReset();
+    mockedSpawn.mockReset();
+    mockedSpawn.mockReturnValue({
+      status: 0,
+      stdout: JSON.stringify({
+        schema: "envelope/1",
+        type: "envelope",
+        ok: true,
+        command: "version",
+        version: "1.11.1",
+        where: null,
+        data: {},
+        error: null,
+      }),
+      stderr: "",
+    } as never);
     mockedExists.mockReset();
     mockedExists.mockReturnValue(true);
     // Default: no custom_nodes fixture — the #797 disk scan delegates to the
@@ -463,6 +513,8 @@ describe("node-management service", () => {
     // and never touches the checkout. It exists so the suite can prove that even the
     // most local-looking configuration is refused, not to model permission.
     liveRoot.value = "/fake/comfy";
+    liveCustomNodesScan.value = undefined;
+    liveCustomNodesScan.throwUnavailable = false;
     // Default: live server is reachable. Tests that exercise the cm-cli unavailable
     // path (no COMFYUI_PATH) must set this to { reachable: false } to avoid the actual
     // dev machine's ComfyUI from interfering.
@@ -820,6 +872,176 @@ describe("node-management service", () => {
       expect(cloneEnv?.GIT_ASKPASS).toBe("echo");
     });
 
+    it("replaces a Manager-aliased teskor-hub checkout with the requested artokun origin (#2523)", async () => {
+      // Manager v4 keys from-source installs by bare repo name, so requesting
+      // artokun/comfyui-teskors-utils still clones teskor-hub's repository into
+      // the same folder and reports success. The pack's TS nodes then come from
+      // the wrong fork.
+      stubFetch({
+        installedBody: {
+          "comfyui-teskors-utils": {
+            ver: "nightly",
+            aux_id: "teskor-hub/comfyui-teskors-utils",
+            enabled: true,
+          },
+        },
+      });
+      let cloned = false;
+      mockedExists.mockImplementation((p: unknown) => {
+        const s = String(p);
+        if (s.includes("requirements.txt") || s.includes("install.py")) return false;
+        if (s.includes(".venv") || s.includes("cm-cli.py")) return false;
+        if (s.includes(NODE_DIR_UTILS) || s.endsWith("comfyui-teskors-utils")) {
+          if (cloned) return true;
+          return !fsCtl.removed.includes(NODE_DIR_UTILS);
+        }
+        return false;
+      });
+      fsCtl.readdirSync = (p) => {
+        const norm = p.replace(/\\/g, "/");
+        return norm.endsWith("/comfyui-teskors-utils") ? ["__init__.py", ".git"] : [];
+      };
+      mockedExec.mockImplementation(((bin: string, args: string[]) => {
+        const argv = args as string[];
+        if (bin === "git" && argv[0] === "clone") {
+          cloned = true;
+          return "";
+        }
+        if (bin === "git" && argv.includes("get-url")) {
+          return "https://github.com/teskor-hub/comfyui-teskors-utils.git";
+        }
+        return "";
+      }) as never);
+
+      const res = await installCustomNode({
+        id: "https://github.com/artokun/comfyui-teskors-utils",
+      });
+
+      expect(res.mechanism).toBe("git-clone");
+      expect(res.message).toMatch(/artokun\/comfyui-teskors-utils/);
+      expect(res.message).toMatch(/teskor-hub\/comfyui-teskors-utils/);
+      expect(fsCtl.removed).toContain(NODE_DIR_UTILS);
+      const cloneCall = mockedExec.mock.calls.find(
+        (c) => c[0] === "git" && (c[1] as string[])[0] === "clone",
+      );
+      expect(cloneCall).toBeDefined();
+      expect(cloneCall![1]).toEqual([
+        "clone",
+        "--depth",
+        "1",
+        "--end-of-options",
+        "https://github.com/artokun/comfyui-teskors-utils",
+        NODE_DIR_UTILS,
+      ]);
+    });
+
+    it("keeps a correct disk origin when Manager aux_id is stale (#2523)", async () => {
+      // Manager can retain the old alias after the local checkout was corrected.
+      // The disk remote is the stronger witness and must protect the checkout,
+      // including files the user changed locally, from replacement.
+      stubFetch({
+        installedBody: {
+          "comfyui-teskors-utils": {
+            ver: "nightly",
+            aux_id: "teskor-hub/comfyui-teskors-utils",
+            enabled: true,
+          },
+        },
+      });
+      let cloned = false;
+      mockedExists.mockImplementation((p: unknown) => {
+        const s = String(p);
+        if (s.includes("requirements.txt") || s.includes("install.py")) return false;
+        if (s.includes(".venv") || s.includes("cm-cli.py")) return false;
+        if (s.includes(NODE_DIR_UTILS) || s.endsWith("comfyui-teskors-utils")) {
+          return cloned || !fsCtl.removed.includes(NODE_DIR_UTILS);
+        }
+        return false;
+      });
+      fsCtl.readdirSync = (p) => {
+        const norm = p.replace(/\\/g, "/");
+        return norm.endsWith("/comfyui-teskors-utils")
+          ? ["__init__.py", ".git", "local-change.py"]
+          : [];
+      };
+      mockedExec.mockImplementation(((bin: string, args: string[]) => {
+        const argv = args as string[];
+        if (bin === "git" && argv[0] === "clone") {
+          cloned = true;
+          return "";
+        }
+        if (bin === "git" && argv.includes("get-url")) {
+          return "https://github.com/artokun/comfyui-teskors-utils.git";
+        }
+        return "";
+      }) as never);
+
+      const res = await installCustomNode({
+        id: "https://github.com/artokun/comfyui-teskors-utils",
+      });
+
+      expect(res.mechanism).toBe("git-clone");
+      expect(res.message).toMatch(/already exists in custom_nodes/);
+      expect(fsCtl.removed).not.toContain(NODE_DIR_UTILS);
+      expect(
+        mockedExec.mock.calls.find(
+          (c) => c[0] === "git" && (c[1] as string[])[0] === "clone",
+        ),
+      ).toBeUndefined();
+    });
+
+    it("does not treat a Manager listing of teskor-hub as the requested artokun origin (#2523)", async () => {
+      // Same substitution, but the on-disk remote cannot be read — aux_id is
+      // still enough proof to refuse the Manager hit and clone the URL passed.
+      stubFetch({
+        installedBody: {
+          "comfyui-teskors-utils": {
+            ver: "nightly",
+            aux_id: "teskor-hub/comfyui-teskors-utils",
+            enabled: true,
+          },
+        },
+      });
+      let cloned = false;
+      mockedExists.mockImplementation((p: unknown) => {
+        const s = String(p);
+        if (s.includes("requirements.txt") || s.includes("install.py")) return false;
+        if (s.includes(".venv") || s.includes("cm-cli.py")) return false;
+        if (s.includes(NODE_DIR_UTILS) || s.endsWith("comfyui-teskors-utils")) {
+          return cloned || !fsCtl.removed.includes(NODE_DIR_UTILS);
+        }
+        return false;
+      });
+      fsCtl.readdirSync = (p) => {
+        const norm = p.replace(/\\/g, "/");
+        return norm.endsWith("/comfyui-teskors-utils") ? ["__init__.py", ".git"] : [];
+      };
+      mockedExec.mockImplementation(((bin: string, args: string[]) => {
+        const argv = args as string[];
+        if (bin === "git" && argv[0] === "clone") {
+          cloned = true;
+          return "";
+        }
+        if (bin === "git" && argv.includes("get-url")) {
+          throw Object.assign(new Error("not a git repository"), { status: 128 });
+        }
+        return "";
+      }) as never);
+
+      const res = await installCustomNode({
+        id: "https://github.com/artokun/comfyui-teskors-utils",
+      });
+
+      expect(res.mechanism).toBe("git-clone");
+      expect(fsCtl.removed).toContain(NODE_DIR_UTILS);
+      const cloneCall = mockedExec.mock.calls.find(
+        (c) => c[0] === "git" && (c[1] as string[])[0] === "clone",
+      );
+      expect((cloneCall![1] as string[]).includes("https://github.com/artokun/comfyui-teskors-utils")).toBe(
+        true,
+      );
+    });
+
     // #463 — a detection failure is allowed to reach a direct clone only after
     // the connected ComfyUI proves that BOTH Manager queue/status dialects are
     // absent. This is distinct from a queue operation's own route-level 404,
@@ -851,44 +1073,64 @@ describe("node-management service", () => {
       ).toBeDefined();
     });
 
-    it("fails closed when Manager accepts a git enqueue with an empty success body", async () => {
+    it("drains before falling back when Manager accepts a git enqueue with an empty success body", async () => {
       const { calls } = stubFetch({ installedBody: {}, queueOpEmpty: true });
+      let cloned = false;
+      mockedExists.mockImplementation((p: unknown) => {
+        const s = String(p);
+        if (s.includes("requirements.txt") || s.includes("install.py")) return false;
+        if (s.includes(".venv") || s.includes("cm-cli.py")) return false;
+        if (s.includes(NODE_DIR_UTILS) || s.endsWith("comfyui-teskors-utils")) return cloned;
+        return false;
+      });
+      mockedExec.mockImplementation(((bin: string, args: string[]) => {
+        if (bin === "git" && args[0] === "clone") cloned = true;
+        return "";
+      }) as never);
 
-      await expect(
-        installCustomNode({
-          id: "https://github.com/teskor-hub/comfyui-teskors-utils",
-          source: "git",
-        }),
-      ).rejects.toMatchObject({
-        details: { kind: "manager-enqueue-empty-success" },
+      const res = await installCustomNode({
+        id: "https://github.com/teskor-hub/comfyui-teskors-utils",
+        source: "git",
       });
 
-      // The successful empty enqueue is ambiguous: do not start/poll it and
-      // never race a possible Manager task with a local clone.
+      expect(res.mechanism).toBe("git-clone");
+      // An empty successful body is not a pre-queue refusal. Drain the task
+      // before the exact installed-pack/disk check authorizes the clone.
       expect(calls.some((c) => c.url.endsWith("/v2/manager/queue/task"))).toBe(true);
-      expect(calls.some((c) => c.url.endsWith("/v2/manager/queue/start"))).toBe(false);
+      expect(calls.some((c) => c.url.endsWith("/v2/manager/queue/start"))).toBe(true);
+      expect(calls.some((c) => c.url.endsWith("/manager/queue/status"))).toBe(true);
       expect(
         mockedExec.mock.calls.find((c) => c[0] === "git" && (c[1] as string[])[0] === "clone"),
-      ).toBeUndefined();
+      ).toBeDefined();
     });
 
-    it("fails closed when Manager accepts a git enqueue with JSON null", async () => {
+    it("drains before falling back when Manager accepts a git enqueue with JSON null", async () => {
       const { calls } = stubFetch({ installedBody: {}, queueOpNull: true });
+      let cloned = false;
+      mockedExists.mockImplementation((p: unknown) => {
+        const s = String(p);
+        if (s.includes("requirements.txt") || s.includes("install.py")) return false;
+        if (s.includes(".venv") || s.includes("cm-cli.py")) return false;
+        if (s.includes(NODE_DIR_UTILS) || s.endsWith("comfyui-teskors-utils")) return cloned;
+        return false;
+      });
+      mockedExec.mockImplementation(((bin: string, args: string[]) => {
+        if (bin === "git" && args[0] === "clone") cloned = true;
+        return "";
+      }) as never);
 
-      await expect(
-        installCustomNode({
-          id: "https://github.com/teskor-hub/comfyui-teskors-utils",
-          source: "git",
-        }),
-      ).rejects.toMatchObject({
-        details: { kind: "manager-enqueue-empty-success" },
+      const res = await installCustomNode({
+        id: "https://github.com/teskor-hub/comfyui-teskors-utils",
+        source: "git",
       });
 
+      expect(res.mechanism).toBe("git-clone");
       expect(calls.some((c) => c.url.endsWith("/v2/manager/queue/task"))).toBe(true);
-      expect(calls.some((c) => c.url.endsWith("/v2/manager/queue/start"))).toBe(false);
+      expect(calls.some((c) => c.url.endsWith("/v2/manager/queue/start"))).toBe(true);
+      expect(calls.some((c) => c.url.endsWith("/manager/queue/status"))).toBe(true);
       expect(
         mockedExec.mock.calls.find((c) => c[0] === "git" && (c[1] as string[])[0] === "clone"),
-      ).toBeUndefined();
+      ).toBeDefined();
     });
 
     it("fails closed when a warm dialect cache later returns an empty queue status", async () => {
@@ -1549,6 +1791,9 @@ describe("node-management service", () => {
       expect(res.mechanism).toBe("git-clone");
       // The deps install was REFUSED and the reason is surfaced in the message…
       expect(res.message).toContain("Python dependencies were NOT installed");
+      expect(res.message).toMatch(/PARTIAL install/i);
+      expect(res.message).toMatch(/action:"fix"/);
+      expect(res.message).not.toMatch(/-m pip install/);
       // …and no pip subprocess ran against any interpreter.
       const pipCall = mockedExec.mock.calls.find(
         (c) =>
@@ -1557,6 +1802,61 @@ describe("node-management service", () => {
           (c[1] as string[]).includes(requirements),
       );
       expect(pipCall).toBeUndefined();
+    });
+
+    it("does not recommend the same pip command after a PEP 668 refusal (#2530)", async () => {
+      // Even a pinned COMFYUI_PYTHON can be an externally-managed base interpreter.
+      // Clone still succeeds; the warning must NOT tell the user to re-run the
+      // command PEP 668 just rejected.
+      config.comfyuiPath = undefined;
+      const adopted = "/adopted/ComfyUI";
+      const IS_WIN = process.platform === "win32";
+      const basePy = join(
+        adopted,
+        ".venv",
+        IS_WIN ? "Scripts" : "bin",
+        IS_WIN ? "python.exe" : "python",
+      );
+      process.env.COMFYUI_PYTHON = basePy;
+      const nodeDir = resolve(adopted, "custom_nodes", "comfyui-teskors-utils");
+      const requirements = join(nodeDir, "requirements.txt");
+      stubFetch({ installedBody: {} });
+      let cloned = false;
+      mockedExists.mockImplementation((p: unknown) => {
+        const s = String(p);
+        if (s === basePy) return true;
+        if (s === requirements) return true;
+        if (s.includes("install.py") || s.includes("cm-cli.py")) return false;
+        if (s.includes(".venv")) return false;
+        if (s.includes("comfyui-teskors-utils")) return cloned;
+        return false;
+      });
+      mockedExec.mockImplementation(((bin: string, args: string[]) => {
+        if (bin === "git" && args[0] === "clone") {
+          cloned = true;
+          return "";
+        }
+        if (Array.isArray(args) && args.includes("-r")) {
+          throw Object.assign(new Error("Command failed: pip"), {
+            stderr:
+              "error: externally-managed-environment\n" +
+              "This Python installation is managed by uv and should not be modified.\n",
+            stdout: "",
+          });
+        }
+        return "";
+      }) as never);
+
+      const res = await installCustomNode({
+        id: "https://github.com/teskor-hub/comfyui-teskors-utils",
+        comfyuiPath: adopted,
+      });
+
+      expect(res.mechanism).toBe("git-clone");
+      expect(res.message).toMatch(/PEP 668|EXTERNALLY MANAGED/);
+      expect(res.message).toMatch(/action:"fix"/);
+      expect(res.message).toMatch(/Do not re-run pip against that interpreter/);
+      expect(res.message).not.toContain(`${basePy} -m pip install`);
     });
 
     it("full-clones (no --depth) and checks out an explicit ref on fallback", async () => {
@@ -2295,6 +2595,7 @@ describe("node-management service", () => {
       const { calls } = stubFetch();
       const res = await fixCustomNode({ id: "my-pack" });
       expect(res.mechanism).toBe("manager-http");
+      expect(res.message).toMatch(/Queued \+ repaired/);
       expect(taskOf(calls, "fix").params).toMatchObject({ node_name: "my-pack" });
     });
 
@@ -2309,6 +2610,84 @@ describe("node-management service", () => {
       expect(args).toContain("all");
       expect(args).toContain("/split/data");
       expect(args).not.toContain("/split/code");
+    });
+
+    it("does not report repaired when Manager history records a not-found error (#2490)", async () => {
+      const { calls } = stubFetch({
+        managerTaskHistory: (uiId) => ({
+          history: {
+            ui_id: uiId,
+            kind: "fix",
+            result: "not found: ComfyUI-CacheDiT@",
+            status: { status_str: "error" },
+          },
+        }),
+      });
+      const err = await fixCustomNode({ id: "ComfyUI-CacheDiT" }).catch((e) => e as Error);
+      expect(err).toBeInstanceOf(NodeManagementError);
+      expect(err.message).toMatch(/not found: ComfyUI-CacheDiT@/);
+      expect(err.message).toMatch(/does not prove/);
+      expect(err.message).not.toMatch(/Queued \+ repaired/);
+      const { body } = taskOf(calls, "fix");
+      const historyCalls = calls.filter(
+        (c) => new URL(c.url).pathname === "/v2/manager/queue/history",
+      );
+      expect(historyCalls).toHaveLength(1);
+      expect(new URL(historyCalls[0].url).searchParams.get("ui_id")).toBe(body.ui_id);
+    });
+
+    it.each(["failed", "error"] as const)(
+      "surfaces a v4 per-task fix %s after queue drain (#2490)",
+      async (statusStr) => {
+        stubFetch({
+          managerTaskHistory: (uiId) => ({
+            history: {
+              ui_id: uiId,
+              kind: "fix",
+              result: `An error occurred while fixing 'ComfyUI-CacheDiT@'.`,
+              status: { status_str: statusStr },
+            },
+          }),
+        });
+        const err = await fixCustomNode({ id: "ComfyUI-CacheDiT" }).catch((e) => e as Error);
+        expect(err).toBeInstanceOf(NodeManagementError);
+        expect(err.message).toContain(`recorded the fix of "ComfyUI-CacheDiT" as ${statusStr}`);
+        expect(err.message).toMatch(/An error occurred while fixing/);
+        expect(err.message).not.toMatch(/Queued \+ repaired/);
+      },
+    );
+
+    it("does not report repaired when history result is not-found without status_str (#2490)", async () => {
+      stubFetch({
+        managerTaskHistory: (uiId) => ({
+          history: {
+            ui_id: uiId,
+            kind: "fix",
+            result: "not found: ComfyUI-CacheDiT@",
+          },
+        }),
+      });
+      const err = await fixCustomNode({ id: "ComfyUI-CacheDiT" }).catch((e) => e as Error);
+      expect(err).toBeInstanceOf(NodeManagementError);
+      expect(err.message).toMatch(/not found: ComfyUI-CacheDiT@/);
+      expect(err.message).not.toMatch(/Queued \+ repaired/);
+    });
+
+    it("still reports repaired when Manager history records success (#2490)", async () => {
+      const { calls } = stubFetch({
+        managerTaskHistory: (uiId) => ({
+          history: {
+            ui_id: uiId,
+            kind: "fix",
+            result: "success",
+            status: { status_str: "success" },
+          },
+        }),
+      });
+      const res = await fixCustomNode({ id: "my-pack" });
+      expect(res.mechanism).toBe("manager-http");
+      expect(res.message).toMatch(/Queued \+ repaired "my-pack"/);
+      expect(res.taskUiId).toBe(taskOf(calls, "fix").body.ui_id);
     });
   });
 
@@ -3421,6 +3800,161 @@ describe("node-management service", () => {
       expect(res.message).toMatch(/no matching directory remains/);
     });
 
+    it("uninstall disk verification uses the live Desktop custom_nodes root, not COMFYUI_PATH (#2485)", async () => {
+      // ComfyUI Desktop: COMFYUI_PATH is a workspace without custom_nodes, while
+      // the running server scans a different --base-directory data root. Scanning
+      // the configured workspace reports "custom_nodes does not exist" even when
+      // the pack is gone from (or still sitting in) the live scan root.
+      const workspace = resolve("/workspace/no-nodes");
+      const desktop = resolve("/desktop/user-data");
+      config.comfyuiPath = workspace;
+      liveCustomNodesScan.value = desktop;
+      mockedExists.mockImplementation((p: unknown) => {
+        const norm = String(p).replace(/\\/g, "/").toLowerCase();
+        return !norm.includes("/workspace/no-nodes/custom_nodes");
+      });
+      fsCtl.readdirSync = (p) => {
+        const norm = p.replace(/\\/g, "/");
+        if (norm.includes("/desktop/user-data/") && /\/custom_nodes$/i.test(norm)) return [];
+        if (/\/custom_nodes$/i.test(norm)) {
+          throw new Error(`scanned the wrong custom_nodes: ${p}`);
+        }
+        return [];
+      };
+      let listCalls = 0;
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(async (url: string) => {
+          const path = new URL(url).pathname + (new URL(url).search || "");
+          if (path.startsWith("/v2/customnode/installed")) {
+            listCalls++;
+            return jsonResponse(listCalls === 1 ? installedEnabled : {});
+          }
+          if (path === "/v2/manager/queue/status") return jsonResponse(drained);
+          return new Response("", { status: 200 });
+        }),
+      );
+      const res = await uninstallCustomNode({ id: "my-pack" });
+      expect(res.message).toMatch(/Uninstalled "my-pack"/);
+      expect(res.message).toMatch(/gone from disk/);
+      expect(res.message).not.toMatch(/inconclusive/);
+      expect(res.message).not.toMatch(/does not exist/);
+    });
+
+    it("uninstall reports STILL on disk when the leftover is under the live Desktop root (#2485)", async () => {
+      const workspace = resolve("/workspace/no-nodes");
+      const desktop = resolve("/desktop/user-data");
+      config.comfyuiPath = workspace;
+      liveCustomNodesScan.value = desktop;
+      mockedExists.mockImplementation((p: unknown) => {
+        const norm = String(p).replace(/\\/g, "/").toLowerCase();
+        return !norm.includes("/workspace/no-nodes/custom_nodes");
+      });
+      fsCtl.readdirSync = (p) => {
+        const norm = p.replace(/\\/g, "/");
+        if (norm.includes("/desktop/user-data/") && /\/custom_nodes$/i.test(norm)) {
+          return [dirEnt("my-pack")];
+        }
+        return [];
+      };
+      let listCalls = 0;
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(async (url: string) => {
+          const path = new URL(url).pathname + (new URL(url).search || "");
+          if (path.startsWith("/v2/customnode/installed")) {
+            listCalls++;
+            return jsonResponse(listCalls === 1 ? installedEnabled : {});
+          }
+          if (path === "/v2/manager/queue/status") return jsonResponse(drained);
+          return new Response("", { status: 200 });
+        }),
+      );
+      const res = await uninstallCustomNode({ id: "my-pack" });
+      expect(res.message).toMatch(/STILL on disk/);
+      expect(res.message).toMatch(/NOT a completed uninstall/);
+      expect(res.message).not.toMatch(/inconclusive/);
+      expect(res.message).not.toMatch(/^Uninstalled/);
+    });
+
+    it("uninstall does not fall back to COMFYUI_PATH when live --base-directory is unavailable (#2485)", async () => {
+      const workspace = resolve("/workspace/no-nodes");
+      config.comfyuiPath = workspace;
+      liveCustomNodesScan.throwUnavailable = true;
+      mockedExists.mockImplementation((p: unknown) => {
+        const norm = String(p).replace(/\\/g, "/").toLowerCase();
+        return !norm.includes("/workspace/no-nodes/custom_nodes");
+      });
+      fsCtl.readdirSync = (p) => {
+        const norm = p.replace(/\\/g, "/");
+        if (norm.includes("/workspace/no-nodes/") && /\/custom_nodes$/i.test(norm)) {
+          throw new Error(`fell back to COMFYUI_PATH custom_nodes: ${p}`);
+        }
+        return [];
+      };
+      let listCalls = 0;
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(async (url: string) => {
+          const path = new URL(url).pathname + (new URL(url).search || "");
+          if (path.startsWith("/v2/customnode/installed")) {
+            listCalls++;
+            return jsonResponse(listCalls === 1 ? installedEnabled : {});
+          }
+          if (path === "/v2/manager/queue/status") return jsonResponse(drained);
+          return new Response("", { status: 200 });
+        }),
+      );
+      const res = await uninstallCustomNode({ id: "my-pack" });
+      expect(res.message).toMatch(/Uninstalled "my-pack"/);
+      expect(res.message).toMatch(/no disk check was possible/);
+      expect(res.message).not.toMatch(/inconclusive/);
+    });
+
+    it("CLI uninstall disk verification uses the live Desktop scan root, not COMFYUI_PATH (#2485)", async () => {
+      const workspace = resolve("/workspace/no-nodes");
+      const desktop = resolve("/desktop/user-data");
+      config.comfyuiPath = workspace;
+      liveCustomNodesScan.value = desktop;
+      mockedExists.mockImplementation((p: unknown) => {
+        const norm = String(p).replace(/\\/g, "/").toLowerCase();
+        return !norm.includes("/workspace/no-nodes/custom_nodes");
+      });
+      let removed = false;
+      fsCtl.readdirSync = (p) => {
+        const norm = p.replace(/\\/g, "/");
+        if (norm.includes("/desktop/user-data/") && /\/custom_nodes$/i.test(norm)) {
+          return removed ? [] : [dirEnt("my-pack")];
+        }
+        return [];
+      };
+      fsCtl.readFileSync = () => {
+        throw new Error("ENOENT");
+      };
+      mockedExec.mockImplementation(() => {
+        removed = true;
+        return cliEnvelope({ message: "uninstalled" }) as never;
+      });
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(async (url: string) => {
+          const path = new URL(url).pathname + (new URL(url).search || "");
+          if (path.startsWith("/v2/customnode/installed")) {
+            return new Response("boom", { status: 500 });
+          }
+          if (path === "/v2/manager/queue/status") {
+            return jsonResponse(drained);
+          }
+          return new Response("", { status: 200 });
+        }),
+      );
+      const res = await uninstallCustomNode({ id: "my-pack", useCmCli: true });
+      expect(res.mechanism).toBe("comfy-cli");
+      expect(res.message).toMatch(/Uninstalled "my-pack"/);
+      expect(res.message).toMatch(/no matching directory remains/);
+      expect(res.message).not.toMatch(/inconclusive/);
+    });
+
     it("the CLI uninstall disk verification uses the ENTRY-captured workspace, not a retargeted one", async () => {
       // The CLI runs against /fake/comfy; the retarget flips config to
       // /other/comfy (which still has the pack). Verifying against the
@@ -3594,6 +4128,101 @@ describe("node-management service", () => {
   // ---- list --------------------------------------------------------------
 
   describe("listInstalledNodes", () => {
+    it("#2603 falls back to Manager HTTP when the installed comfy-cli version is unrecognized", async () => {
+      const cliPath = "/fake/comfy-cli-2603-unrecognized";
+      const priorCliPath = process.env.COMFY_CLI_PATH;
+      process.env.COMFY_CLI_PATH = cliPath;
+      mockedSpawn.mockReturnValue({
+        status: 0,
+        stdout: "comfy-cli version unavailable\n",
+        stderr: "",
+      } as never);
+      const { calls } = stubFetch({
+        installedBody: {
+          "ComfyUI-Manager": {
+            ver: "3.1",
+            cnr_id: "comfyui-manager",
+            enabled: true,
+          },
+        },
+      });
+
+      try {
+        const nodes = await listInstalledNodes({ mode: "default", useCmCli: true });
+        expect(nodes).toEqual([
+          {
+            module: "ComfyUI-Manager",
+            // #2714 — the object payload's key is a folder key, carried explicitly
+            // so the on-disk corroboration never has to guess whether it is one.
+            moduleKey: "ComfyUI-Manager",
+            cnrId: "comfyui-manager",
+            version: "3.1",
+            enabled: true,
+          },
+        ]);
+        expect(mockedSpawn).toHaveBeenCalledWith(
+          cliPath,
+          ["--json", "--version"],
+          expect.objectContaining({ timeout: 10_000 }),
+        );
+        expect(mockedExec).not.toHaveBeenCalled();
+        expect(
+          calls.some((call) => call.url.includes("/v2/customnode/installed?mode=default")),
+        ).toBe(true);
+      } finally {
+        if (priorCliPath === undefined) delete process.env.COMFY_CLI_PATH;
+        else process.env.COMFY_CLI_PATH = priorCliPath;
+      }
+    });
+
+    it("does not fall back after a supported comfy-cli inventory command fails", async () => {
+      const cliPath = "/fake/comfy-cli-2603-command-error";
+      const priorCliPath = process.env.COMFY_CLI_PATH;
+      process.env.COMFY_CLI_PATH = cliPath;
+      mockedSpawn.mockReturnValue({
+        status: 0,
+        stdout: JSON.stringify({
+          schema: "envelope/1",
+          type: "envelope",
+          ok: true,
+          command: "version",
+          version: "1.11.1",
+          where: null,
+          data: {},
+          error: null,
+        }),
+        stderr: "",
+      } as never);
+      mockedExec.mockReturnValue(
+        JSON.stringify({
+          schema: "envelope/1",
+          type: "envelope",
+          ok: false,
+          command: "node show installed",
+          version: "1.11.1",
+          where: "local",
+          data: null,
+          error: {
+            code: "node_inventory_failed",
+            message: "inventory unavailable",
+          },
+        }) as never,
+      );
+      const { fetchMock } = stubFetch({
+        installedBody: { "Manager-pack": { ver: "1.0", enabled: true } },
+      });
+
+      try {
+        await expect(listInstalledNodes({ useCmCli: true })).rejects.toThrow(
+          /comfy-cli node show failed: node_inventory_failed: inventory unavailable/,
+        );
+        expect(fetchMock).not.toHaveBeenCalled();
+      } finally {
+        if (priorCliPath === undefined) delete process.env.COMFY_CLI_PATH;
+        else process.env.COMFY_CLI_PATH = priorCliPath;
+      }
+    });
+
     it("parses an object-keyed installed response", async () => {
       stubFetch({
         installedBody: {
@@ -3636,6 +4265,33 @@ describe("node-management service", () => {
       const nodes = await listInstalledNodes();
       expect(nodes).toHaveLength(1);
       expect(nodes[0].module).toBe("PackA");
+    });
+
+    it("#2714 — a title-derived module carries NO folder key", async () => {
+      // `module` keeps its precedence (title first) because that is what this list
+      // displays and what Manager is sent back as `node_name`. But #2714's on-disk
+      // corroboration reads a module as a PATH, and prose is not one — so the key
+      // the payload actually stated is carried separately, and is absent when the
+      // payload stated none.
+      stubFetch({
+        installedBody: [
+          { title: "Friendly Label", ver: "1.0.0", cnr_id: "packa", enabled: true },
+          { title: "Pack A", module: "ComfyUI-PackA", ver: "1.0.0", enabled: true },
+        ],
+      });
+      const nodes = await listInstalledNodes();
+      expect(nodes[0].module).toBe("Friendly Label");
+      expect(nodes[0].moduleKey).toBeUndefined();
+      expect(nodes[1].module).toBe("Pack A");
+      expect(nodes[1].moduleKey).toBe("ComfyUI-PackA");
+    });
+
+    it("#2714 — the object shape's KEY is a folder key", async () => {
+      stubFetch({
+        installedBody: { "ComfyUI-PackB": { ver: "1.0.0", cnr_id: "packb", enabled: true } },
+      });
+      const nodes = await listInstalledNodes();
+      expect(nodes[0].moduleKey).toBe("ComfyUI-PackB");
     });
 
     it("missing enabled/is_disabled is UNKNOWN, never defaulted to a definite state", async () => {

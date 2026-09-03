@@ -393,3 +393,198 @@ describe("#2416 ComfyUI-Seed-API BytePlus nodes are not free", () => {
     expect(out.externalProviders).toEqual(["BytePlus"]);
   });
 });
+
+// ---------------------------------------------------------------------------
+// #2543 — Nicole Social env-auth backends. GEMINI_API_KEY / WAVESPEED_API_KEY
+// live in the environment, never as a workflow input, and api_node is absent,
+// so every generic signal says free while the nodes spend the user's Google
+// Gemini / WaveSpeed balance. The fixtures are the report's own category
+// ("Nicole Social/backends") with no credential widget and no partner marker.
+//
+// The opt-in marker (`external_api_node` / `EXTERNAL_API_NODE`) is the other
+// half of the fix: the next env-only pack can mark itself without a code change.
+// ---------------------------------------------------------------------------
+
+/** The reported Gemini node. No credential input; api_node absent. */
+const NICOLE_GEMINI = def({
+  name: "NicoleGeminiGenerate",
+  display_name: "Nicole Gemini Generate",
+  category: "Nicole Social/backends",
+  python_module: "custom_nodes.nicole-social",
+  input: { required: { prompt: ["STRING", {}] } },
+});
+
+/** The reported WaveSpeed node. Same pack, same hole. */
+const NICOLE_WAVESPEED = def({
+  name: "NicoleWaveSpeedGenerate",
+  display_name: "Nicole WaveSpeed Generate",
+  category: "Nicole Social/backends",
+  python_module: "custom_nodes.nicole-social",
+  input: { required: { prompt: ["STRING", {}] } },
+});
+
+const KJNODES = def({
+  name: "INTConstant",
+  category: "KJNodes",
+  python_module: "custom_nodes.ComfyUI-KJNodes",
+  input: { required: { value: ["INT", {}] } },
+});
+
+/** A merely similar "gemini" category — must stay free until marked. */
+const LOCAL_GEMINI_TAGGER = def({
+  name: "LocalGeminiTagger",
+  category: "gemini/caption",
+  python_module: "custom_nodes.comfyui-local-gemini-tools",
+  input: { required: { image: ["IMAGE", {}] } },
+});
+
+/** chengzeyi/Comfy-WaveSpeed is a LOCAL optimizer, not the hosted WaveSpeed API. */
+const WAVESPEED_LOCAL_CACHE = def({
+  name: "ApplyFirstBlockCache",
+  category: "wavespeed",
+  python_module: "custom_nodes.Comfy-WaveSpeed",
+  input: { required: { model: ["MODEL", {}] } },
+});
+
+/** Official Comfy partner Gemini — stays isApiNode, not the external list. */
+const PARTNER_GEMINI = def({
+  name: "GeminiNode",
+  category: "api node/image/Gemini",
+  api_node: true,
+});
+
+describe("#2543 env-authenticated Gemini/WaveSpeed nodes are not free", () => {
+  it("THE REPORTED GRAPH: Nicole Social backends are no longer local/free", async () => {
+    // Exact unfixed verdict from #2543: runtime:"local", usesApiNodes:false,
+    // guidance "Local-GPU / free — every node runs on the user's own GPU, no paid credits."
+    const out = await runtimeOf(
+      ["PreviewImage", "NicoleGeminiGenerate", "NicoleWaveSpeedGenerate", "ImpactMakeImageBatch"],
+      {
+        PreviewImage: CORE_PREVIEW,
+        NicoleGeminiGenerate: NICOLE_GEMINI,
+        NicoleWaveSpeedGenerate: NICOLE_WAVESPEED,
+        ImpactMakeImageBatch: IMPACT,
+      },
+    );
+
+    expect(out.runtime).toBe("mixed");
+    expect(out.usesApiNodes).toBe(true);
+    expect(out.externalApiNodes).toEqual(["NicoleGeminiGenerate", "NicoleWaveSpeedGenerate"]);
+    expect(out.externalProviders).toEqual(["Google Gemini", "WaveSpeed"]);
+    expect(out.apiNodes).toEqual([]);
+    expect(out.unknownNodes).toEqual([]);
+  });
+
+  it("an all-external Nicole Social graph reads `api`, not `mixed`", async () => {
+    const out = await runtimeOf(["NicoleGeminiGenerate"], { NicoleGeminiGenerate: NICOLE_GEMINI });
+    expect(out.runtime).toBe("api");
+    expect(out.usesApiNodes).toBe(true);
+    expect(out.externalProviders).toEqual(["Google Gemini", "WaveSpeed"]);
+  });
+
+  it("the category prefix matches even when the pack directory is renamed", async () => {
+    const renamed = def({
+      ...NICOLE_WAVESPEED,
+      python_module: "custom_nodes.my-nicole-fork",
+    } as Partial<ComfyUINodeDef>);
+    expect(isExternalServiceNode(renamed)).toBe(true);
+    const out = await runtimeOf(["NicoleWaveSpeedGenerate"], { NicoleWaveSpeedGenerate: renamed });
+    expect(out.runtime).toBe("api");
+    expect(out.externalProviders).toEqual(["Google Gemini", "WaveSpeed"]);
+  });
+
+  it("a merely SIMILAR category is not swept in", async () => {
+    const other = def({
+      name: "NicoleSocialExtrasMasker",
+      category: "Nicole Social Extras/Mask",
+      python_module: "custom_nodes.nicole-ai-extras",
+      input: { required: { image: ["IMAGE", {}] } },
+    });
+    const out = await runtimeOf(["NicoleSocialExtrasMasker"], { NicoleSocialExtrasMasker: other });
+    expect(out.runtime).toBe("local");
+    expect(out.usesApiNodes).toBe(false);
+    expect(out.externalProviders).toBeUndefined();
+  });
+
+  it("a generic `gemini` category is not treated as paid", async () => {
+    expect(isExternalServiceNode(LOCAL_GEMINI_TAGGER)).toBe(false);
+    const out = await runtimeOf(["LocalGeminiTagger", "KSampler"], {
+      LocalGeminiTagger: LOCAL_GEMINI_TAGGER,
+      KSampler: CORE_SAMPLER,
+    });
+    expect(out.runtime).toBe("local");
+    expect(out.usesApiNodes).toBe(false);
+  });
+
+  it("Impact Pack, KJNodes, and Comfy-WaveSpeed's local optimizer stay free", async () => {
+    expect(isExternalServiceNode(IMPACT)).toBe(false);
+    expect(isExternalServiceNode(KJNODES)).toBe(false);
+    expect(isExternalServiceNode(WAVESPEED_LOCAL_CACHE)).toBe(false);
+    const out = await runtimeOf(["ImpactMakeImageBatch", "INTConstant", "ApplyFirstBlockCache"], {
+      ImpactMakeImageBatch: IMPACT,
+      INTConstant: KJNODES,
+      ApplyFirstBlockCache: WAVESPEED_LOCAL_CACHE,
+    });
+    expect(out.runtime).toBe("local");
+    expect(out.usesApiNodes).toBe(false);
+    expect(out.externalApiNodes).toEqual([]);
+  });
+
+  it("official Comfy partner Gemini stays in apiNodes, not the external list", async () => {
+    expect(isApiNode(PARTNER_GEMINI)).toBe(true);
+    expect(isExternalServiceNode(PARTNER_GEMINI)).toBe(false);
+    const out = await runtimeOf(["GeminiNode"], { GeminiNode: PARTNER_GEMINI });
+    expect(out.apiNodes).toEqual(["GeminiNode"]);
+    expect(out.externalApiNodes).toEqual([]);
+    expect(out.runtime).toBe("api");
+  });
+
+  it("an explicit external_api_node marker is enough (no widget, no pack entry)", async () => {
+    const marked = def({
+      name: "EnvOnlyPaidBackend",
+      category: "misc/backends",
+      python_module: "custom_nodes.some-unlisted-env-auth-pack",
+      external_api_node: true,
+      external_api_provider: "Acme",
+      input: { required: { prompt: ["STRING", {}] } },
+    });
+    expect(isExternalServiceNode(marked)).toBe(true);
+    expect(isApiNode(marked)).toBe(false);
+    const out = await runtimeOf(["EnvOnlyPaidBackend"], { EnvOnlyPaidBackend: marked });
+    expect(out.runtime).toBe("api");
+    expect(out.usesApiNodes).toBe(true);
+    expect(out.externalApiNodes).toEqual(["EnvOnlyPaidBackend"]);
+    expect(out.externalProviders).toEqual(["Acme"]);
+    expect(out.apiNodes).toEqual([]);
+  });
+
+  it("EXTERNAL_API_NODE as a string names the provider without a companion field", async () => {
+    const marked = def({
+      name: "EnvOnlyStringMarker",
+      category: "misc",
+      python_module: "custom_nodes.another-unlisted-pack",
+      EXTERNAL_API_NODE: "CloudVendor",
+      input: { required: { prompt: ["STRING", {}] } },
+    });
+    expect(isExternalServiceNode(marked)).toBe(true);
+    const out = await runtimeOf(["EnvOnlyStringMarker"], { EnvOnlyStringMarker: marked });
+    expect(out.runtime).toBe("api");
+    expect(out.externalProviders).toEqual(["CloudVendor"]);
+    expect(out.apiNodes).toEqual([]);
+  });
+
+  it("a boolean marker without a provider still is not local/free", async () => {
+    const marked = def({
+      name: "EnvOnlyUnnamed",
+      category: "misc",
+      python_module: "custom_nodes.unnamed-env-auth-pack",
+      external_api_node: true,
+      input: { required: { prompt: ["STRING", {}] } },
+    });
+    const out = await runtimeOf(["EnvOnlyUnnamed"], { EnvOnlyUnnamed: marked });
+    expect(out.runtime).toBe("api");
+    expect(out.usesApiNodes).toBe(true);
+    expect(out.externalApiNodes).toEqual(["EnvOnlyUnnamed"]);
+    expect(out.externalProviders).toBeUndefined();
+  });
+});

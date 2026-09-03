@@ -1,4 +1,5 @@
 import { Client } from "@stable-canvas/comfyui-client";
+import { LoopbackWebSocket } from "../transport/loopback-websocket.js";
 import {
   config,
   getComfyUIApiHost,
@@ -18,10 +19,14 @@ import {
   comfyuiFetch,
   connectedPanelFallbackOriginsNow,
   comfyHttpTimeoutSeconds,
+  describeMissingInputMediaDrift,
   isComfyTransportFailure,
   isTimeoutAbort,
+  originOf,
   raceAbort,
 } from "./fetch.js";
+import { isKnownLoaderInput } from "./loader-asset-inputs.js";
+import { sameOrigin } from "../utils/origin.js";
 import {
   choosePanelFallbackOrigin,
   describeDeclinedPanelFallback,
@@ -30,6 +35,8 @@ import {
 import {
   PanelComfyUIReadRelayError,
   PanelImageRelayError,
+  PANEL_COMFYUI_READ_MAX_BYTES,
+  PANEL_COMFYUI_READ_OBJECT_INFO_MAX_BYTES,
   requestPanelComfyUIRead,
   requestPanelImage,
   type PanelComfyUIReadSuccess,
@@ -104,15 +111,24 @@ function requireLocalComfyUI(op: string): void {
 
 let clientInstance: Client | null = null;
 
+/** Keep the SDK's configured URL literal until a refused loopback dial proves
+ * that Node should retry through its IPv6-capable localhost resolver. */
+function connectionWebSocket(): typeof WebSocket | undefined {
+  // oxlint-disable-next-line anti-slop/no-chained-type-assertions -- the SDK's DOM WebSocket type is wider than this Node adapter's runtime-compatible surface
+  return LoopbackWebSocket as unknown as typeof WebSocket;
+}
+
 export function getClient(): Client {
   requireLocalMode("getClient");
   if (!clientInstance) {
+    const ws = connectionWebSocket();
     clientInstance = new Client({
       api_host: getComfyUIApiHost(),
       // Path prefix for reverse-proxied / gateway'd ComfyUI (e.g. "/comfyapi").
       api_base: getComfyUIBasePath(),
       ssl: config.comfyuiSsl,
       clientId: "comfyui-mcp",
+      ...(ws ? { WebSocket: ws } : {}),
       // Inject generic auth headers (COMFYUI_AUTH_*) on the library's own HTTP
       // calls; a no-op when unset. Node 22+ provides global WebSocket.
       //
@@ -223,6 +239,34 @@ function looksLikeSystemStats(body: unknown): boolean {
   return (b.system != null && typeof b.system === "object") || Array.isArray(b.devices);
 }
 
+/** A relayed /object_info document must be a non-empty object registry, not an
+ * HTML or gateway JSON envelope that happens to parse successfully. Every
+ * entry must retain the required ComfyUI node-definition fields. */
+function looksLikeObjectInfo(body: unknown): boolean {
+  if (!body || typeof body !== "object" || Array.isArray(body)) return false;
+  const entries = Object.entries(body as Record<string, unknown>);
+  if (entries.length === 0) return false;
+  return entries.every(([nodeType, definition]) => {
+    if (!nodeType.trim() || !definition || typeof definition !== "object" || Array.isArray(definition)) return false;
+    const def = definition as Record<string, unknown>;
+    const input = def.input;
+    return Boolean(
+      Object.prototype.hasOwnProperty.call(def, "input") &&
+      input &&
+      typeof input === "object" &&
+      !Array.isArray(input) &&
+      Array.isArray(def.output) &&
+      Array.isArray(def.output_is_list) &&
+      Array.isArray(def.output_name) &&
+      typeof def.name === "string" &&
+      typeof def.display_name === "string" &&
+      typeof def.description === "string" &&
+      typeof def.category === "string" &&
+      typeof def.output_node === "boolean",
+    );
+  });
+}
+
 function panelReadResponse(read: PanelComfyUIReadSuccess): Response {
   const headers = new Headers();
   if (read.contentType) headers.set("content-type", read.contentType);
@@ -232,7 +276,7 @@ function panelReadResponse(read: PanelComfyUIReadSuccess): Response {
 /** Ask the authenticated panel only after the configured headless route failed
  * at the transport layer. No browser origin is selected or contacted here. */
 async function panelReadFallback(
-  operation: "history" | "system_stats" | "logs",
+  operation: "history" | "system_stats" | "logs" | "object_info",
   primaryError: unknown,
 ): Promise<PanelComfyUIReadSuccess | undefined> {
   try {
@@ -241,8 +285,19 @@ async function panelReadFallback(
     if (error instanceof PanelComfyUIReadRelayError && error.unavailable) return undefined;
     const primary = primaryError instanceof Error ? primaryError.message : String(primaryError);
     const code = error instanceof PanelComfyUIReadRelayError ? error.code : "RELAY_ERROR";
+    // #2703 - the code alone was the whole answer, and PANEL_FETCH_FAILED does
+    // not distinguish "the read exceeded the relay's byte ceiling" from "the
+    // panel's fetch timed out" from "ComfyUI answered 403" from "that panel
+    // predates the read relay". The reporter got `fetch failed: connect
+    // ECONNREFUSED 127.0.0.1:8188 ... (PANEL_FETCH_FAILED)` and had nothing to
+    // act on: the headless target was dead AND the one path that could have
+    // answered declined without saying why. The relay now carries the cause
+    // (services/panel-image-relay.ts, panelFailureReason); say it here, because
+    // this message - not the relay error - is what reaches the caller.
+    const reason = error instanceof PanelComfyUIReadRelayError ? error.reason : undefined;
     throw new Error(
-      `${primary} The connected panel ComfyUI read fallback failed safely (${code}).`,
+      `${primary} The connected panel ComfyUI read fallback failed safely (${code}).` +
+        (reason ? ` The panel reported: ${reason}` : ""),
       { cause: error },
     );
   }
@@ -371,6 +426,11 @@ let objectInfoInflight: Promise<ObjectInfo> | null = null;
 // stale value (codex WS-3 finding #1).
 let objectInfoEpoch = 0;
 
+/** Fresh `/object_info` snapshot, or null when the cache is empty or expired. */
+export function peekObjectInfoCache(): ObjectInfo | null {
+  return objectInfoCacheFresh() ? objectInfoCache : null;
+}
+
 function objectInfoCacheFresh(): boolean {
   if (objectInfoCache === null) return false;
   const age = Date.now() - objectInfoCachedAt;
@@ -484,6 +544,18 @@ export async function getObjectInfo(): Promise<ObjectInfo> {
       try {
         return commit((await getClient().getNodeDefs()) as ObjectInfo);
       } catch (retryErr) {
+        if (isComfyTransportFailure(err) && isComfyTransportFailure(retryErr)) {
+          const relayed = await panelReadFallback("object_info", retryErr);
+          if (relayed) {
+            const info = await readComfyJson<ObjectInfo>(panelReadResponse(relayed), {
+              url: "/object_info",
+              maxBytes: PANEL_COMFYUI_READ_OBJECT_INFO_MAX_BYTES,
+              expectShape: looksLikeObjectInfo,
+              shapeHint: "a ComfyUI /object_info node registry object",
+            });
+            return commit(info);
+          }
+        }
         // The client library parses JSON itself, so an HTML body reaches us as a
         // bare "Unexpected token '<'" naming neither the URL nor the responder
         // (#828). Re-probe the endpoint ONCE to say what actually answered; if
@@ -722,9 +794,9 @@ function describeRejectedOutputs(nodeErrors: unknown): string | undefined {
 export async function enqueuePrompt(
   workflow: Record<string, unknown>,
   extraData?: Record<string, unknown>,
-  opts?: { front?: boolean },
+  opts?: { front?: boolean; partialExecutionTargets?: readonly string[] },
 ): Promise<{ prompt_id: string; queue_remaining?: number; rejectedOutputs?: string }> {
-  if (isCloudMode()) return cloudClient.enqueuePrompt(workflow, extraData);
+  if (isCloudMode()) return cloudClient.enqueuePrompt(workflow, extraData, opts);
 
   // POST /prompt directly (rather than the SDK's _enqueue_prompt) for two
   // reasons: (1) the SDK does not forward `extra_data` — how comfy.org API-node
@@ -743,10 +815,13 @@ export async function enqueuePrompt(
       client_id: "comfyui-mcp",
       ...(extraData ? { extra_data: extraData } : {}),
       ...(opts?.front ? { front: true } : {}),
+      ...(opts?.partialExecutionTargets?.length
+        ? { partial_execution_targets: [...opts.partialExecutionTargets] }
+        : {}),
     }),
   });
   if (!res.ok) {
-    throw await buildEnqueueError(res);
+    throw await buildEnqueueError(res, url);
   }
   // A bare res.json() here is the worst place in the codebase for one, and the
   // same family as #1149/#1160/#828. This is a MUTATING POST that already
@@ -871,7 +946,126 @@ function safeField(v: unknown): string {
   return scrubbed === null ? "(withheld: contains a configured credential)" : scrubbed;
 }
 
-async function buildEnqueueError(res: Response): Promise<ComfyUIError> {
+/** One node error as ComfyUI reports it. `type` and `extra_info.input_name` are
+ *  machine tokens the server never localises; `message`/`details` are prose and
+ *  are only ever displayed, never matched on. */
+interface ComfyNodeErrorEntry {
+  type?: string;
+  message?: string;
+  details?: string;
+  extra_info?: { input_name?: string; received_value?: unknown };
+}
+
+/**
+ * ComfyUI error `type`s that mean "the value you gave this input is not
+ * something this server has".
+ *
+ * Which one fires is decided by the node, not by us: `validate_inputs` skips the
+ * combo-membership check for any input the node declares in its own
+ * `VALIDATE_INPUTS`, so `LoadImage.image` — which does — can only ever fail as
+ * `custom_validation_failed`, while a loader that leaves the check in place
+ * fails as `value_not_in_list`. Both are the SAME situation for a media
+ * selector, so both are matched — and both are stable machine tokens, unlike the
+ * English `message`/`details` beside them.
+ */
+const MISSING_VALUE_ERROR_TYPES = new Set(["custom_validation_failed", "value_not_in_list"]);
+
+interface MissingInputMedia {
+  nodeId: string;
+  classType: string;
+  inputName: string;
+}
+
+/**
+ * Loader inputs in a rejection that name a media FILE the server does not have
+ * (#2673).
+ *
+ * Restricted to the (class_type, input) allowlist, so a `custom_validation_failed`
+ * raised by some unrelated custom check — a bad width, an out-of-range strength —
+ * never collects an "upload the file" note. An unlisted loader yields nothing,
+ * which is the pre-#2673 silence rather than a wrong claim.
+ */
+function collectMissingInputMedia(
+  nodeErrors: Record<string, { class_type?: string; errors?: ComfyNodeErrorEntry[] }>,
+): MissingInputMedia[] {
+  const found: MissingInputMedia[] = [];
+  for (const [nodeId, info] of Object.entries(nodeErrors)) {
+    const classType = info?.class_type;
+    if (typeof classType !== "string") continue;
+    const errs = Array.isArray(info?.errors) ? info.errors : [];
+    for (const e of errs) {
+      if (typeof e?.type !== "string" || !MISSING_VALUE_ERROR_TYPES.has(e.type)) continue;
+      const inputName = e.extra_info?.input_name;
+      if (typeof inputName !== "string") continue;
+      // A `value_not_in_list` reports `received_value`; when it is present and
+      // is NOT a string, the widget never held a filename at all (a malformed
+      // prompt, an object, a link tuple) and "the server does not have this
+      // file" would be a wrong reading of a real rejection (gate, round 4).
+      // ABSENCE must not disqualify: `custom_validation_failed` — the shape
+      // LoadImage always fails with — carries no `received_value` at all.
+      const received = e.extra_info?.received_value;
+      if (received !== undefined && typeof received !== "string") continue;
+      if (!isKnownLoaderInput(classType, inputName)) continue;
+      found.push({ nodeId, classType, inputName });
+    }
+  }
+  return found;
+}
+
+/**
+ * The recovery note for a rejection of that shape (#2673).
+ *
+ * WHAT IT DOES NOT SAY: why the file is absent. It states the one thing the
+ * input's TYPE guarantees — ComfyUI resolves this value inside its OWN input
+ * directory, so the rejection is about a file on a server and not about the
+ * value's spelling — then hands over the machine-checked panel-vs-target
+ * comparison and the two calls that put a file on THIS target. Naming a cause we
+ * have not observed is what sent #2673's reporter to "attachment registration
+ * race, or filename handling", when nothing between the panel and `/prompt`
+ * rewrites the value at all.
+ *
+ * The last sentence is the one that saves the next render: `enqueue_workflow`
+ * passes loader values through verbatim, so re-submitting reproduces this exactly.
+ */
+function describeMissingInputMedia(missing: MissingInputMedia[], target: string): string {
+  const where = missing
+    .map((m) => `${safeField(m.classType)}.${safeField(m.inputName)} (node ${safeField(m.nodeId)})`)
+    .join(", ");
+  // #1191 — `originOf` drops userinfo/path/query, so a COMFYUI_URL carrying a
+  // token cannot leak. It returns undefined only for a target `new URL()` cannot
+  // parse, and interpolating THAT raw would reintroduce the leak by the back
+  // door (gate finding), so the fallback takes the same fail-closed scrub as
+  // every other interpolated field here.
+  const origin = originOf(target) ?? safeField(target);
+  return (
+    `\n\nThat input names a FILE on the server, not a free value: on stock ComfyUI ${where} is a ` +
+    `server-side FILE selector, resolved against the media directories of the ComfyUI at ` +
+    `${origin} — so this is a question about WHICH server holds the file, not about the value's ` +
+    `spelling. A file ATTACHED in the panel's chat is uploaded by ` +
+    `the BROWSER to whichever ComfyUI that tab is on, a separate connection from this headless ` +
+    `target (COMFYUI_URL), so a file can exist on one and not the other.` +
+    `${describeMissingInputMediaDrift(target)}` +
+    ` To put it on THIS target: upload_image (action:"image") for a file on disk, or upload_image ` +
+    `(action:"stage") for an existing ComfyUI output; then re-enqueue with the filename it ` +
+    `returns. Re-submitting this workflow unchanged will fail identically — enqueue_workflow ` +
+    `sends loader values through verbatim and never rewrites them.`
+  );
+}
+
+async function buildEnqueueError(res: Response, requestedUrl: string): Promise<ComfyUIError> {
+  // WHICH server actually answered (#2673, gate finding).
+  //
+  // `comfyuiFetch` goes through `fetch`, which FOLLOWS redirects — so a 307/308
+  // in front of ComfyUI can move the POST to a different origin, and the input
+  // directory that was searched belongs to whoever answered, not to whoever was
+  // addressed. Naming the requested URL would then point the reader at the proxy
+  // and compare the panel's origin against the wrong server, producing confident
+  // and wrong guidance on exactly the message written to end that guessing.
+  //
+  // `res.url` is "" on a Response that was constructed rather than fetched, so
+  // the requested URL stays as the fallback: an unknown final URL must degrade to
+  // the address we know we asked, never to "".
+  const target = res.url || requestedUrl;
   // unknown-ok: "" only routes to the GENERIC status message, which reports the
   // HTTP status and claims nothing about node errors. An unread body and an empty
   // body get the same honest fallback rather than a fabricated validation result.
@@ -892,10 +1086,7 @@ async function buildEnqueueError(res: Response): Promise<ComfyUIError> {
   if (parsed && typeof parsed === "object") {
     const payload = parsed as {
       error?: { message?: string; details?: string };
-      node_errors?: Record<
-        string,
-        { class_type?: string; errors?: Array<{ message?: string; details?: string }> }
-      >;
+      node_errors?: Record<string, { class_type?: string; errors?: ComfyNodeErrorEntry[] }>;
     };
     const nodeErrors = payload.node_errors ?? {};
     const lines: string[] = [];
@@ -920,8 +1111,14 @@ async function buildEnqueueError(res: Response): Promise<ComfyUIError> {
       : `ComfyUI rejected the workflow (${res.status})`;
 
     if (lines.length > 0 || payload.error?.message) {
-      const message =
-        lines.length > 0 ? `${headline}\n${lines.join("\n")}` : headline;
+      const base = lines.length > 0 ? `${headline}\n${lines.join("\n")}` : headline;
+      // #2673 — the reporter's agent got exactly `base` and stopped. It named the
+      // node and quoted ComfyUI's "Invalid image file", and said nothing about
+      // WHICH server was asked, whether a connected panel is on a different one,
+      // or how to put the file where the render will look. Appended, never
+      // substituted: ComfyUI's own diagnosis stays first and whole.
+      const missing = collectMissingInputMedia(nodeErrors);
+      const message = missing.length > 0 ? base + describeMissingInputMedia(missing, target) : base;
       return new WorkflowExecutionError(message, {
         status: res.status,
         error: payload.error,
@@ -1294,6 +1491,21 @@ export interface HistoryEntry {
 
 export { MAX_HISTORY_RESPONSE_BYTES } from "./bounded-response.js";
 
+/** The panel `fetch_comfyui_read` command has one fixed global `/history`
+ * route. A prompt-scoped caller still uses that body, then we keep only the
+ * requested id — never the rest of the map. */
+function historyForPrompt(
+  history: Record<string, HistoryEntry>,
+  promptId: string | undefined,
+): Record<string, HistoryEntry> {
+  if (!promptId) return history;
+  if (!history || typeof history !== "object" || Array.isArray(history)) return {};
+  if (!Object.prototype.hasOwnProperty.call(history, promptId)) return {};
+  const entry = history[promptId];
+  if (!entry || typeof entry !== "object" || Array.isArray(entry)) return {};
+  return { [promptId]: entry };
+}
+
 export async function getHistory(
   promptId?: string,
   options: { signal?: AbortSignal } = {},
@@ -1304,17 +1516,20 @@ export async function getHistory(
   try {
     res = await comfyApiFetch(path, options.signal ? { signal: options.signal } : {});
   } catch (err) {
-    // The panel command has one fixed global /history route. A prompt-scoped
-    // request is therefore deliberately not eligible for this fallback.
-    if (!promptId && isComfyTransportFailure(err)) {
+    // #2532 — prompt-scoped `/history/<id>` used to skip this fallback because
+    // the panel command is global-only. That left get_history(action:"list")
+    // and the run-completion journal unable to name a finished panel_run's
+    // outputs while queue.status still reported done:true from local cache.
+    if (isComfyTransportFailure(err)) {
       const relayed = await panelReadFallback("history", err);
       if (relayed) {
-        return await readComfyJson<Record<string, HistoryEntry>>(panelReadResponse(relayed), {
-          url: path,
+        const all = await readComfyJson<Record<string, HistoryEntry>>(panelReadResponse(relayed), {
+          url: "/history",
           maxBytes: MAX_HISTORY_RESPONSE_BYTES,
           bodyTimeoutMs: Math.round(comfyHttpTimeoutSeconds() * 1000),
           signal: options.signal,
         });
+        return historyForPrompt(all, promptId);
       }
     }
     throw err;
@@ -1348,7 +1563,10 @@ export const MAX_VIEW_RESPONSE_BYTES = SHARED_MAX_VIEW_RESPONSE_BYTES;
 function validateViewResponseOrigin(res: Response, expectedOrigin: string, label: string): void {
   if (res.url) {
     const actualOrigin = httpOriginOf(res.url);
-    if (actualOrigin !== expectedOrigin) {
+    // The transport may retry exact 127.0.0.1 at localhost for an IPv6-only
+    // loopback listener. The comparator folds only those known loopback aliases;
+    // remote origins remain an exact scheme/host/port match.
+    if (!sameOrigin(actualOrigin, expectedOrigin)) {
       throw new ComfyUIError(
         `ComfyUI /view response from ${label} changed origin unexpectedly; the response was refused.`,
         "VIEW_RESPONSE_ORIGIN",
@@ -1443,8 +1661,13 @@ export async function fetchImage(
       } catch (relayError) {
         if (relayError instanceof PanelImageRelayError && !relayError.unavailable) {
           const primary = primaryError instanceof Error ? primaryError.message : String(primaryError);
+          // #2703 - the same collapse on the image relay's own dead end. Both
+          // codes are produced by ONE catch in the relay, so leaving this one
+          // bare would have left half the reports unactionable for the same
+          // reason the history path was.
           throw new Error(
-            `${primary} The connected panel image relay failed safely (${relayError.code}).`,
+            `${primary} The connected panel image relay failed safely (${relayError.code}).` +
+              (relayError.reason ? ` The panel reported: ${relayError.reason}` : ""),
             { cause: relayError },
           );
         }

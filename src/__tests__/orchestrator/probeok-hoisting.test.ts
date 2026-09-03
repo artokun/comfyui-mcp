@@ -3,7 +3,7 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { probeOk } from "../../orchestrator/probe-ok.js";
 import { judgeHelloRetarget } from "../../services/hello-retarget.js";
-import * as cfg from "../../config.js";
+import { comfyuiFetch } from "../../comfyui/fetch.js";
 
 const INDEX = readFileSync(
   fileURLToPath(new URL("../../orchestrator/index.ts", import.meta.url)),
@@ -16,6 +16,7 @@ const PROBE_SRC = readFileSync(
 
 afterEach(() => {
   vi.unstubAllGlobals();
+  vi.unstubAllEnvs();
   vi.restoreAllMocks();
 });
 
@@ -56,16 +57,14 @@ function asJsDeclaration(tsFn: string): string {
 }
 
 type HelloOrdering = (
-  fetchImpl: typeof fetch,
-  headers: () => Record<string, string>,
+  comfyuiFetchImpl: typeof comfyuiFetch,
 ) => Promise<boolean>;
 
 function helloOrdering(declarationJs: string): HelloOrdering {
   // Same order as the bug: the hello path builds `probe: (u) => probeOk(u, 3_000)`
   // and invokes it BEFORE source evaluation would reach a later `const`.
   return new Function(
-    "fetch",
-    "getComfyUIAuthHeaders",
+    "comfyuiFetch",
     `"use strict";
      const probe = (u) => probeOk(u, 3_000);
      const pending = probe("http://example.test/system_stats");
@@ -115,9 +114,9 @@ describe("probeOk hoisting (#2425)", () => {
   });
 
   it("returns true when the URL answers, and forwards configured auth headers", async () => {
-    vi.spyOn(cfg, "getComfyUIAuthHeaders").mockReturnValue({ Authorization: "Bearer t" });
+    vi.stubEnv("COMFYUI_AUTH_TOKEN", "t");
     const fetch = vi.fn(async (_url: string, init?: RequestInit) => {
-      expect((init?.headers as Record<string, string>).Authorization).toBe("Bearer t");
+      expect(new Headers(init?.headers).get("Authorization")).toBe("Bearer t");
       return { ok: true };
     });
     vi.stubGlobal("fetch", fetch);
@@ -144,9 +143,10 @@ describe("probeOk hoisting (#2425)", () => {
     const tsFn = extractAsyncFunction(PROBE_SRC, "probeOk");
     const fnJs = asJsDeclaration(tsFn);
     const okFetch = (async () => ({ ok: true })) as typeof fetch;
-    const headers = () => ({});
+    const comfyuiFetchImpl = (async (url: string, init?: RequestInit) =>
+      okFetch(url, init)) as typeof comfyuiFetch;
 
-    await expect(helloOrdering(fnJs)(okFetch, headers)).resolves.toBe(true);
+    await expect(helloOrdering(fnJs)(comfyuiFetchImpl)).resolves.toBe(true);
 
     const constJs = fnJs.replace(
       /^async function probeOk\s*\(([^)]*)\)\s*/,
@@ -155,7 +155,7 @@ describe("probeOk hoisting (#2425)", () => {
     expect(constJs, "mutant must be the const-arrow form that shipped in 0.52.139").toMatch(
       /^const probeOk = async \(/,
     );
-    expect(() => helloOrdering(constJs)(okFetch, headers)).toThrow(
+    expect(() => helloOrdering(constJs)(comfyuiFetchImpl)).toThrow(
       /Cannot access 'probeOk' before initialization/,
     );
   });

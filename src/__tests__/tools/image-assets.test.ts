@@ -28,7 +28,11 @@ const uploadVideoAutoMock = vi.fn();
 const uploadAudioAutoMock = vi.fn();
 const stageOutputAsInputMock = vi.fn();
 /** Where the listing came from. Mutable so a test can pick local vs remote. */
-let listSourceMock: { directory?: string; basis: "local-scan" | "server-history" } = {
+let listSourceMock: {
+  directory?: string;
+  tempDirectory?: string;
+  basis: "local-scan" | "server-history" | "server-history-fallback";
+} = {
   directory: "C:\\Comfy\\output",
   basis: "local-scan",
 };
@@ -318,11 +322,21 @@ describe("get_image: each action reaches exactly one service", () => {
     });
   }
 
-  it('action:"get" forwards filename/type/subfolder and the allowMedia flag unchanged', async () => {
+  it('action:"get" forwards filename/type/subfolder and all fetch capability flags', async () => {
     await getImage()({ action: "get", filename: "p.png", type: "temp", subfolder: "sub" });
     expect(getOutputImageMock).toHaveBeenCalledWith("p.png", "temp", "sub", {
       allowMedia: true,
+      allowAttachment: true,
       // #1373 — the input dir legitimately holds workflow .json files.
+      allowJson: true,
+    });
+  });
+
+  it('action:"get" forwards a get_history subfolder-qualified filename for service normalization', async () => {
+    await getImage()({ action: "get", filename: "out_F/p.png" });
+    expect(getOutputImageMock).toHaveBeenCalledWith("out_F/p.png", "output", "", {
+      allowMedia: true,
+      allowAttachment: true,
       allowJson: true,
     });
   });
@@ -334,6 +348,7 @@ describe("get_image: each action reaches exactly one service", () => {
     await getImage()({ action: "get", filename: "p.png" });
     expect(getOutputImageMock).toHaveBeenCalledWith("p.png", "output", "", {
       allowMedia: true,
+      allowAttachment: true,
       allowJson: true,
     });
   });
@@ -517,6 +532,26 @@ describe("upload_image: each action writes to exactly one destination", () => {
     expect(uploadOutputMock).not.toHaveBeenCalled();
   });
 
+  it('action:"image" reports the verified root filename when LoadImage omits the nested path (#2498)', async () => {
+    uploadImageAutoMock.mockResolvedValue({
+      filename: "clean_profile_90_silhouette_v1.png",
+      subfolder: "",
+      loaderSelectable: "root-fallback",
+      requestedFilename: "story_mixer_refs/clean_profile_90_silhouette_v1.png",
+    });
+    const res = await uploadImage()({
+      action: "image",
+      source_path: "/tmp/profile.png",
+      filename: "story_mixer_refs/clean_profile_90_silhouette_v1.png",
+    });
+    const t = text(res);
+    expect(t).toContain("Filename: clean_profile_90_silhouette_v1.png");
+    expect(t).toContain('Use "clean_profile_90_silhouette_v1.png"');
+    expect(t).toContain("story_mixer_refs/clean_profile_90_silhouette_v1.png");
+    expect(t).toContain("LoadImage enumerates only top-level input files");
+    expect(t).not.toContain('Use "story_mixer_refs/clean_profile_90_silhouette_v1.png"');
+  });
+
   it('action:"image" reports the SUBFOLDER-qualified reference when the upload landed in one (#946)', async () => {
     // The recurrence: filename "minimax_h3/walter_ropeflow_clip1_end.png"
     // uploaded fine, but the tool answered with the bare name — which does not
@@ -638,6 +673,7 @@ describe("guards test ABSENCE, never falsiness", () => {
     await getImage()({ action: "get", filename: "" });
     expect(getOutputImageMock).toHaveBeenCalledWith("", "output", "", {
       allowMedia: true,
+      allowAttachment: true,
       allowJson: true,
     });
   });
@@ -871,6 +907,96 @@ describe('action:"list_outputs" keeps the mobile dataset picker\'s contract', ()
       const parsed = JSON.parse(t) as { note?: string };
       expect(parsed.note).toMatch(/NOT evidence the file is missing/);
       expect(parsed.note).not.toMatch(/save_output/);
+    });
+
+    // Recurrence: naming the hole is not the fix. Production now scans temp/
+    // for videos; when that scan ran, an empty listing names both dirs and
+    // does NOT claim it skipped temp/.
+    it("empty local listing that DID scan temp names both dirs, not a blind-spot caveat", async () => {
+      listSourceMock = {
+        directory: "C:\\Comfy\\output",
+        tempDirectory: "C:\\Comfy\\temp",
+        basis: "local-scan",
+      };
+      listOutputImagesMock.mockResolvedValue([]);
+      const t = text(
+        await getImage()({
+          action: "list_outputs",
+          pattern: "LTX_NATIVE_CONTEXT_TEST_00001",
+          format: "json",
+        }),
+      );
+      const parsed = JSON.parse(t) as { note?: string; tempDirectory?: string };
+      expect(parsed.tempDirectory).toBe("C:\\Comfy\\temp");
+      expect(parsed.note).toContain("C:\\Comfy\\temp");
+      expect(parsed.note).not.toMatch(/does NOT look/);
+      expect(parsed.note).not.toMatch(/save_output/);
+    });
+  });
+
+  describe("#2370: a completed VHS temp mp4 is listed with type:temp", () => {
+    const vhsTemp = {
+      filename: "LTX_NATIVE_CONTEXT_TEST_00001-audio.mp4",
+      path: "C:\\Comfy\\temp\\LTX_NATIVE_CONTEXT_TEST_00001-audio.mp4",
+      size: 4096,
+      modified: "2026-08-29T00:00:00.000Z",
+      subfolder: "",
+      kind: "video" as const,
+      type: "temp" as const,
+    };
+
+    beforeEach(() => {
+      listSourceMock = {
+        directory: "C:\\Comfy\\output",
+        tempDirectory: "C:\\Comfy\\temp",
+        basis: "local-scan",
+      };
+    });
+    afterEach(() => {
+      listSourceMock = { directory: "C:\\Comfy\\output", basis: "local-scan" };
+    });
+
+    it("json: the reporter's pattern returns the -audio.mp4 with type:temp", async () => {
+      listOutputImagesMock.mockResolvedValue([vhsTemp]);
+      const t = text(
+        await getImage()({
+          action: "list_outputs",
+          pattern: "LTX_NATIVE_CONTEXT_TEST_00001",
+          format: "json",
+        }),
+      );
+      const parsed = JSON.parse(t) as { images: Array<Record<string, unknown>> };
+      expect(parsed.images).toEqual([
+        {
+          filename: "LTX_NATIVE_CONTEXT_TEST_00001-audio.mp4",
+          subfolder: "",
+          kind: "video",
+          size: 4096,
+          modified: "2026-08-29T00:00:00.000Z",
+          type: "temp",
+        },
+      ]);
+    });
+
+    it("markdown: names type:temp so action:get can fetch it", async () => {
+      listOutputImagesMock.mockResolvedValue([vhsTemp]);
+      const t = text(
+        await getImage()({
+          action: "list_outputs",
+          pattern: "LTX_NATIVE_CONTEXT_TEST_00001",
+        }),
+      );
+      expect(t).toContain("LTX_NATIVE_CONTEXT_TEST_00001-audio.mp4");
+      expect(t).toMatch(/type:"temp"/);
+      expect(t).toContain("C:\\Comfy\\temp");
+    });
+
+    it("json: an output/ file still omits type (populated payload stays compatible)", async () => {
+      listOutputImagesMock.mockResolvedValue(sample);
+      const t = text(await getImage()({ action: "list_outputs", format: "json" }));
+      const parsed = JSON.parse(t) as { images: Array<Record<string, unknown>> };
+      expect(parsed.images[0]).not.toHaveProperty("type");
+      expect(parsed.images[1]).not.toHaveProperty("type");
     });
   });
 

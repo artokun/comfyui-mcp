@@ -47,5 +47,6 @@ grab "models/detection/vitpose_h_wholebody_data.bin" "https://huggingface.co/Kij
 grab "models/detection/yolov10m.onnx" "https://huggingface.co/onnx-community/yolov10m/resolve/main/onnx/model.onnx"
 grab "models/insightface/inswapper_128.onnx" "https://huggingface.co/datasets/Gourieff/ReActor/resolve/main/models/inswapper_128.onnx"
 grab "models/facerestore_models/GPEN-BFR-512.onnx" "https://huggingface.co/datasets/Gourieff/ReActor/resolve/main/models/facerestore_models/GPEN-BFR-512.onnx"
+grab "models/checkpoints/sam3.1_multiplex_fp16.safetensors" "https://huggingface.co/Comfy-Org/sam3.1/resolve/main/checkpoints/sam3.1_multiplex_fp16.safetensors"
 
 echo "DONE. Restart ComfyUI, then load workflow.json."

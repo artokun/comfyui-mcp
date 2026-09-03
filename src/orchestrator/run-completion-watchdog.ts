@@ -87,12 +87,20 @@
 // promising more than this can keep.
 
 import { getHistory, type HistoryEntry } from "../comfyui/client.js";
-import { buildCompletionNotification } from "../services/job-watcher.js";
+import { buildCompletionNotification, type CompletionNotification } from "../services/job-watcher.js";
 import { logger } from "../utils/logger.js";
 import type { CompletionStatus } from "../services/queue-monitor.js";
 import type { CompletionPayload, RunTicket } from "./run-completion-journal.js";
 
 type CompletionImage = NonNullable<CompletionPayload["images"]>[number];
+
+/** History parse used by the watchdog: images plus ComfyUI's own duration. */
+export interface ResolvedHistoryCompletion {
+  images: CompletionImage[];
+  duration_ms: number;
+  timestamp: string;
+  status: CompletionNotification["status"];
+}
 
 /** One completion QueueMonitor observed, held until its grace expires. */
 interface ArmedCompletion {
@@ -131,11 +139,14 @@ export interface RunCompletionWatchdogDeps {
   /** Journal + flush a synthesised completion for `ticket`. */
   deliver: (payload: CompletionPayload, ticket: RunTicket) => void;
   /**
-   * Resolve output refs from the completed prompt's ComfyUI history. Wired to
-   * `resolveHistoryCompletionImages` in production. Missing / throwing / empty
-   * is the #1789 status-only notice, never a fabricated image.
+   * Resolve output refs (and, when available, history timing) from the
+   * completed prompt's ComfyUI history. Wired to `resolveHistoryCompletion` in
+   * production. Missing / throwing / empty is the #1789 status-only notice,
+   * never a fabricated image.
    */
-  resolveOutputs?: (promptId: string) => Promise<CompletionPayload["images"]>;
+  resolveOutputs?: (
+    promptId: string,
+  ) => Promise<CompletionPayload["images"] | ResolvedHistoryCompletion | undefined>;
   /**
    * Terminal status of a prompt in ComfyUI history, or null if it is missing /
    * still running / unreadable. Wired to `resolveHistoryCompletionStatus` in
@@ -255,15 +266,14 @@ function usableHistoryImages(images: CompletionPayload["images"]): CompletionIma
 }
 
 /**
- * Flatten a history entry's media into the completion-payload `images` shape.
- * Extraction is `buildCompletionNotification` — the same parse JobWatcher and
- * asset reconcile already ship — so a SaveVideo `videos` ref and a SaveImage
- * `images` ref take the same path a watched completion would.
+ * Flatten a history entry through `buildCompletionNotification` — the same
+ * parse JobWatcher and asset reconcile already ship — so duration, finished-at,
+ * status, and media refs are one observation (#2512).
  */
-export function historyOutputRefsFromEntry(
+export function parseHistoryCompletion(
   promptId: string,
   entry: HistoryEntry,
-): CompletionImage[] {
+): ResolvedHistoryCompletion {
   const notification = buildCompletionNotification(promptId, entry, 0);
   const refs: CompletionImage[] = [];
   for (const node of notification.outputs) {
@@ -276,30 +286,56 @@ export function historyOutputRefsFromEntry(
       refs.push({ filename: vid.filename, subfolder: vid.subfolder, type: vid.type });
     }
   }
-  return usableHistoryImages(refs);
+  return {
+    images: usableHistoryImages(refs),
+    duration_ms: notification.duration_ms,
+    timestamp: notification.timestamp,
+    status: notification.status,
+  };
+}
+
+/**
+ * Flatten a history entry's media into the completion-payload `images` shape.
+ * Extraction is `buildCompletionNotification` — the same parse JobWatcher and
+ * asset reconcile already ship — so a SaveVideo `videos` ref and a SaveImage
+ * `images` ref take the same path a watched completion would.
+ */
+export function historyOutputRefsFromEntry(
+  promptId: string,
+  entry: HistoryEntry,
+): CompletionImage[] {
+  return parseHistoryCompletion(promptId, entry).images;
 }
 
 /**
  * Fetch `/history/<promptId>` and return the real output refs, or [] when the
  * record is missing, unreadable, or lists no usable media. Never fabricates.
  */
-export async function resolveHistoryCompletionImages(
+export async function resolveHistoryCompletion(
   promptId: string,
   fetchHistory: (id: string) => Promise<Record<string, HistoryEntry>> = getHistory,
-): Promise<CompletionImage[]> {
+): Promise<ResolvedHistoryCompletion | undefined> {
   const id = typeof promptId === "string" ? promptId.trim() : "";
-  if (!id) return [];
+  if (!id) return undefined;
   try {
     const history = await fetchHistory(id);
     const entry = history?.[id];
-    if (!entry) return [];
-    return historyOutputRefsFromEntry(id, entry);
+    if (!entry) return undefined;
+    return parseHistoryCompletion(id, entry);
   } catch (err) {
     logger.debug(
       `[run-completion-watchdog] history fetch for ${id} failed: ${err instanceof Error ? err.message : String(err)}`,
     );
-    return [];
+    return undefined;
   }
+}
+
+export async function resolveHistoryCompletionImages(
+  promptId: string,
+  fetchHistory: (id: string) => Promise<Record<string, HistoryEntry>> = getHistory,
+): Promise<CompletionImage[]> {
+  const parsed = await resolveHistoryCompletion(promptId, fetchHistory);
+  return parsed?.images ?? [];
 }
 
 /**
@@ -361,17 +397,44 @@ export async function resolveHistoryCompletionStatus(
  * out of a terminal record possibly a minute later. The note states the failure
  * plainly and names the tool that reads the detail.
  */
+function formatRunDuration(ms: number): string {
+  const totalSec = Math.max(0, Math.round(ms / 1000));
+  const minutes = Math.floor(totalSec / 60);
+  const seconds = totalSec % 60;
+  if (minutes === 0) return `${seconds}s`;
+  return `${minutes}m ${seconds}s`;
+}
+
+function resolvedFromOutputs(
+  value: CompletionPayload["images"] | ResolvedHistoryCompletion | undefined,
+): { images: CompletionImage[]; duration_ms?: number; timestamp?: string } {
+  if (!value) return { images: [] };
+  if (Array.isArray(value)) return { images: usableHistoryImages(value) };
+  return {
+    images: usableHistoryImages(value.images),
+    duration_ms: value.duration_ms,
+    timestamp: value.timestamp,
+  };
+}
+
 export function synthesizeCompletionPayload(
   armed: ArmedCompletion,
-  opts: { deliveredAt: number; images?: CompletionPayload["images"] },
+  opts: {
+    deliveredAt: number;
+    images?: CompletionPayload["images"];
+    durationMs?: number;
+    finishedAt?: string;
+  },
 ): CompletionPayload {
   const waitedS = Math.max(0, Math.round((opts.deliveredAt - armed.observedAt) / 1000));
   const { images, other: otherMedia } = partitionAttachableMedia(usableHistoryImages(opts.images));
+  const durationSuffix =
+    typeof opts.durationMs === "number" ? ` after ${formatRunDuration(opts.durationMs)}` : "";
   const outcome =
     armed.status === "success"
       ? "finished SUCCESSFULLY"
       : armed.status === "interrupted"
-        ? "was INTERRUPTED (cancelled before it finished)"
+        ? `was INTERRUPTED (cancelled before it finished)${durationSuffix}`
         : "FAILED";
   const refName = (m: CompletionImage) => (m.subfolder ? `${m.subfolder}/${m.filename}` : m.filename);
   const names = images.map(refName).join(", ");
@@ -401,6 +464,8 @@ export function synthesizeCompletionPayload(
     // Machine-readable provenance: this completion was NOT reported by the panel.
     completion_source: "orchestrator-history-watchdog",
     run_status: armed.status,
+    ...(typeof opts.durationMs === "number" ? { duration_ms: opts.durationMs } : {}),
+    ...(opts.finishedAt ? { finished_at: opts.finishedAt } : {}),
     note:
       `The render you queued (prompt ${armed.promptId}) ${outcome}. No completion for it reached the ` +
       `orchestrator in the ${waitedS}s after that finish was observed here, so this notice was ` +
@@ -472,7 +537,10 @@ export function createRunCompletionWatchdog({
       // simply means the next tick delivers. There is deliberately no floor —
       // one would be unreachable (proved by mutating it: nothing changed).
       const dueAfter = entry.extended ? storyboardGraceMs : graceMs;
-      if (!ignoreGrace && at - entry.observedAt < dueAfter) continue;
+      // Interrupted has no better panel frame coming (it is deferred until the
+      // next prompt, with wall-clock duration). Deliver at interrupt time (#2512).
+      const skipGrace = ignoreGrace || entry.status === "interrupted";
+      if (!skipGrace && at - entry.observedAt < dueAfter) continue;
       // Disarm FIRST and unconditionally: whatever happens below, this
       // observation is spent. Leaving it armed on a throwing deliver() would
       // re-fire it on every later tick.
@@ -504,9 +572,14 @@ export function createRunCompletionWatchdog({
       }
       try {
         let images: CompletionImage[] = [];
+        let durationMs: number | undefined;
+        let finishedAt: string | undefined;
         if (resolveOutputs) {
           try {
-            images = usableHistoryImages(await resolveOutputs(entry.promptId));
+            const resolved = resolvedFromOutputs(await resolveOutputs(entry.promptId));
+            images = resolved.images;
+            durationMs = resolved.duration_ms;
+            finishedAt = resolved.timestamp;
           } catch (err) {
             logger.debug(
               `[run-completion-watchdog] history outputs for ${entry.promptId} unavailable: ${err instanceof Error ? err.message : String(err)}`,
@@ -536,7 +609,7 @@ export function createRunCompletionWatchdog({
           // Deliberately NOT applied on reconcile(): that path is a missed-WS /
           // hello recovery whose whole point is that it does not wait (#1556).
           if (
-            !ignoreGrace &&
+            !skipGrace &&
             !entry.extended &&
             partitionAttachableMedia(images).other.length > 0
           ) {
@@ -557,7 +630,15 @@ export function createRunCompletionWatchdog({
             (at - entry.observedAt) / 1000,
           )}s ago and NO completion for it has reached the orchestrator — synthesising one from its own ComfyUI observation so the agent that was told to end its turn and wait is not left idle. The panel may never have sent one or may still be composing it; either way this run is answered now (#1789/#2001)`,
         );
-        deliver(synthesizeCompletionPayload(entry, { deliveredAt: at, images }), ticket);
+        deliver(
+          synthesizeCompletionPayload(entry, {
+            deliveredAt: at,
+            images,
+            durationMs,
+            finishedAt,
+          }),
+          ticket,
+        );
       } catch (err) {
         logger.warn(
           `[run-completion-watchdog] could not deliver the synthesised completion for prompt ${entry.promptId}: ${err instanceof Error ? err.message : String(err)}`,

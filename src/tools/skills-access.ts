@@ -162,6 +162,55 @@ function enumerateSkills(): Array<{ name: string; description: string }> {
   return out;
 }
 
+/** The workflow filename a pack.yaml resolves to — the SINGLE derivation shared
+ *  by action:"list" (has_workflow), resolvePackWorkflowFile() — which backs
+ *  action:"read_workflow", action:"check_runtime" and also
+ *  enqueue_workflow (action:"run_template") — and read_workflow's own message.
+ *
+ *  This existed three times and one copy was different: action:"list" took
+ *  `meta.workflow` verbatim while the resolver rejected any value that is not a
+ *  single safe path segment and fell back to workflow.json. A pack declaring
+ *  `workflow: "sub/graph.json"` therefore reported has_workflow: true from a file
+ *  the resolver would never open, and read_workflow answered "workflow.json not
+ *  found" — the catalog disagreeing with the filesystem (#2748). Deriving it once
+ *  makes that divergence unrepresentable rather than merely absent from today's
+ *  bundled packs. */
+/** A pack.yaml must parse to a YAML MAPPING — pure so the trap below is
+ *  directly testable.
+ *
+ *  A top-level SEQUENCE is the trap: `parseYaml("[]")` is truthy AND
+ *  `typeof === "object"`, so a `parsed && typeof parsed === "object"` check
+ *  accepts it as a metadata record. Every field then reads `undefined`, and
+ *  `workflow: undefined` is indistinguishable from a deliberate `workflow: null`
+ *  — so a malformed bundle gets reported as an intentional installer-only pack.
+ *  Array.isArray is the only thing separating metadata from "something else that
+ *  happens to parse". */
+export function coercePackMeta(parsed: unknown): Record<string, unknown> | null {
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return null;
+  return parsed as Record<string, unknown>;
+}
+
+/** Parse `packs/<name>/pack.yaml`, or null when absent/unreadable/not a mapping. */
+function readPackMeta(packDir: string): Record<string, unknown> | null {
+  const metaFile = join(packDir, "pack.yaml");
+  if (!existsSync(metaFile)) return null;
+  try {
+    return coercePackMeta(parseYaml(readFileSync(metaFile, "utf8")));
+  } catch {
+    return null;
+  }
+}
+
+export function resolveWorkflowFileName(meta: unknown): string {
+  const fallback = "workflow.json";
+  if (!meta || typeof meta !== "object") return fallback;
+  const declared = (meta as Record<string, unknown>).workflow;
+  if (typeof declared !== "string") return fallback;
+  // A traversal, a separator or an empty value is not a usable filename.
+  if (!SAFE_NAME.test(declared)) return fallback;
+  return declared;
+}
+
 /** Enumerate installer packs as { name, family, kind, description, workflow,
  *  has_workflow, has_manifest }. Reads each packs/<name>/pack.yaml. */
 export function enumeratePacks(): Array<Record<string, unknown>> {
@@ -180,14 +229,10 @@ export function enumeratePacks(): Array<Record<string, unknown>> {
     if (!isDir) continue;
     const metaFile = join(packDir, "pack.yaml");
     if (!existsSync(metaFile)) continue; // not a pack
-    let meta: Record<string, unknown> = {};
-    try {
-      const parsed = parseYaml(readFileSync(metaFile, "utf8"));
-      if (parsed && typeof parsed === "object") meta = parsed as Record<string, unknown>;
-    } catch {
-      // malformed pack.yaml — still report the pack with just its dir name
-    }
-    const workflowName = typeof meta.workflow === "string" ? meta.workflow : "workflow.json";
+    // Same parse contract read_workflow/check_runtime use — a malformed or
+    // non-mapping pack.yaml still reports the pack with just its dir name.
+    const meta = readPackMeta(packDir) ?? {};
+    const workflowName = resolveWorkflowFileName(meta);
     out.push({
       name: entry,
       family: meta.family ?? null,
@@ -211,6 +256,103 @@ export function enumeratePacks(): Array<Record<string, unknown>> {
   return out;
 }
 
+/** Pack names that actually HAVE a ready workflow — the only names worth
+ *  suggesting after a workflow lookup fails.
+ *
+ *  Not every bundled pack ships a graph: a pack may be installer-only, declaring
+ *  `workflow: null` in pack.yaml because the upstream installer never shipped one
+ *  (qwen-image, ltx-2.3). Suggesting those after a workflow miss advertises the
+ *  very pack that was just refused, and re-calling with a name copied out of the
+ *  list fails identically — which reads as the catalog disagreeing with the
+ *  filesystem (#2748). `has_workflow` is the same existsSync the resolver uses,
+ *  so this list and resolvePackWorkflowFile() cannot disagree.
+ *
+ *  enqueue_workflow (action:"run_template") already filters its suggestions this
+ *  way; this is the shared version of that filter. */
+function packsWithReadyWorkflow(): string[] {
+  return enumeratePacks()
+    .filter((p) => p.has_workflow)
+    .map((p) => String(p.name));
+}
+
+/** True when `packs/<name>/` exists as a directory, regardless of whether it
+ *  ships a workflow. Lets a workflow miss say "this pack ships no workflow"
+ *  instead of the false "no pack named <name>". */
+function packDirExists(name: string): boolean {
+  if (!SAFE_NAME.test(name)) return false;
+  const packDir = join(packsDir(), name);
+  if (!packDir.startsWith(packsDir())) return false;
+  try {
+    return statSync(packDir).isDirectory();
+  } catch {
+    return false;
+  }
+}
+
+/** Render a suggestion list, or a clear note when nothing qualifies. */
+function suggest(names: string[]): string {
+  return names.length
+    ? `Packs with a ready workflow: ${names.join(", ")}.`
+    : "No bundled pack ships a ready workflow.";
+}
+
+/** The "this directory exists but has no graph" sentence — the PURE half, so
+ *  every branch is testable without planting fixture directories in packs/.
+ *
+ *  FIVE distinct states share this exit, and collapsing them is the same defect
+ *  this PR is fixing one level up: a message that asserts a cause nobody checked.
+ *  "Installer-only" is a deliberate, working-as-intended state (pack.yaml
+ *  `workflow: null`) — reporting a malformed pack.yaml, an absent pack.yaml, or
+ *  `workflow: 42` as "installer-only" hides a broken bundle behind a reassuring
+ *  explanation, and the has_workflow footnote is itself false when action:"list"
+ *  does not list the directory at all (it requires a pack.yaml to consider one a
+ *  pack). */
+export function describeMissingWorkflow(
+  name: string,
+  state: { hasPackYaml: boolean; meta: Record<string, unknown> | null },
+): string {
+  // No pack.yaml → action:"list" does not consider this a pack at all, so the
+  // "has_workflow: false" footnote below would be a claim about a row that
+  // does not exist.
+  if (!state.hasPackYaml) {
+    return `"${name}" is a directory under packs/ with no pack.yaml, so it is not a bundled pack and action:"list" does not report it.`;
+  }
+  // Covers unreadable, malformed, empty, and "parsed to something that is not a
+  // mapping" alike — in none of them did anyone verify an installer-only intent.
+  if (state.meta === null) {
+    return `Pack "${name}" has a pack.yaml that did not parse to a YAML mapping, so no workflow filename could be resolved.`;
+  }
+  const declared = state.meta.workflow;
+  const footnote = ` action:"list" reports has_workflow: false for it.`;
+  if (typeof declared === "string") {
+    // Declared a name; the file is absent — a broken bundle, NOT installer-only.
+    return `Pack "${name}" ships no workflow — its declared workflow file (${resolveWorkflowFileName(state.meta)}) is missing from the pack.${footnote}`;
+  }
+  if (declared != null) {
+    return `Pack "${name}" ships no workflow — its pack.yaml sets \`workflow\` to a ${typeof declared} rather than a filename.${footnote}`;
+  }
+  // An OMITTED key is not a declaration. All 56 bundled packs write `workflow:`
+  // explicitly, so an absent key expresses no intent — the author may equally
+  // have meant workflow.json to be there. Report only what was checked and let
+  // the reader judge, rather than blessing a possibly-broken pack.
+  if (!("workflow" in state.meta)) {
+    return `Pack "${name}" ships no workflow — its pack.yaml has no \`workflow\` key, and the default workflow.json is not in the pack.${footnote}`;
+  }
+  // An EXPLICIT `workflow: null` — the declared installer-only shape
+  // (qwen-image, ltx-2.3).
+  return `Pack "${name}" ships no workflow — pack.yaml declares \`workflow: null\`, so it is installer-only.${footnote}`;
+}
+
+/** I/O half: read the pack's metadata state, then describe it. read_workflow and
+ *  check_runtime share this one builder. Error path only. */
+function noWorkflowSentence(name: string): string {
+  const packDir = join(packsDir(), name);
+  return describeMissingWorkflow(name, {
+    hasPackYaml: existsSync(join(packDir, "pack.yaml")),
+    meta: readPackMeta(packDir),
+  });
+}
+
 /** Locate a pack's workflow.json file path (name-guarded, must exist). Returns
  *  null when the pack or its workflow is missing. Shared by action:"read_workflow"
  *  and action:"check_runtime" so they resolve the file identically. Also
@@ -223,19 +365,7 @@ export function resolvePackWorkflowFile(packName: string): string | null {
   if (!packDir.startsWith(packsDir()) || !existsSync(packDir) || !statSync(packDir).isDirectory()) {
     return null;
   }
-  let workflowName = "workflow.json";
-  const metaFile = join(packDir, "pack.yaml");
-  if (existsSync(metaFile)) {
-    try {
-      const meta = parseYaml(readFileSync(metaFile, "utf8")) as Record<string, unknown>;
-      if (meta && typeof meta.workflow === "string") workflowName = meta.workflow;
-    } catch {
-      // keep default
-    }
-  }
-  if (!SAFE_NAME.test(workflowName) && workflowName !== "workflow.json") {
-    workflowName = "workflow.json";
-  }
+  const workflowName = resolveWorkflowFileName(readPackMeta(packDir));
   const wfFile = join(packDir, workflowName);
   if (!wfFile.startsWith(packDir) || !existsSync(wfFile)) return null;
   return wfFile;
@@ -486,32 +616,20 @@ function readPackWorkflowAction(rawName: string): ToolText {
   }
   const packDir = join(packsDir(), name);
   if (!packDir.startsWith(packsDir()) || !existsSync(packDir) || !statSync(packDir).isDirectory()) {
-    const known = enumeratePacks().map((p) => p.name);
     return {
       isError: true,
       content: [
         {
           type: "text" as const,
-          text: `No pack named "${name}". Available packs: ${known.join(", ") || "(none bundled)"}.`,
+          text: `No pack named "${name}". ${suggest(packsWithReadyWorkflow())}`,
         },
       ],
     };
   }
-  // Resolve the workflow filename from pack.yaml (default workflow.json).
-  let workflowName = "workflow.json";
-  const metaFile = join(packDir, "pack.yaml");
-  if (existsSync(metaFile)) {
-    try {
-      const meta = parseYaml(readFileSync(metaFile, "utf8")) as Record<string, unknown>;
-      if (meta && typeof meta.workflow === "string") workflowName = meta.workflow;
-    } catch {
-      // keep default
-    }
-  }
-  if (!SAFE_NAME.test(workflowName) && workflowName !== "workflow.json") {
-    // pack.yaml controls this, but stay defensive against odd values.
-    workflowName = "workflow.json";
-  }
+  // Same single derivation action:"list" and resolvePackWorkflowFile() use, so
+  // the filename this message names is the filename that was actually looked for.
+  const meta = readPackMeta(packDir);
+  const workflowName = resolveWorkflowFileName(meta);
   const wfFile = join(packDir, workflowName);
   if (!wfFile.startsWith(packDir) || !existsSync(wfFile)) {
     return {
@@ -519,7 +637,7 @@ function readPackWorkflowAction(rawName: string): ToolText {
       content: [
         {
           type: "text" as const,
-          text: `Pack "${name}" has no ready workflow (${workflowName} not found).`,
+          text: `${noWorkflowSentence(name)} ${suggest(packsWithReadyWorkflow())}`,
         },
       ],
     };
@@ -690,13 +808,20 @@ async function checkRuntimeAction(args: {
   if (args.pack) {
     const wfFile = resolvePackWorkflowFile(args.pack);
     if (!wfFile) {
-      const known = enumeratePacks().map((p) => p.name);
+      // TWO different failures shared one message: a pack that does not exist,
+      // and a pack that exists but is installer-only. Saying `No pack named
+      // "qwen-image"` for a pack action:"list" plainly lists reads as the
+      // catalog contradicting itself (#2748) — name which one it actually is.
+      const packName = args.pack.trim();
+      const head = packDirExists(packName)
+        ? `${noWorkflowSentence(packName)} There is no graph to runtime-check.`
+        : `No pack named "${args.pack}".`;
       return {
         isError: true,
         content: [
           {
             type: "text" as const,
-            text: `No pack named "${args.pack}" with a ready workflow. Available packs: ${known.join(", ") || "(none bundled)"}.`,
+            text: `${head} ${suggest(packsWithReadyWorkflow())}`,
           },
         ],
       };

@@ -700,6 +700,52 @@ describe("UiBridge (typed dispatch outcome — panel #442 defect 4)", () => {
     a.close();
   });
 
+  it("clears a cached subgraph identity after a live root viewing (#2518)", async () => {
+    const a = await connectPanel("tab-scope-2518");
+    a.on("message", (buf) => {
+      const msg = JSON.parse(buf.toString());
+      if (msg.rid && msg.cmd === "graph_query") {
+        a.send(
+          JSON.stringify({
+            rid: msg.rid,
+            ok: true,
+            result: {
+              viewing: {
+                scope: "subgraph",
+                owner_node_id: 12,
+                workflow_uuid: "25180000-0000-4000-8000-000000000000",
+                graph_identity: "graph:stale-subgraph",
+              },
+              nodes: [{ id: 53, type: "StringConcatenate" }],
+            },
+          }),
+        );
+      }
+    });
+    await waitFor(() => expect(bridge.connected()).toBe(true));
+    await bridge.send(
+      { cmd: "graph_query", ids: [53], fields: "detail", limit: 1 },
+      { tabId: "tab-scope-2518" },
+    );
+    expect(bridge.promotedScopeFor("tab-scope-2518")).toMatchObject({
+      known: true,
+      scope: "subgraph",
+    });
+    bridge.clearPromotedSubgraphIdentity("tab-scope-2518");
+    expect(bridge.promotedScopeFor("tab-scope-2518").known).toBe(false);
+    bridge.applyLiveRootViewing("tab-scope-2518", {
+      scope: "root",
+      workflow_uuid: "25180000-0000-4000-8000-000000000000",
+      graph_identity: "graph:2518-root",
+    });
+    expect(bridge.promotedScopeFor("tab-scope-2518")).toMatchObject({
+      known: true,
+      scope: "root",
+      graphIdentity: "graph:2518-root",
+    });
+    a.close();
+  });
+
   it("freshly reads the current promoted owner after the cached owner goes stale (#2314)", async () => {
     const a = await connectPanel("tab-scope-read-2314");
     let ownerNodeId = 78;
@@ -6114,25 +6160,34 @@ describe("UiBridge (late MUTATION outcome — #694)", () => {
 
   it("asks the FILTER, not the mutating flag — the #778 commands stay out", async () => {
     // ctx.mutating is !BRIDGE_READONLY_CMDS.has(cmd), which this file documents
-    // as misclassifying graph_screenshot &c. The first cut of #694 gated on it
-    // and retained seven reads under a comment claiming reads were excluded.
-    // graph_screenshot is mutating:true AND not retainable — the exact pair that
-    // tells the two discriminators apart.
+    // as misclassifying graph_canvas &c. The first cut of #694 gated on it and
+    // retained seven reads under a comment claiming reads were excluded.
+    //
+    // The fixture must be a command that is mutating:true AND not retainable —
+    // that pair is the only thing that tells the two discriminators apart. This
+    // test used `graph_screenshot` until panel#2191 admitted it to
+    // BRIDGE_READONLY_CMDS; it would still have PASSED afterwards, on
+    // mutating:false, proving nothing. `graph_canvas` is the durable choice and
+    // is deliberately, permanently out of that set: `pan` is a dx/dy DELTA, so
+    // replaying it after a reconnect pans twice (graph-command-effect.test.ts
+    // pins exactly that). It is not retainable either — it is absent from
+    // RETRY_TOKEN_CMD_BY_TOOL, which is what the filter is built from.
+    expect(BRIDGE_READONLY_CMDS.has("graph_canvas"), "fixture must be mutating:true").toBe(false);
     const sock = await connectPanel("tab-778", "wf");
     await waitFor(() => expect(bridge.tabs().some((t) => t.tab_id === "tab-778")).toBe(true));
     let rid = "";
     sock.on("message", (buf) => {
       const msg = JSON.parse(buf.toString());
-      if (msg.rid && msg.cmd === "graph_screenshot") {
+      if (msg.rid && msg.cmd === "graph_canvas") {
         rid = msg.rid;
         setTimeout(() => sock.send(JSON.stringify({ rid: msg.rid, ok: true })), 80);
       }
     });
     await expect(
-      bridge.send({ cmd: "graph_screenshot" }, { tabId: "tab-778", timeoutMs: 30 }),
+      bridge.send({ cmd: "graph_canvas" }, { tabId: "tab-778", timeoutMs: 30 }),
     ).rejects.toThrow(/did not reply/i);
     await new Promise((r) => setTimeout(r, 140));
-    expect(rid, "graph_screenshot should have been dispatched").toBeTruthy();
+    expect(rid, "graph_canvas should have been dispatched").toBeTruthy();
     expect(bridge.takeLateMutation(rid)).toBeUndefined();
     sock.close();
   });

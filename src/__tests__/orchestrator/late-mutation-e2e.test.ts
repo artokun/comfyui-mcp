@@ -192,7 +192,7 @@ describe("late-mutation notice, end to end over a real bridge (#694)", () => {
 
     // 2. THE ASSERTION THIS FILE EXISTS FOR. Nothing else in the suite pins it:
     //    the token an agent is told to quote must be the rid the bridge minted,
-    //    dispatched under, and keyed `timedOutMutations` by.
+    //    dispatched under, and keyed delivered-mutation retention by.
     expect(panel.rids).toHaveLength(1);
     expect(hintRid, "the retry hint quotes a rid the bridge never dispatched").toBe(panel.rids[0]);
 
@@ -212,9 +212,11 @@ describe("late-mutation notice, end to end over a real bridge (#694)", () => {
     expect(textOf(retry)).toContain("tab-e2e");
     // The retry's own result survives underneath the notice.
     expect(retry.content.length).toBeGreaterThan(1);
-    // Not a short-circuit: the retry really was dispatched (#683/#687).
-    expect(panel.rids).toHaveLength(2);
-    expect(panel.rids[1]).not.toBe(panel.rids[0]);
+    // #2527 — once the original has settled, retry_of is answered from the
+    // retained receipt instead of re-dispatching a command the frontend would
+    // reject as a different command or workflow. #683/#687 still forbids
+    // short-circuiting on rid alone when the write has not settled.
+    expect(panel.rids).toHaveLength(1);
   });
 
   it("catches a reply that lands WHILE the retry is in flight", async () => {

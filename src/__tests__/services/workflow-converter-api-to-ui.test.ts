@@ -351,3 +351,99 @@ describe("isApiFormat / isUiFormat detection", () => {
     expect(isApiFormat({ a: { inputs: {} } })).toBe(false); // no class_type
   });
 });
+
+// ─────────────────────────────────────────────────────────────────────────────
+// #2753 — the reverse direction has to agree, or a round-trip re-introduces the
+// shift. A forceInput-only input is a plain SOCKET on canvas: it gets an inputs[]
+// slot with no `widget` marker, and NO widgets_values placeholder.
+// ─────────────────────────────────────────────────────────────────────────────
+describe("convertApiToUi — forceInput-only scalar input (issue #2753)", () => {
+  const INFO = {
+    AnimaTrainerLoader: {
+      input: {
+        required: {
+          trainer_status: ["STRING", { forceInput: true }],
+          unet_name: [["anima-base-v1.0.safetensors", "other.safetensors"]],
+          clip_name: [["qwen_3_06b_base.safetensors", "other.safetensors"]],
+          weight_dtype: [["default", "fp8_e4m3fn"]],
+        },
+      },
+      input_order: {
+        required: ["trainer_status", "unet_name", "clip_name", "weight_dtype"],
+      },
+      output: ["MODEL"],
+      output_name: ["MODEL"],
+    },
+  } as never;
+
+  const API = {
+    "7": {
+      class_type: "AnimaTrainerLoader",
+      inputs: {
+        unet_name: "anima-base-v1.0.safetensors",
+        clip_name: "qwen_3_06b_base.safetensors",
+        weight_dtype: "default",
+      },
+    },
+  } as never;
+
+  it("emits a socket slot and NO widgets_values placeholder for it", () => {
+    const { workflow } = convertApiToUi(API, INFO);
+    const node = workflow.nodes[0];
+    expect(node.widgets_values).toEqual([
+      "anima-base-v1.0.safetensors",
+      "qwen_3_06b_base.safetensors",
+      "default",
+    ]);
+    const slot = (node.inputs ?? []).find((i) => i.name === "trainer_status");
+    expect(slot).toBeDefined();
+    // a real socket, not a converted widget — an unwired `widget:{…}` slot is
+    // stripped by the frontend on load, which would lose the socket entirely.
+    expect(slot?.widget).toBeUndefined();
+  });
+
+  // An API graph MAY carry a literal on a forceInput input — ComfyUI's backend
+  // ignores forceInput, it is a frontend hint. UI format has nowhere to put it: the
+  // canvas renders a socket, so there is no widget and no widgets_values slot. This
+  // is therefore the converter's ordinary treatment of a literal on a socket input,
+  // the same warning every other link input gets, and it is DELIBERATE.
+  //
+  // The alternative is what this PR removed: writing a placeholder into
+  // widgets_values. That is not a carrier either — ComfyUI's own loader
+  // (migrateWidgetsValues) drops exactly that slot on load — it just loses the value
+  // silently, one step later, and misaligns every widget after it in the meantime.
+  it("a literal on the socket-only input is dropped, and SAID so", () => {
+    const withLiteral = {
+      "7": {
+        class_type: "AnimaTrainerLoader",
+        inputs: {
+          trainer_status: "a literal the canvas cannot hold",
+          unet_name: "anima-base-v1.0.safetensors",
+          clip_name: "qwen_3_06b_base.safetensors",
+          weight_dtype: "default",
+        },
+      },
+    } as never;
+    const { workflow, warnings } = convertApiToUi(withLiteral, INFO);
+    const node = workflow.nodes[0];
+    // the literal does NOT become a widget slot — that is what shifted the row
+    expect(node.widgets_values).toEqual([
+      "anima-base-v1.0.safetensors",
+      "qwen_3_06b_base.safetensors",
+      "default",
+    ]);
+    expect(warnings.join(" ")).toContain('"trainer_status"');
+    expect(warnings.join(" ")).toContain("dropped");
+  });
+
+  it("round-trips back to the same widget values", () => {
+    const { workflow: ui } = convertApiToUi(API, INFO);
+    const { workflow: api } = convertUiToApi(ui as never, INFO);
+    expect((api["7"] as { inputs: Record<string, unknown> }).inputs).toMatchObject({
+      unet_name: "anima-base-v1.0.safetensors",
+      clip_name: "qwen_3_06b_base.safetensors",
+      weight_dtype: "default",
+    });
+  });
+});
+

@@ -68,7 +68,7 @@ export function registerComfyCliTools(server: McpServer): void {
       '- action:"workflow_run" — Submit an API/UI workflow file (`workflowPath` required). Asynchronous by default; set wait=true to await outputs (`timeoutSeconds`).\n' +
       '- action:"transfer_upload" — Upload input files (`files` required) for local ComfyUI or Comfy Cloud; overwrite=false passes --no-overwrite.\n' +
       '- action:"transfer_download" — Download completed outputs for `promptId` (required); `outDir` and `urlOnly` optional.\n' +
-      '- action:"models_list_folders" / "models_list_folder" / "models_search" / "models_show" — Discover model folders/files locally or in Comfy Cloud (`folder` required for list_folder, `name` for show). When comfy-cli is not installed/on PATH and the target is the connected (local) server, these read-only listings fall back to that server\'s own local models (via /models) — so model discovery works without the CLI.\n' +
+      '- action:"models_list_folders" / "models_list_folder" / "models_search" / "models_show" — Discover model folders/files locally or in Comfy Cloud (`folder` required for list_folder, `name` for show). For models_show, pass `folder`/`type` or a relative `name` path (e.g. vae/foo.safetensors) when the same basename exists in more than one folder. When comfy-cli is not installed/on PATH and the target is the connected (local) server, these read-only listings fall back to that server\'s own local models (via /models) — so model discovery works without the CLI.\n' +
       '- action:"models_download" — Download a model `url` (required) into the workspace (`relativePath`, default models/checkpoints). A download can run for many minutes and is gated on an idle-liveness timeout, so a progressing download is never killed.\n' +
       '- action:"models_remove" — Remove workspace model files (`modelNames` required; `relativePath` optional).\n' +
       '- action:"skills_list" / "skills_show" / "skills_validate" / "skills_install" / "skills_status" / "skills_uninstall" — Manage the official comfy-cli bundled agent skills (comfy, fragments, debug, relay, director). validate requires `path`; install/uninstall default to dry-run unless apply=true; scope="project" requires `projectDir`.',
@@ -122,10 +122,10 @@ export function registerComfyCliTools(server: McpServer): void {
       outDir: z.string().optional().describe('action:"transfer_download" — output directory.'),
       overwrite: z.boolean().optional().describe('action:"transfer_upload" — set false to pass --no-overwrite.'),
       urlOnly: z.boolean().optional().describe('action:"transfer_download" — print URLs instead of downloading files.'),
-      folder: z.string().optional().describe('action:"models_list_folder" — the model folder to list. REQUIRED.'),
+      folder: z.string().optional().describe('action:"models_list_folder" — the model folder to list (REQUIRED). action:"models_show" — optional folder to pick among duplicate basenames.'),
       text: z.string().optional().describe('action:"models_search" — search text.'),
-      type: z.string().optional().describe('action:"models_search" — model type filter (checkpoint, lora, vae, …).'),
-      name: z.string().optional().describe('actions "models_show"/"skills_show" — the model or skill name.'),
+      type: z.string().optional().describe('action:"models_search" — model type filter (checkpoint, lora, vae, …). action:"models_show" — same filter, to pick among duplicate basenames.'),
+      name: z.string().optional().describe('actions "models_show"/"skills_show" — the model or skill name. For models_show a relative path (e.g. vae/qwen_image_vae.safetensors) selects among duplicate basenames.'),
       url: z.string().url().optional().describe('action:"models_download" — model URL to download. REQUIRED.'),
       relativePath: z.string().optional().describe('actions "models_download"/"models_remove" — workspace-relative model directory (default models/checkpoints).'),
       modelNames: z.array(z.string()).optional().describe('action:"models_remove" — model filenames to remove. REQUIRED.'),

@@ -12,10 +12,11 @@
 # up to date so SAM3_VideoTrack/SAM3_TrackToMask exist.
 #
 # TS UTILITY NODES (now auto-installed): TSColorMatch (reference-free temporal color
-# stabilizer), TSPoseDataSmoother (pose-jitter smoother), TSVideoCombineNoMetadata
-# (metadata-free video save) — all three from github.com/artokun/comfyui-teskors-utils,
-# a public fork of teskor-hub/comfyui-teskors-utils. The color/pose nodes have no public
-# drop-in equivalents, so the pack ships its own maintained fork.
+# stabilizer) and TSPoseDataSmoother (pose-jitter smoother) from
+# github.com/artokun/comfyui-teskors-utils, a public fork of teskor-hub/comfyui-teskors-utils.
+# Video is saved with VHS_VideoCombine (OUTPUT_NODE). The color/pose nodes have no public
+# drop-in equivalents, so the pack ships its own maintained fork. apply_manifest must
+# clone this exact origin — Manager v4 may otherwise alias the bare name to teskor-hub.
 #
 # MODEL NAMING: the base-model host serves them under short placeholder names. The
 # workflow references the REAL Kijai filenames, so base models are downloaded and SAVED
@@ -29,7 +30,7 @@ custom_nodes:
   - https://github.com/kijai/ComfyUI-KJNodes               # ImageResizeKJv2, GetImageSizeAndCount, DrawMaskOnImage, ImageConcatMulti, PreviewAnimation
   - https://github.com/Kosinkadink/ComfyUI-VideoHelperSuite # VHS_LoadVideo, VHS_VideoInfoLoaded
   - https://github.com/Gourieff/ComfyUI-ReActor            # ReActorFaceSwap, ReActorBuildFaceModel (first-frame face-lock; auto-fetches inswapper_128 + GPEN-BFR-512)
-  - https://github.com/artokun/comfyui-teskors-utils       # TSColorMatch, TSPoseDataSmoother, TSVideoCombineNoMetadata (public fork of teskor-hub)
+  - https://github.com/artokun/comfyui-teskors-utils       # TSColorMatch, TSPoseDataSmoother (public fork of teskor-hub; exact origin must be cloned)
   # --- OPTIONAL (only for the muted Upscale4x-RIFE-1080p subgraph) ---
   # - https://github.com/numz/ComfyUI-SeedVR2_VideoUpscaler  # SeedVR2* — un-mute the upscale subgraph to use
 
@@ -73,3 +74,7 @@ models:
     local_path: insightface/inswapper_128.onnx
   - url: https://huggingface.co/datasets/Gourieff/ReActor/resolve/main/models/facerestore_models/GPEN-BFR-512.onnx
     local_path: facerestore_models/GPEN-BFR-512.onnx
+
+  # --- SAM3 tracking/masking (REPLACEMENT MODE subgraph; CheckpointLoaderSimple) ---
+  - url: https://huggingface.co/Comfy-Org/sam3.1/resolve/main/checkpoints/sam3.1_multiplex_fp16.safetensors
+    local_path: checkpoints/sam3.1_multiplex_fp16.safetensors

@@ -28,9 +28,10 @@
 // is simply "inactive" and nothing in the orchestrator changes. It must never
 // throw into the main path.
 
-import WebSocket from "ws";
+import { type RawData } from "ws";
 import { logger } from "../utils/logger.js";
 import { getComfyUIAuthHeaders } from "../config.js";
+import { LoopbackWebSocket } from "../transport/loopback-websocket.js";
 import { comfyuiFetch } from "../comfyui/fetch.js";
 import { sameOrigin } from "../utils/origin.js";
 
@@ -130,6 +131,16 @@ export interface QueueSnapshot {
    *  reported depth is fully accounted for — the coarse recent-self-queue
    *  fallback never counts here. */
   selfAttributedProven: boolean;
+  /** #2684 — ms epoch of the last evidence the monitored ComfyUI answered HERE:
+   *  a successful `/queue` poll (`lastServerAliveTs`) or any decodable ws frame
+   *  (`lastFrameTs`), whichever is newer. null when neither has ever happened.
+   *
+   *  This is the SAME heartbeat `report()` reduces to `serverAlive`, exposed so
+   *  a consumer of `running`/`runningPromptId` can tell a live claim from a
+   *  last-known one. Every other field here is last-known state with no expiry;
+   *  without this there is no way to ask how old that state is, which is how a
+   *  never-confirmed run kept being named as present-tense fact (#2684). */
+  lastServerContactTs: number | null;
 }
 
 /**
@@ -182,6 +193,26 @@ const HISTORY_TAIL_ITEMS = 32;
 // Training nodes legitimately exceed it (hours of silent tqdm), which is why
 // report() exempts runs whose graph contains a known trainer class (#1652).
 const HARD_STALL_FLOOR_MS = 30 * 60 * 1000; // 30 minutes
+/**
+ * #2684 — how long the monitored ComfyUI may stay SILENT before a believed
+ * running prompt stops being reported as present-tense fact.
+ *
+ * Keeping the last-known run across a blip is deliberate and right: one timed-out
+ * poll is not proof a render finished, and clearing on it would falsely report an
+ * active job as done. What was wrong is that the belief had no upper bound — when
+ * the monitored target stops answering entirely (`fetchJson` returns null on abort,
+ * timeout or non-2xx, and `applyQueue` then returns before it can clear), nothing
+ * ever downgrades "is running" to "was running, unverified since".
+ *
+ * 30 s is chosen against the two clocks that bound it. Below: the poll runs at
+ * ~1 Hz with a 2.5 s timeout, so 30 s of total silence is ten-plus consecutive
+ * failed polls AND zero ws frames — well past any transient blip. Above: the
+ * default stall threshold is 180 s and the live setting floors at 15 s, so the
+ * busy note downgrades BEFORE `report()` can raise a STALLED notice off the same
+ * lapsed heartbeat. That ordering is the point: the reported session got both
+ * statements at once, one derived from the other's negation.
+ */
+export const RUNNING_UNCONFIRMED_MS = 30_000;
 // Node classes whose HEALTHY runtime legitimately exceeds the hard floor with
 // ZERO forward-progress frames: ComfyUI's built-in LoRA training only rewrites
 // a tqdm bar on stdout — no per-step `progress` WS frames — so lastActivityTs
@@ -199,7 +230,7 @@ const TRAINING_NODE_CLASS_TYPES = new Set([
 ]);
 
 class QueueMonitorImpl {
-  private ws: WebSocket | null = null;
+  private ws: LoopbackWebSocket | null = null;
   private url: string | null = null;
   private stopped = false;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
@@ -243,6 +274,9 @@ class QueueMonitorImpl {
   private completedReported = new Set<string>();
   // Completions not yet drained by the broadcaster. Bounded.
   private pendingCompletions: CompletionEvent[] = [];
+  /** Prompt that just left /queue this poll — record its history even if the
+   *  id was already in the tail (an in-progress row becoming interrupted). */
+  private vanishedPromptId: string | null = null;
   // ---- self-attribution for the backlog warning (#559) ----
   // Prompt ids THIS orchestrator queued via panel_run, plus the ms timestamp of
   // the most recent self-queue. A backlog made entirely of the agent's own recent
@@ -278,6 +312,7 @@ class QueueMonitorImpl {
     this.historySeen.clear();
     this.completedReported.clear();
     this.pendingCompletions.length = 0;
+    this.vanishedPromptId = null;
     this.state.lastCompleted = null;
     // Self-queued prompt ids belong to the OLD target — a fresh ComfyUI's jobs are
     // foreign to us until we queue them, so drop the attribution (#559).
@@ -488,13 +523,13 @@ class QueueMonitorImpl {
 
   private connect(): void {
     if (this.stopped) return;
-    let ws: WebSocket;
+    let ws: LoopbackWebSocket;
     try {
       // Ride the same auth as HTTP (COMFYUI_AUTH_* + Cloudflare Access service
       // token) on the WS handshake, so the watchdog reaches a ComfyUI behind a
       // proxy / CF Access. undefined when unauth'd → identical to `new WebSocket(url)`.
       const authHeaders = getComfyUIAuthHeaders();
-      ws = new WebSocket(
+      ws = new LoopbackWebSocket(
         this.wsUrl(),
         Object.keys(authHeaders).length ? { headers: authHeaders } : undefined,
       );
@@ -513,7 +548,7 @@ class QueueMonitorImpl {
       this.state.connected = true;
       logger.debug("[queue-monitor] watchdog WS connected");
     });
-    ws.on("message", (raw: WebSocket.RawData, isBinary: boolean) => {
+    ws.on("message", (raw: RawData, isBinary: boolean) => {
       if (this.ws !== ws) return;
       if (isBinary) return; // preview image frames — ignore
       this.onMessage(raw.toString());
@@ -798,6 +833,7 @@ class QueueMonitorImpl {
       // Empty queue → the tracked run is over. Skip the clear if a run was
       // adopted AFTER this fetch began (the response would be stale for it).
       if ((this.state.lastActivityTs ?? 0) <= fetchStart) {
+        this.vanishedPromptId = this.state.runningPromptId;
         this.clearRunning();
         this.emitEndIfIdle();
       }
@@ -821,11 +857,16 @@ class QueueMonitorImpl {
     } | null;
     const st = entry && typeof entry === "object" ? entry.status : undefined;
     const messages = Array.isArray(st?.messages) ? (st.messages as unknown[]) : [];
+    const has = (type: string) => messages.some((m) => Array.isArray(m) && m[0] === type);
     let status: CompletionStatus;
-    if (st?.completed === true || st?.status_str === "success" || st === undefined) {
-      status = "success";
-    } else if (messages.some((m) => Array.isArray(m) && m[0] === "execution_interrupted")) {
+    // Interrupt is terminal even when ComfyUI marks completed:true / status_str
+    // success-or-error — that used to classify a cancel as a successful finish.
+    if (has("execution_interrupted")) {
       status = "interrupted";
+    } else if (has("execution_error") || st?.status_str === "error") {
+      status = "error";
+    } else if (st?.completed === true || st?.status_str === "success" || st === undefined) {
+      status = "success";
     } else {
       status = "error";
     }
@@ -877,6 +918,29 @@ class QueueMonitorImpl {
     }
     for (const e of unseen) this.recordCompletion(e.id, e.status);
     this.historySeen = new Set(ids);
+    // A tracked run that left /queue this tick may already have been in the
+    // tail (in-progress). The unseen diff would miss it; record the terminal
+    // status now so an interrupt is not held until the next prompt (#2512).
+    const vanished = this.vanishedPromptId;
+    this.vanishedPromptId = null;
+    if (vanished && h[vanished] && !this.completedReported.has(vanished)) {
+      const terminal = this.terminalHistoryStatus(h[vanished]);
+      if (terminal) this.recordCompletion(vanished, terminal);
+    }
+  }
+
+  /** Fail-closed: only a proven finish (interrupt / error / completed success). */
+  private terminalHistoryStatus(raw: unknown): CompletionStatus | null {
+    if (!raw || typeof raw !== "object") return null;
+    const st = (raw as { status?: unknown }).status;
+    if (!st || typeof st !== "object") return null;
+    const status = st as { status_str?: unknown; completed?: unknown; messages?: unknown };
+    const messages = Array.isArray(status.messages) ? status.messages : [];
+    const has = (type: string) => messages.some((m) => Array.isArray(m) && m[0] === type);
+    if (has("execution_interrupted")) return "interrupted";
+    if (has("execution_error") || status.status_str === "error") return "error";
+    if (status.completed === true || status.status_str === "success") return "success";
+    return null;
   }
 
   /** Cheap snapshot for backpressure (panel_run) and the live `queue_status`
@@ -893,7 +957,16 @@ class QueueMonitorImpl {
       lastCompleted: this.state.lastCompleted,
       selfAttributed: this.isSelfAttributed(),
       selfAttributedProven: this.isSelfAttributedProven(),
+      lastServerContactTs: this.lastServerContactTs(),
     };
+  }
+
+  /** #2684 — newest of the two liveness heartbeats, null when the monitored
+   *  server has never answered here. Shared with `report()` so the busy notes
+   *  and the STALLED notice cannot disagree about whether the server is alive. */
+  private lastServerContactTs(): number | null {
+    const ts = Math.max(this.state.lastServerAliveTs ?? 0, this.state.lastFrameTs ?? 0);
+    return ts > 0 ? ts : null;
   }
 
   /** Stall/backlog report for the turn-start injector. */
@@ -910,8 +983,8 @@ class QueueMonitorImpl {
     // 1 Hz poll fresh, so a busy decode stays live and is NOT flagged; a server
     // that stops answering (crashed / event-loop wedged) lets the heartbeat
     // lapse → a real stall still surfaces.
-    const heartbeatTs = Math.max(this.state.lastServerAliveTs ?? 0, this.state.lastFrameTs ?? 0);
-    const serverAlive = heartbeatTs > 0 && now - heartbeatTs < stallMs;
+    const heartbeatTs = this.lastServerContactTs();
+    const serverAlive = heartbeatTs !== null && now - heartbeatTs < stallMs;
     // Backstop so a genuine in-node DEADLOCK on a still-reachable server isn't
     // suppressed FOREVER: after a long hard floor of zero forward progress, flag
     // regardless of liveness. A real deadlock usually holds Python's GIL, which

@@ -982,3 +982,208 @@ describe("get_errors completion does not invent a found type or skip the sanitiz
     ).toBeUndefined();
   });
 });
+
+// #2587 — a completed panel scan can classify a current LoadImage as a cosmetic
+// stale outline when its saved value is no longer in the freshly refreshed combo.
+// These drive the registered panel_get_errors tool, including a subgraph viewing
+// identity, rather than calling get-errors-audit.ts in isolation.
+describe("panel_get_errors reclassifies unavailable stale LoadImage values (#2587)", () => {
+  const SUBGRAPH_VIEW = {
+    kind: "subgraph",
+    scope: "subgraph",
+    workflow: "nested.json",
+    workflow_uuid: "workflow-a",
+    graph_identity: "subgraph-a",
+  };
+
+  const panelReply = (viewing = SUBGRAPH_VIEW) => ({
+    viewing,
+    node_count: 3,
+    errored_count: 0,
+    nodes: [],
+    stale_flags: [
+      { id: 306, type: "LoadImage", widgets: { image: "front_color.png" }, red_outline: true, reasons: [] },
+      { id: 307, type: "LoadImage", widgets: { image: "front_normal.png" }, red_outline: true, reasons: [] },
+      { id: 308, type: "LoadImage", widgets: { image: "front_depth.png" }, red_outline: true, reasons: [] },
+    ],
+    last_execution_error: null,
+    node_errors: null,
+    note: CLEAN_NOTE,
+  });
+
+  it("reports an absent enumerable root-level saved value with its id and value", async () => {
+    const { payload, cmds, calls } = await runGetErrors((cmd) => {
+      if (cmd.cmd === "graph_get_errors") return panelReply();
+      if (cmd.cmd === "graph_get_object_info") {
+        return {
+          ok: true,
+          object_info: {
+            LoadImage: {
+              input: { required: { image: [["front_color.png", "front_other.png"], {}] } },
+            },
+          },
+        };
+      }
+      if (cmd.cmd === "graph_query") {
+        return {
+          viewing: SUBGRAPH_VIEW,
+          matched: 3,
+          shown: 3,
+          text: [
+            { id: 306, type: "LoadImage", widgets: { image: "front_color.png" } },
+            { id: 307, type: "LoadImage", widgets: { image: "front_normal.png" } },
+            { id: 308, type: "LoadImage", widgets: { image: "front_depth.png" } },
+          ].map(JSON.stringify).join("\n"),
+        };
+      }
+      throw new Error(`unexpected follow-up ${cmd.cmd}`);
+    });
+
+    expect(cmds).toEqual(["graph_get_errors", "graph_get_object_info", "graph_query"]);
+    expect(calls.find((call) => call.cmd === "graph_query")).toMatchObject({
+      fields: "detail",
+      ids: [306, 307, 308],
+    });
+    expect(payload.audit_complete).toBe(true);
+    expect(payload.errored_count).toBe(0);
+    expect(payload.note).toBeUndefined();
+
+    const unavailable = payload.unavailable_widget_values as Array<Record<string, unknown>>;
+    expect(unavailable).toHaveLength(2);
+    expect(unavailable).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        id: 307,
+        type: "LoadImage",
+        widget: "image",
+        value: "front_normal.png",
+        kind: "missing_asset",
+        source: "orchestrator_completion",
+      }),
+      expect.objectContaining({
+        id: 308,
+        type: "LoadImage",
+        widget: "image",
+        value: "front_depth.png",
+        kind: "missing_asset",
+        source: "orchestrator_completion",
+      }),
+    ]));
+    expect((payload.stale_flags as Array<Record<string, unknown>>)).toEqual([
+      expect.objectContaining({ id: 306, type: "LoadImage" }),
+    ]);
+  });
+
+  it("does not classify annotated or nested upload paths without /view evidence", async () => {
+    const panel = panelReply();
+    const pathValues = ["[input]nested/front_normal.png", "[output]front_depth.png", "temp/front_mask.png"];
+    panel.stale_flags = pathValues.map((value, i) => ({
+      id: 306 + i,
+      type: "LoadImage",
+      red_outline: true,
+      reasons: [],
+      value,
+    }));
+    const { payload } = await runGetErrors((cmd) => {
+      if (cmd.cmd === "graph_get_errors") return panel;
+      if (cmd.cmd === "graph_get_object_info") {
+        return {
+          ok: true,
+          object_info: {
+            LoadImage: {
+              input: { required: { image: [["front_color.png"], { image_upload: true }] } },
+            },
+          },
+        };
+      }
+      if (cmd.cmd === "graph_query") {
+        return {
+          viewing: SUBGRAPH_VIEW,
+          matched: pathValues.length,
+          shown: pathValues.length,
+          text: pathValues
+            .map((value, i) => JSON.stringify({ id: 306 + i, type: "LoadImage", widgets: { image: value } }))
+            .join("\n"),
+        };
+      }
+      throw new Error(`unexpected follow-up ${cmd.cmd}`);
+    });
+
+    expect(payload.unavailable_widget_values).toBeUndefined();
+    expect(payload.stale_flags).toHaveLength(pathValues.length);
+    expect(payload.note).toBe(CLEAN_NOTE);
+  });
+
+  it("keeps linked and driven LoadImage values unknown", async () => {
+    const panel = panelReply();
+    panel.stale_flags = [
+      { id: 306, type: "LoadImage", red_outline: true, reasons: [] },
+      { id: 307, type: "LoadImage", red_outline: true, reasons: [] },
+    ];
+    const { payload } = await runGetErrors((cmd) => {
+      if (cmd.cmd === "graph_get_errors") return panel;
+      if (cmd.cmd === "graph_get_object_info") {
+        return {
+          ok: true,
+          object_info: {
+            LoadImage: {
+              input: { required: { image: [["front_color.png"], { image_upload: true }] } },
+            },
+          },
+        };
+      }
+      if (cmd.cmd === "graph_query") {
+        return {
+          viewing: SUBGRAPH_VIEW,
+          matched: 2,
+          shown: 2,
+          text: [
+            {
+              id: 306,
+              type: "LoadImage",
+              widgets: { image: "front_normal.png" },
+              inputs: [{ name: "image", link: { node_id: 12, output_slot: 0 } }],
+            },
+            {
+              id: 307,
+              type: "LoadImage",
+              widgets: { image: "front_depth.png" },
+              driven_by_link: { image: { node_id: 13, output_slot: 0 } },
+            },
+          ].map(JSON.stringify).join("\n"),
+        };
+      }
+      throw new Error(`unexpected follow-up ${cmd.cmd}`);
+    });
+
+    expect(payload.unavailable_widget_values).toBeUndefined();
+    expect(payload.stale_flags).toHaveLength(2);
+    expect(payload.note).toBe(CLEAN_NOTE);
+  });
+
+  it("keeps the cosmetic stale classification when a same-workflow graph identity changes", async () => {
+    const { payload } = await runGetErrors((cmd) => {
+      if (cmd.cmd === "graph_get_errors") return panelReply();
+      if (cmd.cmd === "graph_get_object_info") {
+        return {
+          ok: true,
+          object_info: {
+            LoadImage: { input: { required: { image: [["front_color.png"], {}] } } },
+          },
+        };
+      }
+      if (cmd.cmd === "graph_query") {
+        return {
+          viewing: { ...SUBGRAPH_VIEW, graph_identity: "subgraph-b" },
+          matched: 3,
+          shown: 3,
+          text: JSON.stringify({ id: 307, type: "LoadImage", widgets: { image: "front_normal.png" } }),
+        };
+      }
+      throw new Error(`unexpected follow-up ${cmd.cmd}`);
+    });
+
+    expect(payload.unavailable_widget_values).toBeUndefined();
+    expect(payload.stale_flags).toHaveLength(3);
+    expect(payload.note).toBe(CLEAN_NOTE);
+  });
+});

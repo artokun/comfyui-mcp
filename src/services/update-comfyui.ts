@@ -119,6 +119,124 @@ function gitProbe(args: string[], cwd: string): string | null {
   }
 }
 
+/** ComfyUI's historical default, then the generic git default. */
+const UPDATE_BRANCHES = ["master", "main"] as const;
+
+/**
+ * Stale remote-tracking ref vs new nested ref: `refs/remotes/origin/dev` exists
+ * as a file, so git cannot create `refs/remotes/origin/dev/<child>` (#2524).
+ * Git's own hint is `git remote prune origin`. Other lock failures (index.lock,
+ * another process) must NOT match — those are not cured by pruning.
+ */
+export function isStaleRemoteRefLock(output: string): boolean {
+  const nestedLock = /cannot lock ref\s+['"]?refs\/remotes\/origin\//i.test(output);
+  const parentExists = /exists/i.test(output);
+  const pruneHint = /git remote prune origin/i.test(output);
+  return (nestedLock && parentExists) || pruneHint;
+}
+
+/** `git pull` on a DETACHED HEAD: fetch may work, merge has no branch (#2524). */
+export function isDetachedPullFailure(output: string): boolean {
+  return /you are not currently on a branch/i.test(output);
+}
+
+interface AttachAttempt {
+  switched: boolean;
+  branch: string | null;
+  dirty: boolean;
+}
+
+function localUpdateBranch(cwd: string): string | null {
+  for (const name of UPDATE_BRANCHES) {
+    if (gitProbe(["show-ref", "--verify", `refs/heads/${name}`], cwd)) {
+      return name;
+    }
+  }
+  return null;
+}
+
+/** Empty porcelain = clean. A failed status is NOT clean — we cannot prove it. */
+function workingTreeClean(cwd: string): boolean {
+  try {
+    const out = execFileSync("git", ["status", "--porcelain"], {
+      cwd,
+      encoding: "utf-8",
+      timeout: 30_000,
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    return (out ?? "").trim() === "";
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * `install_comfyui(action:"update")` is an explicit request to move the
+ * checkout. A detached release-tag HEAD (Comfy Desktop / `git checkout vX.Y.Z`)
+ * has no branch for `git pull` to merge with. When a local master/main exists
+ * and the tree is clean, switch onto it before pulling. Dirty trees and
+ * missing local branches are left untouched — switching those is not ours.
+ */
+function tryAttachUpdateBranch(
+  cwd: string,
+  currentBranch: string | null,
+  steps: CommandResult[],
+): AttachAttempt {
+  if (currentBranch) return { switched: false, branch: currentBranch, dirty: false };
+  const branch = localUpdateBranch(cwd);
+  if (!branch) return { switched: false, branch: null, dirty: false };
+  const dirty = !workingTreeClean(cwd);
+  if (dirty) return { switched: false, branch, dirty: true };
+  steps.push(runCommand("git", ["checkout", branch], cwd));
+  return { switched: true, branch, dirty: false };
+}
+
+function detachedPullRefusalMessage(comfyuiPath: string, attach: AttachAttempt): string {
+  const intro =
+    `ComfyUI core was NOT updated in ${comfyuiPath}: HEAD is DETACHED ` +
+    `(a tag or bare commit, which is how release-tag and Comfy Desktop installs are set up), ` +
+    `so \`git pull\` has no branch to merge with.`;
+  const tail = "Python requirements were NOT reinstalled, because nothing changed that would need them.";
+  if (attach.branch && attach.dirty) {
+    return (
+      `${intro} Local branch "${attach.branch}" exists, but the working tree is not clean ` +
+      `so this tool will not switch branches. Commit or stash local changes, then ` +
+      `\`git checkout ${attach.branch}\` and retry. ${tail}`
+    );
+  }
+  if (attach.branch) {
+    return (
+      `${intro} Switch to "${attach.branch}" first ` +
+      `(\`git checkout ${attach.branch} && git pull --ff-only\`) and retry. ${tail}`
+    );
+  }
+  return (
+    `${intro} Switch to a branch first, e.g. \`git checkout master && git pull --ff-only\`. ` +
+    `Check for local edits before switching (\`git status\`). ${tail}`
+  );
+}
+
+/**
+ * `git pull`, recovering once from the stale origin/dev vs origin/dev/* ref-lock
+ * by pruning origin. Other pull failures propagate unchanged.
+ */
+function runGitPullWithStaleRefRetry(cwd: string, steps: CommandResult[]): CommandResult {
+  try {
+    const pulled = runCommand("git", ["pull"], cwd);
+    steps.push(pulled);
+    return pulled;
+  } catch (err) {
+    if (!(err instanceof ProcessControlError) || !isStaleRemoteRefLock(err.message)) {
+      throw err;
+    }
+    steps.push({ command: "git pull", ok: false, output: err.message });
+    steps.push(runCommand("git", ["remote", "prune", "origin"], cwd));
+    const retried = runCommand("git", ["pull"], cwd);
+    steps.push(retried);
+    return retried;
+  }
+}
+
 /**
  * Decide whether `git pull` actually updated the checkout (#945).
  *
@@ -320,8 +438,36 @@ export async function updateComfyUICore(): Promise<UpdateCoreResult> {
 
   // 1. git pull the core repo — bracketed by a revision read, because a pull
   //    that exits 0 is NOT evidence that anything moved (#945).
+  //    A detached version-tag checkout is attached to local master/main first
+  //    when the tree is clean (#2524); a stale origin/dev vs origin/dev/*
+  //    ref-lock is pruned once and the pull retried.
   const before = readGitState(comfyuiPath);
-  steps.push(runCommand("git", ["pull"], comfyuiPath));
+  const attach = tryAttachUpdateBranch(comfyuiPath, before.branch, steps);
+  try {
+    runGitPullWithStaleRefRetry(comfyuiPath, steps);
+  } catch (err) {
+    if (err instanceof ProcessControlError && isDetachedPullFailure(err.message)) {
+      if (!steps.some((s) => s.command === "git pull" && !s.ok)) {
+        steps.push({ command: "git pull", ok: false, output: err.message });
+      }
+      const afterDetached = readGitState(comfyuiPath);
+      return {
+        updated: false,
+        comfyui_path: comfyuiPath,
+        package_manager: pm,
+        steps,
+        revision: {
+          before: before.head,
+          after: afterDetached.head,
+          branch: afterDetached.branch,
+          upstream: afterDetached.upstream,
+          matches_upstream: null,
+        },
+        message: detachedPullRefusalMessage(comfyuiPath, attach),
+      };
+    }
+    throw err;
+  }
   const after = readGitState(comfyuiPath);
   const verdict = classifyCoreUpdate({
     before: before.head,

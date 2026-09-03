@@ -9,7 +9,7 @@
 //
 // Rules:
 //   - exact match (same type name) is compatible and ranks highest;
-//   - `*` wildcard is compatible with anything but ranks LAST;
+//   - `*` wildcard is compatible with anything (including another `*`) but ranks LAST;
 //   - COMBO / enum array types are compatible only when identical;
 //   - comma-joined multi-types ("IMAGE,MASK") match if ANY segment matches.
 
@@ -42,7 +42,11 @@ export function compatibilityRank(output: SlotType, input: SlotType): number {
       : RANK_INCOMPATIBLE;
   }
 
-  // Wildcards accept anything but must rank below every concrete match.
+  // Wildcards accept anything — including another LiteGraph wildcard — but
+  // must rank below every concrete match. `*` → `*` is a valid pairing
+  // (Reroute, PrimitiveNode "connect to widget input", LogicIF when_true /
+  // when_false); the panel's "no input accepts type *" tail is not a
+  // compatibility verdict for that pair (artokun/comfyui-mcp#2542).
   if (output === "*" || input === "*") return RANK_WILDCARD;
 
   // Exact / comma multi-type: any shared segment is an exact-type match.
@@ -56,4 +60,9 @@ export function compatibilityRank(output: SlotType, input: SlotType): number {
 
 export function isTypeCompatible(output: SlotType, input: SlotType): boolean {
   return compatibilityRank(output, input) > RANK_INCOMPATIBLE;
+}
+
+/** True when a slot type is, or contains, LiteGraph's `*` wildcard segment. */
+export function isLiteGraphWildcardType(type: SlotType | null | undefined): boolean {
+  return typeof type === "string" && segments(type).includes("*");
 }

@@ -18,15 +18,7 @@ echo -------- custom nodes --------
 call :clone "ComfyUI-GGUF" "https://github.com/city96/ComfyUI-GGUF"
 call :clone "rgthree-comfy" "https://github.com/rgthree/rgthree-comfy"
 call :clone "ComfyUI-Easy-Use" "https://github.com/yolain/ComfyUI-Easy-Use"
-call :clone "ComfyUI-KJNodes" "https://github.com/kijai/ComfyUI-KJNodes"
-call :clone "ComfyUI_UltimateSDUpscale" "https://github.com/ssitu/ComfyUI_UltimateSDUpscale"
 call :clone "ComfyUI_essentials" "https://github.com/cubiq/ComfyUI_essentials"
-call :clone "wlsh_nodes" "https://github.com/wallish77/wlsh_nodes"
-call :clone "comfyui-vrgamedevgirl" "https://github.com/vrgamegirl19/comfyui-vrgamedevgirl"
-call :clone "RES4LYF" "https://github.com/ClownsharkBatwing/RES4LYF"
-call :clone "SeedVarianceEnhancer" "https://github.com/ChangeTheConstants/SeedVarianceEnhancer"
-call :clone "ComfyUI-Detail-Daemon" "https://github.com/Jonseed/ComfyUI-Detail-Daemon"
-call :clone "comfyui_controlnet_aux" "https://github.com/Fannovel16/comfyui_controlnet_aux"
 
 echo -------- models --------
 call :grab "models\unet\z_image_turbo-Q8_0.gguf" "https://huggingface.co/Aitrepreneur/FLX/resolve/main/z_image_turbo-Q8_0.gguf"

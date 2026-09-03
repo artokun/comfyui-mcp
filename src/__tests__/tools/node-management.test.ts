@@ -594,9 +594,9 @@ describe("install_custom_node action:\"list\" discloses what mode:\"imported\" c
     }
   });
 
-  // cm-cli `show installed` has no mode parameter, so useCmCli does not degrade
-  // `mode` — it drops it. Reporting the live on-disk list under a mode that was
-  // never sent is the same misreport wearing a second costume.
+  // A usable cm-cli `show installed` has no mode parameter, so that path does
+  // not degrade `mode` — it drops it. When the CLI is absent or unsupported,
+  // action:"list" falls back to Manager HTTP and the requested mode applies.
   it("discloses that useCmCli dropped `mode` entirely", async () => {
     mocks.listInstalledNodes.mockResolvedValueOnce(PACKS);
     const out = text(

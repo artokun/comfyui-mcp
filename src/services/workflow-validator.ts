@@ -41,7 +41,8 @@ export interface ValidationResult {
  *   nodes[]/links[] — converted via convertUiToApi so saved canvas exports can be
  *   checked without a prior strip).
  * @param options.health Merge graph-health heuristics (disconnected nodes, duplicate
- *   model loads, orphaned branches, muted/bypassed) as info/warning issues plus a
+ *   model loads, orphaned branches, muted/bypassed, partial denoise on an empty
+ *   latent) as info/warning issues plus a
  *   structured `health` section. Health findings NEVER flip `valid`. Default true.
  */
 export async function validateWorkflow(

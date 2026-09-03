@@ -162,15 +162,12 @@ vi.mock("../../services/workspace-env.js", async () => {
   return {
     resolveEffectiveComfyUIBase: () => config.comfyuiPath ?? savedDefaultWorkspace,
     // #1052 — backed by the REAL argv parsing, like the resolvers above, so the
-    // live-root rung is exercised end to end rather than stubbed away.
-    resolveLiveComfyUIBase: async () => {
-      try {
-        const stats = await getSystemStats();
-        return actual.liveRootFromArgv(stats?.system?.argv, stats?.system?.cwd);
-      } catch {
-        return undefined;
-      }
-    },
+    // live-root rung is exercised end to end rather than stubbed away. This is
+    // deliberately one snapshot: explicit I/O flags and the inferred live root
+    // must describe the same server instance.
+    // Use the real snapshot boundary so a production-shaped malformed response
+    // cannot bypass its runtime argv/cwd validation in this resolver suite.
+    getLiveServerSnapshot: () => actual.getLiveServerSnapshot(),
     liveRootFromArgv: actual.liveRootFromArgv,
     hasComfyUIEntrypoint: (dir: string) =>
       hasEntrypointFor ? hasEntrypointFor(dir) : baseHasEntrypoint,
@@ -198,6 +195,9 @@ import {
   parseInputDirFromArgv,
   localInputDirFallback,
   resolveInputDir,
+  parseTempDirFromArgv,
+  localTempDirFallback,
+  resolveTempDir,
   parseBaseDirFromArgv,
   parseModelsDirFromArgv,
   parseExtraModelPathsConfigsFromArgv,
@@ -362,6 +362,96 @@ describe("localInputDirFallback", () => {
   it("throws when COMFYUI_PATH is unset", () => {
     (config as { comfyuiPath?: string }).comfyuiPath = undefined;
     expect(() => localInputDirFallback()).toThrow(/COMFYUI_PATH/);
+  });
+});
+
+describe("parseTempDirFromArgv", () => {
+  it("returns undefined when no relevant flags are present", () => {
+    expect(parseTempDirFromArgv(["python", "main.py", "--listen"])).toBeUndefined();
+    expect(parseTempDirFromArgv([])).toBeUndefined();
+    expect(parseTempDirFromArgv(undefined)).toBeUndefined();
+  });
+
+  it("parses --temp-directory <value>", () => {
+    const abs = resolve("/shared/ComfyUI-Shared/temp");
+    expect(parseTempDirFromArgv(["main.py", "--temp-directory", abs])).toBe(abs);
+  });
+
+  it("parses --temp-directory=<value>", () => {
+    const abs = resolve("/shared/tmp");
+    expect(parseTempDirFromArgv(["main.py", `--temp-directory=${abs}`])).toBe(abs);
+  });
+
+  it("resolves a relative --temp-directory against the server cwd", () => {
+    const serverCwd = resolve("/srv/live-comfyui");
+    expect(
+      parseTempDirFromArgv(["main.py", "--temp-directory", "custom-temp"], serverCwd),
+    ).toBe(join(serverCwd, "custom-temp"));
+  });
+
+  it("derives <base>/temp from --base-directory", () => {
+    const base = resolve("/srv/comfy-base");
+    expect(parseTempDirFromArgv(["main.py", "--base-directory", base])).toBe(
+      join(base, "temp"),
+    );
+  });
+
+  it("lets --temp-directory win over --base-directory", () => {
+    const base = resolve("/srv/base");
+    const tmp = resolve("/srv/explicit-temp");
+    const got = parseTempDirFromArgv([
+      "main.py",
+      "--base-directory",
+      base,
+      "--temp-directory",
+      tmp,
+    ]);
+    expect(got).toBe(tmp);
+  });
+});
+
+describe("localTempDirFallback", () => {
+  it("returns <COMFYUI_PATH>/temp", () => {
+    expect(localTempDirFallback()).toBe(resolve("/comfy", "temp"));
+  });
+
+  it("throws when COMFYUI_PATH is unset", () => {
+    (config as { comfyuiPath?: string }).comfyuiPath = undefined;
+    expect(() => localTempDirFallback()).toThrow(/COMFYUI_PATH/);
+  });
+});
+
+describe("resolveTempDir", () => {
+  it("uses the redirected dir reported by /system_stats argv", async () => {
+    const redirected = resolve("/shared/ComfyUI-Shared/temp");
+    getSystemStats.mockResolvedValue({
+      system: { argv: ["python", "main.py", "--temp-directory", redirected] },
+    });
+    const got = await resolveTempDir();
+    expect(got).toBe(redirected);
+    expect(got).not.toBe(resolve("/comfy", "temp"));
+    expect(isAbsolute(got)).toBe(true);
+  });
+
+  it("resolves a relative redirected dir against the live server cwd", async () => {
+    const serverCwd = resolve("/srv/live-comfyui");
+    getSystemStats.mockResolvedValue({
+      system: {
+        argv: ["python", "main.py", "--temp-directory", "custom-temp"],
+        cwd: serverCwd,
+      },
+    });
+    expect(await resolveTempDir()).toBe(join(serverCwd, "custom-temp"));
+  });
+
+  it("falls back to <COMFYUI_PATH>/temp when argv has no override", async () => {
+    getSystemStats.mockResolvedValue({ system: { argv: ["python", "main.py"] } });
+    expect(await resolveTempDir()).toBe(resolve("/comfy", "temp"));
+  });
+
+  it("falls back to <COMFYUI_PATH>/temp when /system_stats is unreachable", async () => {
+    getSystemStats.mockRejectedValue(new Error("ECONNREFUSED"));
+    expect(await resolveTempDir()).toBe(resolve("/comfy", "temp"));
   });
 });
 
@@ -1235,11 +1325,13 @@ describe("#1052: I/O dirs follow the CONNECTED server, not a second install", ()
     const got = await resolveOutputDir();
     expect(got).toBe(join(CONNECTED, "output"));
     expect(got).not.toBe(resolve(DESKTOP, "output")); // the reported failure
+    expect(getSystemStats).toHaveBeenCalledTimes(1);
   });
 
   it("resolves the INPUT dir the same way", async () => {
     connectedServerNoExplicitDirs();
     expect(await resolveInputDir()).toBe(join(CONNECTED, "input"));
+    expect(getSystemStats).toHaveBeenCalledTimes(1);
   });
 
   // An EXPLICIT --output-directory is the server telling us outright; it must
@@ -1265,6 +1357,28 @@ describe("#1052: I/O dirs follow the CONNECTED server, not a second install", ()
   it("falls back when the live argv identifies no root", async () => {
     getSystemStats.mockResolvedValue({ system: { argv: ["python"] } });
     expect(await resolveOutputDir()).toBe(resolve(DESKTOP, "output"));
+  });
+
+  it("fails closed on a production-shaped malformed argv response", async () => {
+    getSystemStats.mockResolvedValue({ system: { argv: [1] } });
+    await expect(resolveOutputDir()).resolves.toBe(resolve(DESKTOP, "output"));
+    expect(getSystemStats).toHaveBeenCalledTimes(1);
+  });
+
+  // #2539 — ComfyUI Desktop / Windows portable report a RELATIVE
+  // `ComfyUI/main.py` with no cwd and no --output-directory. argv alone cannot
+  // resolve the live root, so list_outputs scanned the unrelated COMFYUI_PATH
+  // while /view served the live server's files. The OS-observed process is the
+  // same rung models already use for this argv shape.
+  it("#2539: relative ComfyUI/main.py without cwd uses the OS-observed live root, not COMFYUI_PATH", async () => {
+    const liveRoot = resolve("/portable2/ComfyUI");
+    observedLiveRoot = liveRoot;
+    getSystemStats.mockResolvedValue({
+      system: { argv: [join("ComfyUI", "main.py"), "--windows-standalone-build"] },
+    });
+    const got = await resolveOutputDir();
+    expect(got).toBe(join(liveRoot, "output"));
+    expect(got).not.toBe(resolve(DESKTOP, "output"));
   });
 });
 

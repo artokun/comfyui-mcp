@@ -8,7 +8,9 @@
 //
 // The two updates are separate. The fence is already repaired. This file
 // drives the ROUTING half: re-point the session onto the dest tab when the
-// current address is dead. A live pin is left alone (#1917 / #884).
+// current address is dead, aliases onto dest, or is the unsaved tmp:
+// predecessor of dest. A live pin on a different saved tab is left alone
+// (#1917 / #884).
 //
 // Workaround that already worked: panel_set_workflow_target({mode:"current"}).
 // That tool is the only writer of the routing target; this makes Save-As do
@@ -31,6 +33,8 @@ const OLD_TAB = "wf:src-route:workflows/Untitled 1.json";
 const NEW_TAB = "wf:dest-route:workflows/photo_to_anime_main.json";
 const DEST_PATH = "workflows/photo_to_anime_main.json";
 const SCOPE = "orchestrator::codex";
+const TMP_TAB = "tmp:2522828d-unsaved";
+const TMP_PIN_PATH = "tmp:2522828d-unsaved";
 
 const SAVE_AS_REPLY = {
   saved: true,
@@ -71,7 +75,14 @@ function afterSaveAsLive(): void {
   reachable = new Set([NEW_TAB]);
 }
 
-function bridgeFor(opts?: { keepOldTab?: boolean }): PanelToolCtx["bridge"] {
+function bridgeFor(opts?: {
+  keepOldTab?: boolean;
+  /** Same-socket alias: retired id still canReach, but liveTabIdFor names dest. */
+  alias?: Record<string, string>;
+  /** First-save reply publishes a bare workflows/ routing_key, as production does. */
+  firstSaveRoutingKey?: string;
+}): PanelToolCtx["bridge"] {
+  const aliases = opts?.alias ?? {};
   return {
     send: async (c: Record<string, unknown>, extra?: { tabId?: string }) => {
       sent.push(c);
@@ -82,7 +93,16 @@ function bridgeFor(opts?: { keepOldTab?: boolean }): PanelToolCtx["bridge"] {
       }
       if (c.cmd === "workflow_save") {
         if (!opts?.keepOldTab) afterSaveAsLive();
-        return { saved: true, workflow: "photo_to_anime_main", ...SAVE_AS_REPLY };
+        const routing_key = opts?.firstSaveRoutingKey ?? SAVE_AS_REPLY.routing_key;
+        return {
+          saved: true,
+          first_save: true,
+          workflow: "photo_to_anime_main",
+          path: DEST_PATH,
+          routing_key,
+          workflow_uuid: NEW_UUID,
+          workflow_instance_changed: true,
+        };
       }
       if (c.cmd === "workflow_list") {
         return {
@@ -109,8 +129,21 @@ function bridgeFor(opts?: { keepOldTab?: boolean }): PanelToolCtx["bridge"] {
     },
     push: () => 1,
     canReach: (id: string) => {
-      if (id === SCOPE) return reachable.has(scopePin);
-      return reachable.has(id);
+      if (id === SCOPE) {
+        return reachable.has(scopePin) || Boolean(aliases[scopePin] && reachable.has(aliases[scopePin]));
+      }
+      if (reachable.has(id)) return true;
+      return Boolean(aliases[id] && reachable.has(aliases[id]));
+    },
+    liveTabIdFor: (id: string) => {
+      if (id === SCOPE) {
+        if (reachable.has(scopePin)) return scopePin;
+        const aliased = aliases[scopePin];
+        return aliased && reachable.has(aliased) ? aliased : undefined;
+      }
+      if (reachable.has(id)) return id;
+      const aliased = aliases[id];
+      return aliased && reachable.has(aliased) ? aliased : undefined;
     },
     isHeadless: () => false,
     tabs: () => liveTabs,
@@ -153,7 +186,7 @@ describe("#2419 Save-As re-points a dead real-tab address onto the dest canvas",
     expect(saved).toBe(true);
     expect(ctx.tabId).toBe(NEW_TAB);
     expect(ctx.tabId).not.toBe(OLD_TAB);
-    expect(targets.get(NEW_TAB)).toMatchObject({ mode: "pinned", path: "workflows/Untitled 1.json" });
+    expect(targets.get(NEW_TAB)).toMatchObject({ mode: "pinned", path: DEST_PATH });
     expect(targets.get(OLD_TAB)).toEqual({ mode: "current" });
   });
 
@@ -221,6 +254,90 @@ describe("#2419 Save-As re-points a dead SCOPE pin onto the dest canvas", () => 
 
     expect(scopeRepins).toEqual([]);
     expect(scopePin).toBe(OLD_TAB);
+  });
+});
+
+describe("#2419 first save of a pinned tmp: canvas follows dest even while tmp: still reaches", () => {
+  it("re-points a still-reachable tmp: tab onto dest after workflow_save (bare workflows/ routing_key)", async () => {
+    const targets = new WorkflowTargetStore();
+    targets.set(TMP_TAB, { mode: "pinned", path: TMP_PIN_PATH, filename: "Unsaved Workflow" });
+    liveTabs = [{ tab_id: TMP_TAB, title: "Unsaved Workflow", connected_at: 0 }];
+    reachable = new Set([TMP_TAB]);
+    const ctx = makePanelToolCtx(
+      bridgeFor({
+        alias: { [TMP_TAB]: NEW_TAB },
+        firstSaveRoutingKey: DEST_PATH,
+      }),
+      TMP_TAB,
+      targets,
+    );
+
+    const res = await toolNamed("panel_save_workflow").handler({}, ctx);
+
+    expect(res.isError).toBeFalsy();
+    expect(ctx.tabId).toBe(NEW_TAB);
+    expect(targets.get(NEW_TAB)).toMatchObject({ mode: "pinned", path: DEST_PATH });
+    expect(targets.get(TMP_TAB)).toEqual({ mode: "current" });
+
+    sent = [];
+    sentTab = [];
+    const todo = await toolNamed("panel_set_todo").handler(
+      { items: [{ text: "continue", status: "active" }] },
+      ctx,
+    );
+    const canvas = await toolNamed("panel_canvas").handler({ action: "fit" }, ctx);
+    expect(todo.isError, textOf(todo)).toBeFalsy();
+    expect(canvas.isError, textOf(canvas)).toBeFalsy();
+    expect(sentTab.every((id) => id === NEW_TAB)).toBe(true);
+    expect(sentTab).not.toContain(TMP_TAB);
+  });
+
+  it("re-points when the tmp: tab stays listed next to dest (not only via alias)", async () => {
+    const targets = new WorkflowTargetStore();
+    targets.set(TMP_TAB, { mode: "pinned", path: TMP_PIN_PATH });
+    liveTabs = [{ tab_id: TMP_TAB, title: "Unsaved Workflow", connected_at: 0 }];
+    reachable = new Set([TMP_TAB]);
+    const b = bridgeFor({ firstSaveRoutingKey: DEST_PATH });
+    const origSend = b.send;
+    b.send = async (c, extra) => {
+      const out = await origSend(c, extra);
+      if (c.cmd === "workflow_save") {
+        liveTabs = [
+          { tab_id: TMP_TAB, title: "Unsaved Workflow", connected_at: 0 },
+          { tab_id: NEW_TAB, title: "photo_to_anime_main", connected_at: 1 },
+        ];
+        reachable = new Set([TMP_TAB, NEW_TAB]);
+      }
+      return out;
+    };
+    const ctx = makePanelToolCtx(b, TMP_TAB, targets);
+
+    await toolNamed("panel_save_workflow").handler({}, ctx);
+
+    expect(ctx.tabId).toBe(NEW_TAB);
+    expect(targets.get(NEW_TAB)).toMatchObject({ mode: "pinned", path: DEST_PATH });
+  });
+
+  it("re-points a SCOPE session whose turn pin is the tmp: predecessor", async () => {
+    liveTabs = [{ tab_id: TMP_TAB, title: "Unsaved Workflow", connected_at: 0 }];
+    reachable = new Set([TMP_TAB]);
+    scopePin = TMP_TAB;
+    const targets = new WorkflowTargetStore();
+    targets.set(SCOPE, { mode: "pinned", path: TMP_PIN_PATH });
+    const ctx = makePanelToolCtx(
+      bridgeFor({
+        alias: { [TMP_TAB]: NEW_TAB },
+        firstSaveRoutingKey: DEST_PATH,
+      }),
+      SCOPE,
+      targets,
+    );
+
+    await toolNamed("panel_save_workflow").handler({}, ctx);
+
+    expect(scopeRepins).toEqual([{ scope: SCOPE, path: DEST_PATH }]);
+    expect(scopePin).toBe(NEW_TAB);
+    expect(targets.get(SCOPE)).toMatchObject({ mode: "pinned", path: DEST_PATH });
   });
 });
 

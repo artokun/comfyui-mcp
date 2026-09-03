@@ -1,4 +1,7 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 const mocks = vi.hoisted(() => ({
   listLocalModels: vi.fn(),
@@ -146,6 +149,125 @@ describe("comfy_cli models_* local fallback (#460)", () => {
       model("flux_schnell.safetensors", "checkpoints"),
     ]);
     await expect(listLocalModelsFallback({ action: "show", name: "flux" })).rejects.toThrow(/was not found/i);
+  });
+
+  // #2504 — HTTP `/models/<dir>` listings share basenames across folders (a VAE
+  // copied into loras, extra_model_paths, a misplaced download). `Array.find`
+  // returned whichever copy happened to be listed first and reported it as THE
+  // installed model. The fallback must refuse that silent pick, and must honour
+  // folder/type/relative-path as the deterministic selector.
+  describe("show duplicate basename (#2504)", () => {
+    const duplicates = [
+      model("qwen_image_vae.safetensors", "loras"),
+      model("qwen_image_vae.safetensors", "vae"),
+    ];
+
+    it("does not report the first listed duplicate as the installed model", async () => {
+      mocks.listLocalModels.mockResolvedValue(duplicates);
+      const err = await listLocalModelsFallback({
+        action: "show",
+        name: "qwen_image_vae.safetensors",
+      }).catch((e) => e as Error);
+      expect(err).toBeInstanceOf(Error);
+      expect(err.message).toMatch(/matches 2 local files/i);
+      expect(err.message).toMatch(/loras\/qwen_image_vae\.safetensors/);
+      expect(err.message).toMatch(/vae\/qwen_image_vae\.safetensors/);
+      expect(err.message, "must not collapse to the first listed type").not.toMatch(/^Model '.*' was not found/);
+    });
+
+    it("still refuses an arbitrary pick when the other copy is listed first", async () => {
+      mocks.listLocalModels.mockResolvedValue([...duplicates].reverse());
+      await expect(
+        listLocalModelsFallback({ action: "show", name: "qwen_image_vae.safetensors" }),
+      ).rejects.toThrow(/matches 2 local files/i);
+    });
+
+    it("picks the folder-qualified copy even when the other basename is listed first", async () => {
+      mocks.listLocalModels.mockResolvedValue(duplicates);
+      const { data } = await listLocalModelsFallback({
+        action: "show",
+        name: "qwen_image_vae.safetensors",
+        folder: "vae",
+      });
+      expect(data).toMatchObject({
+        name: "qwen_image_vae.safetensors",
+        type: "vae",
+        path: "vae/qwen_image_vae.safetensors",
+      });
+    });
+
+    it("picks the type-qualified copy (cli alias) even when the other basename is listed first", async () => {
+      mocks.listLocalModels.mockResolvedValue(duplicates);
+      const { data } = await listLocalModelsFallback({
+        action: "show",
+        name: "qwen_image_vae.safetensors",
+        type: "lora",
+      });
+      expect(data).toMatchObject({
+        name: "qwen_image_vae.safetensors",
+        type: "loras",
+        path: "loras/qwen_image_vae.safetensors",
+      });
+    });
+
+    it("picks the relative-path copy even when the other basename is listed first", async () => {
+      mocks.listLocalModels.mockResolvedValue(duplicates);
+      const { data } = await listLocalModelsFallback({
+        action: "show",
+        name: "vae/qwen_image_vae.safetensors",
+      });
+      expect(data).toMatchObject({
+        name: "qwen_image_vae.safetensors",
+        type: "vae",
+        path: "vae/qwen_image_vae.safetensors",
+      });
+    });
+
+    it("does not fall back to another folder when the hinted folder has no copy", async () => {
+      mocks.listLocalModels.mockResolvedValue(duplicates);
+      await expect(
+        listLocalModelsFallback({
+          action: "show",
+          name: "qwen_image_vae.safetensors",
+          folder: "checkpoints",
+        }),
+      ).rejects.toThrow(/was not found/i);
+    });
+  });
+
+  describe("show stats a local file (#2504)", () => {
+    let root: string | undefined;
+
+    afterEach(() => {
+      if (root) rmSync(root, { recursive: true, force: true });
+      root = undefined;
+    });
+
+    it("fills size and modified from the resolved file when COMFYUI_PATH is known", async () => {
+      root = mkdtempSync(join(tmpdir(), "comfyui-mcp-2504-"));
+      const rel = join("vae", "qwen_image_vae.safetensors");
+      mkdirSync(join(root, "models", "vae"), { recursive: true });
+      const bytes = Buffer.from("vae-weights");
+      writeFileSync(join(root, "models", rel), bytes);
+      mocks.comfyuiPath = root;
+      mocks.listLocalModels.mockResolvedValue([
+        { name: "qwen_image_vae.safetensors", path: "vae/qwen_image_vae.safetensors", size: 0, modified: "", type: "vae" },
+      ]);
+
+      const { data } = await listLocalModelsFallback({
+        action: "show",
+        name: "qwen_image_vae.safetensors",
+      });
+      expect(data).toMatchObject({
+        name: "qwen_image_vae.safetensors",
+        type: "vae",
+        path: "vae/qwen_image_vae.safetensors",
+        size: bytes.length,
+      });
+      expect(data).toEqual(
+        expect.objectContaining({ modified: expect.stringMatching(/^\d{4}-\d{2}-\d{2}T/) }),
+      );
+    });
   });
 
   it("throws a clear error when neither comfy-cli nor a readable server is available", async () => {

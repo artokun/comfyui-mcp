@@ -9,6 +9,7 @@ import {
   enqueuePrompt as clientEnqueuePrompt,
   freeMemory as clientFreeMemory,
 } from "../comfyui/client.js";
+import { isComfyTransportFailure } from "../comfyui/fetch.js";
 import * as cloudClient from "../comfyui/cloud-client.js";
 import { isCloudMode } from "../config.js";
 import type { QueueItem, WorkflowJSON } from "../comfyui/types.js";
@@ -52,6 +53,10 @@ export interface JobStatus {
   running: boolean;
   pending: boolean;
   done: boolean;
+  /** Present only as `false`: neither running nor queued, and a successful
+   *  /history read found no record of the prompt — so `done` is not a
+   *  completion. Omitted in every other reply (#2507). */
+  found?: boolean;
   status_str?: string;
   error?: ExecutionErrorDetails;
   execution_stats?: ExecutionStats;
@@ -59,7 +64,24 @@ export interface JobStatus {
    *  These write no file, so without this a text-producing workflow finishes
    *  with nothing for the agent to report. Omitted when the run produced none. */
   text_outputs?: TextOutput[];
+  /** Present only when `done` came from this client's cached prompt status
+   *  because ComfyUI `/history` was unreachable from this process (#2532). */
+  done_from?: "local_cache";
+  note?: string;
+  /** Narrates the `found:false` reply — what to check instead of waiting. */
+  message?: string;
 }
+
+/** True when history enrichment failed because the headless target (and any
+ * panel fallback) could not be reached — not a parse/HTTP-status failure. */
+function historyUnreachableFromHere(err: unknown): boolean {
+  if (isComfyTransportFailure(err)) return true;
+  const msg = err instanceof Error ? err.message : String(err);
+  return msg.includes("read fallback failed safely");
+}
+
+const LOCAL_CACHE_DONE_NOTE =
+  'done:true is from this client\'s cached prompt status; ComfyUI /history was unreachable from this process (COMFYUI_URL). A connected sidebar panel can still read the completed run. Retry get_history (action:"list") for this prompt_id — it uses a panel-origin fallback when available — or inspect the live canvas.';
 
 function asRecord(value: unknown): Record<string, unknown> | undefined {
   return value && typeof value === "object" && !Array.isArray(value)
@@ -289,7 +311,23 @@ export async function getJobStatus(
   try {
     const history = await getHistory(promptId);
     const entry = history[promptId];
-    if (!entry) return status;
+    if (!entry) {
+      // Both reads answered and neither has seen this prompt — not a
+      // completion. `done = !running && !pending` used to call a lost job
+      // (restart wipe, mistyped id) finished. Absence is only claimed on a
+      // read that succeeded; a failed history read falls to the catch.
+      return {
+        running: false,
+        pending: false,
+        done: false,
+        found: false,
+        message:
+          `ComfyUI has no record of this prompt — not running, not queued, and absent ` +
+          `from /history. It may have been lost to a restart or was never queued. Do not ` +
+          `wait for outputs; verify with get_history (action:"diagnose") and ` +
+          `get_image (action:"list_outputs").`,
+      };
+    }
 
     const analysis = analyzeHistoryEntry(entry);
     return {
@@ -304,6 +342,13 @@ export async function getJobStatus(
       prompt_id: promptId,
       error: err instanceof Error ? err.message : err,
     });
+    if (status.done && historyUnreachableFromHere(err)) {
+      return {
+        ...status,
+        done_from: "local_cache",
+        note: LOCAL_CACHE_DONE_NOTE,
+      };
+    }
     return status;
   }
 }
@@ -427,9 +472,11 @@ export interface EscalatedCancelResult {
    *  - "unknown" — /queue could not be read, so neither is established.
    */
   target_state: "stopped" | "running" | "unknown";
-  /** clear_pending was asked for and the clear did not complete — the pending
-   *  jobs may still be queued. Distinct from `pending_cleared: undefined`,
-   *  which is also what "clear_pending was never requested" looks like. */
+  /** clear_pending was asked for and the clear left pending jobs possibly
+   *  still queued. Distinct from `pending_cleared: undefined`, which is also
+   *  what "clear_pending was never requested" looks like. A failed REQUEST
+   *  over a queue a live read shows holds no pending jobs is not this — the
+   *  goal the clear was for is settled (#2517). */
   pending_clear_failed?: boolean;
   pending_cleared?: number; // how many pending jobs were dropped (if clear_pending)
   running_prompt_id?: string;
@@ -463,14 +510,6 @@ export async function cancelRunningJobEscalating(opts: {
     // failed request is a confident false statement.
     pending_cleared = clearPendingFailed ? undefined : before?.pending;
   }
-  // The pending half of every verdict message, true to what actually happened.
-  const pendingNote = !opts.clear_pending
-    ? `Pending jobs were NOT cleared — pass clear_pending:true or call queue (action:"clear").`
-    : clearPendingFailed
-      ? `Clearing pending jobs FAILED — they may still be queued; check queue (action:"list").`
-      : pending_cleared != null
-        ? `Pending jobs were cleared (${pending_cleared}).`
-        : `Pending jobs were cleared.`;
 
   // Identify the job we're trying to stop so we can verify it actually clears.
   // unknown-ok: null makes targetSeenRunning false, and "interrupted" is only
@@ -483,6 +522,22 @@ export async function cancelRunningJobEscalating(opts: {
     ? !!pre?.running_jobs.some((j) => j.prompt_id === opts.prompt_id)
     : !!pre && pre.running > 0;
 
+  // A clear whose REQUEST failed is only a real failure when pending jobs may
+  // still be queued: a live read showing none settles the goal the clear was
+  // for (#2517 — an idle queue was told "clearing FAILED" its own verified
+  // empty list disproved one poll later).
+  const pendingClearFailed = clearPendingFailed && (!pre || pre.pending > 0);
+  // The pending half of every verdict message, true to what actually happened.
+  const pendingNote = !opts.clear_pending
+    ? `Pending jobs were NOT cleared — pass clear_pending:true or call queue (action:"clear").`
+    : pendingClearFailed
+      ? `Clearing pending jobs FAILED — they may still be queued; check queue (action:"list").`
+      : clearPendingFailed
+        ? `The clear request failed, but /queue now shows no pending jobs.`
+        : pending_cleared != null
+          ? `Pending jobs were cleared (${pending_cleared}).`
+          : `Pending jobs were cleared.`;
+
   if (pre && pre.running === 0 && !opts.prompt_id) {
     return {
       interrupted: false,
@@ -490,7 +545,7 @@ export async function cancelRunningJobEscalating(opts: {
       freed_vram: false,
       wedged: false,
       target_state: "stopped",
-      pending_clear_failed: clearPendingFailed || undefined,
+      pending_clear_failed: pendingClearFailed || undefined,
       pending_cleared,
       message: `No job is running.${opts.clear_pending ? ` ${pendingNote}` : ""}`,
     };
@@ -502,7 +557,7 @@ export async function cancelRunningJobEscalating(opts: {
       freed_vram: false,
       wedged: false,
       target_state: "stopped",
-      pending_clear_failed: clearPendingFailed || undefined,
+      pending_clear_failed: pendingClearFailed || undefined,
       pending_cleared,
       message:
         `${opts.prompt_id} is not running (verified via /queue) — nothing to interrupt.` +
@@ -525,7 +580,7 @@ export async function cancelRunningJobEscalating(opts: {
         wedged: false,
         unverified: true,
         target_state: "stopped",
-        pending_clear_failed: clearPendingFailed || undefined,
+        pending_clear_failed: pendingClearFailed || undefined,
         pending_cleared,
         running_prompt_id: runningId,
         message:
@@ -541,7 +596,7 @@ export async function cancelRunningJobEscalating(opts: {
       freed_vram: false,
       wedged: false,
       target_state: "stopped",
-      pending_clear_failed: clearPendingFailed || undefined,
+      pending_clear_failed: pendingClearFailed || undefined,
       pending_cleared,
       running_prompt_id: runningId,
       message: `Interrupted the running job${runningId ? ` (${runningId})` : ""}.${
@@ -656,7 +711,7 @@ export async function cancelRunningJobEscalating(opts: {
       wedged: false,
       unverified: stopVerified ? undefined : true,
       target_state: "stopped",
-      pending_clear_failed: clearPendingFailed || undefined,
+      pending_clear_failed: pendingClearFailed || undefined,
       pending_cleared,
       running_prompt_id: runningId,
       message,
@@ -683,7 +738,7 @@ export async function cancelRunningJobEscalating(opts: {
       wedged: false,
       unverified: true,
       target_state: "unknown",
-      pending_clear_failed: clearPendingFailed || undefined,
+      pending_clear_failed: pendingClearFailed || undefined,
       pending_cleared,
       running_prompt_id: runningId,
       message:
@@ -719,7 +774,7 @@ export async function cancelRunningJobEscalating(opts: {
       // is what the message below already says. Calling that "running" would
       // make the field claim the identity the prose disclaims (codex gate).
       target_state: opts.prompt_id ? "running" : "unknown",
-      pending_clear_failed: clearPendingFailed || undefined,
+      pending_clear_failed: pendingClearFailed || undefined,
       pending_cleared,
       running_prompt_id: runningId,
       message:
@@ -743,7 +798,7 @@ export async function cancelRunningJobEscalating(opts: {
     freed_vram: freedVram,
     wedged: true,
     target_state: "running",
-    pending_clear_failed: clearPendingFailed || undefined,
+    pending_clear_failed: pendingClearFailed || undefined,
     pending_cleared,
     running_prompt_id: runningId,
     message:

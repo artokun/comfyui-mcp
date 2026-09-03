@@ -6,6 +6,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
   buildPanelToolDefs,
   makePanelToolCtx,
+  __panelRunTestHooks,
   __panelToolsTestHooks,
   type PanelToolCtx,
 } from "../../orchestrator/panel-tools.js";
@@ -39,6 +40,7 @@ function textOf(res: { content?: Array<{ type: string; text?: string }> }): stri
 
 beforeEach(() => {
   __panelToolsTestHooks.setRunLateAckGraceMs(450);
+  __panelRunTestHooks.setGotPromptLinesProbe(async () => null);
   RunCompletions.reset();
   qm.selfQueuedIds.clear();
   qm.lastSelfQueueTs = null;
@@ -52,6 +54,7 @@ beforeEach(() => {
 
 afterEach(() => {
   __panelToolsTestHooks.setRunLateAckGraceMs(null);
+  __panelRunTestHooks.setGotPromptLinesProbe(null);
   RunCompletions.reset();
   qm.selfQueuedIds.clear();
   qm.lastSelfQueueTs = null;
@@ -427,7 +430,11 @@ describe("panel_run late prompt reconciliation (#1728)", () => {
       return true;
     });
     expect(frames).toHaveLength(1);
-    expect(res.isError).toBeFalsy();
+    // Idle observed queue + unread logs fail closed as not queued (#2521). The
+    // beyond-grace receipt still tickets; the handler result is that closed
+    // verdict, not a claim that /prompt left the panel.
+    expect(res.isError).toBe(true);
+    expect(textOf(res)).not.toContain("already left the panel");
   });
 
   it("registers a timeout handoff before returning so a beyond-grace receipt still tickets", async () => {

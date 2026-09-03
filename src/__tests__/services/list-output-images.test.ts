@@ -6,14 +6,18 @@ import { join } from "node:path";
 // Mock resolveOutputDir so the scan targets our temp dir; everything else
 // (readdir/stat/extname classification) runs for real.
 let outputDir = "";
+let tempDir = "";
 // #877 needs the FAILING resolution too: "the output dir could not be
 // determined" is a distinct state from "it resolved and was empty", and the bug
 // was those two producing the same answer.
 let outputDirError: Error | null = null;
+let tempDirError: Error | null = null;
 vi.mock("../../services/output-dir.js", () => ({
   resolveOutputDir: () =>
     outputDirError ? Promise.reject(outputDirError) : Promise.resolve(outputDir),
   resolveInputDir: () => Promise.resolve(outputDir),
+  resolveTempDir: () =>
+    tempDirError ? Promise.reject(tempDirError) : Promise.resolve(tempDir),
 }));
 
 // Mock the client so the remote (history-derived) branch is controllable. Only
@@ -58,20 +62,31 @@ async function touchSub(
   await utimes(p, when, when);
 }
 
+async function touchTemp(name: string, when: Date, bytes = 1024): Promise<void> {
+  await mkdir(tempDir, { recursive: true });
+  const p = join(tempDir, name);
+  await writeFile(p, Buffer.alloc(bytes));
+  await utimes(p, when, when);
+}
+
 let prevComfyuiPath: string | undefined;
 
 beforeEach(async () => {
   outputDir = await mkdtemp(join(tmpdir(), "comfy-out-"));
+  tempDir = await mkdtemp(join(tmpdir(), "comfy-temp-"));
   // The local filesystem scan only runs when COMFYUI_PATH is set; force local
   // mode for the scan-based tests (resolveOutputDir is mocked to our temp dir).
   prevComfyuiPath = config.comfyuiPath;
   config.comfyuiPath = outputDir;
   remoteFlag = false;
+  outputDirError = null;
+  tempDirError = null;
   getHistoryMock.mockReset();
 });
 
 afterEach(async () => {
   await rm(outputDir, { recursive: true, force: true });
+  await rm(tempDir, { recursive: true, force: true });
   config.comfyuiPath = prevComfyuiPath;
   vi.clearAllMocks();
 });
@@ -123,6 +138,45 @@ describe("listOutputImages", () => {
     expect(nested).toHaveLength(1);
     expect(nested[0]?.subfolder).toBe("video");
     expect(nested[0]?.kind).toBe("video");
+  });
+
+  // #2370 recurrence: a completed VHS render named
+  // LTX_NATIVE_CONTEXT_TEST_00001-audio.mp4, but list_outputs against output/
+  // returned []. VHS_VideoCombine with save_output unchecked writes that file
+  // to temp/ (type:"temp"), which the previous fix only *named* in an empty
+  // caveat. The file must actually be listed, tagged type:"temp".
+  it("#2370: lists a completed VHS -audio.mp4 written to temp/, tagged type:temp", async () => {
+    const now = new Date("2026-08-29T12:00:00Z");
+    await touchTemp("LTX_NATIVE_CONTEXT_TEST_00001-audio.mp4", now);
+    await touchTemp("LTX_NATIVE_CONTEXT_TEST_00001.mp4", now);
+    // PreviewImage stills live in temp/ too and must NOT flood the listing.
+    await touchTemp("ComfyUI_temp_preview.png", now);
+
+    const hits = await listOutputImages({
+      pattern: "LTX_NATIVE_CONTEXT_TEST_00001",
+      limit: 100,
+    });
+    expect(hits.map((r) => r.filename).sort()).toEqual([
+      "LTX_NATIVE_CONTEXT_TEST_00001-audio.mp4",
+      "LTX_NATIVE_CONTEXT_TEST_00001.mp4",
+    ]);
+    expect(hits.every((r) => r.kind === "video")).toBe(true);
+    expect(hits.every((r) => r.type === "temp")).toBe(true);
+    expect(hits.find((r) => r.filename === "ComfyUI_temp_preview.png")).toBeUndefined();
+  });
+
+  it("#2370: a temp VHS video is listed even when output/ already has stills", async () => {
+    const now = new Date("2026-08-29T12:00:00Z");
+    await touch("portrait_00001.png", now);
+    await touchTemp("LTX_NATIVE_CONTEXT_TEST_00001-audio.mp4", now);
+
+    const hits = await listOutputImages({ limit: 100 });
+    expect(hits.map((r) => r.filename).sort()).toEqual([
+      "LTX_NATIVE_CONTEXT_TEST_00001-audio.mp4",
+      "portrait_00001.png",
+    ]);
+    expect(hits.find((r) => r.filename.endsWith(".mp4"))?.type).toBe("temp");
+    expect(hits.find((r) => r.filename.endsWith(".png"))?.type).toBe("output");
   });
 
   it("classifies still images as kind:image and videos/animations as kind:video", async () => {
@@ -253,7 +307,7 @@ describe("listOutputImages — remote mode (derived from /history)", () => {
     expect(byName["old.png"].modified).toBe("");
   });
 
-  it("skips temp-type assets and dedupes repeated filenames", async () => {
+  it("skips temp stills (PreviewImage) and dedupes repeated filenames", async () => {
     getHistoryMock.mockResolvedValue({
       a: {
         outputs: {
@@ -273,7 +327,36 @@ describe("listOutputImages — remote mode (derived from /history)", () => {
     });
 
     const results = await listOutputImages({ limit: 100 });
-    expect(results.map((r) => r.filename)).toEqual(["dup.png"]); // temp skipped, dup deduped
+    expect(results.map((r) => r.filename)).toEqual(["dup.png"]); // temp still skipped, dup deduped
+  });
+
+  it("#2370: includes a VHS type:temp video from history, skips temp stills", async () => {
+    getHistoryMock.mockResolvedValue({
+      a: {
+        outputs: {
+          "12": {
+            videos: [
+              {
+                filename: "LTX_NATIVE_CONTEXT_TEST_00001-audio.mp4",
+                subfolder: "",
+                type: "temp",
+              },
+            ],
+            images: [{ filename: "preview.png", subfolder: "", type: "temp" }],
+          },
+        },
+      },
+    });
+
+    const results = await listOutputImages({
+      pattern: "LTX_NATIVE_CONTEXT_TEST_00001",
+      limit: 100,
+    });
+    expect(results.map((r) => r.filename)).toEqual([
+      "LTX_NATIVE_CONTEXT_TEST_00001-audio.mp4",
+    ]);
+    expect(results[0]?.kind).toBe("video");
+    expect(results[0]?.type).toBe("temp");
   });
 
   it("honors limit and pattern", async () => {

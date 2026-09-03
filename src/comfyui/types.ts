@@ -26,6 +26,19 @@ export interface ComfyUINodeDef {
    * with "api node/" (e.g. "api node/image/BFL").
    */
   api_node?: boolean;
+  /**
+   * #2543 — opt-in for third-party nodes that bill a paid external service
+   * from environment-only credentials (no api_key widget, no Comfy `api_node`).
+   * Packs may set the class attribute `EXTERNAL_API_NODE` (boolean, or a string
+   * naming the provider). Honored when present on /object_info so the next
+   * env-only pack does not need a code change here.
+   */
+  external_api_node?: boolean | string;
+  /** Python class-attr spelling of `external_api_node`, if a serializer dumps it. */
+  EXTERNAL_API_NODE?: boolean | string;
+  /** Optional provider when `external_api_node` is a boolean. */
+  external_api_provider?: string;
+  EXTERNAL_API_PROVIDER?: string;
   deprecated?: boolean;
   experimental?: boolean;
 }

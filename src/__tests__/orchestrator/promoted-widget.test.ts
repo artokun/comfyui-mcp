@@ -27,8 +27,11 @@ import {
   matchListedName,
   parseAmbiguousPromotedWidgetRefusal,
   parseContradictoryPromotedWidgetRefusal,
+  parseLinkDrivenPromotedWriteWarning,
   parseSubgraphScopeRefusal,
+  promotedInnerWidgetIsLinkDriven,
   resolveInnerPromotedTarget,
+  describePromotedSubgraphEnvelope,
   validatePromotedSubgraphEnvelope,
 } from "../../orchestrator/promoted-widget.js";
 import { WorkflowTargetStore } from "../../services/workflow-target-store.js";
@@ -88,8 +91,11 @@ function bridge(opts: {
   preflightNodeIsSubgraph?: boolean;
   /** #2401: change the routing or panel connection identity after the async
    * ordinary-node scope probe has produced its result, before the caller can
-   * take the fast path. */
-  scopeProbeIdentityChange?: "tab" | "connection";
+   * take the fast path. `"gone"` drops a previously usable fingerprint. */
+  scopeProbeIdentityChange?: "tab" | "connection" | "gone";
+  /** #2551: the panel answers graph reads, but tab_session_id is never published
+   * so panelConnectionIdentity stays unusable both before and after the probe. */
+  unusableConnectionIdentity?: boolean;
   /** #2409: the same, one exit lower — change identity after the async
    * graph_get_subgraph read, before the definitive-non-subgraph exit returns. */
   subgraphReadIdentityChange?: "tab" | "connection";
@@ -147,6 +153,8 @@ function bridge(opts: {
   parentRailRelinkAfterMcpFence?: boolean;
   /** Whether the fake receiver enforces the final parent-rail witness. */
   promotedParentRailFence?: boolean;
+  /** #2488: inner graph_set_widget succeeds with the panel's link-driven warning. */
+  innerWriteLinkDriven?: boolean;
   /** Receiver navigation to another graph with the SAME owner/workflow and
    * colliding inner ids. Only graph_identity may distinguish this target. */
   receiverGraphIdentityCollisionAfterMcpFence?: boolean;
@@ -161,6 +169,8 @@ function bridge(opts: {
   };
   omitWorkflowUuid?: boolean;
   workflowUuid?: string;
+  /** Leave graph_query without a viewing witness so the scope is genuinely unknown. */
+  omitViewing?: boolean;
   /** The outer node id used by the current fake viewing scope. */
   ownerNodeId?: number;
   /** #2394: begin the fake panel inside a subgraph for active-view scope tests. */
@@ -190,7 +200,10 @@ function bridge(opts: {
   let currentOwnerNodeId = opts.ownerNodeId ?? 78;
   const targetGraphIdentity = "graph:workflow-a-container-a";
   let currentGraphIdentity = inSubgraph ? targetGraphIdentity : "graph:workflow-a-root";
-  let connectionIdentity = { generation: 1, tabSessionId: "browser-tab-a" };
+  let connectionIdentity: { generation: number; tabSessionId: string } | undefined =
+    opts.unusableConnectionIdentity === true
+      ? undefined
+      : { generation: 1, tabSessionId: "browser-tab-a" };
   let identityFenceCapability = opts.identityFenceChange === "upgrade" ? false : true;
   let identityFenceChangeApplied = false;
   let liveInnerNodeIdentity = opts.innerNodeIdentity;
@@ -215,9 +228,11 @@ function bridge(opts: {
     ...(opts.omitWorkflowUuid ? {} : { workflow_uuid: workflowUuid }),
   });
   const withCurrentViewing = (value: Record<string, unknown>): Record<string, unknown> => {
-    let result = Object.prototype.hasOwnProperty.call(value, "viewing")
+    let result = opts.omitViewing
       ? value
-      : { ...value, viewing: currentViewing() };
+      : Object.prototype.hasOwnProperty.call(value, "viewing")
+        ? value
+        : { ...value, viewing: currentViewing() };
     if (
       !legacyBuild &&
       identityFenceCapability &&
@@ -346,11 +361,19 @@ function bridge(opts: {
           }
           const expected = expectedScope as Record<string, unknown>;
           const actualOwner = inSubgraph ? String(currentOwnerNodeId) : null;
+          const expectedScopeKind = expected.scope ?? "subgraph";
+          const scopeMatches =
+            expectedScopeKind === "root"
+              ? !inSubgraph &&
+                String(expected.owner_node_id) === String(opts.ownerNodeId ?? 78) &&
+                expected.graph_identity === currentGraphIdentity
+              : expectedScopeKind === "subgraph" &&
+                String(expected.owner_node_id) === actualOwner &&
+                expected.graph_identity === currentGraphIdentity;
           if (
-            expected.scope !== "subgraph" ||
-            String(expected.owner_node_id) !== actualOwner ||
+            !scopeMatches ||
             (expected.workflow_uuid !== undefined && expected.workflow_uuid !== workflowUuid) ||
-            expected.graph_identity !== currentGraphIdentity
+            (expectedScopeKind !== "root" && expected.scope !== "subgraph")
           ) {
             throw new Error("graph_set_widget promoted receiver changed before dispatch: Nothing was applied.");
           }
@@ -409,18 +432,32 @@ function bridge(opts: {
         ) {
           throw new Error(DYNAMIC_CHILD_CONTRADICTORY);
         }
+        const outerId = String(opts.ownerNodeId ?? 78);
         const which =
           writes === 1
             ? (opts.firstWrite ?? "contradict")
             : opts.scopeLost
               ? (opts.innerWrite ?? "ok")
-            : Number(cmd.node_id) === 76 || cmd.node_id === "76"
+            : String(cmd.node_id) !== outerId
               ? (opts.innerWrite ?? "ok")
               : (opts.remappedWrite ?? "contradict");
         if (which === "contradict") throw new Error(CONTRADICTORY);
         if (which === "fail") throw new Error("inner write rejected");
         mutations += 1;
-        return { set: { node_id: cmd.node_id, widget: cmd.widget, value: cmd.value } };
+        const applied = { set: { node_id: cmd.node_id, widget: cmd.widget, value: cmd.value } };
+        if (
+          opts.innerWriteLinkDriven &&
+          String(cmd.node_id) !== String(opts.ownerNodeId ?? 78)
+        ) {
+          return {
+            ...applied,
+            warning:
+              `The write SUCCEEDED and was verified, but it will NOT change the render: ` +
+              `widget "${String(cmd.widget)}" on inner node is link-driven. ` +
+              `Set the widget on the ENCLOSING subgraph node instead.`,
+          };
+        }
+        return applied;
       }
       if (cmd.cmd === "graph_get_subgraph") {
         subgraphReads += 1;
@@ -488,6 +525,8 @@ function bridge(opts: {
           if (cmd.fields === "detail" && cmd.max_chars === undefined) {
             if (opts.scopeProbeIdentityChange === "connection") {
               connectionIdentity = { generation: 2, tabSessionId: "browser-tab-a" };
+            } else if (opts.scopeProbeIdentityChange === "gone") {
+              connectionIdentity = undefined;
             }
             const mutation = afterScopeProbe.mutate;
             afterScopeProbe.mutate = undefined;
@@ -967,6 +1006,452 @@ const QWEN_EDIT_INCOMPLETE_PROMOTED_SUBGRAPH = {
   ],
 };
 
+/** #2393 recurrence — official-template COMBO `unet_name` on a root SubgraphNode.
+ * The own-entry is incomplete (parent rail is a name-only stub) and the live
+ * immediate ids can point at the WRONG inner node after input-count drift.
+ * Query maps through input-rail output 6 to UNETLoader 37. */
+const UNet_COMBO_TEMPLATE_SUBGRAPH = {
+  subgraph_of: { node_id: 472, title: "Official Template" },
+  node_count: 2,
+  nodes: [
+    {
+      id: 37,
+      type: "UNETLoader",
+      widgets: { unet_name: "model.safetensors", weight_dtype: "default" },
+      inputs: [
+        { slot: 0, name: "unet_name", type: "COMBO", connected_from: { node_id: -10, output_slot: 6 } },
+        { slot: 1, name: "weight_dtype", type: "COMBO" },
+      ],
+    },
+    {
+      id: 38,
+      type: "CLIPLoader",
+      widgets: { clip_name: "clip.safetensors" },
+      inputs: [
+        { slot: 0, name: "clip_name", type: "COMBO", connected_from: { node_id: -10, output_slot: 7 } },
+      ],
+    },
+  ],
+  promoted_terminals: [
+    {
+      widget: "unet_name",
+      immediate_node_id: 99,
+      immediate_widget: "value",
+      error: "the promoted parent rail was missing, externally linked, or not authoritative",
+    },
+    {
+      widget: "lora_name",
+      error:
+        "properties.proxyWidgets named a promoted relation that had no live node.widgets/_subgraphSlot projection",
+    },
+  ],
+};
+
+const UNet_COMBO_TEMPLATE_DETAIL = {
+  text:
+    '1 match(es) of 1 in scope (viewing: 1 nodes)\n' +
+    '{"id":472,"type":"SubgraphNode","is_subgraph":true}',
+};
+
+/** #2488 — inner PrimitiveInt.length exposed as host frame_counts. The inner
+ * widget is link-driven; the durable store is the enclosing SubgraphNode. */
+const FRAME_COUNTS_PROMOTED_SUBGRAPH = {
+  subgraph_of: { node_id: 78, title: "Clip pack" },
+  node_count: 1,
+  nodes: [
+    {
+      id: 12,
+      type: "PrimitiveInt",
+      widgets: { length: 81 },
+      inputs: [{ name: "length", type: "INT" }],
+    },
+  ],
+  promoted_terminals: [
+    {
+      widget: "frame_counts",
+      parent_rail: { authoritative: true, widget: "frame_counts" },
+      immediate_node_id: 12,
+      immediate_widget: "length",
+      terminal_node_id: 12,
+      terminal_node_type: "PrimitiveInt",
+      terminal_widget: "length",
+      terminal_inputs: [{ name: "length", type: "INT" }],
+      chain_depth: 0,
+    },
+  ],
+};
+
+describe("panel_set_widget promoted subgraph input routing (#2488)", () => {
+  const hostDetail = {
+    text:
+      '1 match(es) of 1 in scope (viewing: 1 nodes)\n' +
+      '{"id":78,"type":"SubgraphNode","is_subgraph":true}',
+  };
+
+  it.each(["frame_counts", "length"] as const)(
+    "writes the host rail first when the caller addresses the SubgraphNode as %s",
+    async (widget) => {
+      const { text, isError, calls, mutations } = await setWidget(
+        { node_id: 78, widget, value: 49 },
+        {
+          firstWrite: "ok",
+          promotedTerminalWitnesses: true,
+          promotedDetail: hostDetail,
+          subgraph: FRAME_COUNTS_PROMOTED_SUBGRAPH,
+        },
+      );
+
+      expect(isError).toBe(false);
+      expect(mutations).toBe(1);
+      expect(calls.filter((call) => call.cmd === "graph_enter_subgraph")).toHaveLength(0);
+      expect(calls.filter((call) => call.cmd === "graph_set_widget")).toEqual([
+        expect.objectContaining({ node_id: 78, widget: "frame_counts", value: 49 }),
+      ]);
+      expect(text).toMatch(/enclosing subgraph node 78 widget "frame_counts"/);
+      expect(text).toMatch(/inner mapping node 12 "length"/);
+      expect(text).not.toMatch(/validated promoted inner widget/);
+    },
+  );
+
+  it("writes the host rail when the inner PrimitiveInt keeps the same widget name", async () => {
+    const sameName = {
+      ...FRAME_COUNTS_PROMOTED_SUBGRAPH,
+      promoted_terminals: [
+        {
+          ...FRAME_COUNTS_PROMOTED_SUBGRAPH.promoted_terminals[0],
+          widget: "length",
+          parent_rail: { authoritative: true, widget: "length" },
+        },
+      ],
+    };
+    const { text, isError, calls, mutations } = await setWidget(
+      { node_id: 78, widget: "length", value: 49 },
+      {
+        firstWrite: "ok",
+        promotedTerminalWitnesses: true,
+        promotedDetail: hostDetail,
+        subgraph: sameName,
+      },
+    );
+
+    expect(isError).toBe(false);
+    expect(mutations).toBe(1);
+    expect(calls.filter((call) => call.cmd === "graph_set_widget")).toEqual([
+      expect.objectContaining({ node_id: 78, widget: "length", value: 49 }),
+    ]);
+    expect(calls.map((call) => call.cmd)).not.toContain("graph_enter_subgraph");
+    expect(text).toMatch(/enclosing subgraph node 78 widget "length"/);
+  });
+
+  it("refuses the host write when the root graph changes after the MCP fence", async () => {
+    const { text, isError, calls, mutations } = await setWidget(
+      { node_id: 78, widget: "frame_counts", value: 49 },
+      {
+        firstWrite: "ok",
+        promotedTerminalWitnesses: true,
+        promotedDetail: hostDetail,
+        subgraph: FRAME_COUNTS_PROMOTED_SUBGRAPH,
+        receiverNavigationAfterMcpFence: true,
+        receiverGraphIdentityCollisionAfterMcpFence: true,
+      },
+    );
+
+    expect(isError).toBe(true);
+    expect(mutations).toBe(0);
+    expect(calls.filter((call) => call.cmd === "graph_set_widget")).toHaveLength(1);
+    expect(calls.find((call) => call.cmd === "graph_set_widget")).toEqual(
+      expect.objectContaining({
+        expected_scope: expect.objectContaining({ scope: "root", graph_identity: "graph:workflow-a-root" }),
+      }),
+    );
+    expect(text).toMatch(/promoted receiver changed|Nothing was applied/);
+  });
+
+  it("does not report a link-driven inner fallback as a durable write", async () => {
+    const { text, isError, calls, mutations } = await setWidget(
+      { node_id: 78, widget: "frame_counts", value: 49 },
+      {
+        firstWriteError:
+          `Cannot set widget on subgraph node 78: "frame_counts" is not a promoted widget ` +
+          `on this subgraph (promoted: frame_counts).`,
+        promotedTerminalWitnesses: true,
+        promotedDetail: hostDetail,
+        subgraph: FRAME_COUNTS_PROMOTED_SUBGRAPH,
+        innerWriteLinkDriven: true,
+      },
+    );
+
+    expect(isError).toBe(true);
+    expect(mutations).toBe(0);
+    expect(calls.filter((call) => call.cmd === "graph_enter_subgraph")).toHaveLength(0);
+    expect(
+      calls.some((call) => call.cmd === "graph_set_widget" && Number(call.node_id) === 12),
+    ).toBe(false);
+    expect(text).toMatch(/enclosing subgraph widget on node 78/);
+    expect(text).not.toMatch(/Applied via the validated promoted inner widget/);
+  });
+});
+
+/** #2500 — inner PrimitiveInt.value is a live input driven by the promoted
+ * duration/fps rail. Without a parent-rail witness, #2488 host-first would
+ * skip and the inner write would succeed while leaving the container at 5s. */
+const DURATION_PROMOTED_SUBGRAPH = {
+  subgraph_of: { node_id: 42, title: "First-Last-Frame to Video (LTX-2.3)" },
+  node_count: 1,
+  nodes: [
+    {
+      id: 198,
+      type: "PrimitiveInt",
+      widgets: { value: 5 },
+      inputs: [{ name: "value", type: "INT" }],
+    },
+  ],
+  promoted_terminals: [
+    {
+      widget: "value_2",
+      parent_rail: { authoritative: true, widget: "value_2" },
+      immediate_node_id: 198,
+      immediate_widget: "value",
+      terminal_node_id: 198,
+      terminal_node_type: "PrimitiveInt",
+      terminal_widget: "value",
+      terminal_inputs: [{ name: "value", type: "INT" }],
+      chain_depth: 0,
+    },
+  ],
+};
+
+describe("panel_set_widget promoted Primitive value misroute (#2500)", () => {
+  const hostDetail = {
+    text:
+      '1 match(es) of 1 in scope (viewing: 1 nodes)\n' +
+      '{"id":42,"type":"SubgraphNode","is_subgraph":true}',
+  };
+
+  it("writes duration/value_2 on the enclosing subgraph when the inner value input is link-driven", async () => {
+    const { text, isError, calls, mutations } = await setWidget(
+      { node_id: 42, widget: "value_2", value: 4 },
+      {
+        ownerNodeId: 42,
+        firstWrite: "ok",
+        promotedTerminalWitnesses: true,
+        promotedDetail: hostDetail,
+        subgraph: DURATION_PROMOTED_SUBGRAPH,
+      },
+    );
+
+    expect(isError).toBe(false);
+    expect(mutations).toBe(1);
+    expect(calls.filter((call) => call.cmd === "graph_enter_subgraph")).toHaveLength(0);
+    expect(calls.filter((call) => call.cmd === "graph_set_widget")).toEqual([
+      expect.objectContaining({ node_id: 42, widget: "value_2", value: 4 }),
+    ]);
+    expect(calls.some((call) => Number(call.node_id) === 198)).toBe(false);
+    expect(text).toMatch(/enclosing subgraph node 42 widget "value_2"/);
+    expect(text).not.toMatch(/will NOT change the render|Set the enclosing subgraph node/);
+  });
+
+  it("does not misroute a contradictory host write onto a link-driven Primitive value inner", async () => {
+    const { text, isError, calls } = await setWidget(
+      { node_id: 42, widget: "value_2", value: 4 },
+      {
+        ownerNodeId: 42,
+        firstWriteError:
+          `Cannot set widget on subgraph node 42: "value_2" is not a promoted widget ` +
+          `on this subgraph (promoted: value_2).`,
+        promotedTerminalWitnesses: true,
+        promotedDetail: hostDetail,
+        subgraph: DURATION_PROMOTED_SUBGRAPH,
+        innerWriteLinkDriven: true,
+      },
+    );
+
+    expect(isError).toBe(true);
+    expect(calls.filter((call) => call.cmd === "graph_enter_subgraph")).toHaveLength(0);
+    expect(
+      calls.some((call) => call.cmd === "graph_set_widget" && Number(call.node_id) === 198),
+    ).toBe(false);
+    expect(text).not.toMatch(/Applied via the validated promoted inner widget/);
+  });
+});
+
+/** #2533 — Krea-2 Turbo promoted STRING (`value`, labelled `prompt`). Both
+ * caller names must resolve to the same inner PrimitiveString.value, and the
+ * enclosing subgraph widget is the durable store. */
+const KREA_PROMPT_PROMOTED_SUBGRAPH = {
+  subgraph_of: { node_id: 12, title: "Text to Image (Krea-2 Turbo)" },
+  node_count: 1,
+  nodes: [
+    {
+      id: 131,
+      type: "PrimitiveString",
+      widgets: { value: "a cat" },
+      inputs: [{ name: "value", type: "STRING" }],
+    },
+  ],
+  promoted_terminals: [
+    {
+      widget: "prompt",
+      parent_rail: { authoritative: true, widget: "value" },
+      immediate_node_id: 131,
+      immediate_widget: "value",
+      terminal_node_id: 131,
+      terminal_node_type: "PrimitiveString",
+      terminal_widget: "value",
+      terminal_inputs: [{ name: "value", type: "STRING" }],
+      chain_depth: 0,
+    },
+  ],
+};
+
+/** #2533 — MiniMax audio_minimax_music_3. Root container 37 has authoritative
+ * unet_name/clip_name rails; the inners are ordinary COMBO widgets that are
+ * live inputs, not Primitive* value. */
+const MINIMAX_MUSIC_PROMOTED_SUBGRAPH = {
+  subgraph_of: { node_id: 37, title: "audio_minimax_music_3" },
+  node_count: 2,
+  nodes: [
+    {
+      id: 6,
+      type: "UNETLoader",
+      widgets: { unet_name: "music_fp16.safetensors", weight_dtype: "default" },
+      inputs: [
+        { name: "unet_name", type: "COMBO" },
+        { name: "weight_dtype", type: "COMBO" },
+      ],
+    },
+    {
+      id: 8,
+      type: "CLIPLoader",
+      widgets: { clip_name: "clip_fp16.safetensors", type: "stable_diffusion" },
+      inputs: [
+        { name: "clip_name", type: "COMBO" },
+        { name: "type", type: "COMBO" },
+      ],
+    },
+  ],
+  promoted_terminals: [
+    {
+      widget: "unet_name",
+      parent_rail: { authoritative: true, widget: "unet_name" },
+      immediate_node_id: 6,
+      immediate_widget: "unet_name",
+      terminal_node_id: 6,
+      terminal_node_type: "UNETLoader",
+      terminal_widget: "unet_name",
+      terminal_inputs: [
+        { name: "unet_name", type: "COMBO" },
+        { name: "weight_dtype", type: "COMBO" },
+      ],
+      chain_depth: 0,
+    },
+    {
+      widget: "clip_name",
+      parent_rail: { authoritative: true, widget: "clip_name" },
+      immediate_node_id: 8,
+      immediate_widget: "clip_name",
+      terminal_node_id: 8,
+      terminal_node_type: "CLIPLoader",
+      terminal_widget: "clip_name",
+      terminal_inputs: [
+        { name: "clip_name", type: "COMBO" },
+        { name: "type", type: "COMBO" },
+      ],
+      chain_depth: 0,
+    },
+  ],
+};
+
+describe("panel_set_widget promoted STRING prompt/value (#2533)", () => {
+  const hostDetail = {
+    text:
+      '1 match(es) of 1 in scope (viewing: 1 nodes)\n' +
+      '{"id":12,"type":"SubgraphNode","is_subgraph":true}',
+  };
+
+  it.each(["prompt", "value"] as const)(
+    "writes the enclosing subgraph when the labelled STRING is addressed as %s",
+    async (widget) => {
+      const { text, isError, calls, mutations } = await setWidget(
+        { node_id: 12, widget, value: "a red bicycle at dusk" },
+        {
+          ownerNodeId: 12,
+          firstWrite: "ok",
+          promotedTerminalWitnesses: true,
+          promotedDetail: hostDetail,
+          subgraph: KREA_PROMPT_PROMOTED_SUBGRAPH,
+        },
+      );
+
+      expect(isError).toBe(false);
+      expect(mutations).toBe(1);
+      expect(calls.filter((call) => call.cmd === "graph_enter_subgraph")).toHaveLength(0);
+      expect(calls.filter((call) => call.cmd === "graph_set_widget")).toEqual([
+        expect.objectContaining({ node_id: 12, widget: "value", value: "a red bicycle at dusk" }),
+      ]);
+      expect(calls.some((call) => Number(call.node_id) === 131)).toBe(false);
+      expect(text).toMatch(/enclosing subgraph node 12 widget "value"/);
+      expect(text).not.toMatch(/will NOT change the render|The container was not written/);
+    },
+  );
+});
+
+describe("panel_set_widget promoted MiniMax unet_name/clip_name (#2533)", () => {
+  const hostDetail = {
+    text:
+      '1 match(es) of 1 in scope (viewing: 1 nodes)\n' +
+      '{"id":37,"type":"SubgraphNode","is_subgraph":true}',
+  };
+
+  it("writes unet_name on the enclosing container instead of inner UNETLoader 6", async () => {
+    const { text, isError, calls, mutations } = await setWidget(
+      { node_id: 37, widget: "unet_name", value: "music_fp8.safetensors" },
+      {
+        ownerNodeId: 37,
+        firstWrite: "ok",
+        promotedTerminalWitnesses: true,
+        promotedDetail: hostDetail,
+        subgraph: MINIMAX_MUSIC_PROMOTED_SUBGRAPH,
+        innerWriteLinkDriven: true,
+      },
+    );
+
+    expect(isError).toBe(false);
+    expect(mutations).toBe(1);
+    expect(calls.filter((call) => call.cmd === "graph_enter_subgraph")).toHaveLength(0);
+    expect(calls.filter((call) => call.cmd === "graph_set_widget")).toEqual([
+      expect.objectContaining({ node_id: 37, widget: "unet_name", value: "music_fp8.safetensors" }),
+    ]);
+    expect(calls.some((call) => Number(call.node_id) === 6)).toBe(false);
+    expect(text).toMatch(/enclosing subgraph node 37 widget "unet_name"/);
+    expect(text).not.toMatch(/will NOT change the render|The container was not written/);
+  });
+
+  it("writes clip_name on the enclosing container instead of inner CLIPLoader 8", async () => {
+    const { text, isError, calls, mutations } = await setWidget(
+      { node_id: 37, widget: "clip_name", value: "clip_fp8.safetensors" },
+      {
+        ownerNodeId: 37,
+        firstWrite: "ok",
+        promotedTerminalWitnesses: true,
+        promotedDetail: hostDetail,
+        subgraph: MINIMAX_MUSIC_PROMOTED_SUBGRAPH,
+        innerWriteLinkDriven: true,
+      },
+    );
+
+    expect(isError).toBe(false);
+    expect(mutations).toBe(1);
+    expect(calls.filter((call) => call.cmd === "graph_enter_subgraph")).toHaveLength(0);
+    expect(calls.filter((call) => call.cmd === "graph_set_widget")).toEqual([
+      expect.objectContaining({ node_id: 37, widget: "clip_name", value: "clip_fp8.safetensors" }),
+    ]);
+    expect(calls.some((call) => Number(call.node_id) === 8)).toBe(false);
+    expect(text).toMatch(/enclosing subgraph node 37 widget "clip_name"/);
+    expect(text).not.toMatch(/will NOT change the render|The container was not written/);
+  });
+});
+
 describe("panel_set_widget coordinated promoted-widget fixes (#2393, #2394)", () => {
   it("refreshes one incomplete post-template terminal witness before the guarded inner write (#2393)", async () => {
     const { isError, calls, mutations } = await setWidget(
@@ -990,10 +1475,11 @@ describe("panel_set_widget coordinated promoted-widget fixes (#2393, #2394)", ()
 
     expect(isError).toBe(false);
     expect(mutations).toBe(1);
-    expect(calls.filter((call) => call.cmd === "graph_get_subgraph")).toHaveLength(3);
+    expect(calls.filter((call) => call.cmd === "graph_get_subgraph")).toHaveLength(2);
     expect(calls.filter((call) => call.cmd === "graph_set_widget")).toEqual([
-      expect.objectContaining({ node_id: 168, widget: "value", value: true }),
+      expect.objectContaining({ node_id: 170, widget: "enable_turbo_mode", value: true }),
     ]);
+    expect(calls.map((call) => call.cmd)).not.toContain("graph_enter_subgraph");
   });
 
   it("allows a missing root-level Power Lora Loader lora_N row without entering promoted mapping (#2394)", async () => {
@@ -1162,6 +1648,7 @@ describe("panel_set_widget ordinary-node scope probe fence (#2401)", () => {
       { node_id: 82, widget: "lora_1", value },
       {
         firstWrite: "ok",
+        omitViewing: true,
         promotedDetail: { nodes: [{ id: 82, type: "Power Lora Loader (rgthree)" }] },
         subgraph: new Error("graph_get_subgraph unavailable"),
       },
@@ -1174,6 +1661,163 @@ describe("panel_set_widget ordinary-node scope probe fence (#2401)", () => {
       "graph_get_subgraph",
       "graph_get_subgraph",
     ]);
+    expect(writesApplied).toBe(0);
+    expect(mutations).toBe(0);
+  });
+});
+
+describe("panel_set_widget root-scope write after a root graph read (#2518)", () => {
+  const STRING_CONCAT_ID = 53;
+  const ROOT_GRAPH_IDENTITY = "graph:workflow-a-root";
+  const stalePromotedEnvelope = {
+    subgraph_of: { node_id: STRING_CONCAT_ID, title: "stale-subgraph" },
+    instance_widgets: { string_a: "old" },
+    node_count: 1,
+    nodes: [{ id: 99, type: "PrimitiveStringMultiline", widgets: { value: "old" } }],
+  };
+
+  it("writes a truncated root StringConcatenate widget without the promoted-subgraph path", async () => {
+    const { text, isError, calls, writesApplied, mutations } = await setWidget(
+      { node_id: STRING_CONCAT_ID, widget: "string_a", value: "hello" },
+      {
+        firstWrite: "ok",
+        unusableConnectionIdentity: true,
+        subgraph: stalePromotedEnvelope,
+        promotedDetail: {
+          truncated: true,
+          viewing: {
+            scope: "root",
+            graph_identity: ROOT_GRAPH_IDENTITY,
+            workflow_uuid: "workflow-a",
+          },
+          nodes: [
+            {
+              id: STRING_CONCAT_ID,
+              type: "StringConcatenate",
+              is_subgraph: false,
+              widgets: { string_a: "old", string_b: "world", delimiter: " " },
+            },
+          ],
+        },
+      },
+    );
+
+    expect(isError).toBe(false);
+    expect(text).not.toMatch(/refused the promoted/);
+    expect(text).not.toMatch(/panel connection identity was unavailable/);
+    expect(calls.filter((call) => call.cmd === "graph_get_subgraph")).toHaveLength(0);
+    expect(calls.filter((call) => call.cmd === "graph_set_widget")).toEqual([
+      expect.objectContaining({
+        node_id: STRING_CONCAT_ID,
+        widget: "string_a",
+        value: "hello",
+      }),
+    ]);
+    expect(writesApplied).toBe(1);
+    expect(mutations).toBe(1);
+  });
+
+  it("still maps a root subgraph container through the promoted path", async () => {
+    const { isError, calls, writesApplied, mutations } = await setWidget(
+      { node_id: 78, widget: "width", value: 1920 },
+      {
+        firstWrite: "ok",
+        promotedDetail: {
+          truncated: false,
+          nodes: [{ id: 78, type: "Krea2", is_subgraph: true, widgets: { width: 1024 } }],
+        },
+      },
+    );
+
+    expect(isError).toBe(false);
+    expect(calls.filter((call) => call.cmd === "graph_get_subgraph").length).toBeGreaterThan(0);
+    expect(writesApplied).toBe(1);
+    expect(mutations).toBe(1);
+  });
+});
+
+describe("panel_set_widget ordinary-root write with missing connection identity (#2551)", () => {
+  const promotedLookingOrdinaryRoots = [
+    {
+      name: "PrimitiveFloat.value",
+      node_id: 132,
+      type: "PrimitiveFloat",
+      widget: "value",
+      value: 0.65,
+      inputs: [{ name: "value", type: "FLOAT", widget: { name: "value" } }],
+      widgets: { value: 1 },
+    },
+    {
+      name: "DenoResolutionSetup.ratio_preset",
+      node_id: 145,
+      type: "DenoResolutionSetup",
+      widget: "ratio_preset",
+      value: "16:9",
+      inputs: [
+        { name: "ratio_preset", type: "COMBO", widget: { name: "ratio_preset" } },
+        { name: "megapixels", type: "FLOAT", widget: { name: "megapixels" } },
+      ],
+      widgets: { ratio_preset: "1:1", megapixels: 1 },
+    },
+    {
+      name: "PrimitiveStringMultiline.value",
+      node_id: 196,
+      type: "PrimitiveStringMultiline",
+      widget: "value",
+      value: "a prompt",
+      inputs: [{ name: "value", type: "STRING", widget: { name: "value" } }],
+      widgets: { value: "" },
+    },
+  ] as const;
+
+  it.each(promotedLookingOrdinaryRoots)(
+    "writes $name on the ordinary path when the connection identity is missing",
+    async ({ node_id, type, widget, value, inputs, widgets }) => {
+      const { text, isError, calls, writesApplied, mutations } = await setWidget(
+        { node_id, widget, value },
+        {
+          firstWrite: "ok",
+          unusableConnectionIdentity: true,
+          promotedDetail: {
+            nodes: [{ id: node_id, type, is_subgraph: false, inputs: [...inputs], widgets }],
+          },
+        },
+      );
+
+      expect(isError).toBe(false);
+      expect(text).not.toMatch(/panel connection identity was unavailable/);
+      expect(calls.map((call) => call.cmd)).toEqual(["graph_query", "graph_set_widget"]);
+      expect(calls.filter((call) => call.cmd === "graph_set_widget")).toEqual([
+        expect.objectContaining({ node_id, widget, value }),
+      ]);
+      expect(writesApplied).toBe(1);
+      expect(mutations).toBe(1);
+    },
+  );
+
+  it("still refuses the ordinary fast path when a usable identity disappears after the scope probe", async () => {
+    const { text, isError, calls, writesApplied, mutations } = await setWidget(
+      { node_id: 132, widget: "value", value: 0.65 },
+      {
+        firstWrite: "ok",
+        scopeProbeIdentityChange: "gone",
+        promotedDetail: {
+          nodes: [
+            {
+              id: 132,
+              type: "PrimitiveFloat",
+              is_subgraph: false,
+              inputs: [{ name: "value", type: "FLOAT", widget: { name: "value" } }],
+              widgets: { value: 1 },
+            },
+          ],
+        },
+      },
+    );
+
+    expect(isError).toBe(true);
+    expect(text).toMatch(/panel tab or connection changed after the scope probe/);
+    expect(calls.map((call) => call.cmd)).toEqual(["graph_query"]);
     expect(writesApplied).toBe(0);
     expect(mutations).toBe(0);
   });
@@ -1656,7 +2300,10 @@ describe("panel_set_widget promoted container success guards (#2314)", () => {
     );
 
     expect(isError).toBe(true);
-    expect(text).toMatch(/malformed, stale, or incomplete ownership envelope/);
+    // #2688 — the refusal names the failed invariant, not just "malformed".
+    expect(text).toMatch(
+      /`promoted_terminals\[0\]` carried a `terminal_inputs` that is missing or not an array/,
+    );
     expect(calls.filter((call) => call.cmd === "graph_set_widget")).toHaveLength(0);
   });
 
@@ -2007,9 +2654,17 @@ describe("panel_set_widget promoted container success guards (#2314)", () => {
     expect(parentRailShortfall.text).toContain("0.15.101");
     expect(parentRailShortfall.text).not.toMatch(/binding and subgraph mapping are stable/);
 
-    // Branch 3: a genuinely TRANSIENT refusal — a malformed envelope from a
-    // current panel. Same guarantee, and this is the one a retry can clear.
-    const transient = await setWidget(
+    // Branch 3: an envelope-INVARIANT refusal from a current panel. Same
+    // guarantee, and it is neither a build skew nor a retry.
+    //
+    // #2688 corrected what this branch asserted. It used to call this shape "a
+    // genuinely TRANSIENT refusal … the one a retry can clear" and pin the
+    // retry wording, but `node_count: 2` against a one-node array is decided
+    // from that single reply: retrying reproduces it exactly. The reporter
+    // proved it the expensive way, looping through retries and re-binds on a
+    // sentence that named nothing. What panel#1859 is about is the message not
+    // being the BUILD-SKEW one, and that half is unchanged.
+    const invariantFailure = await setWidget(
       { node_id: 78, widget: "quality_prompt", value: "masterpiece" },
       {
         firstWrite: "ok",
@@ -2017,10 +2672,13 @@ describe("panel_set_widget promoted container success guards (#2314)", () => {
         detailById: SAFE_ANIMA_IDENTITY_BY_ID,
       },
     );
-    expect(transient.isError).toBe(true);
-    expect(transient.text).toMatch(/No graph_set_widget was dispatched/);
-    expect(transient.text).toMatch(/binding and subgraph mapping are stable/);
-    expect(transient.text).not.toContain("0.15.101");
+    expect(invariantFailure.isError).toBe(true);
+    expect(invariantFailure.text).toMatch(/No graph_set_widget was dispatched/);
+    expect(invariantFailure.text).toMatch(
+      /`node_count` claimed 2 inner node\(s\) but `nodes` carried 1/,
+    );
+    expect(invariantFailure.text).not.toMatch(/binding and subgraph mapping are stable/);
+    expect(invariantFailure.text).not.toContain("0.15.101");
   });
 
   it("refuses a promoted mapping for a receiver without the final parent-rail fence", async () => {
@@ -2062,30 +2720,49 @@ describe("panel_set_widget promoted container success guards (#2314)", () => {
     expect(calls.map((c) => c.cmd)).not.toContain("graph_enter_subgraph");
   });
 
+  // #2688 — each row also pins WHICH invariant the refusal names. Six shapes
+  // that used to produce one indistinguishable sentence are six distinct
+  // reports now, and a row that starts naming a different field is a behaviour
+  // change this table will catch.
   it.each([
-    ["stale owner", { ...SAFE_ANIMA_SUBGRAPH, subgraph_of: { node_id: 79 } }],
-    ["wrong node count", { ...SAFE_ANIMA_SUBGRAPH, node_count: 2 }],
-    ["malformed viewing identity", { ...SAFE_ANIMA_SUBGRAPH, viewing: null }],
+    [
+      "stale owner",
+      { ...SAFE_ANIMA_SUBGRAPH, subgraph_of: { node_id: 79 } },
+      /`subgraph_of\.node_id` named node 79, not the addressed node 78/,
+    ],
+    [
+      "wrong node count",
+      { ...SAFE_ANIMA_SUBGRAPH, node_count: 2 },
+      /`node_count` claimed 2 inner node\(s\) but `nodes` carried 1/,
+    ],
+    [
+      "malformed viewing identity",
+      { ...SAFE_ANIMA_SUBGRAPH, viewing: null },
+      /`viewing` was present but did not parse as a graph-scope identity/,
+    ],
     [
       "malformed viewing workflow identity",
       { ...SAFE_ANIMA_SUBGRAPH, viewing: { scope: "subgraph", owner_node_id: 78, workflow_uuid: 42 } },
+      /`viewing` was present but did not parse as a graph-scope identity/,
     ],
     [
       "malformed viewing graph identity",
       { ...SAFE_ANIMA_SUBGRAPH, viewing: { scope: "subgraph", owner_node_id: 78, graph_identity: "" } },
+      /`viewing` was present but did not parse as a graph-scope identity/,
     ],
     [
       "malformed target graph identity",
       { ...SAFE_ANIMA_SUBGRAPH, subgraph_of: { node_id: 78, graph_identity: "" } },
+      /`subgraph_of\.graph_identity` was present but not a string of 1-256 characters/,
     ],
-  ])("refuses a %s envelope before writing the container", async (_name, subgraph) => {
+  ])("refuses a %s envelope before writing the container", async (_name, subgraph, invariant) => {
     const { text, isError, calls } = await setWidget(
       { node_id: 78, widget: "quality_prompt", value: "masterpiece" },
       { firstWrite: "ok", subgraph },
     );
 
     expect(isError).toBe(true);
-    expect(text).toMatch(/malformed, stale, or incomplete ownership envelope/);
+    expect(text).toMatch(invariant);
     expect(calls.filter((c) => c.cmd === "graph_set_widget")).toHaveLength(0);
   });
 
@@ -2522,6 +3199,130 @@ describe("panel_set_widget promoted container success guards (#2314)", () => {
 
 });
 
+describe("promotedInnerWidgetIsLinkDriven (#2500)", () => {
+  it("detects a PrimitiveInt whose value widget is a live input", () => {
+    expect(
+      promotedInnerWidgetIsLinkDriven(
+        {
+          id: 198,
+          type: "PrimitiveInt",
+          widgets: { value: 5 },
+          inputs: [{ name: "value", type: "INT" }],
+        },
+        "value",
+      ),
+    ).toBe(true);
+  });
+
+  it("detects the same shape from the terminal witness when the inner row omits inputs", () => {
+    expect(
+      promotedInnerWidgetIsLinkDriven(
+        { id: 198, type: "PrimitiveInt", widgets: { value: 5 } },
+        "value",
+        {
+          nodeId: 198,
+          nodeType: "PrimitiveInt",
+          widget: "value",
+          inputs: [{ name: "value", type: "INT" }],
+          chainDepth: 0,
+        },
+      ),
+    ).toBe(true);
+  });
+
+  it("does not treat an unconverted inner widget as link-driven", () => {
+    expect(
+      promotedInnerWidgetIsLinkDriven(
+        { id: 76, type: "PrimitiveStringMultiline", widgets: { quality_prompt: "old" } },
+        "quality_prompt",
+        {
+          nodeId: 76,
+          nodeType: "PrimitiveStringMultiline",
+          widget: "quality_prompt",
+          inputs: [],
+          chainDepth: 0,
+        },
+      ),
+    ).toBe(false);
+  });
+
+  it("does not treat a converted ordinary-node child as this Primitive shape", () => {
+    expect(
+      promotedInnerWidgetIsLinkDriven(
+        {
+          id: 76,
+          type: "MinimaxHailuo03TextToVideoNode",
+          widgets: { "model.prompt": "" },
+          inputs: [
+            { name: "model", type: "COMFY_DYNAMICCOMBO_V3" },
+            { name: "model.prompt", type: "STRING" },
+          ],
+        },
+        "model.prompt",
+      ),
+    ).toBe(false);
+  });
+
+  it("detects a PrimitiveString whose value widget is a live STRING input (#2533)", () => {
+    expect(
+      promotedInnerWidgetIsLinkDriven(
+        {
+          id: 131,
+          type: "PrimitiveString",
+          widgets: { value: "a cat" },
+          inputs: [{ name: "value", type: "STRING" }],
+        },
+        "value",
+      ),
+    ).toBe(true);
+  });
+
+  it("detects a UNETLoader unet_name live input only when the parent rail is authoritative (#2533)", () => {
+    const inner = {
+      id: 6,
+      type: "UNETLoader",
+      widgets: { unet_name: "music_fp16.safetensors", weight_dtype: "default" },
+      inputs: [
+        { name: "unet_name", type: "COMBO" },
+        { name: "weight_dtype", type: "COMBO" },
+      ],
+    };
+    const terminal = {
+      nodeId: 6,
+      nodeType: "UNETLoader",
+      widget: "unet_name",
+      inputs: [
+        { name: "unet_name", type: "COMBO" },
+        { name: "weight_dtype", type: "COMBO" },
+      ],
+      chainDepth: 0,
+    };
+    expect(promotedInnerWidgetIsLinkDriven(inner, "unet_name", terminal)).toBe(false);
+    expect(
+      promotedInnerWidgetIsLinkDriven(inner, "unet_name", terminal, {
+        authoritative: true as const,
+        widget: "unet_name",
+      }),
+    ).toBe(true);
+  });
+
+  it("detects a CLIPLoader clip_name live input only when the parent rail is authoritative (#2533)", () => {
+    const inner = {
+      id: 8,
+      type: "CLIPLoader",
+      widgets: { clip_name: "clip_fp16.safetensors" },
+      inputs: [{ name: "clip_name", type: "COMBO" }],
+    };
+    expect(promotedInnerWidgetIsLinkDriven(inner, "clip_name")).toBe(false);
+    expect(
+      promotedInnerWidgetIsLinkDriven(inner, "clip_name", undefined, {
+        authoritative: true as const,
+        widget: "clip_name",
+      }),
+    ).toBe(true);
+  });
+});
+
 describe("parseContradictoryPromotedWidgetRefusal", () => {
   it("the reporter's error is contradictory — width is listed as promoted", () => {
     const parsed = parseContradictoryPromotedWidgetRefusal(CONTRADICTORY, "width");
@@ -2587,6 +3388,14 @@ describe("parseContradictoryPromotedWidgetRefusal", () => {
     });
     expect(parseSubgraphScopeRefusal(SCOPE_REFUSAL, 189)).toBeNull();
     expect(parseSubgraphScopeRefusal("No node with id 188 in the current graph", 188)).toBeNull();
+  });
+
+  it("parses the panel's link-driven inner-write warning (#2488)", () => {
+    const text =
+      `The write SUCCEEDED and was verified, but it will NOT change the render: ` +
+      `widget "length" on inner node is link-driven. Set the widget on the ENCLOSING subgraph node instead.`;
+    expect(parseLinkDrivenPromotedWriteWarning(text)).toEqual({ widget: "length" });
+    expect(parseLinkDrivenPromotedWriteWarning("inner write rejected")).toBeNull();
   });
 });
 
@@ -2654,6 +3463,24 @@ describe("resolveInnerPromotedTarget", () => {
         chainDepth: 1,
       },
     });
+  });
+
+  it("maps either the displayed host alias or the inner widget name to the same promotion (#2488)", () => {
+    const viaLabel = resolveInnerPromotedTarget(FRAME_COUNTS_PROMOTED_SUBGRAPH, "frame_counts", 78);
+    const viaInner = resolveInnerPromotedTarget(FRAME_COUNTS_PROMOTED_SUBGRAPH, "length", 78);
+    expect(viaLabel).toEqual({
+      innerNodeId: 12,
+      widget: "length",
+      parentRail: { authoritative: true, widget: "frame_counts" },
+      terminal: {
+        nodeId: 12,
+        nodeType: "PrimitiveInt",
+        widget: "length",
+        inputs: [{ name: "length", type: "INT" }],
+        chainDepth: 0,
+      },
+    });
+    expect(viaInner).toEqual(viaLabel);
   });
 
   it("resolves renamed outer and immediate aliases from the terminal witness", () => {
@@ -3049,13 +3876,45 @@ describe("panel_set_widget promoted-subgraph recovery (#1655)", () => {
     expect(calls.map((c) => c.cmd)).not.toContain("graph_enter_subgraph");
   });
 
+  // Review finding (P2). The recovery path runs AFTER an outer graph_set_widget
+  // has already been dispatched and refused; only the INNER retry is skipped.
+  // Routing it through the standard refusal made it assert "No graph_set_widget
+  // was dispatched", which is false there and invites an agent to re-issue a
+  // write it has already made. The invariant is still named; the consequence
+  // clause is the one this path can actually stand behind.
+  it("names the invariant on the recovery path without claiming no write was dispatched", async () => {
+    const { text, isError, calls } = await setWidget(
+      { node_id: 78, widget: "width", value: 1024 },
+      {
+        firstWrite: "contradict",
+        firstWriteError: CONTRADICTORY,
+        preflightSubgraph: DEFINITIVE_NON_PROMOTED_SUBGRAPH,
+        // Read 2 must also classify non-promoted, so the recovery preflight
+        // returns null and the LEGACY recovery re-read below is the one that
+        // meets the malformed envelope. That is the branch under test.
+        recoveryPreflightSubgraph: DEFINITIVE_NON_PROMOTED_SUBGRAPH,
+        subgraph: { ...SUBGRAPH, node_count: 5 },
+      },
+    );
+
+    expect(isError).toBe(true);
+    expect(text).toMatch(/`node_count` claimed 5 inner node\(s\) but `nodes` carried 2/);
+    expect(text).toMatch(/The inner write was not retried\./);
+    expect(text).not.toMatch(/No graph_set_widget was dispatched/);
+    // The outer attempt is what produced the refusal being annotated, so it did
+    // happen — the message must not deny it.
+    expect(calls.filter((c) => c.cmd === "graph_set_widget").length).toBeGreaterThan(0);
+  });
+
   it("a truncated subgraph read is not treated as unique", async () => {
     const { text, isError, calls } = await setWidget(
       { node_id: 78, widget: "width", value: 1024 },
       { subgraph: { ...SUBGRAPH, truncated: true } },
     );
     expect(isError).toBe(true);
-    expect(text).toMatch(/malformed, stale, or incomplete ownership envelope/);
+    expect(text).toMatch(
+      /the reply's `truncated` flag was not `false`, so the inner node list it carried cannot be taken as the whole subgraph/,
+    );
     expect(calls.map((c) => c.cmd)).not.toContain("graph_enter_subgraph");
   });
 
@@ -3260,9 +4119,12 @@ describe("panel_set_widget promoted write against a pre-#2314 panel build (panel
     expect(calls.filter((c) => c.cmd === "graph_set_widget")).toHaveLength(0);
   });
 
-  it("leaves the transient refusals on a CURRENT panel saying retry", async () => {
-    // Same handler, same fixture, current build: a malformed envelope is a
-    // genuine transient and must keep the retry advice it has always had.
+  it("keeps an envelope-invariant refusal on a CURRENT panel off the build-skew message", async () => {
+    // Same handler, same fixture, current build. #2688: this used to assert the
+    // retry wording on the premise that "a malformed envelope is a genuine
+    // transient". It is not — the invariant is decided from one reply, so the
+    // retry never arrives anywhere new. The claim this test exists to make is
+    // the build-skew one, and that is what it makes now.
     const { text, isError, calls } = await setWidget(
       { node_id: 78, widget: "quality_prompt", value: "masterpiece" },
       {
@@ -3273,7 +4135,8 @@ describe("panel_set_widget promoted write against a pre-#2314 panel build (panel
     );
 
     expect(isError).toBe(true);
-    expect(text).toMatch(/retry only after the panel binding and subgraph mapping are stable/);
+    expect(text).toMatch(/`node_count` claimed 2 inner node\(s\) but `nodes` carried 1/);
+    expect(text).not.toMatch(/retry only after the panel binding and subgraph mapping are stable/);
     expect(text).not.toContain("0.15.101");
     expect(calls.filter((c) => c.cmd === "graph_set_widget")).toHaveLength(0);
   });
@@ -3452,7 +4315,9 @@ describe("#2393 promoted-terminal witness is judged on the requested alias", () 
     );
 
     expect(isError).toBe(true);
-    expect(text).toMatch(/malformed, stale, or incomplete ownership envelope/);
+    // #2688 — names the OFFENDING index, which is not the requested alias's.
+    expect(text).toMatch(/`promoted_terminals\[1\]` was not an object/);
+    expect(text).toMatch(/accepted or rejected as a WHOLE/);
     expect(calls.filter((c) => c.cmd === "graph_set_widget")).toHaveLength(0);
   });
 
@@ -3468,8 +4333,369 @@ describe("#2393 promoted-terminal witness is judged on the requested alias", () 
     );
 
     expect(isError).toBe(true);
-    expect(text).toMatch(/malformed, stale, or incomplete ownership envelope/);
+    expect(text).toMatch(/`promoted_terminals\[1\]` had a missing or empty `widget`/);
     expect(calls.filter((c) => c.cmd === "graph_set_widget")).toHaveLength(0);
+  });
+
+  // #2688 — the WIRING. The reporter's exit from this refusal was the sentence
+  // itself: it named no invariant, and it prescribed "retry only after the
+  // panel binding and subgraph mapping are stable". They retried, re-opened the
+  // workflow, and re-bound the tab, and got the identical text every time.
+  //
+  // Deleting either half of the fix breaks a line here: drop the named
+  // invariant and the first assertion fails; route this branch back through
+  // `promotedWriteRefusal` and the last one does.
+  it("names the failed invariant and drops the retry remedy that cannot clear it", async () => {
+    const { text, isError, calls } = await setWidget(
+      { node_id: 78, widget: "quality_prompt", value: "masterpiece" },
+      {
+        firstWrite: "ok",
+        promotedTerminalWitnesses: true,
+        // An entry that resolved to neither a terminal nor an error. It is not
+        // the requested alias, and under the old wording that was invisible.
+        subgraph: withTerminals([ownEntry, { widget: "unrelated_alias" }]),
+        detailById: SAFE_ANIMA_IDENTITY_BY_ID,
+      },
+    );
+
+    expect(isError).toBe(true);
+    expect(text).toMatch(
+      /`promoted_terminals\[1\]` published neither a terminal endpoint \(`terminal_node_id`\/`terminal_node_type`\) nor an `error`/,
+    );
+    expect(text).toMatch(/accepted or rejected as a WHOLE/);
+    expect(text).toMatch(
+      /unless the panel's reply itself changes shape, panel_open_workflow and panel_set_workflow_target re-bind the tab and produce the identical refusal/,
+    );
+    expect(text).not.toMatch(/retry only after the panel binding and subgraph mapping are stable/);
+    expect(calls.filter((c) => c.cmd === "graph_set_widget")).toHaveLength(0);
+  });
+
+  // The refusal must not become a read of the graph it is refusing to write to.
+  it("names the shape without quoting the offending entry's own names", async () => {
+    const { text } = await setWidget(
+      { node_id: 78, widget: "quality_prompt", value: "masterpiece" },
+      {
+        firstWrite: "ok",
+        promotedTerminalWitnesses: true,
+        subgraph: withTerminals([
+          ownEntry,
+          { widget: "SECRET_ALIAS", immediate_widget: "SECRET_INNER" },
+        ]),
+        detailById: SAFE_ANIMA_IDENTITY_BY_ID,
+      },
+    );
+
+    expect(text).toMatch(/`promoted_terminals\[1\]`/);
+    expect(text).not.toMatch(/SECRET_ALIAS|SECRET_INNER/);
+  });
+});
+
+describe("#2688 describePromotedSubgraphEnvelope names the failed invariant", () => {
+  const VALID = {
+    viewing: { scope: "subgraph", owner_node_id: 78, workflow_uuid: "wf", graph_identity: "g" },
+    subgraph_of: { node_id: 78, graph_identity: "gi" },
+    node_count: 1,
+    truncated: false,
+    nodes: [{ id: 5, type: "CheckpointLoaderSimple", widgets: { ckpt_name: "secret.safetensors" } }],
+    promoted_terminals: [{ widget: "ckpt_name", error: "unresolved" }],
+  };
+
+  const withNodes = (nodes: unknown[]) => ({ ...VALID, node_count: nodes.length, nodes });
+  const terminals = (promoted_terminals: unknown) => ({ ...VALID, promoted_terminals });
+  const goodTerminal = {
+    widget: "ckpt_name",
+    parent_rail: { authoritative: true, widget: "ckpt_name" },
+    immediate_node_id: 5,
+    immediate_widget: "ckpt_name",
+    terminal_node_id: 5,
+    terminal_node_type: "CheckpointLoaderSimple",
+    terminal_widget: "ckpt_name",
+    terminal_inputs: [{ name: "ckpt_name", type: "COMBO" }],
+    chain_depth: 0,
+  };
+  const terminalMinus = (drop: string) => {
+    const entry: Record<string, unknown> = { ...goodTerminal };
+    delete entry[drop];
+    return terminals([entry]);
+  };
+
+  it("accepts a complete envelope", () => {
+    expect(describePromotedSubgraphEnvelope(VALID, 78).ok).toBe(true);
+  });
+
+  it.each([
+    ["a non-object reply", "nope", 78, /the reply was not a JSON object/],
+    [
+      "a truncated flag",
+      { ...VALID, truncated: true },
+      78,
+      /the reply's `truncated` flag was not `false`/,
+    ],
+    // A malformed flag is not evidence of a SHORT read, so the reason must not
+    // claim one. Same rejection, different established fact.
+    [
+      "a malformed truncated flag",
+      { ...VALID, truncated: null },
+      78,
+      /the reply's `truncated` flag was not `false`/,
+    ],
+    [
+      "a missing subgraph_of",
+      { ...VALID, subgraph_of: undefined },
+      78,
+      /`subgraph_of` was missing or not an object/,
+    ],
+    [
+      "an unusable owner id",
+      { ...VALID, subgraph_of: { node_id: {} } },
+      78,
+      /`subgraph_of\.node_id` was missing or not a node id/,
+    ],
+    ["an unusable addressed id", VALID, "not-an-id", /the addressed node id was not a usable node id/],
+    [
+      "a non-integer node_count",
+      { ...VALID, node_count: 1.5 },
+      78,
+      /`node_count` was missing or not a non-negative integer/,
+    ],
+    ["a non-array nodes", { ...VALID, nodes: {} }, 78, /`nodes` was missing or not an array/],
+    [
+      "an inner node without an id",
+      withNodes([{ type: "X" }]),
+      78,
+      /`nodes\[0\]` was not an object carrying a usable `id`/,
+    ],
+    [
+      "a non-array promoted_terminals",
+      terminals({}),
+      78,
+      /`promoted_terminals` was present but not an array/,
+    ],
+    [
+      "an entry carrying both a terminal and an error",
+      terminals([{ ...goodTerminal, error: "boom" }]),
+      78,
+      /published a terminal endpoint AND an `error`/,
+    ],
+    [
+      "a terminal without immediate_node_id",
+      terminalMinus("immediate_node_id"),
+      78,
+      /published a terminal endpoint without `immediate_node_id`/,
+    ],
+    [
+      "a terminal without immediate_widget",
+      terminalMinus("immediate_widget"),
+      78,
+      /published a terminal endpoint without `immediate_widget`/,
+    ],
+    [
+      "a terminal without an authoritative parent rail",
+      terminalMinus("parent_rail"),
+      78,
+      /without a `parent_rail` asserting `authoritative:true`/,
+    ],
+    [
+      "an out-of-range chain_depth",
+      terminals([{ ...goodTerminal, chain_depth: 17 }]),
+      78,
+      /carried a `chain_depth` that is missing or outside 0-16/,
+    ],
+    [
+      "a terminal input without a name",
+      terminals([{ ...goodTerminal, terminal_inputs: [{ type: "COMBO" }] }]),
+      78,
+      /carried a `terminal_inputs\[0\]` without a non-empty `name`/,
+    ],
+    [
+      "an entry that is neither resolved nor errored",
+      terminals([{ widget: "ckpt_name" }]),
+      78,
+      /published neither a terminal endpoint .* nor an `error`/,
+    ],
+  ])("names %s", (_label, payload, owner, invariant) => {
+    const described = describePromotedSubgraphEnvelope(
+      payload as Record<string, unknown>,
+      owner as number | string,
+    );
+    expect(described.ok).toBe(false);
+    if (described.ok) return;
+    expect(described.invariant).toMatch(invariant as RegExp);
+    // Shape only: no widget value and no node type out of the graph itself.
+    expect(described.invariant).not.toMatch(/secret\.safetensors|CheckpointLoaderSimple/);
+  });
+
+  // The fence must not have moved. `validatePromotedSubgraphEnvelope` is the
+  // authorization surface every promoted write still runs through, and it is
+  // this function with the reason dropped — so the two have to agree on every
+  // shape, including the ones that are ACCEPTED.
+  it("agrees with the fence on accept, reject, and the envelope value", () => {
+    const corpus: unknown[] = [
+      VALID,
+      { ...VALID, viewing: undefined },
+      { ...VALID, promoted_terminals: undefined },
+      { ...VALID, truncated: undefined },
+      { ...VALID, subgraph_of: { node_id: "78" } },
+      withNodes([]),
+      terminals([goodTerminal]),
+      terminals([{ ...goodTerminal, chain_depth: 3 }]),
+      "nope",
+      null,
+      undefined,
+      { ...VALID, truncated: true },
+      { ...VALID, node_count: 9 },
+      { ...VALID, viewing: null },
+      terminals([{ widget: "x" }]),
+      terminalMinus("parent_rail"),
+    ];
+    let accepted = 0;
+    for (const owner of [78, "78", 79, "bad"]) {
+      for (const payload of corpus) {
+        const described = describePromotedSubgraphEnvelope(
+          payload as Record<string, unknown>,
+          owner as number | string,
+        );
+        const fenced = validatePromotedSubgraphEnvelope(
+          payload as Record<string, unknown>,
+          owner as number | string,
+        );
+        expect(described.ok).toBe(fenced !== null);
+        expect(described.ok ? described.envelope : null).toEqual(fenced);
+        if (described.ok) accepted += 1;
+      }
+    }
+    // A corpus that rejected everything would pass the loop above while proving
+    // nothing about the accepting half of the fence.
+    expect(accepted).toBeGreaterThan(0);
+  });
+
+  // Review finding (P0). The first draft walked the untrusted arrays with
+  // `.entries()`, which is an own-property a reply can shadow. The loops it
+  // replaced walked `Symbol.iterator`, so a payload that shadowed `entries`
+  // would have been validated against a DIFFERENT list than the one
+  // `nodes.length !== node_count` was checked against — a way past the fence.
+  // The loops are indexed now, which depends on neither hook.
+  it("validates the array it counted, not a shadowed iterator", () => {
+    const nodes: unknown[] = [null];
+    Object.defineProperty(nodes, "entries", {
+      value: function* () {
+        yield [0, { id: 5, type: "X" }];
+      },
+    });
+    const shadowed = {
+      subgraph_of: { node_id: 78 },
+      node_count: 1,
+      nodes,
+    };
+    expect(describePromotedSubgraphEnvelope(shadowed, 78).ok).toBe(false);
+    expect(validatePromotedSubgraphEnvelope(shadowed, 78)).toBeNull();
+
+    const terminals: unknown[] = [null];
+    Object.defineProperty(terminals, "entries", {
+      value: function* () {
+        yield [0, { widget: "w", error: "e" }];
+      },
+    });
+    const shadowedTerminals = {
+      subgraph_of: { node_id: 78 },
+      node_count: 1,
+      nodes: [{ id: 5, type: "X" }],
+      promoted_terminals: terminals,
+    };
+    expect(describePromotedSubgraphEnvelope(shadowedTerminals, 78).ok).toBe(false);
+    expect(validatePromotedSubgraphEnvelope(shadowedTerminals, 78)).toBeNull();
+  });
+});
+
+describe("#2393 promoted COMBO unet_name after official template load", () => {
+  it("maps the unique rail-backed UNETLoader, not the drifted immediate id", () => {
+    expect(resolveInnerPromotedTarget(UNet_COMBO_TEMPLATE_SUBGRAPH, "unet_name", 472)).toEqual({
+      innerNodeId: 37,
+      widget: "unet_name",
+      terminal: {
+        nodeId: 37,
+        nodeType: "UNETLoader",
+        widget: "unet_name",
+        inputs: [
+          { name: "unet_name", type: "COMBO" },
+          { name: "weight_dtype", type: "COMBO" },
+        ],
+        chainDepth: 0,
+      },
+    });
+  });
+
+  it("still refuses when two inner UNETLoaders are rail-backed on the same alias", () => {
+    const ambiguous = {
+      ...UNet_COMBO_TEMPLATE_SUBGRAPH,
+      node_count: 3,
+      nodes: [
+        ...UNet_COMBO_TEMPLATE_SUBGRAPH.nodes,
+        {
+          id: 39,
+          type: "UNETLoader",
+          widgets: { unet_name: "other.safetensors" },
+          inputs: [
+            { slot: 0, name: "unet_name", type: "COMBO", connected_from: { node_id: -10, output_slot: 8 } },
+          ],
+        },
+      ],
+    };
+    expect(resolveInnerPromotedTarget(ambiguous, "unet_name", 472)).toBeNull();
+  });
+
+  it("writes the rail-backed inner COMBO instead of refusing the incomplete own-entry", async () => {
+    const { isError, calls, mutations } = await setWidget(
+      { node_id: 472, widget: "unet_name", value: "model.safetensors" },
+      {
+        ownerNodeId: 472,
+        firstWrite: "ok",
+        promotedTerminalWitnesses: true,
+        promotedDetail: UNet_COMBO_TEMPLATE_DETAIL,
+        subgraph: UNet_COMBO_TEMPLATE_SUBGRAPH,
+      },
+    );
+
+    expect(isError).toBe(false);
+    expect(mutations).toBe(1);
+    expect(calls.filter((call) => call.cmd === "graph_set_widget")).toEqual([
+      expect.objectContaining({ node_id: 37, widget: "unet_name", value: "model.safetensors" }),
+    ]);
+    const write = calls.find((call) => call.cmd === "graph_set_widget");
+    const scope = write?.expected_scope as Record<string, unknown> | undefined;
+    expect(scope?.parent_rail).toBeUndefined();
+    expect(scope?.terminal).toEqual(
+      expect.objectContaining({ node_id: 37, type: "UNETLoader", widget: "unet_name" }),
+    );
+    expect(calls.some((call) => call.cmd === "graph_set_widget" && call.node_id === 99)).toBe(false);
+  });
+
+  it("still refuses the incomplete own-entry when the inner COMBO is not rail-backed", async () => {
+    const { text, isError, calls } = await setWidget(
+      { node_id: 472, widget: "unet_name", value: "model.safetensors" },
+      {
+        ownerNodeId: 472,
+        firstWrite: "ok",
+        promotedTerminalWitnesses: true,
+        promotedDetail: UNet_COMBO_TEMPLATE_DETAIL,
+        subgraph: {
+          ...UNet_COMBO_TEMPLATE_SUBGRAPH,
+          nodes: [
+            {
+              id: 37,
+              type: "UNETLoader",
+              widgets: { unet_name: "model.safetensors" },
+              inputs: [{ slot: 0, name: "unet_name", type: "COMBO" }],
+            },
+            UNet_COMBO_TEMPLATE_SUBGRAPH.nodes[1],
+          ],
+        },
+      },
+    );
+
+    expect(isError).toBe(true);
+    expect(text).toMatch(/witness was incomplete or unresolved/);
+    expect(calls.filter((call) => call.cmd === "graph_set_widget")).toHaveLength(0);
   });
 });
 
@@ -3837,7 +5063,9 @@ describe("panel_set_widget promoted inner identity forwarding (#2478)", () => {
     );
 
     expect(isError).toBe(true);
-    expect(text).toMatch(/malformed, stale, or incomplete ownership envelope/);
+    expect(text).toMatch(
+      /`nodes\[0\]\.node_identity` was present but not a string of 1-256 characters/,
+    );
     expect(calls.filter((call) => call.cmd === "graph_set_widget")).toHaveLength(0);
     expect(mutations).toBe(0);
   });

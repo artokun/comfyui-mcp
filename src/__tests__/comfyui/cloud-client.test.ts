@@ -27,6 +27,7 @@ const {
   interrupt,
   uploadImageHttp,
 } = await import("../../comfyui/cloud-client.js");
+const { enqueuePrompt: dispatchEnqueuePrompt } = await import("../../comfyui/client.js");
 
 describe("cloud-client", () => {
   const originalFetch = global.fetch;
@@ -64,6 +65,16 @@ describe("cloud-client", () => {
     const body = JSON.parse((calls[0]?.init?.body as string) ?? "{}");
     expect(body.prompt).toBeDefined();
     expect(body.extra_data).toEqual({ api_key_comfy_org: "x" });
+  });
+
+  it("preserves partial execution targets for scoped cloud enqueues", async () => {
+    await dispatchEnqueuePrompt(
+      { "380": { class_type: "VHS_VideoCombine", inputs: {} } } as never,
+      undefined,
+      { partialExecutionTargets: ["10:15:380"] },
+    );
+    const body = JSON.parse((calls[0]?.init?.body as string) ?? "{}");
+    expect(body.partial_execution_targets).toEqual(["10:15:380"]);
   });
 
   it("returns empty history (no global endpoint) when no prompt_id", async () => {

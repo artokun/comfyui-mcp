@@ -225,7 +225,9 @@ describe("#2234 the cuts justified by MCP registration are still covered there",
     ["panel_paste_nodes", "merge/compose workflows"],
     ["panel_save_subgraph", "blueprint LIBRARY"],
     ["panel_add_subgraph", "REUSE a built subgraph in another workflow"],
-    ["panel_load_workflow", "without shuttling its JSON through chat"],
+    // The guarantee is server-side reading, not the old wording: panel#2011 reworded this
+    // clause when `path` learned API/prompt format. Pin the sentence that still states it.
+    ["panel_load_workflow", "read SERVER-SIDE so a large graph never enters your context"],
     ["panel_strip_workflow", "Get/Set buses"],
     ["panel_slice_workflow", "Fast Groups Bypasser/Muter"],
     ["panel_set_property", "matchTitle"],

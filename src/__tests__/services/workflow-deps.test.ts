@@ -136,6 +136,41 @@ describe("collectClassTypes", () => {
     };
     expect(collectClassTypes(ui)).toEqual(["CLIPTextEncode", "KSampler"]);
   });
+
+  // #2648 — a UI subgraph INSTANCE is structural (type === definition UUID).
+  // Reading only workflow.nodes treated that UUID as a class_type and never
+  // walked definitions.subgraphs[].nodes, so extract_deps mapped the UUID
+  // through an unrelated Manager pattern and omitted inner packs.
+  it("walks UI subgraph inner nodes and does not treat the instance UUID as a class_type (#2648)", () => {
+    const instanceId = "2d4f2d38-ff62-4ae8-853d-2a359520164b";
+    const ui = {
+      nodes: [
+        { id: 1, type: "LoadImage" },
+        { id: 2, type: instanceId },
+      ],
+      links: [],
+      definitions: {
+        subgraphs: [
+          {
+            id: instanceId,
+            name: "WanSampler",
+            nodes: [
+              { id: 10, type: "WanVideoSampler" },
+              { id: 11, type: "WanVideoWrapper" },
+              { id: 12, type: "SetNode" },
+            ],
+          },
+        ],
+      },
+    };
+    expect(collectClassTypes(ui)).toEqual([
+      "LoadImage",
+      "SetNode",
+      "WanVideoSampler",
+      "WanVideoWrapper",
+    ]);
+    expect(collectClassTypes(ui)).not.toContain(instanceId);
+  });
 });
 
 describe("extractWorkflowDependencies", () => {
@@ -226,6 +261,64 @@ describe("extractWorkflowDependencies", () => {
       installed: false,
       source: "manager_mappings",
     });
+  });
+
+  it("does not map a UI subgraph UUID through an unrelated Manager pattern (#2648)", async () => {
+    const instanceId = "2d4f2d38-ff62-4ae8-853d-2a359520164b";
+    const deps = makeDeps({
+      fetchObjectInfo: vi.fn(async () => ({}) as ObjectInfo),
+      fetchManagerMappings: vi.fn(
+        async () =>
+          ({
+            "https://github.com/DemonGatanjieu/Anomalous_Model_Browser": [
+              [],
+              {
+                title: "Anomalous_Model_Browser",
+                nodename_pattern: "^[0-9a-f]{8}-",
+              },
+            ],
+            "https://github.com/kijai/ComfyUI-WanVideoWrapper": [
+              ["WanVideoSampler", "WanVideoWrapper"],
+              { title: "WanVideoWrapper" },
+            ],
+            "https://github.com/kijai/ComfyUI-KJNodes": [
+              ["SetNode"],
+              { title: "KJNodes" },
+            ],
+          }) as never,
+      ),
+    });
+    const ui = {
+      nodes: [
+        { id: 1, type: "LoadImage" },
+        { id: 2, type: instanceId },
+      ],
+      definitions: {
+        subgraphs: [
+          {
+            id: instanceId,
+            nodes: [
+              { id: 10, type: "WanVideoSampler" },
+              { id: 11, type: "WanVideoWrapper" },
+              { id: 12, type: "SetNode" },
+            ],
+          },
+        ],
+      },
+    };
+    const result = await extractWorkflowDependencies(ui as never, deps);
+
+    expect(result.classTypes).toEqual([
+      "LoadImage",
+      "SetNode",
+      "WanVideoSampler",
+      "WanVideoWrapper",
+    ]);
+    expect(result.classTypes).not.toContain(instanceId);
+    expect(result.requiredPacks).toEqual(["KJNodes", "WanVideoWrapper"]);
+    expect(result.requiredPacks).not.toContain("Anomalous_Model_Browser");
+    expect(result.missingPacks).not.toContain("Anomalous_Model_Browser");
+    expect(result.dependencies.map((d) => d.class_type)).not.toContain(instanceId);
   });
 });
 

@@ -4,8 +4,7 @@ import { config, isRemoteMode } from "../config.js";
 import { getSystemStats, comfyApiFetch } from "../comfyui/client.js";
 import {
   resolveEffectiveComfyUIBase,
-  resolveLiveComfyUIBase,
-  liveRootFromArgv,
+  getLiveServerSnapshot,
   resolveLiveServerRoot,
   hasComfyUIEntrypoint,
 } from "./workspace-env.js";
@@ -60,6 +59,12 @@ export interface LiveServerSnapshot {
    *  or they miss the relative-`main.py` shape entirely (codex gate, round 12).
    *  LOCAL mode only. */
   liveRoot?: string;
+  /** Provenance of liveRoot. An observed-process root is an inference, not a
+   * deletion authority; it is retained for callers that need to explain it. */
+  liveRootSource?: "argv" | "observed-process";
+  /** Normalized OS process start time captured with the live server observation.
+   * Deletion may use launch-named config only when this proof is present. */
+  processStartedAtMs?: number;
 }
 
 /**
@@ -953,7 +958,10 @@ export async function resolveModelsDirWithBases(opts?: {
     // Desktop and the Windows portable bundle both report. Computed ONCE here and
     // used for BOTH the code-root bases and the models dir, so the two can never
     // be derived from different notions of "live".
-    live = resolveLiveServerRoot(argv, cwd, { remote: isRemoteMode() });
+    live = resolveLiveServerRoot(argv, cwd, {
+      remote: isRemoteMode(),
+      includeProcessStart: true,
+    });
     // Collect base-install dirs (LOCAL only) from the SAME call, regardless of how
     // the models dir resolves, so the code-root veto always has the real
     // --base-directory / live-root even when --models-directory diverges.
@@ -966,6 +974,10 @@ export async function resolveModelsDirWithBases(opts?: {
         // authorizer) use the SAME established root instead of re-deriving a weaker
         // one from argv.
         snapshot.liveRoot = resolve(live.root);
+        snapshot.liveRootSource = live.source === "argv" ? "argv" : "observed-process";
+      }
+      if (live.observedStartedAtMs !== undefined) {
+        snapshot.processStartedAtMs = live.observedStartedAtMs;
       }
     }
     const fromArgv = parseModelsDirFromArgv(argv, cwd);
@@ -1261,18 +1273,64 @@ export function localInputDirFallback(): string {
   return resolve(base, "input");
 }
 
+// ---------------------------------------------------------------------------
+// Resolve ComfyUI's REAL temp directory — the same argv chain as input/.
+// VHS_VideoCombine writes completed .mp4 files here whenever `save_output` is
+// unchecked (`folder_paths.get_temp_directory()`), and get_image list_outputs
+// must scan that tree or a finished render lists as nothing (#2370).
+// --temp-directory wins; otherwise --base-directory implies <base>/temp.
+// ---------------------------------------------------------------------------
+
+/**
+ * Parse the configured temp directory out of ComfyUI's launch argv.
+ * --temp-directory wins; otherwise --base-directory implies <base>/temp.
+ * Returns undefined when neither flag is present.
+ */
+export function parseTempDirFromArgv(
+  argv: string[] | undefined,
+  serverCwd?: string,
+): string | undefined {
+  if (!argv || argv.length === 0) return undefined;
+
+  let tempDir: string | undefined;
+  let baseDir: string | undefined;
+  for (let i = 0; i < argv.length; i++) {
+    tempDir = flagValue(argv, i, "--temp-directory") ?? tempDir;
+    baseDir = flagValue(argv, i, "--base-directory") ?? baseDir;
+  }
+
+  if (tempDir) return resolveServerLaunchPath(tempDir, serverCwd);
+  const resolvedBase = baseDir ? resolveServerLaunchPath(baseDir, serverCwd) : undefined;
+  if (resolvedBase) return join(resolvedBase, "temp");
+  return undefined;
+}
+
+/** <COMFYUI_PATH>/temp fallback. Throws if COMFYUI_PATH is unset. */
+export function localTempDirFallback(): string {
+  const base = resolveEffectiveComfyUIBase();
+  if (!base) {
+    throw new ValidationError(
+      "No local ComfyUI install path could be established: COMFYUI_PATH is not set and no " +
+        "default workspace is saved. Set COMFYUI_PATH, or save one with the workspace tool " +
+        "(action 'set_default').",
+    );
+  }
+  return resolve(base, "temp");
+}
+
 /**
  * Resolve the directory ComfyUI actually reads inputs from. Asks the running
  * ComfyUI (/system_stats argv) first; falls back to <COMFYUI_PATH>/input.
  */
 /**
- * `<live install root>/<kind>` when the CONNECTED server's own argv identifies
- * it, else undefined (#1052).
+ * `<live install root>/<kind>` when the CONNECTED server identifies it, else
+ * undefined (#1052, #2539).
  *
  * The argv parse above only answers when ComfyUI was launched with an EXPLICIT
- * --input-directory / --output-directory. Without one, resolution fell straight
- * through to the configured/auto-detected install — and on a machine with more
- * than one ComfyUI that is a different tree from the one actually running.
+ * --input-directory / --output-directory. Without one, resolution used to fall
+ * straight through to the configured/auto-detected install — and on a machine
+ * with more than one ComfyUI that is a different tree from the one actually
+ * running.
  *
  * A reporter with ComfyUI Desktop installed alongside the git checkout they were
  * connected to had `train_prepare_dataset` refs resolve against Desktop and fail
@@ -1281,41 +1339,56 @@ export function localInputDirFallback(): string {
  * connected ComfyUI's output/input dirs", so the contract was right and the
  * resolution was not.
  *
- * `resolveLiveComfyUIBase` derives the root from the running server's argv
- * main.py + cwd, which is the same live-first move #463 made for models. It is
- * only a middle rung: an explicit --output-directory still wins above, and the
- * configured install still catches everything below.
+ * Two live rungs, in this order:
+ *
+ *  1. `resolveLiveComfyUIBase` (#2194 / #1052) — argv `main.py` + cwd when that
+ *     is absolute. `get_image` action:get type:input uses this when no
+ *     `--input-directory` is present, so a second install in COMFYUI_PATH is
+ *     not preferred over the connected server.
+ *  2. `resolveLiveServerRoot` (#2539 / #369) — OS-observed process when argv is
+ *     the relative `ComfyUI/main.py` shape Desktop and the Windows portable
+ *     bundle both report (no --output-directory, no cwd). That last shape is
+ *     why `get_image list_outputs` scanned an unrelated COMFYUI_PATH while
+ *     `/view` served the live server's files.
+ *
+ * An explicit --output-directory still wins above, and the configured install
+ * still catches everything below.
  */
-async function liveIoDirFallback(kind: "input" | "output"): Promise<string | undefined> {
-  try {
-    const base = await resolveLiveComfyUIBase();
-    return base ? join(base, kind) : undefined;
-  } catch {
-    return undefined; // never let a probe failure outrank the configured install
-  }
+function liveIoDirFromSnapshot(
+  kind: "input" | "output" | "temp",
+  snapshot: { reachable: boolean; argv?: string[]; cwd?: string },
+): string | undefined {
+  if (!snapshot.reachable) return undefined;
+
+  // #2539 — relative ComfyUI/main.py with no cwd cannot be derived from argv;
+  // resolveLiveServerRoot may use the correlated local process observation for
+  // that shape. The snapshot is passed through unchanged so the explicit-dir
+  // and live-root answers can never describe different server instances.
+  const live = resolveLiveServerRoot(snapshot.argv, snapshot.cwd, { remote: false });
+  if (!live.root) return undefined;
+  // A Docker/forwarded server reports a container-side path that is not
+  // host-local. Same gate resolveModelsDir uses for an observed root. An argv
+  // root remains the server's direct claim, preserving the existing not-found
+  // behavior when that claimed path is unavailable locally.
+  if (live.source !== "argv" && !existsSync(live.root)) return undefined;
+  return join(live.root, kind);
 }
 
 export async function resolveInputDir(): Promise<string> {
-  try {
-    const stats = await getSystemStats();
-    const serverCwd = (stats.system as { cwd?: string } | undefined)?.cwd;
-    const fromArgv = parseInputDirFromArgv(stats.system?.argv, serverCwd);
+  const snapshot = await getLiveServerSnapshot();
+  if (snapshot.reachable) {
+    const fromArgv = parseInputDirFromArgv(snapshot.argv, snapshot.cwd);
     if (fromArgv) {
       logger.debug("Resolved ComfyUI input directory from launch argv", {
         inputDir: fromArgv,
       });
       return fromArgv;
     }
-  } catch (err) {
-    logger.debug(
-      "Could not resolve input dir from /system_stats; using COMFYUI_PATH/input",
-      { error: err instanceof Error ? err.message : String(err) },
-    );
   }
   // #1052 — before the CONFIGURED install, try the one that is actually
   // running. With two ComfyUIs on a machine these differ, and the connected
   // server is the one whose files the caller means.
-  const live = await liveIoDirFallback("input");
+  const live = liveIoDirFromSnapshot("input", snapshot);
   if (live) {
     logger.debug("Resolved ComfyUI input directory from the LIVE server's install root", {
       dir: live,
@@ -1330,25 +1403,20 @@ export async function resolveInputDir(): Promise<string> {
  * ComfyUI (/system_stats argv) first; falls back to <COMFYUI_PATH>/output.
  */
 export async function resolveOutputDir(): Promise<string> {
-  try {
-    const stats = await getSystemStats();
-    const fromArgv = parseOutputDirFromArgv(stats.system?.argv);
+  const snapshot = await getLiveServerSnapshot();
+  if (snapshot.reachable) {
+    const fromArgv = parseOutputDirFromArgv(snapshot.argv);
     if (fromArgv) {
       logger.debug("Resolved ComfyUI output directory from launch argv", {
         outputDir: fromArgv,
       });
       return fromArgv;
     }
-  } catch (err) {
-    logger.debug(
-      "Could not resolve output dir from /system_stats; using COMFYUI_PATH/output",
-      { error: err instanceof Error ? err.message : String(err) },
-    );
   }
   // #1052 — before the CONFIGURED install, try the one that is actually
   // running. With two ComfyUIs on a machine these differ, and the connected
   // server is the one whose files the caller means.
-  const live = await liveIoDirFallback("output");
+  const live = liveIoDirFromSnapshot("output", snapshot);
   if (live) {
     logger.debug("Resolved ComfyUI output directory from the LIVE server's install root", {
       dir: live,
@@ -1356,4 +1424,29 @@ export async function resolveOutputDir(): Promise<string> {
     return live;
   }
   return localOutputDirFallback();
+}
+
+/**
+ * Resolve the directory ComfyUI actually writes temp/preview files to. Asks the
+ * running ComfyUI (/system_stats argv) first; falls back to <COMFYUI_PATH>/temp.
+ */
+export async function resolveTempDir(): Promise<string> {
+  const snapshot = await getLiveServerSnapshot();
+  if (snapshot.reachable) {
+    const fromArgv = parseTempDirFromArgv(snapshot.argv, snapshot.cwd);
+    if (fromArgv) {
+      logger.debug("Resolved ComfyUI temp directory from launch argv", {
+        tempDir: fromArgv,
+      });
+      return fromArgv;
+    }
+  }
+  const live = liveIoDirFromSnapshot("temp", snapshot);
+  if (live) {
+    logger.debug("Resolved ComfyUI temp directory from the LIVE server's install root", {
+      dir: live,
+    });
+    return live;
+  }
+  return localTempDirFallback();
 }

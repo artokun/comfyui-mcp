@@ -1,4 +1,6 @@
-import { listLocalModels, MODEL_SUBDIRS } from "./model-resolver.js";
+import { isAbsolute, relative, resolve, sep } from "node:path";
+import { stat } from "node:fs/promises";
+import { listLocalModels, MODEL_SUBDIRS, type LocalModel } from "./model-resolver.js";
 import { getSystemStats } from "../comfyui/client.js";
 import { config } from "../config.js";
 
@@ -44,6 +46,118 @@ const TYPE_ALIASES: Record<string, string> = {
 
 function resolveModelFolder(type: string): string {
   return TYPE_ALIASES[type.toLowerCase()] ?? type;
+}
+
+function posixRel(p: string): string {
+  return p.replace(/\\/g, "/").replace(/^\/+/, "");
+}
+
+/** Drop a leading `models/` so `models/vae/foo.safetensors` matches listing paths. */
+function stripModelsPrefix(rel: string): string {
+  const n = posixRel(rel);
+  return /^models\//i.test(n) ? n.slice("models/".length) : n;
+}
+
+function pathBasename(rel: string): string {
+  const parts = posixRel(rel).split("/").filter(Boolean);
+  return parts.at(-1) ?? rel;
+}
+
+function pathDirname(rel: string): string | undefined {
+  const parts = posixRel(rel).split("/").filter(Boolean);
+  return parts.length >= 2 ? parts.slice(0, -1).join("/") : undefined;
+}
+
+function modelRelPath(model: LocalModel): string {
+  if (isAbsolute(model.path)) return posixRel(`${model.type}/${model.name}`);
+  return stripModelsPrefix(model.path);
+}
+
+/**
+ * Folder the caller asked for: explicit `folder`/`type`, else the directory
+ * prefix of a relative `name` (e.g. `vae/qwen_image_vae.safetensors`).
+ */
+function showFolderHint(args: { name: string; folder?: string; type?: string }): string | undefined {
+  const fromArg = (args.folder ?? args.type)?.trim();
+  if (fromArg) return resolveModelFolder(fromArg);
+  const dir = pathDirname(stripModelsPrefix(args.name.trim()));
+  if (!dir) return undefined;
+  const head = dir.split("/")[0];
+  return head ? resolveModelFolder(head) : undefined;
+}
+
+function showArgFolderConflictsName(args: { name: string; folder?: string; type?: string }): boolean {
+  const fromArg = (args.folder ?? args.type)?.trim();
+  const nameDir = pathDirname(stripModelsPrefix(args.name.trim()));
+  const nameHead = nameDir?.split("/")[0];
+  if (!fromArg || !nameHead) return false;
+  return resolveModelFolder(fromArg).toLowerCase() !== resolveModelFolder(nameHead).toLowerCase();
+}
+
+/**
+ * Exact (case-insensitive) basename matches, optionally narrowed by folder/type
+ * or a relative path. Array order is not a selector — #2504's bug was
+ * `Array.find` reporting whichever duplicate happened to be listed first.
+ */
+function showMatches(models: LocalModel[], args: { name: string; folder?: string; type?: string }): LocalModel[] {
+  if (showArgFolderConflictsName(args)) return [];
+  const needle = stripModelsPrefix(args.name.trim());
+  const wantBase = pathBasename(needle).toLowerCase();
+  const nameDir = pathDirname(needle);
+  const folder = showFolderHint(args);
+
+  return models.filter((m) => {
+    if (pathBasename(m.name).toLowerCase() !== wantBase) return false;
+    if (folder && m.type.toLowerCase() !== folder.toLowerCase()) return false;
+    if (nameDir?.includes("/")) {
+      const wantRel = needle.toLowerCase();
+      const gotRel = modelRelPath(m).toLowerCase();
+      const gotName = posixRel(m.name).toLowerCase();
+      if (gotRel !== wantRel && !gotRel.endsWith(`/${wantRel}`) && gotName !== wantRel) return false;
+    }
+    return true;
+  });
+}
+
+function pickShowMatch(models: LocalModel[], args: { name: string; folder?: string; type?: string }): LocalModel {
+  const hits = showMatches(models, args);
+  const only = hits[0];
+  if (hits.length === 1 && only) return only;
+  if (hits.length === 0) {
+    throw new Error(`Model '${args.name}' was not found among the connected ComfyUI's local models.`);
+  }
+  const listed = [...hits]
+    .sort((a, b) => modelRelPath(a).localeCompare(modelRelPath(b)))
+    .map((m) => `  ${modelRelPath(m)}`)
+    .join("\n");
+  throw new Error(
+    `Model '${args.name}' matches ${hits.length} local files:\n${listed}\n` +
+      "Pass folder, type, or a relative path (e.g. vae/qwen_image_vae.safetensors) to select one.",
+  );
+}
+
+/** HTTP listings leave size/mtime blank; stat the file when a local path is known. */
+async function enrichShowStats(match: LocalModel): Promise<LocalModel> {
+  if (match.size > 0 && match.modified) return match;
+  let abs: string | undefined;
+  if (isAbsolute(match.path)) {
+    abs = match.path;
+  } else if (config.comfyuiPath) {
+    const modelsRoot = resolve(config.comfyuiPath, "models");
+    const target = resolve(modelsRoot, match.path);
+    const rel = relative(modelsRoot, target);
+    if (rel !== "" && !rel.startsWith("..") && !isAbsolute(rel) && target.startsWith(modelsRoot + sep)) {
+      abs = target;
+    }
+  }
+  if (!abs) return match;
+  try {
+    const info = await stat(abs);
+    if (!info.isFile()) return match;
+    return { ...match, size: info.size, modified: info.mtime.toISOString() };
+  } catch {
+    return match;
+  }
 }
 
 /** Read-only comfy_cli models_* actions that can be served without comfy-cli. */
@@ -146,15 +260,14 @@ export async function listLocalModelsFallback(args: {
     }
     case "show": {
       if (!args.name) throw new Error("name is required for show");
-      const models = await listLocalModels();
+      const showArgs = { name: args.name, folder: args.folder, type: args.type };
+      // Prefer the hinted folder so a filtered REST listing does not even see
+      // same-basename files in other categories. The matcher still filters the
+      // returned set: mocks (and unfiltered listings) can still yield duplicates.
+      const folderHint = showArgFolderConflictsName(showArgs) ? undefined : showFolderHint(showArgs);
+      const models = await listLocalModels(folderHint);
       if (models.length === 0) await assertLocalSourceAvailable();
-      const needle = args.name.toLowerCase();
-      // comfy `models show <name>` addresses a specific model by name — return
-      // the EXACT (case-insensitive) match only. A substring guess would report
-      // an arbitrary model (e.g. show "flux" picking one of several), so no
-      // exact match is a clear not-found.
-      const match = models.find((m) => m.name.toLowerCase() === needle);
-      if (!match) throw new Error(`Model '${args.name}' was not found among the connected ComfyUI's local models.`);
+      const match = await enrichShowStats(pickShowMatch(models, showArgs));
       return {
         command: `models show ${args.name}`,
         data: {

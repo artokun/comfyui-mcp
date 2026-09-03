@@ -1096,6 +1096,7 @@ const SG_ID = "sg-uuid";
 function subgraphGraph(opts: {
   proxy: [string, string][];
   values: unknown[];
+  captured?: Record<string, unknown>;
   innerInputs?: unknown[];
   linkWidth?: boolean;
 }) {
@@ -1158,6 +1159,7 @@ function subgraphGraph(opts: {
         ],
         outputs: [{ name: "LATENT", type: "LATENT", links: [] }],
         widgets_values: opts.values,
+        ...(opts.captured ? { capturedWidgetValues: opts.captured } : {}),
       },
     ],
     links: opts.linkWidth ? [[200, 60, 0, 706, 0, "INT"]] : [],
@@ -1225,6 +1227,23 @@ describe("#361 — promoted subgraph widget values", () => {
     );
     expect(joined(warnings)).toContain('"not_a_widget"');
     expect(joined(warnings)).toContain("could not be applied");
+  });
+
+  it("a live capturedWidgetValues map wins over stale positional widgets_values (#2522)", () => {
+    // graph_get_state stores the user's current name-keyed values on
+    // capturedWidgetValues and leaves widgets_values as the serialized snapshot.
+    // The expander used to read only the array, so a live 1920 became the inner
+    // node's stale 512 with no warning.
+    const { workflow, warnings } = convertUiToApi(
+      subgraphGraph({
+        proxy: [["-1", "width"]],
+        values: [512],
+        captured: { width: 1920 },
+      }),
+      OBJECT_INFO,
+    );
+    expect(onlyInner(workflow as never).inputs.width).toBe(1920);
+    expect(warnings).toEqual([]);
   });
 
   it("a NAME-KEYED widgets_values on the subgraph node is read by promoted-widget name", () => {

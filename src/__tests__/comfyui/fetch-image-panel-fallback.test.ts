@@ -59,7 +59,9 @@ describe("fetchImage connected-panel fallback (#2149)", () => {
       vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
         calls.push({ input, init });
         const url = String(input);
-        if (url.startsWith(HEADLESS)) throw transportFailure();
+        if (url.startsWith(HEADLESS) || url.startsWith("http://localhost:8000")) {
+          throw transportFailure();
+        }
         return imageResponse();
       }),
     );
@@ -68,11 +70,34 @@ describe("fetchImage connected-panel fallback (#2149)", () => {
       base64: "AQID",
       mimeType: "image/jpeg",
     });
-    expect(calls).toHaveLength(2);
+    expect(calls).toHaveLength(3);
     expect(String(calls[0].input)).toContain(`${HEADLESS}/comfyapi/view?`);
-    expect(String(calls[1].input)).toContain(`${PANEL}/comfyapi/view?`);
+    expect(String(calls[1].input)).toContain("http://localhost:8000/comfyapi/view?");
+    expect(String(calls[2].input)).toContain(`${PANEL}/comfyapi/view?`);
     expect(new Headers(calls[0].init?.headers).get("authorization")).toBe("Bearer headless-token");
-    expect(calls[1].init?.headers).toBeUndefined();
+    expect(calls[2].init?.headers).toBeUndefined();
+  });
+
+  it("retries a refused manual /view request at IPv6-capable localhost", async () => {
+    setConnectedPanelFallbackOrigins(() => []);
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        calls.push({ input, init });
+        if (String(input).startsWith(HEADLESS)) throw transportFailure();
+        const response = imageResponse();
+        Object.defineProperty(response, "url", { value: String(input) });
+        return response;
+      }),
+    );
+
+    await expect(fetchImage("render.png")).resolves.toEqual({
+      base64: "AQID",
+      mimeType: "image/jpeg",
+    });
+    expect(calls).toHaveLength(2);
+    expect(String(calls[1].input)).toContain("http://localhost:8000/comfyapi/view?");
+    expect(calls[1].init?.redirect).toBe("manual");
   });
 
   it("does not guess when multiple different panel origins are connected", async () => {
@@ -89,10 +114,10 @@ describe("fetchImage connected-panel fallback (#2149)", () => {
     expect(err.message).toContain("I did NOT retry against a connected panel");
     expect(err.message).toContain("127.0.0.1:8188");
     expect(err.message).toContain("localhost:8189");
-    expect(calls).toHaveLength(1);
+    expect(calls).toHaveLength(2);
   });
 
-  it("does not retry a loopback alias of the failed target", async () => {
+  it("does not use a connected panel that is only the loopback alias", async () => {
     setConnectedPanelFallbackOrigins(() => ["http://localhost:8000"]);
     vi.stubGlobal(
       "fetch",
@@ -103,7 +128,7 @@ describe("fetchImage connected-panel fallback (#2149)", () => {
     );
 
     await expect(fetchImage("render.png")).rejects.toThrow(/fetch failed/);
-    expect(calls).toHaveLength(1);
+    expect(calls).toHaveLength(2);
   });
 
   it("keeps a panel response's HTTP error classified as an image error", async () => {
@@ -112,7 +137,7 @@ describe("fetchImage connected-panel fallback (#2149)", () => {
       "fetch",
       vi.fn(async (input: RequestInfo | URL) => {
         calls.push({ input });
-        if (calls.length === 1) throw transportFailure();
+        if (calls.length <= 2) throw transportFailure();
         return imageResponse(404);
       }),
     );
@@ -122,7 +147,7 @@ describe("fetchImage connected-panel fallback (#2149)", () => {
     );
     expect(err.code).toBe("IMAGE_NOT_FOUND");
     expect(err.message).toContain(`at ${PANEL}`);
-    expect(calls).toHaveLength(2);
+    expect(calls).toHaveLength(3);
   });
 
   it("does not retry a timeout as if it were a dead target", async () => {
@@ -158,7 +183,7 @@ describe("fetchImage connected-panel fallback (#2149)", () => {
     );
 
     await expect(fetchImage("render.png")).rejects.toThrow(/malformed, unsupported, remote, or otherwise unsafe/);
-    expect(calls).toHaveLength(1);
+    expect(calls).toHaveLength(2);
   });
 
   it("does not follow a cross-origin redirect from the panel", async () => {
@@ -167,7 +192,7 @@ describe("fetchImage connected-panel fallback (#2149)", () => {
       "fetch",
       vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
         calls.push({ input, init });
-        if (calls.length === 1) throw transportFailure();
+        if (calls.length <= 2) throw transportFailure();
         return new Response(null, {
           status: 302,
           headers: { location: "https://evil.example/collect" },
@@ -176,9 +201,9 @@ describe("fetchImage connected-panel fallback (#2149)", () => {
     );
 
     await expect(fetchImage("render.png")).rejects.toMatchObject({ code: "VIEW_REDIRECT_UNSAFE" });
-    expect(calls).toHaveLength(2);
-    expect(calls[1].init?.redirect).toBe("manual");
-    expect(calls[1].init?.signal).toBeInstanceOf(AbortSignal);
+    expect(calls).toHaveLength(3);
+    expect(calls[2].init?.redirect).toBe("manual");
+    expect(calls[2].init?.signal).toBeInstanceOf(AbortSignal);
   });
 
   it("uses manual redirects for the configured target too", async () => {
@@ -252,7 +277,7 @@ describe("fetchImage connected-panel fallback (#2149)", () => {
     );
 
     await expect(fetchImage("forged.png")).rejects.toThrow(/fetch failed/);
-    expect(calls).toHaveLength(1);
+    expect(calls).toHaveLength(2);
     expect(String(calls[0].input)).toContain(`${HEADLESS}/comfyapi/view?`);
   });
 
@@ -270,7 +295,7 @@ describe("fetchImage connected-panel fallback (#2149)", () => {
     );
 
     await expect(fetchImage("render.png", "output", "shots")).rejects.toThrow(/fetch failed/);
-    expect(calls).toHaveLength(1);
+    expect(calls).toHaveLength(2);
     expect(String(calls[0].input)).toContain(`${HEADLESS}/comfyapi/view?`);
   });
 });

@@ -30,6 +30,7 @@ import {
   describe as describeCorrelation,
   type CompletionPayload,
 } from "../../orchestrator/run-completion-journal.js";
+import { buildCompletionReceipt, canonicalPromptId } from "../../orchestrator/completion-receipt.js";
 import { AskAnswerJournalImpl } from "../../orchestrator/ask-answer-journal.js";
 
 let PanelAgentManager: typeof import("../../orchestrator/panel-agent.js").PanelAgentManager;
@@ -195,7 +196,18 @@ function makeHarness(backend: AgentBackend) {
       typeof payload.completion_key === "string" && payload.completion_key.length > 0
         ? payload.completion_key
         : null;
-    const promptId = typeof payload.prompt_id === "string" ? payload.prompt_id : null;
+    const promptId = canonicalPromptId(payload.prompt_id) ?? null;
+    const canonicalPayload =
+      promptId !== null
+        ? payload.prompt_id === promptId
+          ? payload
+          : { ...payload, prompt_id: promptId }
+        : typeof payload.prompt_id === "string"
+          ? (() => {
+              const { prompt_id: _whitespaceOnlyPromptId, ...withoutPromptId } = payload;
+              return withoutPromptId;
+            })()
+          : payload;
     const alreadyKnown =
       completionKey !== null &&
       promptId !== null &&
@@ -204,19 +216,70 @@ function makeHarness(backend: AgentBackend) {
       alreadyKnown || promptId === null
         ? alreadyKnown
           ? null
-          : journal.record(tab, payload, { conversation })
-        : journal.record(tab, payload, { conversation });
+          : journal.record(tab, canonicalPayload, { conversation })
+        : journal.record(tab, canonicalPayload, { conversation });
+    if (entry?.alreadyDelivered) journal.suppressAlreadyDelivered(entry.token);
     const acked =
       completionKey !== null &&
       promptId !== null &&
       journal.acceptsCompletionReceipt(completionKey, promptId, tab, conversation);
+    const receipt = buildCompletionReceipt(promptId, completionKey, acked);
     flush(tab);
-    return { entry, acked };
+    return { entry, acked, receipt };
   };
   return { journal, manager, flush, arrive, arriveProduction };
 }
 
 describe("#1824 production keyed completion ingress", () => {
+  it("canonicalizes padded ingress IDs for journal dedupe and Panel receipt removal", () => {
+    const backend = new ContinuationBackend();
+    const { journal, arriveProduction } = makeHarness(backend);
+    const tab = "tab-padded-1824";
+    const conversation = "orchestrator::claude";
+    const key = JSON.stringify([tab, conversation, PROMPT_A, "generation-padded"]);
+
+    journal.openRun(PROMPT_A, { tabId: tab, conversation, completionKey: key });
+    const first = arriveProduction(
+      tab,
+      { kind: "executed", prompt_id: ` \t${PROMPT_A}\n`, completion_key: key },
+      conversation,
+    );
+    expect(first.acked).toBe(true);
+    expect(first.receipt?.prompt_id).toBe(PROMPT_A);
+    expect(first.entry?.payload.prompt_id).toBe(PROMPT_A);
+    expect(first.entry).toBeDefined();
+    journal.ack(first.entry!.token);
+
+    // The same completion replay must hit the acknowledged-key fence rather than
+    // create a second journal entry or require an untrimmed Panel map key.
+    const replay = arriveProduction(
+      tab,
+      { kind: "executed", prompt_id: ` ${PROMPT_A} `, completion_key: key },
+      conversation,
+    );
+    expect(replay.entry).toBeNull();
+    expect(replay.receipt?.prompt_id).toBe(PROMPT_A);
+    expect(journal.allOutstanding()).toHaveLength(0);
+  });
+
+  it("rejects a whitespace-only ingress ID without emitting a receipt", () => {
+    const backend = new ContinuationBackend();
+    const { journal, arriveProduction } = makeHarness(backend);
+    const tab = "tab-whitespace-1824";
+    const conversation = "orchestrator::claude";
+    const key = JSON.stringify([tab, conversation, PROMPT_A, "generation-whitespace"]);
+
+    const result = arriveProduction(
+      tab,
+      { kind: "executed", prompt_id: " \t\n ", completion_key: key },
+      conversation,
+    );
+    expect(result.acked).toBe(false);
+    expect(result.receipt).toBeUndefined();
+    expect(result.entry?.correlation.status).toBe("unidentified");
+    expect(journal.allOutstanding()).toHaveLength(1);
+  });
+
   it("ACKs a keyed completion only for the current ticket generation", () => {
     const backend = new ContinuationBackend();
     const { journal, arriveProduction } = makeHarness(backend);
@@ -245,6 +308,14 @@ describe("#1824 production keyed completion ingress", () => {
       conversation,
     );
     expect(stale.acked).toBe(false);
+    expect(stale.receipt).toEqual({
+      type: "ack",
+      ok: false,
+      kind: "completion",
+      prompt_id: PROMPT_A,
+      completion_key: keyA,
+      reason: "uncorrelated",
+    });
     expect(stale.entry?.correlation.status).toBe("foreign");
     expect(journal.outstanding(tab)).toHaveLength(1);
   });
@@ -339,6 +410,86 @@ describe("#1824 production keyed completion ingress", () => {
     expect(panel.entry).toBeNull();
     expect(panel.acked).toBe(true);
     expect(journal.outstanding(tab)).toHaveLength(0);
+  });
+});
+
+describe("#2591 production completion reconnect dedupe", () => {
+  it("suppresses a burst of acknowledged legacy frames after reconnect", async () => {
+    const backend = new ContinuationBackend();
+    const { journal, manager, flush, arriveProduction } = makeHarness(backend);
+    const tab = "tab-reconnect-2591";
+    const conversation = "orchestrator::claude";
+    const frame = {
+      kind: "executed",
+      prompt_id: PROMPT_A,
+      images: [{ filename: "reconnect-2591.png" }],
+    };
+
+    journal.openRun(PROMPT_A, { tabId: tab, conversation });
+    manager.send(tab, "render it");
+    await waitFor(() => backend.turns.length >= 1);
+
+    // This is the real production ordering: the panel completion is recorded
+    // and offered while the carrying user turn is still in flight.
+    arriveProduction(tab, frame, conversation);
+    backend.finishTurn();
+    await waitFor(() => backend.turns.length >= 2);
+    expect(backend.turns[1]).toContain("reconnect-2591.png");
+
+    // The completion's own turn result is the positive acknowledgement.
+    backend.finishTurn();
+    await waitFor(() => journal.outstanding(tab).length === 0);
+    const turnsAfterAck = backend.turns.length;
+
+    // A reconnect can resend the same legacy frame and trigger another journal
+    // sweep. It is already acknowledged, so none of the burst may create a turn.
+    for (let i = 0; i < 5; i += 1) {
+      const replay = arriveProduction(tab, frame, conversation);
+      expect(replay.entry?.alreadyDelivered).toBe(true);
+      flush(tab); // reconnect/agent-ready recovery sweep
+    }
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(journal.outstanding(tab)).toHaveLength(0);
+    expect(backend.turns).toHaveLength(turnsAfterAck);
+  });
+
+  it("still replays a genuinely undelivered legacy frame when an agent returns", async () => {
+    const backend = new ContinuationBackend();
+    const { journal, manager, arriveProduction } = makeHarness(backend);
+    const tab = "tab-undelivered-2591";
+    const conversation = "orchestrator::claude";
+
+    journal.openRun(PROMPT_B, { tabId: tab, conversation });
+    const arrival = arriveProduction(
+      tab,
+      { kind: "executed", prompt_id: PROMPT_B, images: [{ filename: "undelivered-2591.png" }] },
+      conversation,
+    );
+    expect(arrival.entry?.alreadyDelivered).toBeUndefined();
+    expect(journal.pending(tab)).toHaveLength(1); // no live agent took it
+
+    manager.send(tab, "welcome back");
+    await waitFor(() => backend.turns.some((turn) => turn.includes("undelivered-2591.png")));
+    expect(journal.outstanding(tab)).toHaveLength(1); // hand-off, not yet an ack
+
+    backend.finishTurn();
+    await waitFor(() => journal.outstanding(tab).length === 0);
+    expect(journal.ticketFor(PROMPT_B)?.settled).toBe(true);
+  });
+});
+
+describe("#2591 production ingress wiring", () => {
+  it("consumes the journal verdict before the reconnect flush", async () => {
+    const { readFile } = await import("node:fs/promises");
+    const source = await readFile(new URL("../../orchestrator/index.ts", import.meta.url), "utf-8");
+    const record = source.indexOf("RunCompletions.record(event.tab_id");
+    const consume = source.indexOf("RunCompletions.suppressAlreadyDelivered(entry.token)", record);
+    const flush = source.indexOf("flushRunCompletions(event.tab_id)", record);
+
+    expect(record).toBeGreaterThan(-1);
+    expect(consume).toBeGreaterThan(record);
+    expect(source.slice(record, consume)).toContain("entry?.alreadyDelivered");
+    expect(flush).toBeGreaterThan(consume);
   });
 });
 
@@ -764,6 +915,90 @@ describe("run completion across automatic goal continuation (#468)", () => {
     expect(text).toContain('preview_a.png (type:"temp")');
     expect(text).toContain('preview_b.png (type:"temp", subfolder:"clips")');
     expect(text).toContain("final_c.png"); // plain output needs no coordinates
+    expect(text).toContain('get_image action:"get"');
+  });
+
+  it("#2283: a matched PreviewImage completion names type:temp so get_image can fetch it without history", async () => {
+    // Headless get_image (action:"list_assets") / history can be ECONNREFUSED while the
+    // panel still queued the run. Filename-only completion text defaults
+    // get_image to type:"output" and misses PreviewImage's temp/ file.
+    const backend = new ContinuationBackend();
+    const { journal, manager, arrive } = makeHarness(backend);
+    const tab = "tab-preview-temp-ref";
+
+    journal.openRun(PROMPT_A, { tabId: tab });
+    manager.send(tab, "go");
+    await waitFor(() => backend.turns.length >= 1);
+    backend.finishTurn();
+
+    arrive(tab, {
+      kind: "executed",
+      prompt_id: PROMPT_A,
+      images: [
+        { filename: "ComfyUI_temp_00001_.png", type: "temp" },
+        { filename: "final_00001_.png" },
+      ],
+    });
+    await waitFor(() => backend.turns.length >= 2);
+
+    const text = backend.turns[1];
+    expect(backend.turnImages[1]).toEqual(["ComfyUI_temp_00001_.png", "final_00001_.png"]);
+    expect(text).toContain("This is the run YOU queued");
+    expect(text).toContain('ComfyUI_temp_00001_.png (type:"temp")');
+    expect(text).toContain("final_00001_.png");
+    expect(text).toContain("produced 2 output image(s)");
+  });
+
+  it("#2283: a custom completion note still names PreviewImage type:temp for get_image", async () => {
+    // A panel note replaces the default filename list, so the temp ref has to
+    // ride the inspect pointer or get_image defaults to type:"output".
+    const backend = new ContinuationBackend();
+    const { journal, manager, arrive } = makeHarness(backend);
+    const tab = "tab-preview-temp-note";
+
+    journal.openRun(PROMPT_A, { tabId: tab });
+    manager.send(tab, "go");
+    await waitFor(() => backend.turns.length >= 1);
+    backend.finishTurn();
+
+    arrive(tab, {
+      kind: "executed",
+      prompt_id: PROMPT_A,
+      note: "Preview tap on VAEDecode.",
+      images: [{ filename: "ComfyUI_temp_00001_.png", type: "temp" }],
+    });
+    await waitFor(() => backend.turns.length >= 2);
+
+    const text = backend.turns[1];
+    expect(text).toContain("Preview tap on VAEDecode.");
+    expect(text).toContain('ComfyUI_temp_00001_.png (type:"temp")');
+    expect(text).toContain('get_image action:"get"');
+  });
+
+  it("#2283: a text-only backend still gets PreviewImage temp coordinates", async () => {
+    class TextOnlyBackend extends ContinuationBackend {
+      readonly capabilities = { ...CLAUDE_CAPABILITIES, vision: false };
+    }
+    const backend = new TextOnlyBackend();
+    const { journal, manager, arrive } = makeHarness(backend);
+    const tab = "tab-preview-temp-text-only";
+
+    journal.openRun(PROMPT_A, { tabId: tab });
+    manager.send(tab, "go");
+    await waitFor(() => backend.turns.length >= 1);
+    backend.finishTurn();
+
+    arrive(tab, {
+      kind: "executed",
+      prompt_id: PROMPT_A,
+      images: [{ filename: "ComfyUI_temp_00002_.png", type: "temp", subfolder: "previews" }],
+    });
+    await waitFor(() => backend.turns.length >= 2);
+
+    const text = backend.turns[1];
+    expect(backend.turnImages[1]).toEqual([]);
+    expect(text).toContain("You cannot view images on this provider");
+    expect(text).toContain('ComfyUI_temp_00002_.png (type:"temp", subfolder:"previews")');
     expect(text).toContain('get_image action:"get"');
   });
 

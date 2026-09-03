@@ -99,7 +99,8 @@ describe("#1789 — the history fallback is WIRED into the orchestrator, not mer
     // #1853 — outputs come from the shipped /history parse, not a status-only
     // pointer. A second path that invented filenames would be the over-claim.
     expect(block).toContain("resolveOutputs:");
-    expect(block).toContain("resolveHistoryCompletionImages(");
+    expect(block).toContain("resolveHistoryCompletion(");
+    expect(block).not.toContain("resolveHistoryCompletionImages(");
     // #1556 — reconnect looks the still-owed ids up in /history, not only in
     // the QueueMonitor drain that may have already missed them.
     expect(block).toContain("lookupStatus:");

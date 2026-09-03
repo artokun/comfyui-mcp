@@ -25,6 +25,7 @@ vi.mock("../../config.js", () => ({
 // consults the SAVED DEFAULT WORKSPACE, and this rig has one.
 vi.mock("../../services/workspace-env.js", () => ({
   resolveEffectiveComfyUIBase: () => cfgRef.config.comfyuiPath,
+  getLiveServerSnapshot: async () => ({ reachable: false }),
 }));
 
 const getOutputImageMock = vi.fn();

@@ -11,7 +11,6 @@ const mocks = vi.hoisted(() => ({
   fetchImage: vi.fn(),
   getSystemStats: vi.fn(),
   comfyApiFetch: vi.fn(),
-  liveRoot: vi.fn(),
   readFile: vi.fn(),
   realpath: vi.fn(),
   stat: vi.fn(),
@@ -44,7 +43,26 @@ vi.mock("../../services/workspace-env.js", async () => {
   const actual = await vi.importActual<typeof import("../../services/workspace-env.js")>("../../services/workspace-env.js");
   return {
     ...actual,
-    resolveLiveComfyUIBase: (...args: unknown[]) => mocks.liveRoot(...args),
+    getLiveServerSnapshot: async () => {
+      try {
+        const stats = await mocks.getSystemStats();
+        return {
+          reachable: true,
+          argv: stats?.system?.argv,
+          cwd: stats?.system?.cwd,
+        };
+      } catch {
+        return { reachable: false };
+      }
+    },
+    // #1263 — this file pins the #2194 argv live-root rung. The OS process table
+    // is not a fixture; observed-process for relative ComfyUI/main.py lives in
+    // output-dir.test.ts (#2539).
+    resolveLiveServerRoot: (argv?: string[], cwd?: string) => {
+      const fromArgv = actual.liveRootFromArgv(argv, cwd);
+      if (fromArgv) return { root: fromArgv, source: "argv" };
+      return { source: "unresolved" };
+    },
   };
 });
 
@@ -114,7 +132,6 @@ beforeEach(() => {
   mocks.config.comfyuiPath = resolve("test-fixtures", "configured-comfyui");
   mocks.getSystemStats.mockResolvedValue({ system: { argv: ["python", "main.py"] } });
   mocks.comfyApiFetch.mockResolvedValue(new Response("{}", { status: 200 }));
-  mocks.liveRoot.mockResolvedValue(undefined);
   mocks.fetchImage.mockRejectedValue(view400());
   mocks.readFile.mockResolvedValue(mp4);
   mocks.realpath.mockImplementation(async (path: string) => path);
@@ -159,7 +176,9 @@ describe("get_image — canonical local input fallback (#2194)", () => {
   it("uses the connected live install input directory when no input flag is present", async () => {
     const liveBase = resolve("test-fixtures", "connected-live-comfyui");
     const localPath = join(liveBase, "input", filename);
-    mocks.liveRoot.mockResolvedValue(liveBase);
+    mocks.getSystemStats.mockResolvedValue({
+      system: { argv: ["python", join(liveBase, "main.py")] },
+    });
 
     const out = await getHandler("get_image")({
       action: "get",
@@ -169,7 +188,7 @@ describe("get_image — canonical local input fallback (#2194)", () => {
     });
 
     expect(out.isError).toBeUndefined();
-    expect(mocks.liveRoot).toHaveBeenCalled();
+    expect(mocks.getSystemStats).toHaveBeenCalledTimes(1);
     expect(mocks.open).toHaveBeenCalledWith(localPath, "r");
     expect(mocks.open).not.toHaveBeenCalledWith(
       join(resolve(mocks.config.comfyuiPath), "input", filename),

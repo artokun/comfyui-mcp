@@ -3,6 +3,8 @@ import {
   existsSync,
   mkdirSync,
   mkdtempSync,
+  readFileSync,
+  realpathSync,
   rmSync,
   symlinkSync,
   writeFileSync,
@@ -539,6 +541,39 @@ describe("parsePatchPaths", () => {
     ].join("\n");
     expect(parsePatchPaths(patch)).toEqual(["Pack/nodes.py"]);
   });
+
+  it("extracts apply-patch *** Update File paths (#2496)", () => {
+    const patch = [
+      "*** Begin Patch",
+      "*** Update File: Pack/nodes.py",
+      "@@",
+      "-old",
+      "+new",
+      "*** End Patch",
+    ].join("\n");
+    expect(parsePatchPaths(patch)).toEqual(["Pack/nodes.py"]);
+  });
+
+  it("extracts Add File, Delete File, and Move to paths (#2496)", () => {
+    const patch = [
+      "*** Begin Patch",
+      "*** Add File: Pack/new.py",
+      "+hello",
+      "*** Delete File: Pack/gone.py",
+      "*** Update File: Pack/old.py",
+      "*** Move to: Pack/renamed.py",
+      "@@",
+      "-a",
+      "+b",
+      "*** End Patch",
+    ].join("\n");
+    expect(parsePatchPaths(patch)).toEqual([
+      "Pack/new.py",
+      "Pack/gone.py",
+      "Pack/old.py",
+      "Pack/renamed.py",
+    ]);
+  });
 });
 
 describe("applyNodePatch", () => {
@@ -598,6 +633,61 @@ describe("applyNodePatch", () => {
     ].join("\n");
     expect(() => applyNodePatch(patch, deps)).toThrow(NodeDevError);
     expect(gitCalls.length).toBe(0);
+  });
+
+  it("applies *** Begin Patch / *** Update File (real git) (#2496)", () => {
+    initRepoPack();
+    const patch = [
+      "*** Begin Patch",
+      "*** Update File: Pack/nodes.py",
+      "@@",
+      "-old",
+      "+new",
+      "*** End Patch",
+    ].join("\n");
+    const res = applyNodePatch(patch);
+    expect(res.success).toBe(true);
+    expect(res.stage).toBe("apply");
+    expect(res.touched).toEqual(["Pack/nodes.py"]);
+    expect(readFileSync(join(customNodes, "Pack", "nodes.py"), "utf8").replace(/\r\n/g, "\n")).toBe(
+      "new\n",
+    );
+  });
+
+  it("applies *** Add File (real git) (#2496)", () => {
+    initRepoPack();
+    const patch = [
+      "*** Begin Patch",
+      "*** Add File: Pack/extra.py",
+      "+hello",
+      "*** End Patch",
+    ].join("\n");
+    const res = applyNodePatch(patch);
+    expect(res.success).toBe(true);
+    expect(res.touched).toEqual(["Pack/extra.py"]);
+    expect(readFileSync(join(customNodes, "Pack", "extra.py"), "utf8").replace(/\r\n/g, "\n")).toBe(
+      "hello\n",
+    );
+  });
+
+  it("jail-checks apply-patch paths BEFORE any git call (#2496)", () => {
+    const { deps, gitCalls } = makeDeps();
+    const patch = [
+      "*** Begin Patch",
+      "*** Update File: ../escape.py",
+      "@@",
+      "-old",
+      "+new",
+      "*** End Patch",
+    ].join("\n");
+    expect(() => applyNodePatch(patch, deps)).toThrow(NodeDevError);
+    expect(gitCalls.length).toBe(0);
+  });
+
+  it("still names both header styles when none are present (#2496)", () => {
+    expect(() => applyNodePatch("not a patch")).toThrow(
+      /---\/\+\+\+ or \*\*\* Update\/Add\/Delete File/,
+    );
   });
 });
 
@@ -675,6 +765,347 @@ describe("nodePackGit", () => {
     expect(() => nodePackGit({ pack: "Pack", action: "commit" }, deps)).toThrow(
       /message/,
     );
+  });
+
+  it("refuses a missing pack before resolving paths or invoking git", () => {
+    const { deps, gitCalls } = makeDeps();
+    expect(() =>
+      nodePackGit({ pack: "Missing", action: "diff", paths: ["nodes.py"] }, deps),
+    ).toThrow(/does not exist under custom_nodes/);
+    expect(gitCalls.length).toBe(0);
+  });
+
+  // -------------------------------------------------------------------------
+  // #2716 — `paths` is documented as PACK-relative, and every documented spelling
+  // was refused: relative entries were resolved against the custom_nodes/ ROOT, so
+  // "preset_core.py" landed beside the pack and failed the pack-containment check.
+  // These pin the anchor, and pin that moving it did not widen the jail.
+  // -------------------------------------------------------------------------
+  describe("paths are relative to the pack root (#2716)", () => {
+    function mkPackFiles(): void {
+      mkdirSync(join(customNodes, "Pack", "tests"), { recursive: true });
+      writeFileSync(join(customNodes, "Pack", "preset_core.py"), "x\n");
+      writeFileSync(join(customNodes, "Pack", "tests", "test_preset_core.py"), "x\n");
+    }
+
+    it("scopes a diff with the reporter's exact call", () => {
+      mkPackFiles();
+      const { deps, gitCalls } = makeDeps();
+      const res = nodePackGit(
+        {
+          pack: "Pack",
+          action: "diff",
+          paths: ["preset_core.py", "tests/test_preset_core.py"],
+        },
+        deps,
+      );
+      expect(res.success).toBe(true);
+      expect(gitCalls[0].args).toEqual([
+        "diff",
+        "--",
+        "preset_core.py",
+        "tests/test_preset_core.py",
+      ]);
+      // The pathspecs are handed to git with the PACK as cwd, so a pack-relative
+      // spelling is what git itself resolves them against.
+      expect(gitCalls[0].cwd).toBe(realpathSync(join(customNodes, "Pack")));
+    });
+
+    it("stages pack-relative paths on commit", () => {
+      mkPackFiles();
+      process.env.COMFYUI_MCP_ALLOW_GIT_WRITES = "1";
+      const { deps, gitCalls } = makeDeps();
+      const res = nodePackGit(
+        { pack: "Pack", action: "commit", message: "fix: x", paths: ["preset_core.py"] },
+        deps,
+      );
+      expect(res.success).toBe(true);
+      expect(gitCalls[0].args).toEqual([
+        "add",
+        "--end-of-options",
+        "--",
+        "preset_core.py",
+      ]);
+    });
+
+    it("accepts an absolute path that lands inside the pack", () => {
+      mkPackFiles();
+      const { deps, gitCalls } = makeDeps();
+      nodePackGit(
+        {
+          pack: "Pack",
+          action: "status",
+          paths: [join(customNodes, "Pack", "tests", "test_preset_core.py")],
+        },
+        deps,
+      );
+      expect(gitCalls[0].args).toEqual([
+        "status",
+        "--short",
+        "--branch",
+        "--",
+        "tests/test_preset_core.py",
+      ]);
+    });
+
+    it("still refuses a SIBLING pack's file by absolute path, before any git call", () => {
+      // The one shape that reaches the pack-containment check: inside custom_nodes/,
+      // outside the selected pack. Anchoring `paths` at the pack must not make a
+      // neighbouring pack reachable through the pack-scoped git surface.
+      mkPackFiles();
+      mkdirSync(join(customNodes, "Other"), { recursive: true });
+      writeFileSync(join(customNodes, "Other", "loot.py"), "secret\n");
+      const { deps, gitCalls } = makeDeps();
+      expect(() =>
+        nodePackGit(
+          {
+            pack: "Pack",
+            action: "diff",
+            paths: [join(customNodes, "Other", "loot.py")],
+          },
+          deps,
+        ),
+      ).toThrow(/outside the target pack/);
+      expect(gitCalls.length).toBe(0);
+    });
+
+    it("still refuses a path that climbs out of the pack, before any git call", () => {
+      mkPackFiles();
+      mkdirSync(join(customNodes, "Other"), { recursive: true });
+      writeFileSync(join(customNodes, "Other", "loot.py"), "secret\n");
+      const { deps, gitCalls } = makeDeps();
+      // A ".." segment is refused by the Windows-hazard scan before containment is
+      // even reached — which is why this asserts the refusal, not its wording.
+      expect(() =>
+        nodePackGit({ pack: "Pack", action: "diff", paths: ["../Other/loot.py"] }, deps),
+      ).toThrow(NodeDevError);
+      expect(gitCalls.length).toBe(0);
+    });
+
+    it("still refuses an absolute path outside custom_nodes, before any git call", () => {
+      mkPackFiles();
+      const { deps, gitCalls } = makeDeps();
+      expect(() =>
+        nodePackGit(
+          { pack: "Pack", action: "diff", paths: [join(workspace, "outside.py")] },
+          deps,
+        ),
+      ).toThrow(NodeDevError);
+      expect(gitCalls.length).toBe(0);
+    });
+
+    it("still refuses a symlink inside the pack that escapes custom_nodes", () => {
+      mkPackFiles();
+      const outside = join(tmpdir(), `node-dev-outside-${Date.now()}`);
+      mkdirSync(outside, { recursive: true });
+      writeFileSync(join(outside, "loot.py"), "secret\n");
+      try {
+        symlinkSync(outside, join(customNodes, "Pack", "link"), "junction");
+      } catch {
+        return; // environment can't create junctions — skip
+      }
+      const { deps, gitCalls } = makeDeps();
+      expect(() =>
+        nodePackGit({ pack: "Pack", action: "diff", paths: ["link/loot.py"] }, deps),
+      ).toThrow(/escapes custom_nodes/);
+      expect(gitCalls.length).toBe(0);
+      rmSync(outside, { recursive: true, force: true });
+    });
+
+    it("names the correction for the pack-name-prefixed spelling this bug forced", () => {
+      mkPackFiles();
+      const { deps, gitCalls } = makeDeps();
+      expect(() =>
+        nodePackGit(
+          { pack: "Pack", action: "diff", paths: ["Pack/preset_core.py"] },
+          deps,
+        ),
+      ).toThrow(
+        /names custom_nodes\/Pack\/Pack\/preset_core\.py .+ custom_nodes\/Pack\/Pack is not in the working tree.+drop the "Pack\/" prefix and pass "preset_core\.py"/s,
+      );
+      expect(gitCalls.length).toBe(0);
+    });
+
+    it("keeps the literal reading when the pack really has a same-named subdir", () => {
+      mkPackFiles();
+      mkdirSync(join(customNodes, "Pack", "Pack"), { recursive: true });
+      writeFileSync(join(customNodes, "Pack", "Pack", "preset_core.py"), "x\n");
+      const { deps, gitCalls } = makeDeps();
+      nodePackGit(
+        { pack: "Pack", action: "diff", paths: ["Pack/preset_core.py"] },
+        deps,
+      );
+      expect(gitCalls[0].args).toEqual(["diff", "--", "Pack/preset_core.py"]);
+    });
+
+    it("names the correction for a BARE pack name, which used to mean the pack root", () => {
+      // The same mistake with nothing after the prefix: under the old anchor "Pack"
+      // resolved to the pack itself and scoped everything; anchored it matches nothing,
+      // and git reports that as an empty result rather than an error.
+      mkPackFiles();
+      const { deps, gitCalls } = makeDeps();
+      expect(() =>
+        nodePackGit({ pack: "Pack", action: "diff", paths: ["Pack"] }, deps),
+      ).toThrow(/omit `paths` to scope the whole pack/);
+      expect(gitCalls.length).toBe(0);
+    });
+
+    it("names the correction when the pack is reached through an ALIAS directory", () => {
+      // custom_nodes/Alias -> RealPack. `packDir` is the REALPATH, so its basename is
+      // "RealPack" while the caller said "Alias"; matching only the basename would let the
+      // aliased prefix through and answer with an empty diff.
+      mkdirSync(join(customNodes, "RealPack"), { recursive: true });
+      writeFileSync(join(customNodes, "RealPack", "preset_core.py"), "x\n");
+      try {
+        symlinkSync(join(customNodes, "RealPack"), join(customNodes, "Alias"), "junction");
+      } catch {
+        return; // environment can't create junctions — skip
+      }
+      const { deps, gitCalls } = makeDeps();
+      expect(() =>
+        nodePackGit(
+          { pack: "Alias", action: "diff", paths: ["Alias/preset_core.py"] },
+          deps,
+        ),
+      ).toThrow(/drop the "Alias\/" prefix and pass "preset_core\.py"/);
+      expect(gitCalls.length).toBe(0);
+      // …and the documented spelling works through the alias.
+      nodePackGit({ pack: "Alias", action: "diff", paths: ["preset_core.py"] }, deps);
+      expect(gitCalls[0].args).toEqual(["diff", "--", "preset_core.py"]);
+    });
+
+    it("passes an unprefixed wildcard pathspec straight through", () => {
+      mkPackFiles();
+      const { deps, gitCalls } = makeDeps();
+      nodePackGit({ pack: "Pack", action: "diff", paths: ["*.py", "tests/**"] }, deps);
+      expect(gitCalls[0].args).toEqual(["diff", "--", "*.py", "tests/**"]);
+    });
+
+    it("names the correction for a prefixed WILDCARD too", () => {
+      // The refusal rests on one fact — the pack has no child named "Pack" — which decides
+      // a wildcard exactly as well as a literal path: it can match nothing either way.
+      mkPackFiles();
+      const { deps, gitCalls } = makeDeps();
+      expect(() =>
+        nodePackGit({ pack: "Pack", action: "diff", paths: ["Pack/*.py"] }, deps),
+      ).toThrow(/drop the "Pack\/" prefix and pass "\*\.py"/);
+      expect(gitCalls.length).toBe(0);
+    });
+
+    it("honours a prefixed wildcard when the pack really has a same-named subdir", () => {
+      mkPackFiles();
+      mkdirSync(join(customNodes, "Pack", "Pack"), { recursive: true });
+      const { deps, gitCalls } = makeDeps();
+      nodePackGit({ pack: "Pack", action: "diff", paths: ["Pack/*.py"] }, deps);
+      expect(gitCalls[0].args).toEqual(["diff", "--", "Pack/*.py"]);
+    });
+
+    it("still corrects a deep prefixed path when the same-named child is a FILE", () => {
+      // A file cannot have children, so "Pack/preset_core.py" matches nothing even though
+      // something named "Pack" exists inside the pack — but the bare name DOES name that
+      // file, so the two arms of the check are not interchangeable.
+      mkPackFiles();
+      writeFileSync(join(customNodes, "Pack", "Pack"), "not a directory\n");
+      const { deps, gitCalls } = makeDeps();
+      expect(() =>
+        nodePackGit({ pack: "Pack", action: "diff", paths: ["Pack/preset_core.py"] }, deps),
+      ).toThrow(/drop the "Pack\/" prefix/);
+      expect(gitCalls.length).toBe(0);
+      const second = makeDeps();
+      nodePackGit({ pack: "Pack", action: "diff", paths: ["Pack"] }, second.deps);
+      expect(second.gitCalls[0].args).toEqual(["diff", "--", "Pack"]);
+    });
+
+    it("honours the ABSOLUTE spelling of a prefixed path — the guard's escape hatch", () => {
+      // The disk cannot settle one case: a same-named child that is TRACKED but deleted
+      // from the working tree, where git still matches "Pack/gone.py". An absolute entry
+      // spells the whole path out, so it cannot be the prefix mistake and is taken as
+      // written — which is what the refusal message tells the caller to do.
+      mkPackFiles();
+      const { deps, gitCalls } = makeDeps();
+      const abs = join(realpathSync(join(customNodes, "Pack")), "Pack", "gone.py");
+      nodePackGit({ pack: "Pack", action: "diff", paths: [abs] }, deps);
+      expect(gitCalls[0].args).toEqual(["diff", "--", "Pack/gone.py"]);
+      // …while the relative spelling of the same path is still corrected.
+      const second = makeDeps();
+      expect(() =>
+        nodePackGit({ pack: "Pack", action: "diff", paths: ["Pack/gone.py"] }, second.deps),
+      ).toThrow(/pass it as an absolute path/);
+    });
+
+    it("leaves a WILDCARD head alone even when it matches the pack's own name", () => {
+      // assertSafeRepoName allows "*" in a folder name, so a POSIX pack really can be
+      // called "Pack*" — and then "Pack*/foo.py" is a glob git resolves, not the prefix
+      // mistake. Simulated through the fs seam, since Windows cannot create that name.
+      const packDir = join(customNodes, "Pack*");
+      const seen = new Set([customNodes, packDir]);
+      const { deps, gitCalls } = makeDeps({
+        existsSync: (q: string) => seen.has(q),
+        realpath: (q: string) => q,
+        isDirectory: (q: string) => q === packDir || q === customNodes,
+      });
+      nodePackGit({ pack: "Pack*", action: "diff", paths: ["Pack*/foo.py"] }, deps);
+      expect(gitCalls[0].args).toEqual(["diff", "--", "Pack*/foo.py"]);
+    });
+
+    it("scopes a path that no longer exists — a deletion is a legitimate pathspec", () => {
+      // `git diff`/`git add` are how a DELETED file is inspected and staged, so the guard
+      // must not probe the de-prefixed path for existence. Here the pack HAS a same-named
+      // subdir and the file inside it is gone; the literal reading must survive.
+      mkPackFiles();
+      mkdirSync(join(customNodes, "Pack", "Pack"), { recursive: true });
+      const { deps, gitCalls } = makeDeps();
+      nodePackGit({ pack: "Pack", action: "diff", paths: ["Pack/gone.py"] }, deps);
+      expect(gitCalls[0].args).toEqual(["diff", "--", "Pack/gone.py"]);
+      // …and an unprefixed deleted file is untouched by any of this.
+      const second = makeDeps();
+      nodePackGit({ pack: "Pack", action: "diff", paths: ["gone.py"] }, second.deps);
+      expect(second.gitCalls[0].args).toEqual(["diff", "--", "gone.py"]);
+    });
+
+    it("normalises an interior climb that stays inside the pack", () => {
+      // join() collapses ".." before the resolver sees it, so "tests/../preset_core.py"
+      // names the file it means. The escaping case is covered above.
+      mkPackFiles();
+      const { deps, gitCalls } = makeDeps();
+      nodePackGit(
+        { pack: "Pack", action: "diff", paths: ["tests/../preset_core.py"] },
+        deps,
+      );
+      expect(gitCalls[0].args).toEqual(["diff", "--", "preset_core.py"]);
+    });
+
+    it("refuses an empty path entry", () => {
+      mkPackFiles();
+      const { deps, gitCalls } = makeDeps();
+      expect(() =>
+        nodePackGit({ pack: "Pack", action: "diff", paths: ["  "] }, deps),
+      ).toThrow(/empty string/);
+      expect(gitCalls.length).toBe(0);
+    });
+
+    it("still refuses an NTFS alternate-data-stream path", () => {
+      mkPackFiles();
+      const { deps, gitCalls } = makeDeps();
+      expect(() =>
+        nodePackGit(
+          { pack: "Pack", action: "diff", paths: ["preset_core.py:hidden"] },
+          deps,
+        ),
+      ).toThrow(NodeDevError);
+      expect(gitCalls.length).toBe(0);
+    });
+
+    it("rejects UNC spellings before the pack anchor can erase the marker", () => {
+      mkPackFiles();
+      const { deps, gitCalls } = makeDeps();
+      for (const unc of [String.raw`\\server\share\loot.py`, "//server/share/loot.py"]) {
+        expect(() =>
+          nodePackGit({ pack: "Pack", action: "diff", paths: [unc] }, deps),
+        ).toThrow(/UNC path/);
+      }
+      expect(gitCalls.length).toBe(0);
+    });
   });
 });
 
