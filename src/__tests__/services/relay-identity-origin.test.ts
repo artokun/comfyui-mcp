@@ -141,3 +141,32 @@ describe("setupRelayBridge actually passes the origin (#1077)", () => {
     );
   });
 });
+
+// #2757 asked whether the RELAY path loses its derived origin when the live tab
+// re-registers under a new workflow uuid — the report's own stated mechanism.
+// It does not, and this pins that: `serverOrigin` is a parameter of
+// `handleConnection`, so the hello handler closes over it and every later hello on
+// that socket — including one that retires the tab id for a new `wf:` one — writes
+// the same value onto the new conn. The transport that actually dropped it was the
+// token-gated listener (see tunnel-listener-handshake-origin.test.ts).
+describe("a relay tab keeps its derived origin across a re-registration (#2757)", () => {
+  const ORIGIN = "https://abc-8188.proxy.runpod.net";
+
+  it("still reports the origin under the NEW workflow tab id", () => {
+    const bridge = new UiBridge(0);
+    const sock = fakeSocket();
+    bridge.attachRelayConnection(sock as never, ORIGIN);
+    sock.emit(
+      "message",
+      JSON.stringify({ type: "hello", tab_id: "wf:route-1:old", title: "wf" }),
+    );
+    expect(bridge.tabServerOrigin("wf:route-1:old")).toBe(ORIGIN);
+
+    // Save-as / open / switch: the SAME socket re-hellos under a new workflow id.
+    sock.emit(
+      "message",
+      JSON.stringify({ type: "hello", tab_id: "wf:route-1:new", title: "wf (2)" }),
+    );
+    expect(bridge.tabServerOrigin("wf:route-1:new")).toBe(ORIGIN);
+  });
+});
