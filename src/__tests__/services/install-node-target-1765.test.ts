@@ -114,13 +114,19 @@ const http = vi.hoisted(() => ({
     | "manager-unavailable",
   calls: [] as string[],
 }));
-vi.mock("../../comfyui/fetch.js", () => {
+// Only `comfyuiFetch` is being stood in for. Everything else in the module —
+// raceAbort, defaultComfyTimeoutSignal, the failure describers — is real, because
+// a mock that silently omits them turns "node-management started using another
+// helper from this module" into a confusing failure in a suite about install
+// TARGETS (#2754).
+vi.mock("../../comfyui/fetch.js", async (importOriginal) => {
   const json = (body: unknown) =>
     new Response(JSON.stringify(body), {
       status: 200,
       headers: { "content-type": "application/json" },
     });
   return {
+    ...(await importOriginal<typeof import("../../comfyui/fetch.js")>()),
     comfyuiFetch: async (url: string) => {
       http.calls.push(url);
       if (http.mode === "refuse-enqueue") {
