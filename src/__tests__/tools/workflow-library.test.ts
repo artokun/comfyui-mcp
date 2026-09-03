@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 import { DEAD_NAMES, TOOL_NAMES } from "../../tools/vocabulary.js";
+import { normalizeWorkflowFilename } from "../../services/workflow-filename.js";
 
 /**
  * The consolidated `get_workflow` (8 read actions) and `save_workflow` (3
@@ -360,6 +361,67 @@ describe("save_workflow actions call the same services with the same arguments",
     expect(text(res)).toContain("auto-converted to Web UI format");
   });
 
+  it('action:"save" appends `.json` and returns the canonical nested filename', async () => {
+    mocks.isUiFormat.mockReturnValue(true);
+    mocks.fetchApi.mockResolvedValueOnce({ ok: true, status: 200, statusText: "OK" });
+    const res = await save()({
+      action: "save",
+      filename: "VIDEO/My Clip",
+      workflow: UI_GRAPH,
+    });
+    expect(mocks.fetchApi).toHaveBeenCalledWith(
+      `/api/userdata/${encodeURIComponent("workflows/VIDEO/My Clip.json")}`,
+      { method: "POST", body: JSON.stringify(UI_GRAPH) },
+    );
+    expect(text(res)).toContain('Workflow saved as "VIDEO/My Clip.json"');
+  });
+
+  it('preserves an existing `.JSON` suffix and its path spelling', async () => {
+    expect(normalizeWorkflowFilename("video/Clip.JSON")).toBe("video/Clip.JSON");
+    expect(normalizeWorkflowFilename("日本語/Clip.JSON")).toBe("日本語/Clip.JSON");
+    expect(normalizeWorkflowFilename("日本語/Clip")).toBe("日本語/Clip.json");
+    mocks.isUiFormat.mockReturnValue(true);
+    mocks.fetchApi.mockResolvedValueOnce({ ok: true, status: 200, statusText: "OK" });
+    await save()({ action: "save", filename: "video/Clip.JSON", workflow: UI_GRAPH });
+    expect(mocks.fetchApi).toHaveBeenCalledWith(
+      `/api/userdata/${encodeURIComponent("workflows/video/Clip.JSON")}`,
+      { method: "POST", body: JSON.stringify(UI_GRAPH) },
+    );
+  });
+
+  it("normalizes lock and verify-lock filenames to the same workflow", async () => {
+    mocks.lockWorkflowAction.mockResolvedValueOnce({ content: [{ type: "text", text: "locked" }] });
+    await save()({ action: "lock", filename: "video/Clip" });
+    expect(mocks.lockWorkflowAction).toHaveBeenCalledWith("video/Clip.json");
+
+    mocks.verifyWorkflowLockAction.mockResolvedValueOnce({
+      content: [{ type: "text", text: "no drift" }],
+    });
+    await save()({ action: "verify_lock", filename: "video/Clip" });
+    expect(mocks.verifyWorkflowLockAction).toHaveBeenCalledWith("video/Clip.json");
+  });
+
+  it("rejects empty, absolute, traversal, and backslash paths before any write", async () => {
+    for (const filename of [
+      "",
+      "../escape",
+      "nested/../../escape",
+      "%2e%2e/escape",
+      "nested/%2E%2e/escape",
+      "%252e%252e/escape",
+      "nested%2fescape",
+      "nested%5Cescape",
+      "/absolute",
+      "C:/escape",
+      "nested\\escape",
+    ]) {
+      const res = await save()({ action: "save", filename, workflow: UI_GRAPH });
+      expect(res.isError, `filename ${JSON.stringify(filename)}`).toBe(true);
+      expect(text(res)).toMatch(/workflow filename/i);
+    }
+    expect(mocks.fetchApi).not.toHaveBeenCalled();
+  });
+
   it('action:"lock" and action:"verify_lock" delegate to the lock bodies', async () => {
     mocks.lockWorkflowAction.mockResolvedValueOnce({ content: [{ type: "text", text: "locked" }] });
     await save()({ action: "lock", filename: "a.json" });
@@ -489,15 +551,11 @@ describe("per-action requiredness NAMES the missing field", () => {
     expect(text(res)).toContain("Workflow not found:  (404)");
   });
 
-  it("an explicitly empty `filename` still reaches the SAVE POST", async () => {
-    mocks.isUiFormat.mockReturnValue(true);
-    mocks.fetchApi.mockResolvedValueOnce({ ok: false, status: 400, statusText: "Bad Request", text: async () => "" });
+  it("rejects an explicitly empty save `filename` before reaching the userdata API", async () => {
     const res = await save()({ action: "save", filename: "", workflow: UI_GRAPH });
-    expect(mocks.fetchApi).toHaveBeenCalledWith(
-      `/api/userdata/${encodeURIComponent("workflows/")}`,
-      { method: "POST", body: JSON.stringify(UI_GRAPH) },
-    );
-    expect(text(res)).toContain("Failed to save workflow: 400");
+    expect(res.isError).toBe(true);
+    expect(text(res)).toMatch(/non-empty library-relative path/i);
+    expect(mocks.fetchApi).not.toHaveBeenCalled();
   });
 });
 
