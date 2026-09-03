@@ -773,6 +773,255 @@ describe("OllamaBackend", () => {
     }
   });
 
+  // #2717 — self-reference often puts the real inner tool on tool_name / tool,
+  // a nested key, or as siblings of name, not nested.name. Unique known names
+  // unwrap once; several names stay refused.
+  it("unwraps a self-call whose inner tool is on sibling tool_name (#2717)", async () => {
+    const { client: comfy } = fakeMcpClient(COMFY_META);
+    const { client: panel, callTool: panelCall } = fakeMcpClient([
+      { name: "panel_focus_node", description: "Focus a node in the canvas." },
+    ]);
+    const backend = new OllamaBackend({
+      model: "gemma4:e4b",
+      connectToolClients: async () => ({ comfyui: comfy, panel }),
+    });
+    chatScript.push(
+      [
+        {
+          message: {
+            content: "",
+            tool_calls: [
+              {
+                function: {
+                  name: "panel_call_tool",
+                  arguments: { name: "panel_call_tool", tool_name: "panel_focus_node", args: { node_id: 3 } },
+                },
+              },
+            ],
+          },
+          done: true,
+        },
+      ],
+      [{ message: { content: "focused." }, done: true }],
+    );
+
+    await collect(backend, turnsOf({ text: "focus node 3" }));
+    expect(panelCall).toHaveBeenCalledWith(
+      { name: "panel_focus_node", arguments: { node_id: 3 } },
+      undefined,
+      { timeout: PANEL_TOOL_MCP_TIMEOUT_MS },
+    );
+    const content = String(chatRequests[1].messages.find((m) => m.role === "tool")?.content);
+    expect(content).toContain("Recovered a nested panel_call_tool envelope");
+    expect(content).toContain('panel_call_tool {"name": "panel_focus_node"');
+  });
+
+  it("unwraps a nested envelope that names the inner tool as tool_name (#2717)", async () => {
+    const { client: comfy } = fakeMcpClient(COMFY_META);
+    const { client: panel, callTool: panelCall } = fakeMcpClient([
+      { name: "panel_focus_node", description: "Focus a node in the canvas." },
+    ]);
+    const backend = new OllamaBackend({
+      model: "gemma4:e4b",
+      connectToolClients: async () => ({ comfyui: comfy, panel }),
+    });
+    chatScript.push(
+      [
+        {
+          message: {
+            content: "",
+            tool_calls: [
+              {
+                function: {
+                  name: "panel_call_tool",
+                  arguments: { name: "panel_call_tool", args: { tool_name: "panel_focus_node", args: { node_id: 3 } } },
+                },
+              },
+            ],
+          },
+          done: true,
+        },
+      ],
+      [{ message: { content: "focused." }, done: true }],
+    );
+
+    await collect(backend, turnsOf({ text: "focus node 3" }));
+    expect(panelCall).toHaveBeenCalledWith(
+      { name: "panel_focus_node", arguments: { node_id: 3 } },
+      undefined,
+      { timeout: PANEL_TOOL_MCP_TIMEOUT_MS },
+    );
+  });
+
+  it("unwraps args keyed by the inner panel tool name (#2717)", async () => {
+    const { client: comfy } = fakeMcpClient(COMFY_META);
+    const { client: panel, callTool: panelCall } = fakeMcpClient([
+      { name: "panel_focus_node", description: "Focus a node in the canvas." },
+    ]);
+    const backend = new OllamaBackend({
+      model: "gemma4:e4b",
+      connectToolClients: async () => ({ comfyui: comfy, panel }),
+    });
+    chatScript.push(
+      [
+        {
+          message: {
+            content: "",
+            tool_calls: [
+              {
+                function: {
+                  name: "panel_call_tool",
+                  arguments: { name: "panel_call_tool", args: { panel_focus_node: { node_id: 3 } } },
+                },
+              },
+            ],
+          },
+          done: true,
+        },
+      ],
+      [{ message: { content: "focused." }, done: true }],
+    );
+
+    await collect(backend, turnsOf({ text: "focus node 3" }));
+    expect(panelCall).toHaveBeenCalledWith(
+      { name: "panel_focus_node", arguments: { node_id: 3 } },
+      undefined,
+      { timeout: PANEL_TOOL_MCP_TIMEOUT_MS },
+    );
+  });
+
+  it("unwraps a nested name whose payload is sibling fields, not args (#2717)", async () => {
+    const { client: comfy } = fakeMcpClient(COMFY_META);
+    const { client: panel, callTool: panelCall } = fakeMcpClient([
+      { name: "panel_focus_node", description: "Focus a node in the canvas." },
+    ]);
+    const backend = new OllamaBackend({
+      model: "gemma4:e4b",
+      connectToolClients: async () => ({ comfyui: comfy, panel }),
+    });
+    chatScript.push(
+      [
+        {
+          message: {
+            content: "",
+            tool_calls: [
+              {
+                function: {
+                  name: "panel_call_tool",
+                  arguments: { name: "panel_call_tool", args: { name: "panel_focus_node", node_id: 3 } },
+                },
+              },
+            ],
+          },
+          done: true,
+        },
+      ],
+      [{ message: { content: "focused." }, done: true }],
+    );
+
+    await collect(backend, turnsOf({ text: "focus node 3" }));
+    expect(panelCall).toHaveBeenCalledWith(
+      { name: "panel_focus_node", arguments: { node_id: 3 } },
+      undefined,
+      { timeout: PANEL_TOOL_MCP_TIMEOUT_MS },
+    );
+  });
+
+  it("refuses a self-call that names two different inner tools (#2717)", async () => {
+    const { client: comfy } = fakeMcpClient(COMFY_META);
+    const { client: panel, callTool: panelCall } = fakeMcpClient([
+      { name: "panel_focus_node", description: "Focus a node in the canvas." },
+      { name: "panel_clear", description: "Clear the graph." },
+    ]);
+    const backend = new OllamaBackend({
+      model: "gemma4:e4b",
+      connectToolClients: async () => ({ comfyui: comfy, panel }),
+    });
+    chatScript.push(
+      [
+        {
+          message: {
+            content: "",
+            tool_calls: [
+              {
+                function: {
+                  name: "panel_call_tool",
+                  arguments: {
+                    name: "panel_call_tool",
+                    tool_name: "panel_focus_node",
+                    args: { name: "panel_clear" },
+                  },
+                },
+              },
+            ],
+          },
+          done: true,
+        },
+      ],
+      [{ message: { content: "sorry" }, done: true }],
+    );
+
+    await collect(backend, turnsOf({ text: "do the thing" }));
+    expect(panelCall).not.toHaveBeenCalled();
+    const content = String(chatRequests[1].messages.find((m) => m.role === "tool")?.content);
+    expect(content).toContain("is this router itself, not a panel tool");
+    expect(content).toContain("more than one inner tool");
+    expect(content).toContain("panel_focus_node");
+    expect(content).toContain("panel_clear");
+  });
+
+  it("a keyed non-object payload is refused and names the inner tool (#2717)", async () => {
+    const { client: comfy } = fakeMcpClient(COMFY_META);
+    const { client: panel, callTool: panelCall } = fakeMcpClient([
+      { name: "panel_focus_node", description: "Focus a node in the canvas." },
+    ]);
+    const backend = new OllamaBackend({
+      model: "gemma4:e4b",
+      connectToolClients: async () => ({ comfyui: comfy, panel }),
+    });
+    chatScript.push(
+      [
+        {
+          message: {
+            content: "",
+            tool_calls: [
+              {
+                function: {
+                  name: "panel_call_tool",
+                  arguments: { name: "panel_call_tool", args: { panel_focus_node: 3 } },
+                },
+              },
+            ],
+          },
+          done: true,
+        },
+      ],
+      [{ message: { content: "sorry" }, done: true }],
+    );
+
+    await collect(backend, turnsOf({ text: "focus node 3" }));
+    expect(panelCall).not.toHaveBeenCalled();
+    const content = String(chatRequests[1].messages.find((m) => m.role === "tool")?.content);
+    expect(content).toContain("is this router itself, not a panel tool");
+    expect(content).toContain('panel_call_tool {"name": "panel_focus_node"');
+  });
+
+  it("panel_call_tool schema tells the model never to pass the router as name (#2717)", async () => {
+    const { client: comfy } = fakeMcpClient(COMFY_META);
+    const { client: panel } = fakeMcpClient([{ name: "panel_focus_node", description: "x" }]);
+    const backend = new OllamaBackend({
+      model: "gemma4:e4b",
+      connectToolClients: async () => ({ comfyui: comfy, panel }),
+    });
+    chatScript.push([{ message: { content: "hi" }, done: true }]);
+    await collect(backend, turnsOf({ text: "hello" }));
+    const def = (chatRequests[0].tools as Array<{ function: { name: string; parameters: { properties: { name: { description: string } } } } }>).find(
+      (t) => t.function.name === "panel_call_tool",
+    );
+    expect(def?.function.parameters.properties.name.description).toContain("Never panel_call_tool");
+    expect(def?.function.parameters.properties.name.description).toContain("Inner panel tool");
+  });
+
   // #1937 — ChatGPT's multi_tool_use.parallel names each recipient's payload
   // `parameters`, and after the first call in a batch the model copies that key
   // inward instead of `args`. #1824 fixed the headless `call_tool` facade for
