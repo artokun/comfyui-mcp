@@ -9,11 +9,19 @@ All notable changes to this project are documented here. This project adheres to
 ### MCP
 
 #### Changed
+
 - the upload body and the bridge probe's socket chunks are typed so they still compile
   under @types/node 26 (#2770). No behaviour change: `uploadBody` keeps the Buffer's
   offset and length, so a pooled Buffer still uploads its own bytes rather than the
   whole 8KB pool the obvious rewrite would have sent. Unblocks the pending dependabot
   bump, which is red on exactly these three type errors.
+
+## [0.52.180] - 2026-09-03
+
+### MCP
+
+#### Fixed
+- normalize saved workflow filenames (#2779)
 
 ## [0.52.179] - 2026-09-02
 
