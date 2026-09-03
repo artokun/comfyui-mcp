@@ -90,9 +90,23 @@ function rewriteGitUrlHit(hit: NodeSearchHit): NodeSearchHit {
   };
 }
 
-function tryParseJson(text: string): unknown {
+type SearchTextBlock = { type?: string; text?: string };
+type SearchEnvelope = {
+  isError?: boolean;
+  content?: SearchTextBlock[];
+  results?: NodeSearchHit[];
+  note?: string;
+};
+
+function isSearchEnvelope(value: object): value is SearchEnvelope {
+  return !Array.isArray(value);
+}
+
+function tryParseSearchEnvelope(text: string): SearchEnvelope | undefined {
   try {
-    return JSON.parse(text);
+    const parsed: object = JSON.parse(text);
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return undefined;
+    return parsed;
   } catch {
     return undefined;
   }
@@ -103,35 +117,33 @@ function tryParseJson(text: string): unknown {
  * Git URL. Panel nodes_search still keys some hits on the mapping URL; passing
  * that `id` to panel_install_node queues a Manager v4 registry lookup (#1539).
  */
-export function sanitizeSearchInstallIds(value: unknown): unknown {
-  if (!value || typeof value !== "object") return value;
-  const rec = value as { isError?: boolean; content?: Array<{ type?: string; text?: string }>; results?: unknown };
-  if (Array.isArray(rec.content)) {
-    if (rec.isError === true) return value;
+export function sanitizeSearchInstallIds(value: object): object {
+  if (!isSearchEnvelope(value)) return value;
+  if (Array.isArray(value.content)) {
+    if (value.isError === true) return value;
     let changed = false;
-    const content = rec.content.map((block) => {
+    const content = value.content.map((block) => {
       if (!block || block.type !== "text" || typeof block.text !== "string") return block;
-      const parsed = tryParseJson(block.text);
+      const parsed = tryParseSearchEnvelope(block.text);
       if (parsed === undefined) return block;
       const sanitized = sanitizeSearchInstallIds(parsed);
       if (sanitized === parsed) return block;
       changed = true;
       return { ...block, text: JSON.stringify(sanitized, null, 2) };
     });
-    return changed ? { ...rec, content } : value;
+    return changed ? { ...value, content } : value;
   }
-  if (!Array.isArray(rec.results)) return value;
+  if (!Array.isArray(value.results)) return value;
   let changed = false;
-  const results = rec.results.map((raw) => {
+  const results = value.results.map((raw) => {
     if (!raw || typeof raw !== "object") return raw;
-    const hit = raw as NodeSearchHit;
-    if (typeof hit.id !== "string") return raw;
-    const next = rewriteGitUrlHit(hit);
-    if (next !== hit) changed = true;
+    if (typeof raw.id !== "string") return raw;
+    const next = rewriteGitUrlHit(raw);
+    if (next !== raw) changed = true;
     return next;
   });
-  const payload = changed ? { ...rec, results } : rec;
-  const noted = withGitSearchNote(payload as { note?: string; results?: NodeSearchHit[] });
+  const payload = changed ? { ...value, results } : value;
+  const noted = withGitSearchNote(payload);
   return noted === value ? value : noted;
 }
 
@@ -430,7 +442,11 @@ export async function searchPanelNodes(opts: {
 }): Promise<{ via: "panel"; value: unknown } | { via: "fallback"; value: NodeSearchResult }> {
   try {
     const value = await opts.panelSearch();
-    if (!shouldHostSearch(value)) return { via: "panel", value: sanitizeSearchInstallIds(value) };
+    if (!shouldHostSearch(value)) {
+      const sanitized =
+        value && typeof value === "object" ? sanitizeSearchInstallIds(value) : value;
+      return { via: "panel", value: sanitized };
+    }
     if (isManagerTransportFetchFailure(value)) {
       return { via: "fallback", value: await hostSearchAfterTransport(opts, value) };
     }
