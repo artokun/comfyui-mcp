@@ -98,15 +98,15 @@ type SearchEnvelope = {
   note?: string;
 };
 
-function isSearchEnvelope(value: object): value is SearchEnvelope {
+function isSearchEnvelope(value: SearchEnvelope | NodeSearchHit[] | SearchTextBlock[]): value is SearchEnvelope {
   return !Array.isArray(value);
 }
 
 function tryParseSearchEnvelope(text: string): SearchEnvelope | undefined {
   try {
-    const parsed: object = JSON.parse(text);
+    const parsed = JSON.parse(text);
     if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return undefined;
-    return parsed;
+    return parsed as SearchEnvelope;
   } catch {
     return undefined;
   }
@@ -117,7 +117,7 @@ function tryParseSearchEnvelope(text: string): SearchEnvelope | undefined {
  * Git URL. Panel nodes_search still keys some hits on the mapping URL; passing
  * that `id` to panel_install_node queues a Manager v4 registry lookup (#1539).
  */
-export function sanitizeSearchInstallIds(value: object): object {
+export function sanitizeSearchInstallIds(value: SearchEnvelope): SearchEnvelope {
   if (!isSearchEnvelope(value)) return value;
   if (Array.isArray(value.content)) {
     if (value.isError === true) return value;
@@ -444,7 +444,9 @@ export async function searchPanelNodes(opts: {
     const value = await opts.panelSearch();
     if (!shouldHostSearch(value)) {
       const sanitized =
-        value && typeof value === "object" ? sanitizeSearchInstallIds(value) : value;
+        value && typeof value === "object" && !Array.isArray(value)
+          ? sanitizeSearchInstallIds(value as SearchEnvelope)
+          : value;
       return { via: "panel", value: sanitized };
     }
     if (isManagerTransportFetchFailure(value)) {
