@@ -6,6 +6,28 @@ All notable changes to this project are documented here. This project adheres to
 
 ## Unreleased
 
+### MCP
+
+#### Fixed
+- **`extract_deps` no longer names a pack the catalogue cannot prove owns the node (#2765).**
+  It mapped `Power Lora Loader (rgthree)`, `Switch latent [Crystools]` and both Krea2Edit
+  nodes to one unrelated repository, then reported that repository as the missing
+  dependency of an approval-gated preflight — one step from installing unrelated
+  third-party code. A ComfyUI-Manager `nodename_pattern` was being read as an ownership
+  record; it is a naming convention anyone may publish about anyone. Measured against the
+  live catalogue (5,614 packs, 40,656 exactly-owned class names), one entry's `Hunyuan`
+  pattern captures 182 names belonging to 43 other packs, and `Inspire$` is published by
+  two different packs.
+  Now: for an INSTALLED node `/object_info`'s `python_module` wins outright — it is the
+  pack the class actually loaded from, and the only signal Manager's own catalogue cannot
+  launder; for a node that is not installed the catalogue answers only when a single
+  repository claims it, and otherwise the class is reported as ambiguous with every
+  claimant named and is never auto-installed. A pattern broad enough to match a name no
+  pack could own, or one that captures class names two other packs list explicitly, is
+  ignored. The same refusal now applies at the last step before an install, where two
+  repositories publishing the same catalogue title used to collapse into whichever
+  `/getlist` returned first.
+
 ## [0.52.179] - 2026-09-02
 
 ### MCP
