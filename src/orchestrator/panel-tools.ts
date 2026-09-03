@@ -178,6 +178,9 @@ import {
   resolveLegacyInnerPromotedTarget,
   promotedInnerWidgetIsLinkDriven,
   resolveInnerPromotedTarget,
+  resolveHostPromotedWidgetMapping,
+  resolveInnerFromHostPromotedMapping,
+  isHostProvenPromotedStringWrite,
   describePromotedSubgraphEnvelope,
   isInnerLinkDrivenWriteWarning,
   shapeParentAuthoritativePromotedWrite,
@@ -8281,7 +8284,22 @@ const PROMOTED_PREFLIGHT_READ_OPTIONS: PanelToolCallOptions = {
 type PromotedTargetProbe = {
   scope: QueriedNodeScope | null;
   rootGraphIdentity: string | null;
+  hostNode: Record<string, unknown> | null;
 };
+
+function matchingQueriedHostNode(
+  nodes: unknown,
+  nodeId: unknown,
+): Record<string, unknown> | null {
+  if (!Array.isArray(nodes) || nodes.length !== 1) return null;
+  const row = nodes[0];
+  if (!row || typeof row !== "object" || Array.isArray(row)) return null;
+  const rec = row as Record<string, unknown>;
+  const id = canonicalQueriedNodeId(rec.id);
+  const requested = canonicalQueriedNodeId(nodeId);
+  if (!id || !requested || id !== requested) return null;
+  return rec;
+}
 
 async function readPromotedTargetScope(
   ctx: PanelToolCtx,
@@ -8294,14 +8312,16 @@ async function readPromotedTargetScope(
     fields: "detail",
     limit: 1,
   }, undefined, undefined, undefined, options);
-  if (probe.isError) return { scope: null, rootGraphIdentity: null };
+  if (probe.isError) return { scope: null, rootGraphIdentity: null, hostNode: null };
   const payload = parseToolResultJson(probe);
   if (parseViewingScope(payload?.viewing)?.scope === "root") {
     rememberLiveRootViewing(ctx, payload?.viewing);
   }
+  const normalized = normalizeGraphQueryResult(probe);
   return {
     scope: parseVerifiedQueriedNodeScope(payload, nodeId),
     rootGraphIdentity: parseRootGraphIdentity(payload),
+    hostNode: matchingQueriedHostNode(normalized.nodes, nodeId),
   };
 }
 
@@ -8976,6 +8996,7 @@ async function preparePromotedWidgetWrite(
     PROMOTED_PREFLIGHT_READ_OPTIONS,
   );
   let targetScope = targetProbe.scope;
+  let hostNode = targetProbe.hostNode;
   const rootGraphIdentity = targetProbe.rootGraphIdentity;
   // #2518 — a live root query names the current root workflow instance. Do not
   // enter the promoted-subgraph identity path for an ordinary (or unproven)
@@ -9069,6 +9090,7 @@ async function preparePromotedWidgetWrite(
           PROMOTED_PREFLIGHT_READ_OPTIONS,
         );
         targetScope = targetProbe.scope;
+        hostNode = targetProbe.hostNode;
         if (targetScope?.activeView === "root" && targetScope.node === "ordinary") {
           const driftAfterMapping = panelBindingDriftReason(
             ctx,
@@ -9278,23 +9300,39 @@ async function preparePromotedWidgetWrite(
       "graph_get_subgraph did not publish a verifiable workflow and viewing-scope identity",
     );
   }
-  const inner = resolvePromotedWriteTarget(
+  let inner = resolvePromotedWriteTarget(
     payload,
     widget,
     nodeId as number | string,
     publishesCompleteTerminalWitness,
   );
+  // #2791 — official Qwen Image host 76 lists input label `prompt` on widget
+  // `text`. When the terminal witness is incomplete, that unique host mapping
+  // (and optional proxyWidgets inner id) is the rail to write. Do not unpack.
+  const hostMapping = resolveHostPromotedWidgetMapping(hostNode, widget);
+  if (hostMapping && !inner?.parentRail) {
+    const mappedInner = resolveInnerFromHostPromotedMapping(
+      payload,
+      hostMapping,
+      nodeId as number | string,
+    );
+    if (mappedInner) inner = mappedInner;
+  }
+  const hostProvenString = isHostProvenPromotedStringWrite(hostMapping, inner);
   const terminalEvidenceError = promotedTerminalEvidenceError(payload, widget);
   if (terminalEvidenceError) {
     // #2393 — an incomplete OWN entry may still uniquely name a rail-backed
-    // inner COMBO. Any other witness error, including an unadvertised duplicate
-    // that would otherwise fall through to the legacy same-name scan, stays a
+    // inner COMBO. #2791 — a host-proven STRING rail writes the enclosing
+    // subgraph widget instead of that inner. Any other witness error stays a
     // hard refusal.
     const railBackedCombo =
       terminalEvidenceError === "the promoted-terminal witness was incomplete or unresolved" &&
       inner?.terminal?.chainDepth === 0 &&
-      !inner.parentRail;
-    if (!railBackedCombo) return promotedWriteRefusal(widget, terminalEvidenceError);
+      !inner.parentRail &&
+      !hostProvenString;
+    if (!railBackedCombo && !hostProvenString) {
+      return promotedWriteRefusal(widget, terminalEvidenceError);
+    }
   }
   if (!inner) {
     if (publishesCompleteTerminalWitness) {
@@ -9413,18 +9451,22 @@ async function preparePromotedWidgetWrite(
   return {
     kind: "promoted-write",
     outerNodeId: nodeId as number | string,
-    hostWidget: inner.parentRail?.widget ?? widget,
+    hostWidget: hostProvenString && hostMapping
+      ? hostMapping.hostWidget
+      : inner.parentRail?.widget ?? widget,
     ...(outerScope ? { outerScope } : {}),
     ...(outerNodeType ? { outerNodeType } : {}),
     ...(outerNodeIdentity ? { outerNodeIdentity } : {}),
     inner,
     innerNodeType,
-    innerLinkDriven: promotedInnerWidgetIsLinkDriven(
-      innerNode,
-      inner.widget,
-      inner.terminal,
-      inner.parentRail,
-    ),
+    innerLinkDriven:
+      hostProvenString ||
+      promotedInnerWidgetIsLinkDriven(
+        innerNode,
+        inner.widget,
+        inner.terminal,
+        inner.parentRail,
+      ),
     ...(inner.terminal ? { terminal: inner.terminal } : {}),
     scope,
     binding: {
