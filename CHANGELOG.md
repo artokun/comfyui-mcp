@@ -28,6 +28,13 @@ All notable changes to this project are documented here. This project adheres to
   repositories publishing the same catalogue title used to collapse into whichever
   `/getlist` returned first.
 
+## [0.52.180] - 2026-09-03
+
+### MCP
+
+#### Fixed
+- normalize saved workflow filenames (#2779)
+
 ## [0.52.179] - 2026-09-02
 
 ### MCP
