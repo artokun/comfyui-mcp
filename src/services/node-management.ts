@@ -1737,6 +1737,8 @@ interface ManagerEnqueueOptions {
   rejectEmptyEnqueue?: boolean;
   /** Allow an empty v4 unified enqueue to proceed to drain/verification. */
   allowEmptyV2Enqueue?: boolean;
+  /** Observe the normal v4 empty-ack path without changing its outcome. */
+  onEmptyV2Enqueue?: () => void;
 }
 
 type ManagerEnqueueResponse = Record<string, unknown> | string | null | undefined;
@@ -1749,10 +1751,14 @@ function assertManagerEnqueueResponse(
   path: string,
   base: string,
 ): void {
+  const empty = response === undefined || response === null;
+  if (empty && api === "v2" && options.allowEmptyV2Enqueue) {
+    options.onEmptyV2Enqueue?.();
+    return;
+  }
   if (
     !options.rejectEmptyEnqueue ||
-    (response !== undefined && response !== null) ||
-    (api === "v2" && options.allowEmptyV2Enqueue)
+    !empty
   ) return;
   throw new NodeManagementError(
     `ComfyUI-Manager returned a successful but empty response for the ${kind} enqueue ` +
@@ -4182,10 +4188,16 @@ export interface InstallOptions {
   localCloneFallback?: "verified-only";
   /**
    * Internal caller policy for an empty Manager v4 Git enqueue. Direct installs
-   * can drain and verify before cloning; budgeted apply_manifest keeps the
-   * UNKNOWN/no-background-write behavior.
+   * can drain and verify before cloning; apply_manifest enables the queue path
+   * but separately disables a late local fallback after an empty acknowledgement.
    */
   allowEmptyV2Enqueue?: boolean;
+  /**
+   * Internal apply_manifest policy: an empty v4 acknowledgement may be the
+   * normal response, but an unresolved/absent post-state must not trigger a
+   * speculative local clone after the manifest call has returned.
+   */
+  allowLocalFallbackAfterEmptyV2Enqueue?: boolean;
   /** Call-scoped Manager base captured with the target generation at operation entry. */
   managerBase?: string;
   /** Monotonic ComfyUI target generation captured with managerBase. */
@@ -4527,6 +4539,7 @@ async function installCustomNodeImpl(
     // Start and drain the queue first, then the exact installed-pack/disk
     // verification below decides whether a local clone is still needed.
     let refusedBy: number | undefined;
+    let emptyV2Enqueue = false;
     const enqueue = async (): Promise<unknown> =>
       await queueManagerTask(
       "install",
@@ -4568,6 +4581,9 @@ async function installCustomNodeImpl(
       {
         rejectEmptyEnqueue: true,
         allowEmptyV2Enqueue: opts.allowEmptyV2Enqueue !== false,
+        onEmptyV2Enqueue: () => {
+          emptyV2Enqueue = true;
+        },
       },
     );
 
@@ -4656,13 +4672,33 @@ async function installCustomNodeImpl(
     // VERIFY: the Manager's installed-pack list is the FIRST witness — but it is
     // Manager's own bookkeeping, not the filesystem, so #2714 crosses it with a
     // disk scan before any success wording (see diskCorroboratesManagerInstall).
-    // Three outcomes, and only one of them writes: a scan that finds the pack
-    // ABSENT falls through to the same direct clone an unregistered pack takes; a
-    // HUSK throws; a scan that could not answer (remote, no proven scan root, an
+    // Three outcomes, and only one of them writes: for ordinary direct installs,
+    // a scan that finds the pack ABSENT falls through to the same direct clone an
+    // unregistered pack takes; apply_manifest disables that fallback after an
+    // empty v4 acknowledgement because the Manager task may still have landed.
+    // A HUSK throws; a scan that could not answer (remote, no proven scan root, an
     // unreadable custom_nodes) keeps the Manager result and says the disk was not
     // checked. "Could not look" is never folded into "not there".
     const installed = await listInstalledNodesAt(managerBase).catch(
-      () => [] as InstalledNode[],
+      (err) => {
+        if (emptyV2Enqueue) {
+          const listError = err instanceof Error ? err.message : String(err);
+          throw new NodeManagementError(
+            `ComfyUI-Manager accepted the git install with an empty v4 response and the queue ` +
+              `drained, but its installed-pack list could not be read (${listError}). ` +
+              `The result is UNKNOWN; no local fallback is authorized because that could ` +
+              `duplicate a Manager task whose post-state cannot be verified. Verify the pack ` +
+              `state before reissuing the install.`,
+            {
+              kind: "manager-enqueue-empty-unverified",
+              base: managerBase,
+              repoName,
+              listError,
+            },
+          );
+        }
+        return [] as InstalledNode[];
+      },
     );
     assertInstallTargetStable(targetGeneration, managerBase);
     const listedNode = findInstalledNode(gitId, installed);
@@ -4673,6 +4709,34 @@ async function installCustomNodeImpl(
       listedNode !== undefined &&
       !listedNode.cnrId &&
       !gitOriginMatchesRequested(gitId, listedNode.auxId);
+    const rejectEmptyV2Fallback = (
+      verification: string,
+      extra: Record<string, unknown> = {},
+    ): never => {
+      throw new NodeManagementError(
+        `ComfyUI-Manager accepted the git install with an empty v4 response and the queue ` +
+          `drained, but ${verification}. The result is UNKNOWN; no local fallback is ` +
+          `authorized because that could duplicate a Manager task that completed without a ` +
+          `visible matching post-state. Verify the pack state before reissuing the install.`,
+        {
+          kind: "manager-enqueue-empty-unverified",
+          base: managerBase,
+          repoName,
+          ...extra,
+        },
+      );
+    };
+    if (
+      emptyV2Enqueue &&
+      opts.allowLocalFallbackAfterEmptyV2Enqueue === false &&
+      (listedNode === undefined || originMismatch)
+    ) {
+      rejectEmptyV2Fallback(
+        originMismatch
+          ? `it listed a different source origin for "${repoName}"`
+          : `it did not provide a matching installed-pack record for "${repoName}"`,
+      );
+    }
     /** #2714 — why the Manager's own "installed" verdict was not taken. */
     let uncorroboratedNote: string | undefined;
     if (listedNode && !originMismatch) {
@@ -4685,6 +4749,15 @@ async function installCustomNodeImpl(
           ? undefined
           : diskCorroboratesManagerInstall(gitId, listedNode, presenceCtx.diskRoot);
       if (corroboration?.state === "absent") {
+        if (
+          emptyV2Enqueue &&
+          opts.allowLocalFallbackAfterEmptyV2Enqueue === false
+        ) {
+          rejectEmptyV2Fallback(
+            `it still lists "${repoName}", but no matching pack exists under ${corroboration.scanned}`,
+            { scanned: corroboration.scanned },
+          );
+        }
         uncorroboratedNote =
           `ComfyUI-Manager drained the install task and still lists "${repoName}" in its ` +
           `installed-pack list, but NO matching pack exists under ${corroboration.scanned} ` +
