@@ -220,10 +220,45 @@ function groupServesModelDownloads(categories: readonly ExtraPathCategory[]): bo
 }
 
 /**
+ * Does every model-serving category in this group sit exactly at
+ * `<base>/<category>`? Only then is the base a GENERIC models tree.
+ *
+ * This is the whole constraint on exposing it. `base_path` is the ANCHOR for each
+ * configured category path, not a models root by itself: with
+ * `base_path: D:/AI` + `checkpoints: models/checkpoints`, ComfyUI registers
+ * `D:/AI/models/checkpoints`, so publishing `D:/AI` as generic would resolve
+ * `D:/AI/checkpoints` — a directory the server never scans — and would also
+ * accept target categories the group never declared (review of #2787).
+ *
+ * The reporter's own config is the shape that IS generic (`base_path E:/models`
+ * with `poses -> poses/`), so this keeps #2787 fixed for the case it was filed
+ * for and declines the case it would have broken. A group that remaps even one
+ * category loses the base entirely: a rejected model_root is a refusal the caller
+ * can act on, while a wrong directory is a download the server never sees.
+ */
+function baseIsGenericModelsTree(
+  categories: readonly ExtraPathCategory[],
+  base: string,
+): boolean {
+  const root = resolve(base);
+  const serving = categories.filter(
+    (c) => !CODE_EXTRA_CATEGORIES.has(c.category.trim().toLowerCase()),
+  );
+  if (serving.length === 0) return false;
+  return serving.every((c) =>
+    c.paths.every((p) => {
+      const dir = isAbsolute(p) ? resolve(p) : resolve(root, p);
+      return dir === resolve(root, c.category.trim());
+    }),
+  );
+}
+
+/**
  * list_paths reports each group's configured `base_path`. Category expansion
  * still happens; omitting the base made concurrent `download_civitai` calls
  * reject that same proven model_root while siblings accepted it (#2787).
- * Relative bases stay out — they are unproven from this process.
+ * Relative bases stay out — they are unproven from this process. A base that is
+ * only an anchor, not a models tree, stays out too — see above.
  */
 function pushProvenGroupBase(
   roots: ExtraModelRoot[],
@@ -232,6 +267,7 @@ function pushProvenGroupBase(
   base: string | undefined,
 ): void {
   if (!base || !groupServesModelDownloads(categories) || !isProvenAbsolutePath(base)) return;
+  if (!baseIsGenericModelsTree(categories, base)) return;
   roots.push({ category: GENERIC_MODELS_CATEGORY, dir: resolve(base), group });
 }
 

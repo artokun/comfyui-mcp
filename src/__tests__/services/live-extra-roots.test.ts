@@ -272,6 +272,53 @@ describe("getLiveExtraModelRoots — fail-closed authorization", () => {
     });
   });
 
+  it("does not expose a base_path that only ANCHORS remapped categories (#2787 review)", async () => {
+    // `base_path` is the anchor for each configured category path, not a models
+    // tree by itself. Here ComfyUI registers <base>/models/checkpoints, so
+    // publishing <base> as generic would resolve <base>/checkpoints — a directory
+    // the server never scans — and would accept categories this group never
+    // declared. A rejected model_root is a refusal the caller can act on; a wrong
+    // directory is a download nobody ever sees.
+    const liveRoot = await trackTmp();
+    const anchored = resolve("/Volumes/Anchored");
+    await writeFile(
+      join(liveRoot, "extra_model_paths.yaml"),
+      ["shared:", `  base_path: ${anchored}`, "  checkpoints: models/checkpoints"].join("\n"),
+      "utf-8",
+    );
+    const res = await getLiveExtraModelRoots(reachable(["python", join(liveRoot, "main.py")]));
+    expect(res.roots).toContainEqual({
+      category: "checkpoints",
+      dir: resolve(anchored, "models", "checkpoints"),
+      group: "shared",
+    });
+    expect(res.roots).not.toContainEqual({
+      category: "models",
+      dir: anchored,
+      group: "shared",
+    });
+  });
+
+  it("a MIXED group loses the base rather than exposing a partly-wrong tree (#2787 review)", async () => {
+    // One remapped category is enough: the generic entry carries a single label
+    // that means "any subfolder", so it cannot be right for `poses` and wrong for
+    // `checkpoints` at the same time.
+    const liveRoot = await trackTmp();
+    const mixed = resolve("/Volumes/Mixed");
+    await writeFile(
+      join(liveRoot, "extra_model_paths.yaml"),
+      ["shared:", `  base_path: ${mixed}`, "  poses: poses/", "  checkpoints: models/checkpoints"].join("\n"),
+      "utf-8",
+    );
+    const res = await getLiveExtraModelRoots(reachable(["python", join(liveRoot, "main.py")]));
+    expect(res.roots).not.toContainEqual({ category: "models", dir: mixed, group: "shared" });
+    expect(res.roots).toContainEqual({
+      category: "poses",
+      dir: resolve(mixed, "poses"),
+      group: "shared",
+    });
+  });
+
   it("does not treat a custom_nodes-only group base_path as a models download root (#2787)", async () => {
     const liveRoot = await trackTmp();
     const codeRoot = resolve("/opt/custom-nodes-base");
