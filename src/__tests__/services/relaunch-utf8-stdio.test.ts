@@ -76,6 +76,40 @@ describe("#2693 a relaunch whose stdout is a file gets UTF-8", () => {
   // The helper is correct in isolation on every platform; it only CHANGES the
   // spawn on Windows, so the behavioural coverage above runs for real on one CI
   // leg out of three. This pins the wiring on all of them — a helper nothing
+  // Windows environment names are CASE-INSENSITIVE, and these paths hand this
+  // function a PLAIN OBJECT rather than process.env. Measured on Windows:
+  //
+  //   PythonUtf8=0 node -e '...'
+  //     process.env.PYTHONUTF8        -> "0"
+  //     ({...process.env}).PYTHONUTF8 -> undefined   (key present as PythonUtf8)
+  //
+  // So a case-sensitive read misses the documented opt-out on exactly the paths
+  // that reconstruct an environment, and writes a SECOND key differing only in
+  // case — two spellings of one variable in the child's block.
+  it("honours an explicit opt-out written in ANY case", () => {
+    const env = { PATH: "C:/x", PythonUtf8: "0" };
+    const out = withUtf8StdioEnv(env, { platform: "win32" });
+    expect(out?.PythonUtf8).toBe("0");
+    expect(Object.keys(out ?? {}).filter((k) => /^pythonutf8$/i.test(k))).toEqual(["PythonUtf8"]);
+  });
+
+  it("honours a lower-cased PYTHONIOENCODING too", () => {
+    const env = { PATH: "C:/x", pythonioencoding: "cp949" };
+    const out = withUtf8StdioEnv(env, { platform: "win32" });
+    expect(out?.pythonioencoding).toBe("cp949");
+    expect(Object.keys(out ?? {}).filter((k) => /^pythonioencoding$/i.test(k))).toEqual([
+      "pythonioencoding",
+    ]);
+  });
+
+  it("fills an EMPTY oddly-cased var in place instead of shadowing it", () => {
+    // A blank value is not an explicit choice, so it is filled — but through the
+    // key that is already there, so the child never sees two spellings.
+    const out = withUtf8StdioEnv({ PATH: "C:/x", PythonUtf8: "" }, { platform: "win32" });
+    expect(out?.PythonUtf8).toBe("1");
+    expect(Object.keys(out ?? {}).filter((k) => /^pythonutf8$/i.test(k))).toEqual(["PythonUtf8"]);
+  });
+
   // calls would leave every test above green.
   it("is applied at the relaunch spawn, on the env the plan resolved", () => {
     const src = readFileSync(

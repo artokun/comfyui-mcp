@@ -811,13 +811,37 @@ export function withUtf8StdioEnv(
   // `env: undefined` means "inherit this process's environment", so the values
   // already in force are the base ones — that is what the child would have got.
   const effective = env ?? opts.baseEnv ?? process.env;
+  // Windows environment names are CASE-INSENSITIVE, and `effective` is often a
+  // plain object rather than `process.env`. Node's `process.env` is a proxy that
+  // honours that (`process.env.PYTHONUTF8` reads a var set as `PythonUtf8`), but a
+  // SPREAD of it is an ordinary object and loses it — measured, not assumed:
+  //
+  //   PythonUtf8=0 node -e '...'
+  //     process.env.PYTHONUTF8        -> "0"
+  //     ({...process.env}).PYTHONUTF8 -> undefined     (key present as PythonUtf8)
+  //
+  // A case-sensitive read here would therefore miss a user's explicit opt-out on
+  // exactly the paths that materialise an env (the Stability Matrix
+  // reconstruction, or any caller passing one), and add a SECOND key differing
+  // only in case. That is the opposite of this function's stated rule, in a
+  // function that only ever runs on Windows.
+  const keyOf = (name: string): string | undefined => {
+    const wanted = name.toLowerCase();
+    return Object.keys(effective).find((k) => k.toLowerCase() === wanted);
+  };
   const set = (name: string) => {
-    const v = effective[name];
+    const key = keyOf(name);
+    const v = key === undefined ? undefined : effective[key];
     return typeof v === "string" && v.trim() !== "";
   };
   if (set("PYTHONUTF8") && set("PYTHONIOENCODING")) return env;
   const out: NodeJS.ProcessEnv = { ...effective };
-  if (!set("PYTHONUTF8")) out.PYTHONUTF8 = "1";
-  if (!set("PYTHONIOENCODING")) out.PYTHONIOENCODING = "utf-8";
+  // Write through the EXISTING key when one is present but empty, so a blank
+  // `PythonUtf8=` is filled in rather than shadowed by a second spelling.
+  const assign = (name: string, value: string) => {
+    out[keyOf(name) ?? name] = value;
+  };
+  if (!set("PYTHONUTF8")) assign("PYTHONUTF8", "1");
+  if (!set("PYTHONIOENCODING")) assign("PYTHONIOENCODING", "utf-8");
   return out;
 }
