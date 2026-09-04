@@ -11,6 +11,8 @@
 // first place, so recovery REFUSES unless the OS reading is exact AND names the same
 // script — the same file from two independent sources.
 
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import {
   interpreterFlagsFromOsArgv,
@@ -186,5 +188,38 @@ describe("#2693 a value-taking interpreter flag survives the relaunch", () => {
     expect(recover([PY, "--jit", "yes", SCRIPT])).toEqual([]);
     expect(recover([PY, "-X", SCRIPT])).toEqual([]);
     expect(recover([PY, "-X", "-s", SCRIPT])).toEqual([]);
+  });
+});
+
+describe("#2693 script corroboration is HOST-AWARE", () => {
+  // The comparison folded case and rewrote backslashes on every platform. That is
+  // correct on Windows and wrong on Linux, where /ComfyUI/main.py and
+  // /comfyui/main.py are different files and a backslash is a legal filename
+  // character — so two DIFFERENT scripts could corroborate and splice interpreter
+  // flags out of a command line belonging to something else.
+  //
+  // Reachable: argvFidelity "exact" is also set on the Linux /proc/<pid>/cmdline
+  // path (live-interpreter.ts), where the kernel NUL-separates argv. Only the `ps`
+  // fallback is "flattened".
+  it("uses the module's own host-aware path rule, not a restated one", () => {
+    const src = readFileSync(
+      fileURLToPath(new URL("../../services/process-control.ts", import.meta.url)),
+      "utf8",
+    );
+    const i = src.indexOf("export function interpreterFlagsFromOsArgv");
+    expect(i).toBeGreaterThan(-1);
+    const fn = src.slice(i, i + 2600);
+    expect(fn).toMatch(/sameRecoveryPath\(tok, script\)/);
+    // The regression: an unconditional lowercase/backslash fold inside this function.
+    expect(fn).not.toMatch(/\.toLowerCase\(\) ===/);
+  });
+
+  it("still corroborates a Windows argv that differs only in case and separator", () => {
+    // normalizeRecoveryPath folds case and separators on win32, so this must keep
+    // working there; off win32 the same input is legitimately two different files.
+    const script = "ComfyUI" + String.fromCharCode(92) + "main.py";
+    const osArgv = ["C:/py/python.exe", "-s", "comfyui/MAIN.PY", "--listen"];
+    const flags = interpreterFlagsFromOsArgv({ argv: [script, "--listen"], osArgv, osArgvExact: true });
+    expect(flags).toEqual(process.platform === "win32" ? ["-s"] : []);
   });
 });

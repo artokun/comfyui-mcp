@@ -2875,10 +2875,20 @@ export function interpreterFlagsFromOsArgv(info: {
   const os = info.osArgv ?? [];
   const script = info.argv[0];
   if (!script || os.length < 2) return [];
-  const same = (a: string, b: string): boolean =>
-    a.split(String.fromCharCode(92)).join("/").toLowerCase() ===
-    b.split(String.fromCharCode(92)).join("/").toLowerCase();
-  const at = os.findIndex((tok, i) => i > 0 && same(tok, script));
+  // Corroboration is HOST-AWARE, via the module's existing rule rather than a
+  // second one restated here. The original folded case and rewrote backslashes
+  // unconditionally, which is right on Windows and wrong everywhere else:
+  // `/ComfyUI/main.py` and `/comfyui/main.py` are different files on Linux, and a
+  // backslash is a legal character in a POSIX filename, so two DIFFERENT scripts
+  // could corroborate each other and splice flags from a command line that is not
+  // this process's.
+  //
+  // Not unreachable, which is what made it worth changing: `argvFidelity: "exact"`
+  // is set on the Linux `/proc/<pid>/cmdline` path too (live-interpreter.ts:371) —
+  // the kernel NUL-separates argv there, so it is exact by construction. Only the
+  // `ps` fallback is "flattened". `osArgvExact` is therefore true on Linux and this
+  // comparison really runs there.
+  const at = os.findIndex((tok, i) => i > 0 && sameRecoveryPath(tok, script));
   if (at <= 0) return [];
   const pre = os.slice(1, at);
   // A BARE token before the script is a value belonging to a flag this code does not
