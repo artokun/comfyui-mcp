@@ -71,12 +71,15 @@ import {
   resetObjectInfoCache,
   resetClient,
 } from "../../comfyui/client.js";
+import { setConnectedPanelOrigins } from "../../comfyui/fetch.js";
 import {
   PanelComfyUIReadRelayError,
   PanelImageRelayError,
   PANEL_COMFYUI_READ_MAX_BYTES,
   PANEL_COMFYUI_READ_OBJECT_INFO_MAX_BYTES,
 } from "../../services/panel-image-relay.js";
+import { resolvePanelReadOrigin } from "../../services/panel-fallback-target.js";
+import { ComfyUIError } from "../../utils/errors.js";
 
 function transportFailure(): TypeError {
   return new TypeError(
@@ -95,6 +98,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  setConnectedPanelOrigins(null);
   vi.unstubAllGlobals();
 });
 
@@ -288,4 +292,81 @@ describe("authenticated panel-backed ComfyUI read fallback (#2283)", () => {
     expect(failure?.message).toContain("read fallback failed safely (PANEL_FETCH_FAILED).");
     expect(failure?.message).not.toContain("The panel reported:");
   });
+});
+
+describe("connected-panel read fallback origin/API base (#2836)", () => {
+  it("does not throw when api_base is undefined — origin stays unproven", () => {
+    expect(resolvePanelReadOrigin(["http://127.0.0.1:8188"], undefined)).toEqual({
+      kind: "unproven",
+    });
+  });
+
+  function apiBaseCrash(): PanelComfyUIReadRelayError {
+    return new PanelComfyUIReadRelayError(
+      "The connected panel could not read ComfyUI.",
+      "PANEL_FETCH_FAILED",
+      false,
+      "Cannot read properties of undefined (reading api_base)",
+    );
+  }
+
+  it.each(["getHistory", "getSystemStats"] as const)(
+    "%s fails closed when the published panel origin is unproven",
+    async (name) => {
+      fetchApi.mockRejectedValue(transportFailure());
+      setConnectedPanelOrigins(() => ["not-an-origin", "ws://localhost:8188"]);
+
+      const err = await (name === "getHistory" ? getHistory() : getSystemStats()).then(
+        () => undefined,
+        (error: unknown) => error,
+      );
+      expect(err).toBeInstanceOf(ComfyUIError);
+      expect(err).toMatchObject({
+        code: "PANEL_ORIGIN_UNPROVEN",
+        message: expect.stringMatching(/ECONNREFUSED|fetch failed/),
+      });
+      expect(String(err instanceof Error ? err.message : err)).toContain("fetch_comfyui_read was not dispatched");
+      expect(panelRead).not.toHaveBeenCalled();
+    },
+  );
+
+  it("still reads history through the panel when the origin is proven", async () => {
+    fetchApi.mockRejectedValue(transportFailure());
+    setConnectedPanelOrigins(() => ["http://127.0.0.1:8188"]);
+    const body = '{"prompt-1":{"status":{"status_str":"success"}}}';
+    panelRead.mockResolvedValue({
+      operation: "history",
+      body,
+      contentType: "application/json",
+      bytes: Buffer.byteLength(body, "utf8"),
+    });
+
+    await expect(getHistory()).resolves.toEqual({
+      "prompt-1": { status: { status_str: "success" } },
+    });
+    expect(panelRead).toHaveBeenCalledWith("history");
+  });
+
+  it.each(["getHistory", "getSystemStats"] as const)(
+    "%s names a transport diagnostic instead of throwing on undefined api_base",
+    async (name) => {
+      fetchApi.mockRejectedValue(transportFailure());
+      setConnectedPanelOrigins(() => ["http://127.0.0.1:8188"]);
+      panelRead.mockRejectedValue(apiBaseCrash());
+
+      const err = await (name === "getHistory" ? getHistory() : getSystemStats()).then(
+        () => undefined,
+        (error: unknown) => error,
+      );
+      expect(err).toBeInstanceOf(ComfyUIError);
+      expect(err).toMatchObject({
+        code: "PANEL_API_BASE_UNAVAILABLE",
+        message: expect.stringMatching(/ECONNREFUSED|fetch failed/),
+      });
+      const message = String(err instanceof Error ? err.message : err);
+      expect(message).toContain("transport diagnostic");
+      expect(message).not.toContain("The panel reported:");
+      expect(panelRead).toHaveBeenCalledWith(name === "getHistory" ? "history" : "system_stats");
+    },
+  );
 });
