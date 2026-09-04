@@ -31,7 +31,7 @@ function fakeBridge(): UiBridge {
 
 describe("panel#291 the deferral opt-out is scoped to the probe tools", () => {
   let client: Client;
-  let close: () => Promise<void>;
+  let close: (() => Promise<void>) | undefined;
   let tools: Array<{ name: string; _meta?: Record<string, unknown> }>;
 
   beforeAll(async () => {
@@ -51,7 +51,10 @@ describe("panel#291 the deferral opt-out is scoped to the probe tools", () => {
   });
 
   afterAll(async () => {
-    await close();
+    // Guarded: if beforeAll throws, `close` is never assigned, and an unguarded
+    // call here replaces the real construction error with "close is not a
+    // function" — which is what happened the first time this suite failed.
+    if (close) await close();
   });
 
   it("the survey is meaningful — the panel surface is actually present", () => {
