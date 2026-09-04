@@ -6,8 +6,11 @@ All notable changes to this project are documented here. This project adheres to
 
 ## Unreleased
 
+
 ### MCP
+
 #### Fixed
+- **`list_packs` `action:"list_templates"` uses the bound panel's `fetch_comfyui_read` relay when the template-index HTTP origin is unproven, and fails closed with `NO_PANEL_ORIGIN` when that origin stays unproven (#2839).** Compact `call_tool` listed templates through a loopback-only origin gate even while `panel_graph_outline` had a live bound canvas (`canvas_binding` / `graph_binding` bound). Native panel replies that carry the viewing witness are accepted; a unique published origin that matches the child's configured target may still be listed; mixed or malformed origin sets are not contacted.
 - **download_model action:"status" now reports what the download cache is holding (#1477).** An UNREADABLE cache directory is now named and reported as unknown rather than silently omitted: "missing" and "there but unreadable" were one value, and the note treated both as nothing to say — leaving the one user who most needs the directory named back at the disk-usage treemap both reporters used.
 - **an out-of-space refusal now names the DESTINATION volume (#1477).** `insufficientCacheSpaceMessage` has accepted `destDir`/`destFree` since it was written — it says, when the destination has room and the staging cache does not, that this is one setting rather than a fatal error. No caller ever passed them, so that clause could not fire. The final destination is threaded from `downloadWithCache` (the only layer that knows it; below it every path is the CACHE path) down to the precheck. That is the reported shape exactly: 32 GB bound for D:, staged on a C: that could not hold it.
 
