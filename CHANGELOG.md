@@ -6,8 +6,11 @@ All notable changes to this project are documented here. This project adheres to
 
 ## Unreleased
 
+
 ### MCP
+
 #### Fixed
+- **History/completion harvests a ComfyUI media ref under an unrecognised key (`dexter_video`, `nkd_video`) instead of only `images`/`videos`/`video`/`gifs` (#2845).** SaveVideoDexter emits `{filename, subfolder?, type?}` as a single object (or a one-item array); `buildCompletionNotification` / the panel_run watchdog now collect that one-level shape and classify by extension so completion names the mp4. Nested non-media values stay ignored. Panel v0.15.163 already collects the array form of this shape (#2128).
 - **the pi backend works when pi was installed from npm on Windows (#2835).** `npm i -g pi`
   writes `pi` (an extensionless bash script), `pi.cmd` and `pi.ps1`, and no `pi.exe`. Node
   spawns the first with ENOENT and the second with EINVAL (measured), and discovery returned
