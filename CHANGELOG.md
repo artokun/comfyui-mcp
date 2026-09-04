@@ -6,11 +6,9 @@ All notable changes to this project are documented here. This project adheres to
 
 ## Unreleased
 
-
 ### MCP
 
 #### Fixed
-- **`get_workflow` `action:"strip"` does not Win32-resolve a remote Linux path on the MCP host (#2782).** Against a remote ComfyUI, an absolute POSIX `path` such as `/mydata/.../models/workflows/example.json` is no longer opened as `C:\mydata\...`. Library-shaped tails (`user/default/workflows`, `user/workflows`, `models/workflows`) are fetched from that server's userdata API; any other remote absolute path is refused instead of a local ENOENT.
 - **a relaunch keeps the Python INTERPRETER flags (#2693).** `-s`, `-E`, `-I`, `-B`, `-O` and `-u`
   are consumed by CPython before `sys.argv` exists, so a relaunch rebuilt from the server's own
   `sys.argv` dropped them — the reporter's portable install needs `-s`, and losing it changes
@@ -20,6 +18,13 @@ All notable changes to this project are documented here. This project adheres to
   tokens before the script that begin with `-` are taken; a bare value there is an argument to a
   flag this code does not model.
 - **a relaunch keeps `-X utf8`, the encoding flag #2693 is actually about (#2693).** Interpreter-flag recovery refused any command line carrying a flag with a separate value, so a server started `python -X utf8 -s main.py` relaunched without it and the CP949 workaround was silently lost. `-X` and `-W` always consume the next token, so they are taken as pairs; every other bare token still reconstructs nothing rather than rebuilding a command the server never had. Measured against a real Windows `Win32_Process.CommandLine`, which is where the gap showed up — the unit tests supplied the argv they expected.
+
+## [0.52.190] - 2026-09-04
+
+### MCP
+
+#### Fixed
+- **`get_workflow` `action:"strip"` does not Win32-resolve a remote Linux path on the MCP host (#2782, #2811).** Against a remote ComfyUI, an absolute POSIX `path` such as `/mydata/.../models/workflows/example.json` is no longer opened as `C:\mydata\...`. Library-shaped tails (`user/default/workflows`, `user/workflows`, `models/workflows`) are fetched from that server's userdata API; any other remote absolute path is refused instead of a local ENOENT.
 
 ## [0.52.189] - 2026-09-03
 
