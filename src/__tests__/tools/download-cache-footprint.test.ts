@@ -182,6 +182,40 @@ describe('#1477 the WIRING: download_model action:"status" says it out loud', ()
     expect(text).not.toContain("Download cache");
   });
 
+  // "There is no cache yet" and "the cache is THERE and I cannot read it" were one
+  // value, and the note treated both as nothing-to-say. The second is the case where
+  // naming the directory matters most: #1477 exists because nothing this server
+  // printed had ever named it, and a user whose cache is unreadable is exactly the
+  // one who ends up back at a disk-usage treemap.
+  //
+  // Reached without mocks by pointing the cache at a FILE — readdir then fails
+  // ENOTDIR, on every platform, and it is a real way to mis-set the env var.
+  it("distinguishes a MISSING cache from an unreadable one", async () => {
+    await mkdir(tempDir, { recursive: true });
+    await writeFile(cacheDir, "not a directory");
+    const f = await downloadCacheFootprint();
+    expect(f.unreadable).toBe(true);
+    expect(f.unreadableCode).toBe("ENOTDIR");
+  });
+
+  it("a missing cache reports ENOENT, which is what keeps the note silent", async () => {
+    const f = await downloadCacheFootprint();
+    expect(f.unreadable).toBe(true);
+    expect(f.unreadableCode).toBe("ENOENT");
+  });
+
+  it("an UNREADABLE cache is named and called unknown, never reported as zero", async () => {
+    await mkdir(tempDir, { recursive: true });
+    await writeFile(cacheDir, "not a directory");
+    const text = (await downloadTool()({ action: "status" })).content[0].text;
+    expect(text).toContain("Download cache");
+    expect(text).toContain(cacheDir);
+    expect(text).toContain("UNKNOWN");
+    // The failure mode this replaces: a confident 0.00 GB for a cache that may hold
+    // tens of gigabytes.
+    expect(text).not.toContain("0.00 GB");
+  });
+
   // The two call sites are separate exits and a test that only reaches one leaves
   // the other free to be deleted silently — verified by mutating each alone. This
   // is also the surface that matters most: someone watching a transfer is exactly

@@ -3532,6 +3532,16 @@ export interface DownloadCacheFootprint {
   limitBytes: number;
   /** The directory could not be listed at all (missing, or unreadable). */
   unreadable: boolean;
+  /**
+   * WHY the listing failed, when it did. ENOENT means there is no cache yet and
+   * there is genuinely nothing to report. Anything else — EACCES on a directory the
+   * user pointed COMFYUI_DOWNLOAD_CACHE_DIR at, say — means the bytes ARE there and
+   * cannot be counted, which is the case where naming the directory matters MOST:
+   * #1477 exists because nothing this server printed had ever named it. Collapsing
+   * the two into one silent `unreadable` sends exactly that user away empty-handed.
+   * `undefined` when the listing succeeded.
+   */
+  unreadableCode?: string;
 }
 
 export async function downloadCacheFootprint(): Promise<DownloadCacheFootprint> {
@@ -3549,8 +3559,9 @@ export async function downloadCacheFootprint(): Promise<DownloadCacheFootprint> 
   let entries;
   try {
     entries = await downloadCacheFs.readdir(dir, { withFileTypes: true });
-  } catch {
-    return { ...base, unreadable: true };
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException)?.code;
+    return { ...base, unreadable: true, unreadableCode: typeof code === "string" ? code : "UNKNOWN" };
   }
   const out = { ...base, unreadable: false };
   for (const entry of entries) {

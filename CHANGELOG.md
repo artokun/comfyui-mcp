@@ -8,7 +8,7 @@ All notable changes to this project are documented here. This project adheres to
 
 ### MCP
 #### Fixed
-- **download_model action:"status" now reports what the download cache is holding (#1477).**
+- **download_model action:"status" now reports what the download cache is holding (#1477).** An UNREADABLE cache directory is now named and reported as unknown rather than silently omitted: "missing" and "there but unreadable" were one value, and the note treated both as nothing to say — leaving the one user who most needs the directory named back at the disk-usage treemap both reporters used.
 
 ## [0.52.185] - 2026-09-03
 

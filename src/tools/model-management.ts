@@ -1181,7 +1181,20 @@ async function cacheFootprintNote(): Promise<string> {
   } catch {
     return "";
   }
-  if (f.unreadable || (f.retainedBytes === 0 && f.stagedBytes === 0 && f.sidecarBytes === 0)) return "";
+  if (f.unreadable) {
+    // ENOENT is "no cache yet" — nothing to report, stay silent. Anything else means
+    // the directory is THERE and could not be read, and #1477's whole complaint is
+    // that nothing ever named it. Reporting no figure is honest; reporting nothing
+    // at all sends that user back to the disk-usage treemap both reporters used.
+    if (f.unreadableCode === "ENOENT") return "";
+    return (
+      `\n\n### Download cache\n\n\`${f.dir}\` could not be read (${f.unreadableCode}), so its ` +
+      `size is UNKNOWN — not zero. This is the directory downloads are staged and retained ` +
+      `in; check its permissions, or set COMFYUI_DOWNLOAD_CACHE_DIR to a volume this process ` +
+      `can read.`
+    );
+  }
+  if (f.retainedBytes === 0 && f.stagedBytes === 0 && f.sidecarBytes === 0) return "";
   const gb = (n: number) => (n / CACHE_GB).toFixed(2);
   const parts: string[] = [];
   if (f.retainedEntries > 0) {
