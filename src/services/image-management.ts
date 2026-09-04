@@ -981,8 +981,9 @@ const IMAGE_EXTENSIONS = new Set([
 
 /**
  * Attachment extensions that get_image may save when ComfyUI serves the file
- * as an opaque octet-stream. This is deliberately an explicit, small allowlist
- * rather than an extension-shaped bypass for the image-content guard.
+ * as an opaque octet-stream (mesh/material) or a ZIP. This is deliberately an
+ * explicit, small allowlist rather than an extension-shaped bypass for the
+ * image-content guard.
  */
 const ATTACHMENT_EXTENSIONS = new Set([
   ".obj",
@@ -992,7 +993,29 @@ const ATTACHMENT_EXTENSIONS = new Set([
   ".ply",
   ".stl",
   ".mtl",
+  ".zip",
 ]);
+
+/** MIME labels a ZIP /view may arrive with. Mesh/material still require octet-stream. */
+const ZIP_ATTACHMENT_MIMES = new Set([
+  "application/zip",
+  "application/x-zip-compressed",
+  "application/octet-stream",
+]);
+
+/** Local-file, empty-archive, and spanned ZIP signatures (#2858). */
+function sniffZipMagic(base64: string): boolean {
+  if (base64.length === 0) return false;
+  const head = Buffer.from(base64.slice(0, 8), "base64");
+  if (head.length < 4) return false;
+  return (
+    head[0] === 0x50 &&
+    head[1] === 0x4b &&
+    ((head[2] === 0x03 && head[3] === 0x04) ||
+      (head[2] === 0x05 && head[3] === 0x06) ||
+      (head[2] === 0x07 && head[3] === 0x08))
+  );
+}
 
 /**
  * The history reconciler needs stronger evidence than an image/* header. Keep
@@ -1070,9 +1093,10 @@ export async function getOutputImage(
   {
     allowMedia = false,
     /**
-     * Accept a known mesh/material attachment for get_image (action:"get").
-     * ComfyUI serves these files as application/octet-stream, so there is no
-     * reliable MIME subtype to sniff. The caller must opt in explicitly and the
+     * Accept a known mesh/material or ZIP attachment for get_image (action:"get").
+     * Meshes are served as application/octet-stream with no reliable subtype to
+     * sniff. ZIPs may also be application/zip or application/x-zip-compressed
+     * and must sniff as PK magic. The caller must opt in explicitly and the
      * requested filename must use the narrow attachment extension allowlist.
      */
     allowAttachment = false,
@@ -1181,14 +1205,18 @@ export async function getOutputImage(
       MEDIA_FORMAT_BY_MIME[mime] === sniffedFormat);
   // ComfyUI serves mesh/material outputs as opaque octet-streams. There is no
   // MIME subtype or universal magic header to validate, so acceptance is gated
-  // by the caller plus the explicit filename allowlist above. This option is
-  // used only by get_image (action:"get"); image analysis/conversion keep the
-  // default refusal behavior.
+  // by the caller plus the explicit filename allowlist above. ZIP is the
+  // exception: /view often labels it application/zip, so those MIME values are
+  // accepted only with a PK local-file / empty-archive / spanned signature.
+  // This option is used only by get_image (action:"get"); image analysis/
+  // conversion keep the default refusal behavior.
+  const isZipAttachment =
+    ext === ".zip" && ZIP_ATTACHMENT_MIMES.has(mime) && sniffZipMagic(result.base64);
   const isAttachment =
     allowAttachment &&
     ATTACHMENT_EXTENSIONS.has(ext) &&
-    mime === "application/octet-stream" &&
-    result.base64.length > 0;
+    result.base64.length > 0 &&
+    (isZipAttachment || (ext !== ".zip" && mime === "application/octet-stream"));
   // A `.json` request whose bytes parse as JSON is accepted whatever the server called
   // them (#1373). Gated on the REQUESTED extension so this can never widen the image or
   // media paths, and on a successful parse so the rejection this function exists for is
@@ -1203,18 +1231,21 @@ export async function getOutputImage(
   // is the server reporting an ABSENT FILE, and calling that a content refusal sends the
   // caller to inspect a payload when the filename is the thing to look at.
   const contentRejected = jsonRefusal?.kind === "content";
-  // An OBJ is a real attachment, but it is not an image, supported media, or JSON
-  // attachment that get_image can save. ComfyUI commonly serves it as the generic
-  // octet-stream type, so do not send a successful non-empty response down the
-  // missing-file path.
-  const unsupportedObjAttachment =
-    ext === ".obj" &&
-    mime === "application/octet-stream" &&
-    result.base64.length > 0 &&
+  // An OBJ/ZIP is a real attachment, but it is not an image, supported media,
+  // or JSON attachment that this caller opted to save. Do not send a successful
+  // non-empty response down the missing-file path.
+  const unsupportedAttachmentKind =
     !allowAttachment &&
+    result.base64.length > 0 &&
     !isImage &&
     !isMedia &&
-    !isJson;
+    !isJson
+      ? ext === ".obj" && mime === "application/octet-stream"
+        ? "OBJ"
+        : isZipAttachment
+          ? "ZIP"
+          : null
+      : null;
 
   if ((!isImage && !isMedia && !isJson && !isAttachment) || !imageContentOk || result.base64.length === 0) {
     const where = subfolder ? `${type}/${subfolder}` : type;
@@ -1225,10 +1256,10 @@ export async function getOutputImage(
           ? `invalid image content labeled "${result.mimeType}"`
           : `content-type "${result.mimeType}"`;
     throw new ComfyUIError(
-      unsupportedObjAttachment
-        ? `ComfyUI /view returned an existing OBJ attachment for "${filename}" (${where}), ` +
+      unsupportedAttachmentKind
+        ? `ComfyUI /view returned an existing ${unsupportedAttachmentKind} attachment for "${filename}" (${where}), ` +
           `but get_image cannot save this type. Nothing was saved. ` +
-          `Use ComfyUI's file browser or another raw-file download path for OBJ attachments.`
+          `Use ComfyUI's file browser or another raw-file download path for ${unsupportedAttachmentKind} attachments.`
         : contentRejected
         ? // NAME THE ACTUAL REASON (#1373). "The file may not exist" for a body that
           // arrived and was rejected on its CONTENT sends the caller to re-check a
@@ -1251,7 +1282,7 @@ export async function getOutputImage(
       // having one — still read IMAGE_NOT_FOUND and went off to re-check a filename that
       // was never wrong. That is the same wrong-cause failure as the prose, one layer
       // down, and it is the layer that automation reads.
-      unsupportedObjAttachment
+      unsupportedAttachmentKind
         ? "ATTACHMENT_TYPE_UNSUPPORTED"
         : contentRejected
           ? "ATTACHMENT_CONTENT_REJECTED"
