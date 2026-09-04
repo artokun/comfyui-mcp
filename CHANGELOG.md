@@ -5,10 +5,10 @@ All notable changes to this project are documented here. This project adheres to
 [Keep a Changelog](https://keepachangelog.com/).
 
 ## Unreleased
-- **a `hello` frame carrying no `comfyui_url` is no longer reported as a dead instance (#2742).** The one verdict with no `base` fell through to the shared warning, rendering as `ignoring hello retarget to unreachable undefined (stale tab on a dead instance?)` — asserting a target was named AND found dead, about a frame that claimed neither. Seen 17 times in one report from tabs that were merely churning.
 
 ### MCP
 #### Fixed
+- **a `hello` frame carrying no `comfyui_url` is no longer reported as a dead instance (#2742).** The one verdict with no `base` fell through to the shared warning, rendering as `ignoring hello retarget to unreachable undefined (stale tab on a dead instance?)` — asserting a target was named AND found dead, about a frame that claimed neither. Seen 17 times in one report from tabs that were merely churning.
 - **an MCP server that connects and registers NO tools is now reported (#2742).** Once this process has seen ANY namespaced MCP tool -- proof the harness lists them -- a session with NONE reports every configured server, closing the blind spot where a failure that emptied EVERY server looked identical to a harness that does not namespace.
 
 ## [0.52.187] - 2026-09-03
