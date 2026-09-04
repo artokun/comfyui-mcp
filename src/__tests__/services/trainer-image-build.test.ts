@@ -217,3 +217,33 @@ describe("#2723 a detached build that HANGS is visible, not silently forever-run
     expect(trainerImageBuildLooksStalled(done, 10 * 60 * 60_000)).toBe(false);
   });
 });
+
+describe("#2723 same-millisecond builds resolve to the LATEST", () => {
+  // started_at is Date.now(), so two builds started in the same millisecond tie.
+  // With a strict `>` the FIRST one inserted wins — Map iterates in insertion order
+  // and the later build never beats it — so doctor reported the earlier settled
+  // result and hid the newer one. Driven through the public API with the clock
+  // pinned, rather than by reaching into the store.
+  it("prefers the later build when both carry the same started_at", async () => {
+    vi.setSystemTime(new Date(1_700_000_000_000));
+
+    let settleFirst: () => void = () => {};
+    buildTrainerImage.mockImplementationOnce(
+      () => new Promise<void>((res) => { settleFirst = () => res(); }),
+    );
+    const first = startTrainerImageBuild({ contextDir: "/ctx" }).build;
+    settleFirst();
+    await vi.waitFor(() => expect(getTrainerImageBuild(first.id)?.status).not.toBe("running"));
+
+    // Same millisecond — the clock has not been advanced.
+    buildTrainerImage.mockImplementationOnce(() => Promise.resolve());
+    const second = startTrainerImageBuild({ contextDir: "/ctx" }).build;
+    await vi.waitFor(() => expect(getTrainerImageBuild(second.id)?.status).not.toBe("running"));
+
+    expect(getTrainerImageBuild(first.id)?.started_at).toBe(
+      getTrainerImageBuild(second.id)?.started_at,
+    );
+    // The regression: this returned `first`.
+    expect(trainerImageBuildStatus()?.id).toBe(second.id);
+  });
+});

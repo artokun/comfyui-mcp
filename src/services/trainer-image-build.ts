@@ -174,7 +174,12 @@ export function trainerImageBuildStatus(): TrainerImageBuild | null {
   if (live) return live;
   let newest: TrainerImageBuild | null = null;
   for (const build of builds.values()) {
-    if (!newest || build.started_at > newest.started_at) newest = build;
+    // `>=`, not `>`. `started_at` is Date.now(), so two builds started in the same
+    // millisecond tie -- and with a strict `>` the FIRST one inserted wins, because
+    // `Map` iterates in insertion order and the later build never beats it. Doctor
+    // then reports the earlier settled result and hides the newer one, which is the
+    // opposite of what "newest" means. Ties resolve to the most recently INSERTED.
+    if (!newest || build.started_at >= newest.started_at) newest = build;
   }
   return newest;
 }

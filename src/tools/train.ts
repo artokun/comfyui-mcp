@@ -604,6 +604,11 @@ export function registerTrainTools(server: McpServer): void {
             const { trainerImageBuildStatus, trainerImageBuildLooksStalled } = await import(
               "../services/trainer-image-build.js"
             );
+            // Sampled here only to decide the stalled note; RE-SAMPLED and snapshotted
+            // just before serialising, because several awaits follow (the pod probe
+            // does network I/O) and this is a LIVE object the builder mutates in
+            // place. Reporting the object read here could serialise a status that
+            // changed after it was chosen.
             const liveBuild = trainerImageBuildStatus();
             // A detached build that hangs pins the slot: every later build_image
             // adopts it instead of starting one. Say so rather than reporting
@@ -642,6 +647,15 @@ export function registerTrainTools(server: McpServer): void {
                 }
               }
             } catch { /* pod reporting is best-effort */ }
+            // #2723 — re-sample and FREEZE immediately before serialising. `doctor`
+            // was awaited first, so its `image` flag is older than everything below;
+            // a build that finishes in between yields `image:false` alongside a
+            // build reporting "done", which reads as a contradiction rather than as
+            // two observations taken at different times. Say so instead.
+            const settled = trainerImageBuildStatus();
+            const finalBuild = settled ? { ...(imageBuild ?? settled), ...settled } : imageBuild;
+            const imageCheckIsStale =
+              doctor.data?.image === false && finalBuild?.status === "done";
             return textEnvelope({
               ...doctor,
               data: {
@@ -661,7 +675,18 @@ export function registerTrainTools(server: McpServer): void {
                 // build RUNNING, `image:false` with one that ERRORED, and
                 // `image:false` with nothing ever attempted are three different
                 // situations that used to render identically.
-                image_build: imageBuild,
+                image_build: finalBuild,
+                // #2723 — `image` was sampled by trainerDoctor() before the awaits
+                // above; `image_build` is sampled after them. When the build settled
+                // in between, the pair reads as a contradiction. Name the skew rather
+                // than emit two timestamps as if they were one observation.
+                ...(imageCheckIsStale
+                  ? {
+                      image_check_stale:
+                        "The image check ran BEFORE this build finished, so `image:false` above is " +
+                        "older than `image_build.status:\"done\"`. Re-run doctor for a consistent read.",
+                    }
+                  : {}),
               },
             });
           }
