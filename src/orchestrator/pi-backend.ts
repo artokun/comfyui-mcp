@@ -157,9 +157,16 @@ export function resolveNpmShimTarget(shimPath: string): string | null {
   } catch {
     return null;
   }
+  // The $basedir class excludes quote and space ON PURPOSE. npm's sh shim names
+  // the interpreter and the script on ONE line -- exec "$basedir/node"
+  // "$basedir/node_modules/pi/bin/pi.js" "$@" -- so a permissive `.+?` anchors on
+  // the FIRST $basedir/ and swallows `node"  "$basedir/...` into the capture. That
+  // path never exists, so existsSync turned it into null and this branch resolved
+  // NOTHING: measured 0/10 against the real npm shims on a Windows box, 10/10 with
+  // the class below, and the .cmd branch stays 10/10 either way.
   // `%dp0%` is the shim's own directory. Accept either separator: npm writes
   // backslashes on Windows, and the .ps1/sh variants use forward slashes.
-  const m = /%dp0%[\\/](.+?[.](?:js|mjs|cjs))/i.exec(text) ?? /[$]basedir[/](.+?[.](?:js|mjs|cjs))/i.exec(text);
+  const m = /%dp0%[\\/](.+?[.](?:js|mjs|cjs))/i.exec(text) ?? /[$]basedir[/]([^"\'\s]+?[.](?:js|mjs|cjs))/i.exec(text);
   if (!m) return null;
   const rel = m[1].split(String.fromCharCode(92)).join("/");
   const target = join(dirname(shimPath), rel);

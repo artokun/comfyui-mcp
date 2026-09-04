@@ -25,6 +25,7 @@ import { join } from "node:path";
 import { resolveNpmShimTarget, resolvePiLaunch } from "../../orchestrator/pi-backend.js";
 
 const S = String.fromCharCode(92);
+const Q = String.fromCharCode(34);
 const NL = String.fromCharCode(10);
 const REL = ["node_modules", "pi", "bin", "pi.js"].join(S);
 
@@ -173,5 +174,51 @@ describe("#2835 resolvePiLaunch prefers a runnable script over an unspawnable sh
     const launch = resolvePiLaunch();
     expect(launch?.command).toBe(exe);
     expect(launch?.prefixArgs).toEqual([]);
+  });
+});
+
+/**
+ * Exactly npm's generated POSIX shim, copied from a real global install. The
+ * detail that matters: the exec line names the INTERPRETER and the SCRIPT, so
+ * "$basedir/" appears TWICE on it.
+ */
+function npmShShim(relScript: string): string {
+  const b = "$basedir";
+  return [
+    "#!/bin/sh",
+    'basedir=$(dirname "$(echo "$0" | sed -e ' + "'" + 's,' + S + S + ',/,g' + "'" + ')")',
+    "",
+    "case `uname` in",
+    "    *CYGWIN*|*MINGW*|*MSYS*)",
+    "        if command -v cygpath > /dev/null 2>&1; then",
+    "            basedir=`cygpath -w " + Q + b + Q + "`",
+    "        fi",
+    "    ;;",
+    "esac",
+    "",
+    "if [ -x " + Q + b + "/node" + Q + " ]; then",
+    "  exec " + Q + b + "/node" + Q + "  " + Q + b + "/" + relScript + Q + " " + Q + "$@" + Q,
+    "else",
+    "  exec node  " + Q + b + "/" + relScript + Q + " " + Q + "$@" + Q,
+    "fi",
+  ].join(NL);
+}
+
+describe("#2835 the POSIX shim npm writes beside the .cmd", () => {
+  const REL_POSIX = ["node_modules", "pi", "bin", "pi.js"].join("/");
+
+  it("resolves the entry point even though $basedir also names the interpreter", () => {
+    // Regression: a permissive `.+?` anchors on the FIRST "$basedir/" of the exec
+    // line and swallows `node"  "$basedir/...` into the capture, producing a path
+    // with embedded quotes that never exists. Measured against the real npm shims
+    // on a Windows box: 0/10 resolved before this, 10/10 after.
+    const script = seedScript();
+    writeFileSync(join(dir, "pi"), npmShShim(REL_POSIX));
+    expect(resolveNpmShimTarget(join(dir, "pi"))).toBe(script);
+  });
+
+  it("still returns null when the script it names is absent", () => {
+    writeFileSync(join(dir, "pi"), npmShShim(REL_POSIX));
+    expect(resolveNpmShimTarget(join(dir, "pi"))).toBeNull();
   });
 });
