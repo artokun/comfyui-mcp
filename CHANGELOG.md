@@ -6,11 +6,9 @@ All notable changes to this project are documented here. This project adheres to
 
 ## Unreleased
 
-
 ### MCP
 
 #### Fixed
-- **`get_workflow` `action:"strip"` does not Win32-resolve a remote Linux path on the MCP host (#2782).** Against a remote ComfyUI, an absolute POSIX `path` such as `/mydata/.../models/workflows/example.json` is no longer opened as `C:\mydata\...`. Library-shaped tails (`user/default/workflows`, `user/workflows`, `models/workflows`) are fetched from that server's userdata API; any other remote absolute path is refused instead of a local ENOENT.
 - **the panel's live-canvas tools are no longer deferred behind tool search (panel#291).**
   The SDK defers in-process MCP tool schemas by default once tool search is enabled, and
   `alwaysLoad` exists because "the tools must be present when the turn-1 prompt is built".
@@ -19,6 +17,13 @@ All notable changes to this project are documented here. This project adheres to
   them. NOT asserted as the cause — deferral would still leave the tools findable via
   ToolSearch, and the report says they are not — this removes the variable so the next
   report distinguishes "deferred and unfound" from "never registered".
+
+## [0.52.190] - 2026-09-04
+
+### MCP
+
+#### Fixed
+- **`get_workflow` `action:"strip"` does not Win32-resolve a remote Linux path on the MCP host (#2782, #2811).** Against a remote ComfyUI, an absolute POSIX `path` such as `/mydata/.../models/workflows/example.json` is no longer opened as `C:\mydata\...`. Library-shaped tails (`user/default/workflows`, `user/workflows`, `models/workflows`) are fetched from that server's userdata API; any other remote absolute path is refused instead of a local ENOENT.
 
 ## [0.52.189] - 2026-09-03
 
