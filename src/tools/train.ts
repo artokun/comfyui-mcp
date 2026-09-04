@@ -25,6 +25,7 @@ import {
 } from "../services/training-jobs.js";
 import { getDataset, getJobConfig, listDatasets, previewConfig, readTrainingFile, deleteDataset, updateDataset } from "../services/training-datasets.js";
 import { captionDataset, captionImage } from "../services/train-caption.js";
+import { acquireInlineImageSlot, chargeInlineEmission } from "../services/inline-frame-budget.js";
 import { errorToToolResult } from "../utils/errors.js";
 import { config, isRemoteMode } from "../config.js";
 
@@ -284,7 +285,26 @@ export function registerTrainTools(server: McpServer): void {
           }
           case "file": {
             const { data, mimeType } = readTrainingFile(requirePath("file", "the image under the training root to inline"));
-            return { content: [{ type: "image" as const, data, mimeType }] };
+            // #2692 — this image rides the SAME transport frame as image_management's
+            // inline emissions, so it has to join their shared accounting. Its own
+            // bound is per-ITEM (<= 2MB), which is exactly the bound that PR shows is
+            // not sufficient: two of these plus a get_image lose the whole reply, and
+            // without charging here the FRAME BUDGET warning never sees the bytes.
+            //
+            // A slot is taken as well as charged: an open slot raises the peak of every
+            // sibling already open, so a concurrent get_image narrows its own share
+            // instead of spending a full budget beside a 2MB training file.
+            const slot = acquireInlineImageSlot();
+            try {
+              const note = chargeInlineEmission(data.length);
+              return {
+                content: note
+                  ? [{ type: "image" as const, data, mimeType }, { type: "text" as const, text: note.trim() }]
+                  : [{ type: "image" as const, data, mimeType }],
+              };
+            } finally {
+              slot.release();
+            }
           }
           case "caption_image": {
             const caption = await captionImage({

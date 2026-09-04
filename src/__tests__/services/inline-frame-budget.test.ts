@@ -267,3 +267,25 @@ describe("slots track real overlapping async work, not just synchronous acquisit
     after.release();
   });
 });
+
+// train_prepare_dataset action:"file" emits an inline image through the SAME MCP
+// transport frame as image_management's get/view. Its own bound is per-ITEM
+// (<= 2MB), which is precisely the bound this module exists because it is not
+// enough: charge nothing here and the running total under-counts, so the FRAME
+// BUDGET warning fires late or never — after the reply it was meant to save has
+// already been lost.
+describe("#2692 every tool that emits inline images shares the frame", () => {
+  it("names both emitters, so a third cannot be added silently", async () => {
+    const { execFileSync } = await import("node:child_process");
+    const files = execFileSync("git", ["ls-files", "src/tools"], { encoding: "utf8" })
+      .split("\n")
+      .filter((f) => f.endsWith(".ts") && !f.includes("__tests__"));
+    const { readFileSync } = await import("node:fs");
+    const emitters = files.filter((f) => readFileSync(f, "utf8").includes('type: "image" as const'));
+    const charging = emitters.filter((f) => readFileSync(f, "utf8").includes("chargeInlineEmission"));
+    expect(emitters.sort()).toEqual(["src/tools/image-management.ts", "src/tools/train.ts"]);
+    // Every emitter must participate. A new one that does not will fail here rather
+    // than quietly spending frame nobody is counting.
+    expect(charging.sort()).toEqual(emitters.sort());
+  });
+});
