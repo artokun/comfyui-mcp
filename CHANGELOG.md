@@ -12,6 +12,14 @@ All notable changes to this project are documented here. This project adheres to
 - pin that the picker's EFFORT survives a New chat as well as its model (#2759). The same change removes `this.effortByKey.delete(...)` from reset(), so two behaviours moved and only the model one was covered. effortFor reads through Map.has(), which makes an explicit return to the SDK default (undefined but PRESENT) a third state distinct from never-picked, so both halves are pinned separately. Found by the Copilot review on the PR
 - **the model picker's choice now survives a New chat (#2759).** `reset()` deleted the
 
+## [0.52.195] - 2026-09-04
+
+### MCP
+
+#### Fixed
+- **`get_history` / `get_system_stats` read the unique proven connected-panel origin+api_base after the headless target is unreachable, instead of only dispatching `fetch_comfyui_read` (#2836, #2867).** On 0.52.193 the named `PANEL_API_BASE_UNAVAILABLE` path still left history/health unavailable while `panel_run` worked: the live tab origin was never contacted, and the panel API object's undefined `api_base` crashed the relay. Mixed or unproven origins stay fail-closed (`PANEL_ORIGIN_UNPROVEN`); a guessed origin is never dialed. Same-origin dead loopback still uses one panel relay; an undefined panel `api_base` remains `PANEL_API_BASE_UNAVAILABLE`.
+
+
 ## [0.52.194] - 2026-09-04
 
 ### MCP

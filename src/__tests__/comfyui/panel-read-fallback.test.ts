@@ -301,6 +301,22 @@ describe("connected-panel read fallback origin/API base (#2836)", () => {
     });
   });
 
+  it("does not pick the first origin when two proven origins differ", () => {
+    expect(
+      resolvePanelReadOrigin(["http://127.0.0.1:8188", "http://127.0.0.1:8189"], ""),
+    ).toEqual({ kind: "unproven" });
+  });
+
+  it("treats loopback aliases as one proven origin", () => {
+    expect(
+      resolvePanelReadOrigin(["http://127.0.0.1:8188", "http://localhost:8188"], "/comfyapi"),
+    ).toEqual({
+      kind: "proven",
+      origin: "http://127.0.0.1:8188",
+      apiBase: "/comfyapi",
+    });
+  });
+
   function apiBaseCrash(): PanelComfyUIReadRelayError {
     return new PanelComfyUIReadRelayError(
       "The connected panel could not read ComfyUI.",
@@ -367,6 +383,69 @@ describe("connected-panel read fallback origin/API base (#2836)", () => {
       expect(message).toContain("transport diagnostic");
       expect(message).not.toContain("The panel reported:");
       expect(panelRead).toHaveBeenCalledWith(name === "getHistory" ? "history" : "system_stats");
+    },
+  );
+
+  // Recurrence on 0.52.193: the live tab origin is not 8188, panel_run works,
+  // but history/health still dispatched fetch_comfyui_read and died on
+  // undefined api_base. The unique proven origin+api_base must be read
+  // instead — this fails if that hop is skipped and only the relay runs.
+  it.each(["getHistory", "getSystemStats"] as const)(
+    "%s uses the unique proven panel origin+api_base when the relay has no api_base",
+    async (name) => {
+      fetchApi.mockRejectedValue(transportFailure());
+      setConnectedPanelOrigins(() => ["http://127.0.0.1:8189"]);
+      panelRead.mockRejectedValue(apiBaseCrash());
+      const historyBody = '{"prompt-1":{"status":{"status_str":"success"}}}';
+      const statsBody = '{"system":{"os":"windows"},"devices":[]}';
+      const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        if (url.startsWith("http://127.0.0.1:8189/comfyapi/")) {
+          expect(new Headers(init?.headers).get("authorization")).toBeNull();
+          const body = name === "getHistory" ? historyBody : statsBody;
+          return new Response(body, {
+            status: 200,
+            headers: { "content-type": "application/json" },
+          });
+        }
+        throw transportFailure();
+      });
+      vi.stubGlobal("fetch", fetchMock);
+
+      if (name === "getHistory") {
+        await expect(getHistory()).resolves.toEqual({
+          "prompt-1": { status: { status_str: "success" } },
+        });
+        expect(fetchMock.mock.calls.some(([input]) => String(input) === "http://127.0.0.1:8189/comfyapi/history")).toBe(true);
+      } else {
+        await expect(getSystemStats()).resolves.toMatchObject({
+          system: { os: "windows" },
+          devices: [],
+        });
+        expect(fetchMock.mock.calls.some(([input]) => String(input) === "http://127.0.0.1:8189/comfyapi/system_stats")).toBe(true);
+      }
+      expect(panelRead).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each(["getHistory", "getSystemStats"] as const)(
+    "%s does not guess when two proven panel origins differ",
+    async (name) => {
+      fetchApi.mockRejectedValue(transportFailure());
+      setConnectedPanelOrigins(() => ["http://127.0.0.1:8188", "http://127.0.0.1:8189"]);
+      const fetchMock = vi.fn(async () => {
+        throw transportFailure();
+      });
+      vi.stubGlobal("fetch", fetchMock);
+
+      const err = await (name === "getHistory" ? getHistory() : getSystemStats()).then(
+        () => undefined,
+        (error: unknown) => error,
+      );
+      expect(err).toBeInstanceOf(ComfyUIError);
+      expect(err).toMatchObject({ code: "PANEL_ORIGIN_UNPROVEN" });
+      expect(panelRead).not.toHaveBeenCalled();
+      expect(fetchMock.mock.calls.some(([input]) => String(input).includes("8189"))).toBe(false);
     },
   );
 });
