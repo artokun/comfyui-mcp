@@ -43,14 +43,36 @@ describe("#2693 interpreter flags are recovered from the OS argv", () => {
     ).toEqual(["-s", "-E", "-u"]);
   });
 
-  it("matches the script across separator and case differences", () => {
+  it("matches across separator and case ON WINDOWS, and only there", () => {
     // The OS reports a backslash path on Windows; /system_stats often reports the
     // same file with forward slashes. Failing to corroborate on that alone would
     // silently recover nothing on the one platform this report comes from.
+    //
+    // But the fold is a WINDOWS rule. This case previously asserted ["-s"] on every
+    // host, which is wrong on Linux — /ComfyUI/main.py and /comfyui/MAIN.PY are two
+    // different files there, and a backslash is a legal filename character, so
+    // corroborating them would splice flags out of another process's command line.
+    // Reachable: argvFidelity "exact" is set on the /proc/<pid>/cmdline path too.
+    //
+    // The old expectation passed locally on Windows and failed on the Linux runner,
+    // which is how it surfaced.
     expect(
       interpreterFlagsFromOsArgv({
         argv: ["C:/ComfyUI/main.py"],
         osArgv: [PY, "-s", ["C:", "ComfyUI", "MAIN.PY"].join(String.fromCharCode(92))],
+        osArgvExact: true,
+      }),
+    ).toEqual(process.platform === "win32" ? ["-s"] : []);
+  });
+
+  it("corroborates an EXACT POSIX path on any host", () => {
+    // The separator/case fold is the only thing that is host-specific; an exact
+    // match must still work everywhere, so the change above cannot have disabled
+    // recovery on Linux wholesale.
+    expect(
+      interpreterFlagsFromOsArgv({
+        argv: ["/opt/ComfyUI/main.py"],
+        osArgv: ["/usr/bin/python3", "-s", "/opt/ComfyUI/main.py"],
         osArgvExact: true,
       }),
     ).toEqual(["-s"]);
