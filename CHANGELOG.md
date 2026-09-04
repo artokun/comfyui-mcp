@@ -9,6 +9,8 @@ All notable changes to this project are documented here. This project adheres to
 ### MCP
 
 #### Fixed
+
+- get_image(action:"get") saves an existing ZIP from ComfyUI input/ instead of misreporting IMAGE_NOT_FOUND when /view returned 2xx application/zip. IMAGE_NOT_FOUND stays reserved for a missing or failed /view. (#2858)
 - the npm POSIX shim now resolves too, not just the .cmd (#2835). npm's sh shim names the interpreter and the script on one line, so the permissive pattern anchored on the first `$basedir/` and captured a path with embedded quotes; it never existed, so that branch resolved nothing at all. Measured against the real npm shims on a Windows box: 0/10 before, 10/10 after, with the .cmd branch unchanged at 10/10
 - **the pi backend works when pi was installed from npm on Windows (#2835).** `npm i -g pi`
   writes `pi` (an extensionless bash script), `pi.cmd` and `pi.ps1`, and no `pi.exe`. Node
