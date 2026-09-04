@@ -1,46 +1,90 @@
-// panel#291 — the panel's live-canvas tools must reach the turn-1 prompt.
+// panel#291 — the panel's in-process (Agent SDK) tools are deferred behind tool
+// search by default; the spawned `comfyui` stdio server is not. The reporter sees
+// every `panel_*` tool missing from BOTH the declared list and the deferred
+// catalog. Deferral alone does not explain an empty catalog, so this is not
+// asserted as the cause — it removes the deferral variable so the next report
+// distinguishes "deferred and unfound" from "never registered".
 //
-// The reported failure (Claude backend, mcp 0.52.186 / panel 0.15.165, 100%
-// reproducible): every `panel_*` tool absent from BOTH the directly declared tools
-// and the deferred `ToolSearch` catalog, while the spawned `comfyui` stdio server
-// works throughout. The two servers differ in exactly one relevant way — `panel` is
-// an in-process `createSdkMcpServer`, `comfyui` is a stdio subprocess — and the SDK
-// defers in-process tool schemas by default once tool search is enabled:
-//
-//   CreateSdkMcpServerOptions.alwaysLoad:
-//     "When true, all tools from this server are always included in the prompt and
-//      never deferred behind tool search. … Default: tools are deferred when tool
-//      search is enabled."
-//
-//   McpStdioServerConfig.alwaysLoad adds why it matters:
-//     "…since the tools must be present when the turn-1 prompt is built."
-//
-// This pins that we ask for that. It is NOT a claim that deferral is the cause —
-// deferral would leave the tools findable via ToolSearch, and the report says they
-// are not — it removes the variable so the next report distinguishes "deferred and
-// unfound" from "never registered".
+// These assertions run against REAL tool definitions: the server built exactly as
+// production builds it, connected to a real MCP client over an in-memory
+// transport, reading the `_meta` the SDK actually emits. Verified against the
+// installed SDK that `tool(..., { alwaysLoad: true })` sets
+// `_meta['anthropic/alwaysLoad'] = true` and that a plain tool has no `_meta`.
 
-import { describe, expect, it } from "vitest";
-import { readFileSync } from "node:fs";
-import { fileURLToPath } from "node:url";
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
+import { createPanelMcpServer } from "../../orchestrator/panel-tools.js";
+import type { UiBridge } from "../../orchestrator/ui-bridge.js";
 
-const SRC = fileURLToPath(new URL("../../orchestrator/panel-tools.ts", import.meta.url));
+const ALWAYS_LOAD_META = "anthropic/alwaysLoad";
 
-describe("panel#291 the in-process panel server opts out of tool-search deferral", () => {
-  it("passes alwaysLoad to createSdkMcpServer", () => {
-    const src = readFileSync(SRC, "utf8");
-    const at = src.indexOf("createSdkMcpServer({");
-    expect(at).toBeGreaterThan(-1);
-    const call = src.slice(at, src.indexOf("})", at));
-    expect(call).toContain("alwaysLoad: true");
+/** The set this PR opts out of deferral. Kept literal so the test states the
+ *  intended surface rather than reading it back from the module under test. */
+const EXPECTED_PROBE_TOOLS = ["panel_canvas", "panel_graph_outline"];
+
+function fakeBridge(): UiBridge {
+  return {
+    send: async () => ({}),
+  } as unknown as UiBridge;
+}
+
+describe("panel#291 the deferral opt-out is scoped to the probe tools", () => {
+  let client: Client;
+  let close: () => Promise<void>;
+  let tools: Array<{ name: string; _meta?: Record<string, unknown> }>;
+
+  beforeAll(async () => {
+    const config = createPanelMcpServer(fakeBridge(), "test-tab");
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    client = new Client({ name: "panel-always-load-test", version: "1.0.0" });
+    await Promise.all([
+      config.instance.connect(serverTransport),
+      client.connect(clientTransport),
+    ]);
+    close = async () => {
+      await client.close();
+      await config.instance.close();
+    };
+    const listed = await client.listTools();
+    tools = listed.tools as typeof tools;
   });
 
-  it("names comfyui-panel, so the opt-out lands on the server the report is about", () => {
-    // Guards against the assertion above drifting onto some other SDK server if one
-    // is ever added to this file: the property and the name must be in one call.
-    const src = readFileSync(SRC, "utf8");
-    const at = src.indexOf("createSdkMcpServer({");
-    const call = src.slice(at, src.indexOf("})", at));
-    expect(call).toContain('name: "comfyui-panel"');
+  afterAll(async () => {
+    await close();
+  });
+
+  it("the survey is meaningful — the panel surface is actually present", () => {
+    // Without this, every assertion below passes vacuously on an empty list.
+    expect(tools.length).toBeGreaterThan(50);
+    for (const name of EXPECTED_PROBE_TOOLS) {
+      expect(tools.map((t) => t.name)).toContain(name);
+    }
+  });
+
+  it("each probe tool carries the alwaysLoad meta the SDK reads", () => {
+    for (const name of EXPECTED_PROBE_TOOLS) {
+      const found = tools.find((t) => t.name === name);
+      expect(found?._meta?.[ALWAYS_LOAD_META]).toBe(true);
+    }
+  });
+
+  it("ONLY the probe tools carry it — the whole surface is not conscripted", () => {
+    // The regression this guards is re-introducing the SERVER-WIDE
+    // `CreateSdkMcpServerOptions.alwaysLoad`, which sets the same `_meta` on
+    // every tool. That would put all ~96 panel schemas (~77k characters of
+    // description alone) into every turn-1 prompt to answer one yes/no question.
+    // A presence check on the two probe tools cannot see that; a count can.
+    const optedOut = tools
+      .filter((t) => t._meta?.[ALWAYS_LOAD_META] === true)
+      .map((t) => t.name)
+      .sort();
+    expect(optedOut).toEqual(EXPECTED_PROBE_TOOLS);
+  });
+
+  it("a representative ordinary tool stays deferred", () => {
+    const ordinary = tools.find((t) => t.name === "panel_move_node");
+    expect(ordinary).toBeDefined();
+    expect(ordinary?._meta?.[ALWAYS_LOAD_META]).toBeUndefined();
   });
 });

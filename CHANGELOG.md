@@ -9,7 +9,7 @@ All notable changes to this project are documented here. This project adheres to
 ### MCP
 
 #### Fixed
-- **the panel's live-canvas tools are no longer deferred behind tool search (panel#291).**
+- **two panel live-canvas tools are no longer deferred behind tool search (panel#291).**
   The SDK defers in-process MCP tool schemas by default once tool search is enabled, and
   `alwaysLoad` exists because "the tools must be present when the turn-1 prompt is built".
   The reported Claude-backend failure has every `panel_*` tool absent while the SPAWNED
@@ -17,6 +17,11 @@ All notable changes to this project are documented here. This project adheres to
   them. NOT asserted as the cause — deferral would still leave the tools findable via
   ToolSearch, and the report says they are not — this removes the variable so the next
   report distinguishes "deferred and unfound" from "never registered".
+  Applied PER TOOL (`panel_graph_outline`, `panel_canvas`) rather than server-wide: the
+  server-wide option opts out all 96 panel tools, whose descriptions alone run to ~77k
+  characters, and one tool provably in the turn-1 prompt answers the question. The tools
+  are read back over a real MCP transport and the count is asserted, so restoring the
+  server-wide flag fails the suite rather than silently enlarging every prompt.
 
 ## [0.52.190] - 2026-09-04
 
