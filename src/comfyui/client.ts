@@ -1,3 +1,4 @@
+import { AsyncLocalStorage } from "node:async_hooks";
 import { Client } from "@stable-canvas/comfyui-client";
 import { LoopbackWebSocket } from "../transport/loopback-websocket.js";
 import {
@@ -387,6 +388,50 @@ async function panelReadFallback(
       { cause: error },
     );
   }
+}
+
+/** Nested fetchImage from a looping image relay must not wrap/retry again (#2864). */
+const panelImageRelayHop = new AsyncLocalStorage<true>();
+
+/**
+ * One authenticated `fetch_image` relay after the configured /view route failed
+ * at the transport layer (#2864). Diagnostic/published origins are not dialed
+ * here (#2149): they are not authorization to contact a /view target. Nested
+ * re-entry is refused by `panelImageRelayHop` in `fetchImage`.
+ */
+async function panelImageFallback(
+  filename: string,
+  type: "output" | "input" | "temp",
+  subfolder: string,
+  primaryError: unknown,
+  declined: string,
+): Promise<{ base64: string; mimeType: string } | undefined> {
+  const primary = primaryError instanceof Error ? primaryError.message : String(primaryError);
+  try {
+    const relayed = await requestPanelImage(filename, type, subfolder);
+    if (relayed) return { base64: relayed.base64, mimeType: relayed.mimeType };
+  } catch (error) {
+    if (error instanceof PanelImageRelayError && error.unavailable) {
+      // The relay itself was unreachable; keep the original transport failure.
+    } else if (isUndefinedApiBaseFailure(error)) {
+      throw new ComfyUIError(
+        `${primary} The connected panel image relay failed safely (PANEL_API_BASE_UNAVAILABLE). ` +
+          `fetch_image could not read api_base because the panel's ComfyUI API object was undefined. ` +
+          `This is a transport diagnostic: the headless target was unreachable, and the panel image relay was not given a usable API base.`,
+        "PANEL_API_BASE_UNAVAILABLE",
+      );
+    } else if (error instanceof PanelImageRelayError) {
+      throw new Error(
+        `${primary} The connected panel image relay failed safely (${error.code}).` +
+          (error.reason ? ` The panel reported: ${error.reason}` : ""),
+        { cause: error },
+      );
+    }
+  }
+  if (declined) {
+    throw new Error(`${primary}${declined}`, { cause: primaryError });
+  }
+  return undefined;
 }
 
 /** Budget for the /system_stats probe. Short on purpose: this is a liveness
@@ -1746,6 +1791,9 @@ export async function fetchImage(
     validateViewResponseOrigin(res, configuredOrigin, "the configured ComfyUI target");
   } catch (primaryError) {
     if (!isComfyTransportFailure(primaryError)) throw primaryError;
+    // A looping fetch_image / get_image fallback must not wrap this failure
+    // again. One hop: one panel relay, then stop (#2864).
+    if (panelImageRelayHop.getStore()) throw primaryError;
 
     const choice = choosePanelFallbackOrigin(configuredTarget, connectedPanelFallbackOriginsNow());
     const declined = describeDeclinedPanelFallback(choice);
@@ -1755,56 +1803,39 @@ export async function fetchImage(
       // capability and asks the authenticated panel to fetch same-origin /view. The old
       // direct-origin seam remains injectable for focused fallback mechanics
       // tests, but it is never installed by production.
-      try {
-        const relayed = await requestPanelImage(filename, type, subfolder);
-        if (relayed) return { base64: relayed.base64, mimeType: relayed.mimeType };
-      } catch (relayError) {
-        if (relayError instanceof PanelImageRelayError && !relayError.unavailable) {
-          const primary = primaryError instanceof Error ? primaryError.message : String(primaryError);
-          // #2703 - the same collapse on the image relay's own dead end. Both
-          // codes are produced by ONE catch in the relay, so leaving this one
-          // bare would have left half the reports unactionable for the same
-          // reason the history path was.
-          throw new Error(
-            `${primary} The connected panel image relay failed safely (${relayError.code}).` +
-              (relayError.reason ? ` The panel reported: ${relayError.reason}` : ""),
-            { cause: relayError },
-          );
-        }
-      }
-      if (declined) {
-        const primary = primaryError instanceof Error ? primaryError.message : String(primaryError);
-        throw new Error(`${primary}${declined}`, { cause: primaryError });
-      }
-      throw primaryError;
-    }
-
-    const fallbackUrl = `${choice.origin}${fallbackPath}`;
-    try {
-      // The configured auth headers are for the headless target, not an origin
-      // selected from a browser handshake. Never send them to the fallback.
-      // A browser-only/tunnel origin can be unreachable from this process; do
-      // not add the full headless timeout on top of the failed primary request.
-      res = await fetch(fallbackUrl, {
-        redirect: "manual",
-        signal: options.signal
-          ? AbortSignal.any([options.signal, AbortSignal.timeout(8_000)])
-          : AbortSignal.timeout(8_000),
-      });
-      responseReadTimeoutMs = 8_000;
-    } catch (fallbackError) {
-      const primary = primaryError instanceof Error ? primaryError.message : String(primaryError);
-      const secondary = describeFetchFailure(fallbackError).message;
-      throw new Error(
-        `${primary} I then tried the ComfyUI a connected sidebar panel is on ` +
-          `(${fallbackUrl}), and that failed too: ${secondary}. The browser can reach ` +
-          `that origin — this process cannot — so something between them (a tunnel, a ` +
-          `container boundary, or a server bound to one interface) is in the way.`,
-        { cause: fallbackError },
+      const relayed = await panelImageRelayHop.run(true, () =>
+        panelImageFallback(filename, type, subfolder, primaryError, declined),
       );
+      if (relayed) return relayed;
+      throw primaryError;
+    } else {
+      const fallbackUrl = `${choice.origin}${fallbackPath}`;
+      try {
+        // The configured auth headers are for the headless target, not an origin
+        // selected from a browser handshake. Never send them to the fallback.
+        // A browser-only/tunnel origin can be unreachable from this process; do
+        // not add the full headless timeout on top of the failed primary request.
+        res = await fetch(fallbackUrl, {
+          redirect: "manual",
+          signal: options.signal
+            ? AbortSignal.any([options.signal, AbortSignal.timeout(8_000)])
+            : AbortSignal.timeout(8_000),
+        });
+        responseReadTimeoutMs = 8_000;
+      } catch (fallbackError) {
+        const primary = primaryError instanceof Error ? primaryError.message : String(primaryError);
+        const secondary = describeFetchFailure(fallbackError).message;
+        throw new Error(
+          `${primary} I then tried the ComfyUI a connected sidebar panel is on ` +
+            `(${fallbackUrl}), and that failed too: ${secondary}. The browser can reach ` +
+            `that origin — this process cannot — so something between them (a tunnel, a ` +
+            `container boundary, or a server bound to one interface) is in the way.`,
+          { cause: fallbackError },
+        );
+      }
+      validateViewResponseOrigin(res, choice.origin, "the connected panel's ComfyUI");
+      answeredByPanelOrigin = choice.origin;
     }
-    validateViewResponseOrigin(res, choice.origin, "the connected panel's ComfyUI");
-    answeredByPanelOrigin = choice.origin;
   }
   if (!res.ok) {
     const where = subfolder ? `${type}/${subfolder}` : type;
