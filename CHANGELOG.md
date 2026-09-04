@@ -6,6 +6,10 @@ All notable changes to this project are documented here. This project adheres to
 
 ## Unreleased
 
+### MCP
+#### Fixed
+- **`train_doctor action:"build_image"` is asynchronous, so it can finish at all (#2723).** A detached build that WEDGES is now reported as such instead of staying "running" forever — while it is in that state every later build_image ADOPTS it rather than starting a new one, so an invisible hang would burn the same ability the timeout did.
+
 ## [0.52.185] - 2026-09-03
 
 ### MCP
