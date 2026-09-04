@@ -9,9 +9,16 @@ All notable changes to this project are documented here. This project adheres to
 ### MCP
 
 #### Fixed
-- **`panel_set_widget` / other mutations accept named node ids the graph readers print (#2855).** API-style graphs use string ids (`sampler`, `mac_studio_vlm`). `panel_graph_outline` already returned those; writes refused them at MCP validation (`NODE_ID_PATTERN` was integer / `120:104` only). Named ids stay strings on the wire — they are never `parseInt`'d. `"42px"` is still refused so it cannot become node 42.
 - **`train_doctor action:"build_image"` says when it adopted a WEDGED build (#2723).** `doctor` already disclosed that a hung build has pinned the slot and that restarting the orchestrator clears it; `build_image` — the action a caller takes to make progress — reported a plain `adopted: true` and advised polling. Re-issuing after the old 300s timeout is exactly what the reporter did, so the reported behaviour landed on the one path that stayed silent, sending them back to poll a build that will never settle. A healthy adoption is unchanged.
 - **`train_doctor action:"build_image"` is asynchronous, so it can finish at all (#2723).** A detached build that WEDGES is now reported as such instead of staying "running" forever — while it is in that state every later build_image ADOPTS it rather than starting a new one, so an invisible hang would burn the same ability the timeout did. A re-issue that pins a DIFFERENT `aiToolkitRef` is refused rather than silently adopting the running build: adoption keyed only on "a build is running", so the tag that landed was the in-flight build's ref, not the one requested — defeating the only thing that parameter is for.
+
+## [0.52.191] - 2026-09-04
+
+### MCP
+
+#### Fixed
+- **`panel_set_widget` / other mutations accept named node ids the graph readers print (#2855, #2856).** API-style graphs use string ids (`sampler`, `mac_studio_vlm`). `panel_graph_outline` already returned those; writes refused them at MCP validation (`NODE_ID_PATTERN` was integer / `120:104` only). Named ids stay strings on the wire — they are never `parseInt`'d. `"42px"` is still refused so it cannot become node 42.
+
 
 ## [0.52.190] - 2026-09-04
 
