@@ -9,6 +9,8 @@ All notable changes to this project are documented here. This project adheres to
 ### MCP
 
 #### Fixed
+
+- **`panel_show_media` inlines a remote ComfyUI output through `fetchImage` (the same client `get_image` uses) instead of handing the browser a `/view` that 404s (#2861).** Local canvas tabs still get a viewRef. A remote/cloud tab that cannot be inlined (MCP 404, non-media, over the 20 MB cap) is refused rather than painted empty. Same-named local workspace files are never substituted (#877/#899).
 - interpreter-flag recovery compares script paths by HOST rules (#2693). The corroboration folded case and rewrote backslashes on every platform, so on Linux /ComfyUI/main.py and /comfyui/main.py corroborated each other and a backslash — a legal POSIX filename character — was rewritten. Reachable: argvFidelity "exact" is set on the /proc/<pid>/cmdline path too, where the kernel NUL-separates argv, so only the ps fallback is "flattened". Now uses the module's own sameRecoveryPath, which preserves POSIX spelling and folds only on Windows. Found by the Copilot review on the PR
 - **a relaunch keeps the Python INTERPRETER flags (#2693).** `-s`, `-E`, `-I`, `-B`, `-O` and `-u`
   are consumed by CPython before `sys.argv` exists, so a relaunch rebuilt from the server's own
