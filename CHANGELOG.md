@@ -9,7 +9,10 @@ All notable changes to this project are documented here. This project adheres to
 ### MCP
 
 #### Fixed
+
+- **`get_image(action:"get")` connected-panel image relay is one hop: one `fetch_image` after the headless `/view` is unreachable, then one bounded error (#2864).** An unreachable headless `127.0.0.1:8188` used to wrap `PANEL_FETCH_FAILED` / `MALFORMED_REPLY` until `Maximum call stack size exceeded` while the live panel stayed connected. Nested fallback into `fetchImage` is refused. Published diagnostic origins are still not dialed as `/view` targets.
 - panel_load_workflow path: loads API/prompt graphs (including graph.api.json) onto the canvas instead of refusing them as non-UI (panel#2011)
+
 
 ## [0.52.195] - 2026-09-04
 
