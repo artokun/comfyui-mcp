@@ -6,6 +6,12 @@ All notable changes to this project are documented here. This project adheres to
 
 ## Unreleased
 
+### MCP
+
+#### Fixed
+
+- panel_show_media inlines a remote ComfyUI /view ref the configured MCP client can fetch, so a browser-facing /view 404 no longer paints an empty card when get_image succeeds (#2861)
+
 ## [0.52.192] - 2026-09-04
 
 ### MCP

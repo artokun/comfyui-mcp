@@ -28959,21 +28959,30 @@ CHECKED FOR YOU: the graph read this message prescribes was just run, and it ` +
             const filename = p.replace(/.*[\/]/, "");
             resolved.push({ kind, dataUrl, filename, caption: item.caption });
           } else {
-            // ComfyUI /view ref. A browser panel fetches it same-origin — but a
-            // HEADLESS (mobile/remote) client can't reach ComfyUI, so resolve the
-            // bytes HERE and inline them as a data URL. Best-effort: any failure
-            // (fetch error, non-media, too big) falls back to forwarding the ref,
-            // which the client renders as a caption card.
+            // ComfyUI /view ref. A local browser panel fetches it same-origin —
+            // but a HEADLESS client cannot, and a REMOTE/CLOUD browser panel's
+            // /view is a different route from the MCP client's authenticated
+            // fetch (the panel 404s while get_image succeeds — #2861). Resolve
+            // the bytes HERE via the configured client and inline them as a
+            // data URL. Best-effort: any failure (fetch error, non-media, too
+            // big) falls back to forwarding the ref.
             //
             // #2012 — judge the DESTINATION, not the address. `ctx.tabId` may be
             // a scope / prefix / alias; `isHeadless` on the address is a lookup
             // miss that answers false and a phone gets a /view URL it cannot
-            // fetch. Positive requirement: inline only a proven headless
-            // destination.
+            // fetch. Positive requirement: inline a proven headless destination,
+            // or a proven interactive destination whose ComfyUI is not local.
+            //
+            // #877/#899 — this fetch is the MCP client's /view of the configured
+            // target, never a same-named file on the orchestrator disk.
             let inlined = false;
-            if (resolveClientKind(ctx).kind === "headless") {
+            const dest = resolveClientKind(ctx);
+            const proxyViaMcpClient =
+              dest.kind === "headless" ||
+              (dest.kind === "interactive" && (isRemoteMode() || isCloudMode()));
+            if (proxyViaMcpClient) {
               try {
-                const base = (process.env.COMFYUI_URL ?? "http://127.0.0.1:8188").replace(/\/+$/, "");
+                const base = getComfyUIBaseUrl().replace(/\/+$/, "");
                 const qs = new URLSearchParams({ filename: src.filename, type: src.type ?? "output" });
                 if (src.subfolder) qs.set("subfolder", src.subfolder);
                 const resp = await comfyuiFetch(`${base}/view?${qs.toString()}`);
