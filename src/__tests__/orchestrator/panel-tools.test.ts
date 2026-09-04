@@ -1311,7 +1311,8 @@ describe("panel-tools: subgraph I/O (expose rails + unpack)", () => {
     // from_node_id is an int like the other per-node tools.
     const fromNode = def.schema.from_node_id as { safeParse: (v: unknown) => { success: boolean } };
     expect(fromNode.safeParse(3).success).toBe(true);
-    expect(fromNode.safeParse("x").success).toBe(false);
+    expect(fromNode.safeParse("x").success).toBe(true);
+    expect(fromNode.safeParse("42px").success).toBe(false);
     // from_output is a string|number slot ref.
     const fromOut = def.schema.from_output as { safeParse: (v: unknown) => { success: boolean } };
     expect(fromOut.safeParse("IMAGE").success).toBe(true);
@@ -1337,7 +1338,8 @@ describe("panel-tools: subgraph I/O (expose rails + unpack)", () => {
     expect(Object.keys(def.schema).sort()).toEqual(["name", "retry_of", "to_input", "to_node_id"]);
     const toNode = def.schema.to_node_id as { safeParse: (v: unknown) => { success: boolean } };
     expect(toNode.safeParse(3).success).toBe(true);
-    expect(toNode.safeParse("x").success).toBe(false);
+    expect(toNode.safeParse("x").success).toBe(true);
+    expect(toNode.safeParse("42px").success).toBe(false);
     const toIn = def.schema.to_input as { safeParse: (v: unknown) => { success: boolean } };
     expect(toIn.safeParse("model").success).toBe(true);
     expect(toIn.safeParse(1).success).toBe(true);

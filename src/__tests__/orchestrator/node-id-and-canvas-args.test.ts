@@ -119,11 +119,22 @@ describe("#845(4): an id the tools printed is accepted back", () => {
   });
 
   it("refuses other non-integer strings", async () => {
-    for (const bad of ["42px", "4.5", "", "abc", "1:", ":1", "1::2", "1:-2"]) {
+    for (const bad of ["42px", "4.5", "", "1:", ":1", "1::2", "1:-2"]) {
       sent = [];
       const res = await callTool("panel_select_nodes", { node_ids: [bad] });
       expect(res.isError, bad).toBe(true);
     }
+  });
+
+  it("#2855 accepts a named id the readers printed and forwards it VERBATIM", async () => {
+    const res = await callTool("panel_set_widget", {
+      node_id: "sampler",
+      widget: "seed",
+      value: 1,
+    });
+    expect(res.isError).toBeFalsy();
+    expect(sent[0].node_id).toBe("sampler");
+    expect(sent[0].node_id).not.toBeNaN();
   });
 });
 
