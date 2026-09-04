@@ -3661,7 +3661,7 @@ describe("resolveInnerPromotedTarget", () => {
     ["wrong node_count", { ...SUBGRAPH, node_count: 1 }],
     ["non-integer node_count", { ...SUBGRAPH, node_count: "2" }],
     ["truncated envelope", { ...SUBGRAPH, truncated: true }],
-    ["malformed inner node id", { ...SUBGRAPH, nodes: [{ ...SUBGRAPH.nodes[0], id: "not-a-node" }, SUBGRAPH.nodes[1]] }],
+    ["malformed inner node id", { ...SUBGRAPH, nodes: [{ ...SUBGRAPH.nodes[0], id: "42px" }, SUBGRAPH.nodes[1]] }],
   ])("rejects a %s instead of trusting its inner mapping", (_name, malformed) => {
     expect(validatePromotedSubgraphEnvelope(malformed, 78)).toBeNull();
     expect(resolveInnerPromotedTarget(malformed, "width", 78)).toBeNull();
@@ -4609,7 +4609,7 @@ describe("#2688 describePromotedSubgraphEnvelope names the failed invariant", ()
       78,
       /`subgraph_of\.node_id` was missing or not a node id/,
     ],
-    ["an unusable addressed id", VALID, "not-an-id", /the addressed node id was not a usable node id/],
+    ["an unusable addressed id", VALID, "42px", /the addressed node id was not a usable node id/],
     [
       "a non-integer node_count",
       { ...VALID, node_count: 1.5 },
