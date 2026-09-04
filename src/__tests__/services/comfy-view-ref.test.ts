@@ -76,8 +76,11 @@ const {
   oversizedInlineRefusal,
   forwardedByReferenceNote,
   unverifiedViewRefNote,
+  mediaKindFromMime,
+  remoteViewRefInlineFailedNote,
   stageFileIntoServedDir,
   stagedForDisplayNote,
+  viewRefTypeForFetch,
 } = await import("../../services/comfy-view-ref.js");
 
 let root: string;
@@ -520,6 +523,36 @@ describe("unverifiedViewRefNote (#941)", () => {
     const note = unverifiedViewRefNote(many);
     expect(note).toMatch(/…and 4 more/);
     expect(note).not.toContain("f11.png");
+  });
+});
+
+describe("#2861 remote inline helpers", () => {
+  it("mediaKindFromMime maps families and strips parameters", () => {
+    expect(mediaKindFromMime("image/png")).toBe("image");
+    expect(mediaKindFromMime("video/mp4; codecs=avc1")).toBe("video");
+    expect(mediaKindFromMime("audio/wav")).toBe("audio");
+    expect(mediaKindFromMime("text/html")).toBeNull();
+  });
+
+  it("viewRefTypeForFetch only keeps ComfyUI's three /view types", () => {
+    expect(viewRefTypeForFetch(undefined)).toBe("output");
+    expect(viewRefTypeForFetch("input")).toBe("input");
+    expect(viewRefTypeForFetch("temp")).toBe("temp");
+    expect(viewRefTypeForFetch("output")).toBe("output");
+    expect(viewRefTypeForFetch("other")).toBe("output");
+  });
+
+  it("remoteViewRefInlineFailedNote refuses a viewRef and a local mirror", () => {
+    const note = remoteViewRefInlineFailedNote({
+      filename: "clip.mp4",
+      detail: "ComfyUI /view returned 404.",
+      capBytes: 20 * 1024 * 1024,
+    });
+    expect(note).toContain("clip.mp4");
+    expect(note).toContain("painted:0");
+    expect(note).toMatch(/did not substitute a same-named local workspace file/i);
+    expect(note).toContain("get_image");
+    expect(note).toContain("20 MB inline cap");
   });
 });
 
