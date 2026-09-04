@@ -18,6 +18,9 @@
 // a user can recognise and contest.
 
 import { afterEach, describe, expect, it } from "vitest";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { __processControlTestHooks } from "../../services/process-control.js";
 
 /** The marker set, as the shipped predicate holds it. */
@@ -149,6 +152,33 @@ describe("#2784 the refusal carries the clause", () => {
       expect(r.isDesktopApp).toBe(true);
       expect(r.desktopEvidence).toContain("ancestors");
       expect(r.desktopEvidence).not.toContain("NAME match");
+    });
+
+    it("an on-disk Desktop-2 marker OUTRANKS both, and it is the strongest claim made", () => {
+      // The remaining arm, reached with a REAL directory rather than a stubbed
+      // existsSync: several process-control suites stub that true, which would
+      // reclassify every ordinary python install in this file. A marker on disk is
+      // a fact about the install, so it must beat both the process tree and the
+      // name match -- including when an ancestor Desktop binary is also present.
+      const root = mkdtempSync(join(tmpdir(), "cmcp-d2-"));
+      const install = join(root, "comfyui-installs", "MyInstall");
+      mkdirSync(install, { recursive: true });
+      writeFileSync(join(install, ".comfyui-desktop-2"), "");
+      try {
+        setParentPidResolver((pid) => (pid === 4242 ? 99 : null));
+        setProcessIdentityResolver((pid) =>
+          pid === 99
+            ? { pid: 99, executablePath: "C:/Programs/ComfyUI/Comfy Desktop/Comfy Desktop.exe" }
+            : undefined,
+        );
+        const r = detectDesktopLaunch(4242, [join(install, "python.exe"), "main.py"]);
+        expect(r.isDesktopApp).toBe(true);
+        expect(r.desktopEvidence).toContain("Desktop-2 install marker");
+        expect(r.desktopEvidence).not.toContain("ancestors");
+        expect(r.desktopEvidence).not.toContain("NAME match");
+      } finally {
+        rmSync(root, { recursive: true, force: true });
+      }
     });
 
     it("says nothing at all when no signal fires", () => {
