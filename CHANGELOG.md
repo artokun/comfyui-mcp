@@ -6,6 +6,10 @@ All notable changes to this project are documented here. This project adheres to
 
 ## Unreleased
 
+### MCP
+#### Fixed
+- `scripts/read-minidump.mjs` — read a Windows crash dump far enough to say WHICH crash it
+
 ## [0.52.185] - 2026-09-03
 
 ### MCP
