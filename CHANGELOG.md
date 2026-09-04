@@ -9,6 +9,8 @@ All notable changes to this project are documented here. This project adheres to
 ### MCP
 
 #### Fixed
+
+- **`panel_show_media` inlines a remote ComfyUI output through `fetchImage` (the same client `get_image` uses) instead of handing the browser a `/view` that 404s (#2861).** Local canvas tabs still get a viewRef. A remote/cloud tab that cannot be inlined (MCP 404, non-media, over the 20 MB cap) is refused rather than painted empty. Same-named local workspace files are never substituted (#877/#899).
 - **the evidence rides on all THREE surfaces the Desktop verdict drives, not just the refusal (#2784).** The same classification also turns auto-restart supervision OFF ("Auto-restart supervision is only supported for directly spawned Python ComfyUI processes.") and produces "Could not determine ComfyUI Desktop executable path." — which is exactly the branch a NAME-match false positive lands in, since it has no Desktop install and so no exe path to find. Both asserted Desktop with nothing attached to check, and the auto-restart one is the hardest to trace back to a directory name because nothing was refused, a capability just quietly went away. Both now carry the same disclosure, worded for a statement rather than a refusal (the refusal clause says "this refusal is wrong with it" and points at "the arguments below", neither of which is true on these surfaces). The auto-restart message is pinned by a real call through a new test seam, not a source grep.
 - **a Desktop restart refusal now names the evidence that classified the install (#2784).**
 
