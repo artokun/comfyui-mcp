@@ -80,16 +80,34 @@ describe("#2693 recovery refuses without the identity binding", () => {
     ).toEqual([]);
   });
 
-  it("takes only FLAGS, never a bare value", () => {
-    // A bare token before the script is an argument to a flag this code does not
-    // model; copying it blind invents a command the server never had.
+  it("takes NOTHING when a flag carries a separate value", () => {
+    // `python -X utf8 -s main.py`. My first version filtered to tokens starting with
+    // "-" and returned ["-X", "-s"] — which rebuilds as `python -X -s main.py`,
+    // where -X swallows -s. That loses the very flag this recovery exists to
+    // preserve AND passes an invalid implementation option. Dropping a value while
+    // keeping its flag is worse than either alternative.
+    //
+    // Modelling which CPython options take a value is not something to hand-roll,
+    // so an unmodellable command line is simply not rebuilt. `-X utf8` is the
+    // likeliest shape to meet here, since this issue is about encoding.
     expect(
       interpreterFlagsFromOsArgv({
         argv: [SCRIPT],
         osArgv: [PY, "-X", "utf8", "-s", SCRIPT],
         osArgvExact: true,
       }),
-    ).toEqual(["-X", "-s"]);
+    ).toEqual([]);
+  });
+
+  it("still takes a run of plain flags", () => {
+    // The neighbour that must keep working: no bare token, nothing ambiguous.
+    expect(
+      interpreterFlagsFromOsArgv({
+        argv: [SCRIPT],
+        osArgv: [PY, "-s", "-E", SCRIPT],
+        osArgvExact: true,
+      }),
+    ).toEqual(["-s", "-E"]);
   });
 
   it("takes nothing when there is nothing before the script", () => {

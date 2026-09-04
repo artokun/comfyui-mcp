@@ -2880,7 +2880,19 @@ export function interpreterFlagsFromOsArgv(info: {
     b.split(String.fromCharCode(92)).join("/").toLowerCase();
   const at = os.findIndex((tok, i) => i > 0 && same(tok, script));
   if (at <= 0) return [];
-  return os.slice(1, at).filter((tok) => tok.startsWith("-"));
+  const pre = os.slice(1, at);
+  // A BARE token before the script is a value belonging to a flag this code does not
+  // model -- `python -X utf8 -s main.py` is the obvious one, and on an ENCODING bug
+  // it is the likeliest shape to meet. Keeping the flag and dropping its value is
+  // worse than either alternative: the relaunch becomes `python -X -s main.py`,
+  // where `-X` swallows `-s`, so the flag this exists to preserve is silently lost
+  // AND `-X -s` is not a valid implementation option.
+  //
+  // We cannot tell which flags take a separate value without modelling CPython's
+  // option table, so the honest answer is to reconstruct nothing: an unmodellable
+  // command line is not a command line we may rebuild.
+  if (pre.some((tok) => !tok.startsWith("-"))) return [];
+  return pre;
 }
 
 function relaunchArgv(info: ProcessInfo): string[] {
