@@ -6,8 +6,11 @@ All notable changes to this project are documented here. This project adheres to
 
 ## Unreleased
 
+
 ### MCP
+
 #### Fixed
+- **History/completion harvests a ComfyUI media ref under an unrecognised key (`dexter_video`, `nkd_video`) instead of only `images`/`videos`/`video`/`gifs` (#2845).** SaveVideoDexter emits `{filename, subfolder?, type?}` as a single object (or a one-item array); `buildCompletionNotification` / the panel_run watchdog now collect that one-level shape and classify by extension so completion names the mp4. Nested non-media values stay ignored. Panel v0.15.163 already collects the array form of this shape (#2128).
 - **download_model action:"status" now reports what the download cache is holding (#1477).** An UNREADABLE cache directory is now named and reported as unknown rather than silently omitted: "missing" and "there but unreadable" were one value, and the note treated both as nothing to say — leaving the one user who most needs the directory named back at the disk-usage treemap both reporters used.
 - **an out-of-space refusal now names the DESTINATION volume (#1477).** `insufficientCacheSpaceMessage` has accepted `destDir`/`destFree` since it was written — it says, when the destination has room and the staging cache does not, that this is one setting rather than a fatal error. No caller ever passed them, so that clause could not fire. The final destination is threaded from `downloadWithCache` (the only layer that knows it; below it every path is the CACHE path) down to the precheck. That is the reported shape exactly: 32 GB bound for D:, staged on a C: that could not hold it.
 
