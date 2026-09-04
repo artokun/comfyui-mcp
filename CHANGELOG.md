@@ -6,12 +6,17 @@ All notable changes to this project are documented here. This project adheres to
 
 ## Unreleased
 
+### MCP
+#### Fixed
+- **`get_workflow` `action:"strip"` does not Win32-resolve a remote Linux path on the MCP host (#2782).** Against a remote ComfyUI, an absolute POSIX `path` such as `/mydata/.../models/workflows/example.json` is no longer opened as `C:\mydata\...`. Library-shaped tails (`user/default/workflows`, `user/workflows`, `models/workflows`) are fetched from that server's userdata API; any other remote absolute path is refused instead of a local ENOENT.
+
+## [0.52.188] - 2026-09-03
 
 ### MCP
 
 #### Fixed
-- **`list_packs` `action:"list_templates"` uses the bound panel's `fetch_comfyui_read` relay when the template-index HTTP origin is unproven, and fails closed with `NO_PANEL_ORIGIN` when that origin stays unproven (#2839).** Compact `call_tool` listed templates through a loopback-only origin gate even while `panel_graph_outline` had a live bound canvas (`canvas_binding` / `graph_binding` bound). Native panel replies that carry the viewing witness are accepted; a unique published origin that matches the child's configured target may still be listed; mixed or malformed origin sets are not contacted.
-- **`get_workflow` `action:"strip"` does not Win32-resolve a remote Linux path on the MCP host (#2782).** Against a remote ComfyUI, an absolute POSIX `path` such as `/mydata/.../models/workflows/example.json` is no longer opened as `C:\mydata\...`. Library-shaped tails (`user/default/workflows`, `user/workflows`, `models/workflows`) are fetched from that server's userdata API; any other remote absolute path is refused instead of a local ENOENT.
+- **`list_packs` `action:"list_templates"` uses the bound panel's `fetch_comfyui_read` relay when the template-index HTTP origin is unproven, and fails closed with `NO_PANEL_ORIGIN` when that origin stays unproven (#2839, #2843).** Compact `call_tool` listed templates through a loopback-only origin gate even while `panel_graph_outline` had a live bound canvas (`canvas_binding` / `graph_binding` bound). Native panel replies that carry the viewing witness are accepted; a unique published origin that matches the child's configured target may still be listed; mixed or malformed origin sets are not contacted.
+
 
 ## [0.52.187] - 2026-09-03
 
