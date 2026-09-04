@@ -508,6 +508,32 @@ describe("train_doctor actions call the same services with the same arguments", 
     );
     expect(JSON.parse(text(res)).ok).toBe(true);
   });
+
+  it('action:"build_image" says a WEDGED build is wedged instead of a bare adoption (#2723)', async () => {
+    // doctor already discloses this; build_image did not. That is the wrong way
+    // round: re-issuing build_image after the old 300s timeout is exactly what the
+    // reporter did, so the one action taken to make progress was the silent one,
+    // and a plain `adopted: true` sends the caller back to polling a corpse.
+    const { startTrainerImageBuild, __resetTrainerImageBuildsForTests } = await import(
+      "../../services/trainer-image-build.js"
+    );
+    __resetTrainerImageBuildsForTests();
+    mocks.buildTrainerImage.mockReturnValueOnce(new Promise(() => {})); // never settles
+    const { build } = startTrainerImageBuild({ contextDir: "/ctx" });
+    build.started_at = Date.now() - 90 * 60_000; // far beyond any plausible build
+
+    mocks.dockerAvailable.mockResolvedValueOnce(true);
+    const body = JSON.parse(text(await handler("train_doctor")({ action: "build_image" })));
+    expect(body.data.adopted).toBe(true);
+    expect(String(body.data.note)).toMatch(/wedged/i);
+    expect(String(body.data.note)).toMatch(/restarting the orchestrator/i);
+    // and a HEALTHY adoption must stay quiet about wedging
+    build.started_at = Date.now();
+    mocks.dockerAvailable.mockResolvedValueOnce(true);
+    const ok = JSON.parse(text(await handler("train_doctor")({ action: "build_image" })));
+    expect(String(ok.data.note)).not.toMatch(/wedged/i);
+    __resetTrainerImageBuildsForTests();
+  });
 });
 
 describe("THE DELETE PAIR — two actions named `delete`, two blast radii", () => {

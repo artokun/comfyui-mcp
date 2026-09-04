@@ -709,7 +709,7 @@ export function registerTrainTools(server: McpServer): void {
             // doctor still said image:false. Local Docker training was unreachable,
             // not slow. Return a handle and let doctor report it — the same shape
             // download_model and enqueue_workflow already use.
-            const { startTrainerImageBuild } = await import("../services/trainer-image-build.js");
+            const { startTrainerImageBuild, trainerImageBuildLooksStalled } = await import("../services/trainer-image-build.js");
             const { build, adopted, refMismatch } = startTrainerImageBuild({
               contextDir,
               aiToolkitRef: args.aiToolkitRef,
@@ -742,8 +742,14 @@ export function registerTrainTools(server: McpServer): void {
                 // against one tag race for the layer cache. A caller who
                 // re-issues after the old 300s timeout must not start another.
                 adopted,
+                // #2723 — a wedged build pins the slot, and ADOPTING one is exactly what a
+                // caller re-issuing after the old 300s timeout does. A plain `adopted: true`
+                // there sends them back to polling a corpse: doctor already knew it looked
+                // stalled, and the one action taken to make progress stayed quiet.
                 note: adopted
-                  ? `A build of ${build.image} was already running (${build.id}); this call adopted it rather than starting a second one. Poll train_doctor (action:"doctor") — it reports this build under \`image_build\`.`
+                  ? trainerImageBuildLooksStalled(build)
+                    ? `A build of ${build.image} was already running (${build.id}) and this call ADOPTED it — but it has been going far longer than this image takes to build, so it is most likely wedged (a stalled base-image pull, or a hung daemon). Polling will NOT clear it: check docker ps for the build container, and restarting the orchestrator clears the slot so a fresh build can start.`
+                    : `A build of ${build.image} was already running (${build.id}); this call adopted it rather than starting a second one. Poll train_doctor (action:"doctor") — it reports this build under \`image_build\`.`
                   : `Started building ${build.image} in the background (${build.id}). This takes several minutes on a cold cache. It is NOT tied to this call, so poll train_doctor (action:"doctor") — it reports progress under \`image_build\` and \`image\` flips true when the tag lands.`,
               },
             });
