@@ -9,8 +9,15 @@ All notable changes to this project are documented here. This project adheres to
 ### MCP
 
 #### Fixed
-- **`panel_set_widget` / other mutations accept named node ids the graph readers print (#2855).** API-style graphs use string ids (`sampler`, `mac_studio_vlm`). `panel_graph_outline` already returned those; writes refused them at MCP validation (`NODE_ID_PATTERN` was integer / `120:104` only). Named ids stay strings on the wire — they are never `parseInt`'d. `"42px"` is still refused so it cannot become node 42.
 - **Credential errors told the user to set `ANTHROPIC_API_KEY`, which the orchestrator deletes from its own environment at startup (#2849).** `runPanelOrchestrator()` unsets the key so the agent authenticates against the claude.ai login; three of its own messages went on naming it as the remedy, one of them alongside "restart the orchestrator" — so a blocked user sets it, restarts as instructed and gets the identical error. The pi and Claude remedies now name only routes that reach the agent. The comfyui MCP child is a separate process with two lanes — the panel BUILDS its env (the allowlist omits the key) while a standalone client inherits the shell env — so its caption error is now lane-aware via `COMFYUI_MCP_TAB` instead of dropping advice that is correct for standalone users, and the `train` tool description (read by the MODEL, so it taught the dead remedy on paths no error string covers) no longer names a variable. New `check:env-advice` gate fails the build if an orchestrator message names a variable the process deletes.
+
+## [0.52.191] - 2026-09-04
+
+### MCP
+
+#### Fixed
+- **`panel_set_widget` / other mutations accept named node ids the graph readers print (#2855, #2856).** API-style graphs use string ids (`sampler`, `mac_studio_vlm`). `panel_graph_outline` already returned those; writes refused them at MCP validation (`NODE_ID_PATTERN` was integer / `120:104` only). Named ids stay strings on the wire — they are never `parseInt`'d. `"42px"` is still refused so it cannot become node 42.
+
 
 ## [0.52.190] - 2026-09-04
 
