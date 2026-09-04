@@ -9,11 +9,17 @@ All notable changes to this project are documented here. This project adheres to
 ### MCP
 
 #### Fixed
-
-- **`get_image(action:"get")` connected-panel image relay is one hop: one `fetch_image` after the headless `/view` is unreachable, then one bounded error (#2864).** An unreachable headless `127.0.0.1:8188` used to wrap `PANEL_FETCH_FAILED` / `MALFORMED_REPLY` until `Maximum call stack size exceeded` while the live panel stayed connected. Nested fallback into `fetchImage` is refused. Published diagnostic origins are still not dialed as `/view` targets.
 - the refused-inline recovery now names the asset's DIRECTORY (#2692). get_image action:"get" defaults to `args.type ?? "output"`, so a prescription carrying only filename and subfolder fetched output/ for an asset living in input/ or temp/ — the wrong file, or none, exactly when the inline preview was refused and that string is the only instruction the caller has. Both prescriptions now build from one helper so they cannot drift. Found by the Copilot review on the PR
 - **`get_image` bounds a BATCH of inline images against the transport frame, and bounds `action:"view"` at all (#2692).** A batch whose individual images each fit could still exceed the frame once concatenated, and the `view` action was not bounded at all; both now share one frame budget so an oversized reply is refused with what to do instead of dying as an unattributed transport error.
 - **`train_prepare_dataset action:"file"` joins the shared inline-frame accounting (#2692).** It returns an inline image through the same MCP transport as `image_management`, bounded only per-ITEM at 2MB — the bound this change exists to show is insufficient. Its bytes were never charged, so the FRAME BUDGET warning fired late or never, and with no slot open a concurrent `get_image` spent a full per-call budget beside it. The guard is a coverage assertion, so a third tool that emits inline content without charging fails the suite.
+
+## [0.52.196] - 2026-09-04
+
+### MCP
+
+#### Fixed
+
+- **`get_image(action:"get")` connected-panel image relay is one hop: one `fetch_image` after the headless `/view` is unreachable, then one bounded error (#2864, #2870).** An unreachable headless `127.0.0.1:8188` used to wrap `PANEL_FETCH_FAILED` / `MALFORMED_REPLY` until `Maximum call stack size exceeded` while the live panel stayed connected. Nested fallback into `fetchImage` is refused. Published diagnostic origins are still not dialed as `/view` targets.
 
 
 ## [0.52.195] - 2026-09-04
