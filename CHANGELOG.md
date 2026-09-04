@@ -14,6 +14,14 @@ All notable changes to this project are documented here. This project adheres to
 - **download_model action:"status" now reports what the download cache is holding (#1477).** An UNREADABLE cache directory is now named and reported as unknown rather than silently omitted: "missing" and "there but unreadable" were one value, and the note treated both as nothing to say — leaving the one user who most needs the directory named back at the disk-usage treemap both reporters used.
 - **an out-of-space refusal now names the DESTINATION volume (#1477).** `insufficientCacheSpaceMessage` has accepted `destDir`/`destFree` since it was written — it says, when the destination has room and the staging cache does not, that this is one setting rather than a fatal error. No caller ever passed them, so that clause could not fire. The final destination is threaded from `downloadWithCache` (the only layer that knows it; below it every path is the CACHE path) down to the precheck. That is the reported shape exactly: 32 GB bound for D:, staged on a C: that could not hold it.
 
+## [0.52.195] - 2026-09-04
+
+### MCP
+
+#### Fixed
+- **`get_history` / `get_system_stats` read the unique proven connected-panel origin+api_base after the headless target is unreachable, instead of only dispatching `fetch_comfyui_read` (#2836, #2867).** On 0.52.193 the named `PANEL_API_BASE_UNAVAILABLE` path still left history/health unavailable while `panel_run` worked: the live tab origin was never contacted, and the panel API object's undefined `api_base` crashed the relay. Mixed or unproven origins stay fail-closed (`PANEL_ORIGIN_UNPROVEN`); a guessed origin is never dialed. Same-origin dead loopback still uses one panel relay; an undefined panel `api_base` remains `PANEL_API_BASE_UNAVAILABLE`.
+
+
 ## [0.52.194] - 2026-09-04
 
 ### MCP
