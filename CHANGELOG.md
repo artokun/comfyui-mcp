@@ -9,9 +9,16 @@ All notable changes to this project are documented here. This project adheres to
 ### MCP
 
 #### Fixed
-
-- panel_save_subgraph accepts overwrite:true so a user-blueprint name collision can replace in place instead of being rejected as an unrecognized key (#2865)
 - the Manager-dialect guard's unit tests no longer probe the developer's real ComfyUI: two orchestrator test files passed on CI (nothing listening) and failed on any machine with ComfyUI actually running, because detection then succeeded and the git-URL guard refused the installs the fixtures are built on (test-only) A third file, late-mutation-e2e, was counted here in error: it invokes only panel_set_node_mode and never reaches the dialect probe -- it is the separate #694 load flake, and it passed in both arms of the control run.
+
+## [0.52.194] - 2026-09-04
+
+### MCP
+
+#### Fixed
+
+- panel_save_subgraph accepts overwrite:true so a user-blueprint name collision can replace in place instead of being rejected as an unrecognized key (#2865, #2866)
+
 
 ## [0.52.193] - 2026-09-04
 
