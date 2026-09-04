@@ -988,21 +988,29 @@ describe("panel_restart_comfyui — identity is resolved BEFORE the confirmation
     expect(out.note).toMatch(/no local boot endpoint/i);
   });
 
-  it("#2068 keeps the dynamic exception fail-closed when the server Origin differs", async () => {
+  it("#1593 restarts the bound local Origin when it differs from the configured target", async () => {
+    // Config points at the Desktop dynamic port; the live tab is still the
+    // boot loopback instance. Restart THAT tab via Manager — do not refuse
+    // and do not preflight/kill the configured other port.
     hoistedConfig.configBase.value = DYNAMIC_PANEL_BASE;
     __panelToolsTestHooks.setVerifiedProxyRestartTarget(async () => undefined);
     const preflight = vi.fn(async () => ({ ok: true }));
+    const healthProbe = vi.fn(async () => "healthy" as const);
     __panelToolsTestHooks.setLocalRestartPreflight(preflight);
+    __panelToolsTestHooks.setHealthProbe(healthProbe);
     const { ctx, sends } = makeCtx({ confirm: "yes", serverOrigin: BOOT_BASE });
     const confirm = vi.fn(async () => "yes" as const);
     ctx.confirm = confirm;
 
     const out = parse(await restartTool().handler({}, ctx));
 
-    expect(confirm).not.toHaveBeenCalled();
+    expect(confirm).toHaveBeenCalledOnce();
     expect(preflight).not.toHaveBeenCalled();
-    expect(sends).toEqual([]);
-    expect(out.refused).toBe(true);
+    expect(healthProbe).not.toHaveBeenCalled();
+    expect(sends.filter((cmd) => cmd.cmd === "comfy_reboot")).toHaveLength(1);
+    expect(out.refused).toBeUndefined();
+    expect(out.rebooting).toBe(true);
+    expect(out.confirmed_cycle).toBe(false);
   });
 
   it("a refused restart keeps the live tab and reports one terminal state, not a reconnect", async () => {
@@ -1044,7 +1052,7 @@ describe("panel_restart_comfyui — identity is resolved BEFORE the confirmation
       tabs: () => [{ tab_id: TAB, title: "wf", connected_at: 0 }],
       resolveActiveTabId: () => TAB,
       tabIsLocal: () => true,
-      tabServerOrigin: () => "http://127.0.0.1:8189",
+      tabServerOrigin: () => "http://localhost:8188",
       tabCanMutateGraph: () => true,
       tabGraphMutationCapability: () => ({ known: true, canMutate: true }),
     } as unknown as PanelToolCtx["bridge"];
