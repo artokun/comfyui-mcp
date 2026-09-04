@@ -660,11 +660,30 @@ function isUnsupportedPanelTemplateRead(error: unknown): boolean {
   );
 }
 
+function isPanelReadViewingWitness(value: unknown): boolean {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  if (!hasOnlyKeys(value, ["scope", "owner_node_id", "title", "workflow_uuid", "graph_identity"])) return false;
+  if (!("scope" in value) || (value.scope !== "root" && value.scope !== "subgraph")) return false;
+  if ("owner_node_id" in value) {
+    const owner = value.owner_node_id;
+    if (
+      owner !== null &&
+      !(typeof owner === "number" && Number.isSafeInteger(owner)) &&
+      !(typeof owner === "string" && isSafeText(owner, 256))
+    ) return false;
+  }
+  if ("title" in value && !isSafeText(value.title, 256)) return false;
+  if ("workflow_uuid" in value && !isSafeText(value.workflow_uuid, 256)) return false;
+  if ("graph_identity" in value && !isSafeText(value.graph_identity, 256)) return false;
+  return true;
+}
+
 function validatePanelTemplateReadPayload(value: unknown): string | undefined {
   if (!value || typeof value !== "object") return undefined;
   const record = value as Record<string, unknown>;
+  if ("viewing" in record && !isPanelReadViewingWitness(record.viewing)) return undefined;
   if (
-    !hasOnlyKeys(record, ["operation", "body", "contentType", "bytes"]) ||
+    !hasOnlyKeys(record, ["operation", "body", "contentType", "bytes", "viewing"]) ||
     record.operation !== PANEL_TEMPLATE_READ_OPERATION ||
     typeof record.body !== "string" ||
     record.body.length === 0 ||

@@ -6,8 +6,11 @@ All notable changes to this project are documented here. This project adheres to
 
 ## Unreleased
 
+
 ### MCP
+
 #### Fixed
+- **`list_packs` `action:"list_templates"` uses the bound panel's `fetch_comfyui_read` relay when the template-index HTTP origin is unproven, and fails closed with `NO_PANEL_ORIGIN` when that origin stays unproven (#2839).** Compact `call_tool` listed templates through a loopback-only origin gate even while `panel_graph_outline` had a live bound canvas (`canvas_binding` / `graph_binding` bound). Native panel replies that carry the viewing witness are accepted; a unique published origin that matches the child's configured target may still be listed; mixed or malformed origin sets are not contacted.
 - **the pi backend works when pi was installed from npm on Windows (#2835).** `npm i -g pi`
   writes `pi` (an extensionless bash script), `pi.cmd` and `pi.ps1`, and no `pi.exe`. Node
   spawns the first with ENOENT and the second with EINVAL (measured), and discovery returned
