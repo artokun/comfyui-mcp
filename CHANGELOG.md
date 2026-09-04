@@ -6,8 +6,11 @@ All notable changes to this project are documented here. This project adheres to
 
 ## Unreleased
 
+
 ### MCP
+
 #### Fixed
+- **`list_packs` `action:"list_templates"` uses the bound panel's `fetch_comfyui_read` relay when the template-index HTTP origin is unproven, and fails closed with `NO_PANEL_ORIGIN` when that origin stays unproven (#2839).** Compact `call_tool` listed templates through a loopback-only origin gate even while `panel_graph_outline` had a live bound canvas (`canvas_binding` / `graph_binding` bound). Native panel replies that carry the viewing witness are accepted; a unique published origin that matches the child's configured target may still be listed; mixed or malformed origin sets are not contacted.
 - **a relaunch keeps the Python INTERPRETER flags (#2693).** `-s`, `-E`, `-I`, `-B`, `-O` and `-u`
   are consumed by CPython before `sys.argv` exists, so a relaunch rebuilt from the server's own
   `sys.argv` dropped them — the reporter's portable install needs `-s`, and losing it changes
