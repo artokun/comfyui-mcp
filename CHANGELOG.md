@@ -8,8 +8,8 @@ All notable changes to this project are documented here. This project adheres to
 
 ### MCP
 
-#### Fixed
-- **two panel live-canvas tools are no longer deferred behind tool search (panel#291).**
+#### Changed
+- **PROBE, not a fix: two panel live-canvas tools opt out of tool-search deferral (panel#291).** This does not claim panel#291 is resolved — deferral alone cannot explain an empty deferred catalog, and the reported setup has not been re-run. It removes the deferral variable so the NEXT report can distinguish "deferred and unfound" from "never registered".
   The SDK defers in-process MCP tool schemas by default once tool search is enabled, and
   `alwaysLoad` exists because "the tools must be present when the turn-1 prompt is built".
   The reported Claude-backend failure has every `panel_*` tool absent while the SPAWNED
