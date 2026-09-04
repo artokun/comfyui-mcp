@@ -9,10 +9,16 @@ All notable changes to this project are documented here. This project adheres to
 ### MCP
 
 #### Fixed
-
-- **`get_image(action:"get")` connected-panel image relay is one hop: one `fetch_image` after the headless `/view` is unreachable, then one bounded error (#2864).** An unreachable headless `127.0.0.1:8188` used to wrap `PANEL_FETCH_FAILED` / `MALFORMED_REPLY` until `Maximum call stack size exceeded` while the live panel stayed connected. Nested fallback into `fetchImage` is refused. Published diagnostic origins are still not dialed as `/view` targets.
 - the env-advice gate now sees a bracket-form delete, not only dot access (#2849). It discovered unset variables with `delete process.env.NAME` alone, so `delete process.env["NAME"]` left the set empty for that key and the gate reported success while the advice it guards was still shipping. A gate a harmless syntax refactor can silence is not a gate. Found by the Copilot review on the PR
 - **Credential errors told the user to set `ANTHROPIC_API_KEY`, which the orchestrator deletes from its own environment at startup (#2849).** `runPanelOrchestrator()` unsets the key so the agent authenticates against the claude.ai login; three of its own messages went on naming it as the remedy, one of them alongside "restart the orchestrator" — so a blocked user sets it, restarts as instructed and gets the identical error. The pi and Claude remedies now name only routes that reach the agent. The comfyui MCP child is a separate process with two lanes — the panel BUILDS its env (the allowlist omits the key) while a standalone client inherits the shell env — so its caption error is now lane-aware via `COMFYUI_MCP_TAB` instead of dropping advice that is correct for standalone users, and the `train` tool description (read by the MODEL, so it taught the dead remedy on paths no error string covers) no longer names a variable. New `check:env-advice` gate fails the build if an orchestrator message names a variable the process deletes.
+
+## [0.52.196] - 2026-09-04
+
+### MCP
+
+#### Fixed
+
+- **`get_image(action:"get")` connected-panel image relay is one hop: one `fetch_image` after the headless `/view` is unreachable, then one bounded error (#2864, #2870).** An unreachable headless `127.0.0.1:8188` used to wrap `PANEL_FETCH_FAILED` / `MALFORMED_REPLY` until `Maximum call stack size exceeded` while the live panel stayed connected. Nested fallback into `fetchImage` is refused. Published diagnostic origins are still not dialed as `/view` targets.
 
 
 ## [0.52.195] - 2026-09-04
