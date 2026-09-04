@@ -10,6 +10,14 @@ All notable changes to this project are documented here. This project adheres to
 #### Fixed
 - **an MCP server that connects and registers NO tools is now reported (#2742).** Once this process has seen ANY namespaced MCP tool -- proof the harness lists them -- a session with NONE reports every configured server, closing the blind spot where a failure that emptied EVERY server looked identical to a harness that does not namespace.
 
+## [0.52.186] - 2026-09-03
+
+### MCP
+
+#### Fixed
+- **`panel_restart_comfyui` restarts the panel's bound local ComfyUI when that origin is a proven loopback instance on a different port than `COMFYUI_URL` (#1593, #2832).** A live tab whose server-observed Origin is a concrete loopback host (and whose socket arrived on the local listener) is Manager-rebooted even if MCP is still configured for `:8188` while the panel is on `:8189`. The busy guard still applies, a guessed or DNS-ambiguous origin is never restarted, and a relayed tab stays fail-closed.
+
+
 ## [0.52.185] - 2026-09-03
 
 ### MCP
