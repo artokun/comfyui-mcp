@@ -109,8 +109,16 @@ describe("#2835 resolvePiLaunch prefers a runnable script over an unspawnable sh
 
     const launch = resolvePiLaunch();
     expect(launch).not.toBeNull();
-    expect(launch?.command).toBe(process.execPath);
-    expect(launch?.prefixArgs).toEqual([script]);
+    if (process.platform === "win32") {
+      expect(launch?.command).toBe(process.execPath);
+      expect(launch?.prefixArgs).toEqual([script]);
+    } else {
+      // Shim resolution is win32-only ON PURPOSE: npm's extensionless shim is a
+      // shell script with a shebang, which POSIX executes directly. Resolving it to
+      // `node <script>` there would replace a working launch with a second guess.
+      expect(launch?.command).toBe(join(dir, "pi"));
+      expect(launch?.prefixArgs).toEqual([]);
+    }
   });
 
   it("accepts COMFYUI_MCP_PI_PATH pointing at a shim it CAN resolve", () => {
@@ -123,8 +131,14 @@ describe("#2835 resolvePiLaunch prefers a runnable script over an unspawnable sh
     process.env.PATH = "";
 
     const launch = resolvePiLaunch();
-    expect(launch?.command).toBe(process.execPath);
-    expect(launch?.prefixArgs).toEqual([script]);
+    if (process.platform === "win32") {
+      expect(launch?.command).toBe(process.execPath);
+      expect(launch?.prefixArgs).toEqual([script]);
+    } else {
+      // On POSIX a `.cmd` override is still refused, unchanged: it is a Windows
+      // batch file and nothing here can run it.
+      expect(launch).toBeNull();
+    }
   });
 
   it("still refuses a .cmd whose target cannot be resolved", () => {
