@@ -9,6 +9,8 @@ All notable changes to this project are documented here. This project adheres to
 ### MCP
 
 #### Fixed
+
+- **`panel_show_media` inlines a remote ComfyUI output through `fetchImage` (the same client `get_image` uses) instead of handing the browser a `/view` that 404s (#2861).** Local canvas tabs still get a viewRef. A remote/cloud tab that cannot be inlined (MCP 404, non-media, over the 20 MB cap) is refused rather than painted empty. Same-named local workspace files are never substituted (#877/#899).
 - **a `hello` frame carrying no `comfyui_url` is no longer reported as a dead instance (#2742).** The one verdict with no `base` fell through to the shared warning, rendering as `ignoring hello retarget to unreachable undefined (stale tab on a dead instance?)` — asserting a target was named AND found dead, about a frame that claimed neither. Seen 17 times in one report from tabs that were merely churning.
 - **an MCP server that connects and registers NO tools is now reported (#2742).** Once this process has seen ANY namespaced MCP tool -- proof the harness lists them -- a session with NONE reports every configured server, closing the blind spot where a failure that emptied EVERY server looked identical to a harness that does not namespace.
 
