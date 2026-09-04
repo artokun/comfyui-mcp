@@ -13,6 +13,14 @@ All notable changes to this project are documented here. This project adheres to
 - **`get_image` bounds a BATCH of inline images against the transport frame, and bounds `action:"view"` at all (#2692).** A batch whose individual images each fit could still exceed the frame once concatenated, and the `view` action was not bounded at all; both now share one frame budget so an oversized reply is refused with what to do instead of dying as an unattributed transport error.
 - **`train_prepare_dataset action:"file"` joins the shared inline-frame accounting (#2692).** It returns an inline image through the same MCP transport as `image_management`, bounded only per-ITEM at 2MB — the bound this change exists to show is insufficient. Its bytes were never charged, so the FRAME BUDGET warning fired late or never, and with no slot open a concurrent `get_image` spent a full per-call budget beside it. The guard is a coverage assertion, so a third tool that emits inline content without charging fails the suite.
 
+## [0.52.195] - 2026-09-04
+
+### MCP
+
+#### Fixed
+- **`get_history` / `get_system_stats` read the unique proven connected-panel origin+api_base after the headless target is unreachable, instead of only dispatching `fetch_comfyui_read` (#2836, #2867).** On 0.52.193 the named `PANEL_API_BASE_UNAVAILABLE` path still left history/health unavailable while `panel_run` worked: the live tab origin was never contacted, and the panel API object's undefined `api_base` crashed the relay. Mixed or unproven origins stay fail-closed (`PANEL_ORIGIN_UNPROVEN`); a guessed origin is never dialed. Same-origin dead loopback still uses one panel relay; an undefined panel `api_base` remains `PANEL_API_BASE_UNAVAILABLE`.
+
+
 ## [0.52.194] - 2026-09-04
 
 ### MCP
