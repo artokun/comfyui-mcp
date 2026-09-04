@@ -3976,8 +3976,12 @@ export class PanelAgentManager {
     // default while the picker went on showing the user's choice. A subscription user
     // picked Sonnet and burned Opus limits with no signal anywhere.
     //
-    // A New chat is a CONVERSATION boundary. The model belongs to the tab and its
-    // provider, not to the conversation, so it is not this boundary's to reset.
+    // A New chat is a CONVERSATION boundary. The model belongs to the PROVIDER, for
+    // the shared session — `agentKeyFor` ignores the tab except to look up its
+    // backend, so one pick is shared by every tab on that provider. Said precisely
+    // because 'belongs to the tab' would invite adding a tab dimension to the key,
+    // which would split the override per tab and undo the shared-session invariant.
+    // Either way it is not a conversation boundary's to reset.
     if (agent) {
       logger.info(`[panel-orchestrator] tab ${agentKey.slice(0, 8)} reset — new session next message`);
       void agent.stop();
