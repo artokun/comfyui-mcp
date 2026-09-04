@@ -6,13 +6,18 @@ All notable changes to this project are documented here. This project adheres to
 
 ## Unreleased
 
+### MCP
+
+#### Fixed
+- **the dump reader says WHICH crash, WHICH process, and WHICH renderer (#2023).** It now reports the crashing executable and its Chromium process type (browser / renderer / gpu-process) alongside the fault, so a dump from the wrong program or the wrong process is caught before anything else in the output is trusted — a gpu-process dump otherwise describes a different fault with identical confidence. It also names the Electron/Chromium build, since two text-stack crashes are only the same bug on the same renderer, and glosses three more exception codes (EXCEPTION_IN_PAGE_ERROR and the two corruption checks) that a reporter would otherwise quote as bare hex. A dump lacking Crashpad annotations reports none of it rather than inventing a value.
+- `scripts/read-minidump.mjs` — read a Windows crash dump far enough to say WHICH crash it
+
+## [0.52.190] - 2026-09-04
 
 ### MCP
 
 #### Fixed
-- **`get_workflow` `action:"strip"` does not Win32-resolve a remote Linux path on the MCP host (#2782).** Against a remote ComfyUI, an absolute POSIX `path` such as `/mydata/.../models/workflows/example.json` is no longer opened as `C:\mydata\...`. Library-shaped tails (`user/default/workflows`, `user/workflows`, `models/workflows`) are fetched from that server's userdata API; any other remote absolute path is refused instead of a local ENOENT.
-- **the dump reader says WHICH crash, WHICH process, and WHICH renderer (#2023).** It now reports the crashing executable and its Chromium process type (browser / renderer / gpu-process) alongside the fault, so a dump from the wrong program or the wrong process is caught before anything else in the output is trusted — a gpu-process dump otherwise describes a different fault with identical confidence. It also names the Electron/Chromium build, since two text-stack crashes are only the same bug on the same renderer, and glosses three more exception codes (EXCEPTION_IN_PAGE_ERROR and the two corruption checks) that a reporter would otherwise quote as bare hex. A dump lacking Crashpad annotations reports none of it rather than inventing a value.
-- `scripts/read-minidump.mjs` — read a Windows crash dump far enough to say WHICH crash it
+- **`get_workflow` `action:"strip"` does not Win32-resolve a remote Linux path on the MCP host (#2782, #2811).** Against a remote ComfyUI, an absolute POSIX `path` such as `/mydata/.../models/workflows/example.json` is no longer opened as `C:\mydata\...`. Library-shaped tails (`user/default/workflows`, `user/workflows`, `models/workflows`) are fetched from that server's userdata API; any other remote absolute path is refused instead of a local ENOENT.
 
 ## [0.52.189] - 2026-09-03
 
