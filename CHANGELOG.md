@@ -6,8 +6,11 @@ All notable changes to this project are documented here. This project adheres to
 
 ## Unreleased
 
+
 ### MCP
+
 #### Fixed
+- **History/completion harvests a ComfyUI media ref under an unrecognised key (`dexter_video`, `nkd_video`) instead of only `images`/`videos`/`video`/`gifs` (#2845).** SaveVideoDexter emits `{filename, subfolder?, type?}` as a single object (or a one-item array); `buildCompletionNotification` / the panel_run watchdog now collect that one-level shape and classify by extension so completion names the mp4. Nested non-media values stay ignored. Panel v0.15.163 already collects the array form of this shape (#2128).
 - the upload body and the bridge probe's socket chunks are typed so they still compile
 
 ## [0.52.188] - 2026-09-03
