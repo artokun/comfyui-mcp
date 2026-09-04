@@ -1,4 +1,4 @@
-import { afterAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -26,6 +26,7 @@ const mocks = vi.hoisted(() => ({
   generateSkillCached: vi.fn(),
   checkWorkflowRuntime: vi.fn(),
   requestPanelTemplateIndex: vi.fn(),
+  requestPanelComfyUIRead: vi.fn(),
 }));
 
 const comfyui = vi.hoisted(() => ({
@@ -56,9 +57,21 @@ vi.mock("../../config.js", () => ({
   getComfyUIAuthHeaders: () => comfyui.authHeaders,
 }));
 
-vi.mock("../../services/panel-template-relay.js", () => ({
-  requestPanelTemplateIndex: (...args: unknown[]) => mocks.requestPanelTemplateIndex(...args),
-}));
+vi.mock("../../services/panel-template-relay.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../../services/panel-template-relay.js")>();
+  return {
+    ...actual,
+    requestPanelTemplateIndex: (...args: unknown[]) => mocks.requestPanelTemplateIndex(...args),
+  };
+});
+
+vi.mock("../../services/panel-image-relay.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../../services/panel-image-relay.js")>();
+  return {
+    ...actual,
+    requestPanelComfyUIRead: (...args: unknown[]) => mocks.requestPanelComfyUIRead(...args),
+  };
+});
 
 import {
   registerSkillsAccessTools,
@@ -68,6 +81,9 @@ import {
   describeMissingWorkflow,
   coercePackMeta,
 } from "../../tools/skills-access.js";
+import { PanelTemplateRelayError } from "../../services/panel-template-relay.js";
+import { PanelComfyUIReadRelayError } from "../../services/panel-image-relay.js";
+import { setConnectedPanelOrigins } from "../../comfyui/fetch.js";
 
 type Handler = (args: Record<string, any>) => Promise<{
   isError?: boolean;
@@ -134,6 +150,10 @@ beforeEach(() => {
 
 afterAll(() => {
   global.fetch = savedFetch;
+});
+
+afterEach(() => {
+  setConnectedPanelOrigins(null);
 });
 
 describe("list_packs registration", () => {
@@ -323,6 +343,78 @@ describe("actions call the same services with the same arguments", () => {
     const res = await handler()({ action: "list_templates" });
     expect(res.isError).toBe(true);
     expect(text(res)).toContain("panel template relay failed");
+    expect(global.fetch).not.toHaveBeenCalled();
+  });
+
+  it('action:"list_templates" uses the bound panel read relay after NO_PANEL_ORIGIN (#2839)', async () => {
+    mocks.requestPanelTemplateIndex.mockRejectedValueOnce(
+      new PanelTemplateRelayError("The connected panel template relay failed (NO_PANEL_ORIGIN).", "NO_PANEL_ORIGIN"),
+    );
+    const index = { "bound-pack": [{ name: "from-bound-panel" }] };
+    const body = JSON.stringify(index);
+    mocks.requestPanelComfyUIRead.mockResolvedValueOnce({
+      operation: "workflow_templates",
+      body,
+      contentType: "application/json",
+      bytes: Buffer.byteLength(body, "utf8"),
+    });
+
+    const res = await handler()({ action: "list_templates" });
+    expect(res.isError ?? false).toBe(false);
+    expect(JSON.parse(text(res))).toMatchObject({
+      source_count: 1,
+      template_count: 1,
+      templates: { "bound-pack": [{ name: "from-bound-panel" }] },
+    });
+    expect(mocks.requestPanelComfyUIRead).toHaveBeenCalledWith("workflow_templates");
+    expect(global.fetch).not.toHaveBeenCalled();
+  });
+
+  it('action:"list_templates" stays fail-closed on NO_PANEL_ORIGIN when the origin is unproven (#2839)', async () => {
+    mocks.requestPanelTemplateIndex.mockRejectedValueOnce(
+      new PanelTemplateRelayError("The connected panel template relay failed (NO_PANEL_ORIGIN).", "NO_PANEL_ORIGIN"),
+    );
+    mocks.requestPanelComfyUIRead.mockResolvedValueOnce(undefined);
+    setConnectedPanelOrigins(() => ["not-an-origin", "https://other.example"]);
+
+    const res = await handler()({ action: "list_templates" });
+    expect(res.isError).toBe(true);
+    expect(text(res)).toContain("NO_PANEL_ORIGIN");
+    expect(global.fetch).not.toHaveBeenCalled();
+  });
+
+  it('action:"list_templates" lists the configured target when the bound origin is proven (#2839)', async () => {
+    mocks.requestPanelTemplateIndex.mockRejectedValueOnce(
+      new PanelTemplateRelayError("The connected panel template relay failed (NO_PANEL_ORIGIN).", "NO_PANEL_ORIGIN"),
+    );
+    mocks.requestPanelComfyUIRead.mockRejectedValueOnce(
+      new PanelComfyUIReadRelayError("The connected panel could not read ComfyUI.", "PANEL_FETCH_FAILED"),
+    );
+    setConnectedPanelOrigins(() => ["http://comfy.test:8188"]);
+    const res = await handler()({ action: "list_templates" });
+    expect(res.isError ?? false).toBe(false);
+    expect(global.fetch).toHaveBeenCalledWith(
+      "http://comfy.test:8188/api/workflow_templates",
+      expect.anything(),
+    );
+    expect(JSON.parse(text(res))).toMatchObject({
+      source_count: 1,
+      template_count: 1,
+    });
+  });
+
+  it('action:"list_templates" fails closed when the bound panel read relay reports a stale target (#2839)', async () => {
+    mocks.requestPanelTemplateIndex.mockRejectedValueOnce(
+      new PanelTemplateRelayError("The connected panel template relay failed (NO_PANEL_ORIGIN).", "NO_PANEL_ORIGIN"),
+    );
+    mocks.requestPanelComfyUIRead.mockRejectedValueOnce(
+      new PanelComfyUIReadRelayError("The connected panel ComfyUI read relay failed (STALE_TARGET).", "STALE_TARGET"),
+    );
+    setConnectedPanelOrigins(() => ["http://comfy.test:8188"]);
+
+    const res = await handler()({ action: "list_templates" });
+    expect(res.isError).toBe(true);
+    expect(text(res)).toContain("STALE_TARGET");
     expect(global.fetch).not.toHaveBeenCalled();
   });
 
