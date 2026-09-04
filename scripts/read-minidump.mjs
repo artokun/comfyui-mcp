@@ -149,9 +149,25 @@ export function describeMinidump(name, dump) {
   lines.push(
     `  modules    ${dump.modules.length} loaded` +
       (text.length
-        ? `; text stack present: ${text.map((m) => m.name.split(/[\\/]/).pop()).join(", ")}`
+        ? `; text stack LOADED (not implicated): ${text.map((m) => m.name.split(/[\\/]/).pop()).join(", ")}`
         : "; no DirectWrite/Direct2D loaded"),
   );
+  // panel#2023 asks ONE question -- is the faulting module a text-rendering DLL --
+  // and the module list answers a different one. DWrite.dll is loaded in every GUI
+  // process (present in all three real Comfy Desktop dumps on the machine this was
+  // written on, including a 37-module one), so listing it carries no discriminating
+  // value and reads, to someone scanning for 'DWrite', exactly like a hit. State the
+  // verdict instead of leaving it to be inferred from a list.
+  if (dump.faultingModule) {
+    const faultingIsText = /dwrite|d2d1|dcomp|gdi32/i.test(dump.faultingModule.name);
+    lines.push(
+      faultingIsText
+        ? '  verdict    the FAULTING module is a text-rendering DLL -- the panel#2023 shape'
+        : '  verdict    the faulting module is NOT a text-rendering DLL -- not the panel#2023 shape',
+    );
+  } else {
+    lines.push('  verdict    <no faulting module resolved -- cannot say either way>');
+  }
   return lines.join("\n");
 }
 

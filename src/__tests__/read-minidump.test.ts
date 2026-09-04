@@ -155,7 +155,10 @@ describe("panel#2023 the reader answers which crash this is", () => {
 
   it("reports whether the text stack was even loaded", () => {
     const withText = describeMinidump("x", readMinidump(makeDump({ modules: [DWRITE, APP] })));
-    expect(withText).toMatch(/text stack present: DWrite\.dll/);
+    // Labelled "LOADED (not implicated)" since DWrite.dll is loaded in EVERY GUI
+    // process — measured on three real Comfy Desktop dumps. The old wording read as
+    // a hit to anyone scanning for it, which is the one thing this tool must not do.
+    expect(withText).toMatch(/text stack LOADED \(not implicated\): DWrite\.dll/);
     const without = describeMinidump("x", readMinidump(makeDump({ modules: [APP] })));
     expect(without).toMatch(/no DirectWrite\/Direct2D loaded/);
   });
@@ -179,5 +182,44 @@ describe("#2023 an unread module list is not a finding about the address", () =>
     expect(unread).not.toContain("inside NO loaded module");
     expect(noOwner).toContain("inside NO loaded module");
     expect(noOwner).not.toContain("could not be read");
+  });
+});
+
+describe("#2023 the report states the verdict, rather than leaving it to be inferred", () => {
+  // Found by running the reader on the three REAL Comfy Desktop dumps on this
+  // machine. DWrite.dll was listed on every one of them -- including a 37-module
+  // dump -- because it is loaded in every GUI process. The old line said "text stack
+  // present: DWrite.dll" while the faulting module was Comfy Desktop.exe, which to
+  // anyone scanning for "DWrite" reads exactly like a hit, in a tool built to answer
+  // that one question.
+  const dwrite = { base: 1n, size: 16, name: "C:/Windows/System32/DWrite.dll" };
+  const base = {
+    streamCount: 1,
+    modules: [dwrite],
+    exception: { codeHex: "0xc0000005", addressHex: "0x5" },
+  };
+
+  it("says NOT the #2023 shape when a text DLL is merely loaded", () => {
+    const out = describeMinidump("x", {
+      ...base,
+      faultingModule: { name: "C:/Program Files/Comfy Desktop/Comfy Desktop.exe", offset: "0x1" },
+    } as never);
+    expect(out).toContain("is NOT a text-rendering DLL");
+    // And the module list must not imply otherwise.
+    expect(out).toContain("LOADED (not implicated)");
+    expect(out).not.toContain("text stack present");
+  });
+
+  it("says it IS the shape when the FAULTING module is the text DLL", () => {
+    const out = describeMinidump("x", {
+      ...base,
+      faultingModule: { name: dwrite.name, offset: "0x1" },
+    } as never);
+    expect(out).toContain("the FAULTING module is a text-rendering DLL");
+  });
+
+  it("refuses a verdict when no faulting module resolved", () => {
+    // Neither direction is claimed from an unknown -- the same rule as the test above.
+    expect(describeMinidump("x", base as never)).toContain("cannot say either way");
   });
 });
