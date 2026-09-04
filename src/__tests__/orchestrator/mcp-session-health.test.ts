@@ -82,6 +82,7 @@ describe("inspectMcpServers — what the session reports vs what it was given", 
   it("treats an unrecognized status as connected", () => {
     // The status vocabulary belongs to the CLI and can grow. A new value must
     // not become an alarm here; only the ones that DO mean unusable are alarms.
+
     expect(
       inspectMcpServers(CONFIGURED, [
         { name: "comfyui", status: "connected" },
@@ -354,6 +355,47 @@ describe("a server that connected and contributed NO tools (#2742)", () => {
     expect(
       serversWithoutTools(["comfyui", "panel"], CONNECTED, [
         "Read",
+        "mcp__comfyui__generate_image",
+      ]),
+    ).toEqual(["panel"]);
+  });
+
+  // #2742 — the notice asserts a server CONNECTED and contributed nothing, so a
+  // server may only be named on POSITIVE evidence of connection. "Not degraded" is a
+  // different fact: inspectMcpServers classifies nothing at all when the report is
+  // absent or empty, and an unrecognised status is deliberately not an alarm — so a
+  // server with no usable status evidence used to be named on the strength of
+  // ANOTHER server's tools populating the list.
+  it("will not name a server the report says nothing about", () => {
+    expect(
+      serversWithoutTools(["comfyui", "panel"], undefined, [
+        "mcp__comfyui__generate_image",
+      ]),
+    ).toEqual([]);
+    expect(
+      serversWithoutTools(["comfyui", "panel"], [], ["mcp__comfyui__generate_image"]),
+    ).toEqual([]);
+  });
+
+  it("will not name a server whose status it does not recognise", () => {
+    // Not an alarm (inspectMcpServers leaves it out of degraded/pending, by design)
+    // and not proof of health either — so it is not eligible for this notice.
+    expect(
+      serversWithoutTools(
+        ["comfyui", "panel"],
+        [
+          { name: "comfyui", status: "connected" },
+          { name: "panel", status: "some-future-status" },
+        ],
+        ["mcp__comfyui__generate_image"],
+      ),
+    ).toEqual([]);
+  });
+
+  it("still names it once the report SAYS connected", () => {
+    // The control for the two above: same inputs, status now positively connected.
+    expect(
+      serversWithoutTools(["comfyui", "panel"], CONNECTED, [
         "mcp__comfyui__generate_image",
       ]),
     ).toEqual(["panel"]);

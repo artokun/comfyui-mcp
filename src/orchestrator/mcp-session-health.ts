@@ -195,10 +195,26 @@ export function serversWithoutTools(
   if (namespaced.length > 0) harnessListsNamespacedMcpTools = true;
   else if (!harnessListsNamespacedMcpTools) return [];
   const health = inspectMcpServers(configured, reported);
-  const notUp = new Set<string>([...health.degraded.map((d) => d.name), ...health.pending]);
+  // #2742 — the notice says a server CONNECTED and contributed nothing, so a server
+  // may only appear here if the report SAYS it connected. "Not in notUp" is a
+  // different fact: with `reported` absent or empty nothing is classified at all,
+  // and an unrecognised status classifies as neither -- so a server with no status
+  // evidence used to be announced as connected-but-empty on the strength of ANOTHER
+  // server's tools populating the list.
+  // POSITIVE evidence, read here rather than added to McpSessionHealth: every other
+  // caller of that type asks "what is wrong", and widening it for one caller that
+  // asks "what is proven right" would churn six expectations for no gain.
+  //
+  // An unrecognised status is deliberately NOT an alarm (its own test says so) --
+  // but it is not proof of health either, and this notice needs the second thing.
+  const isConnected = new Set<string>(
+    (Array.isArray(reported) ? reported : [])
+      .filter((e) => e && String(e.status ?? "").trim().toLowerCase() === "connected")
+      .map((e) => e.name),
+  );
   const empty: string[] = [];
   for (const name of configured) {
-    if (notUp.has(name)) continue;
+    if (!isConnected.has(name)) continue;
     const prefix = `mcp__${name}__`;
     if (!namespaced.some((t) => t.startsWith(prefix))) empty.push(name);
   }
