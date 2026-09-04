@@ -10,7 +10,7 @@ All notable changes to this project are documented here. This project adheres to
 
 #### Fixed
 
-- panel_show_media inlines a remote ComfyUI /view ref the configured MCP client can fetch, so a browser-facing /view 404 no longer paints an empty card when get_image succeeds (#2861)
+- **`panel_show_media` inlines a remote ComfyUI output through `fetchImage` (the same client `get_image` uses) instead of handing the browser a `/view` that 404s (#2861).** Local canvas tabs still get a viewRef. A remote/cloud tab that cannot be inlined (MCP 404, non-media, over the 20 MB cap) is refused rather than painted empty. Same-named local workspace files are never substituted (#877/#899).
 
 ## [0.52.192] - 2026-09-04
 
