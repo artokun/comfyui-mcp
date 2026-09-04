@@ -9,12 +9,19 @@ All notable changes to this project are documented here. This project adheres to
 ### MCP
 
 #### Fixed
-
-- panel_save_subgraph accepts overwrite:true so a user-blueprint name collision can replace in place instead of being rejected as an unrecognized key (#2865)
 - the cache report no longer implies you can reclaim what a hardlink is holding (#1477). materializeCacheFile prefers a hardlink when cache and destination share a volume, so a retained entry is often the SAME inode as the installed model; the note called every one a COPY whose deletion "costs only" a re-download. Measured on a real cache: 75 of 93 entries and 381 GB of 437 GB were shared, so the true reclaimable figure was ~56 GB, not ~437 GB. The footprint now counts sharedBytes/sharedEntries and the note states both. Also: COMFYUI_DOWNLOAD_CACHE_DIR is named whether or not eviction is on, and "unset" becomes "not set to a positive number", which is what cacheSizeLimitBytes actually tests. Found by the Copilot review on the PR
 - **the cache footprint says when it CANNOT account for the whole directory (#1477).** The retained/staged/sidecar buckets cover every regular FILE, which is what lets them reconcile against `du` — but `entry.isFile()` skips a subdirectory or a symlink, and skipping it silently made that reconciliation true-unless. The one scenario this report exists for is a user comparing it against a disk-usage treemap (both reporters found the problem exactly that way), which is precisely where an unexplained remainder reads as the tool being wrong. Non-file entries are now counted and disclosed, as a "may" rather than a "will": an empty subdirectory contributes nothing, so the totals can still agree, and asserting a discrepancy this code has not measured would be its own overclaim. Counted, never sized: `stat` on a directory returns the inode, not the bytes beneath it, so a number there would mislead more than none.
 - **download_model action:"status" now reports what the download cache is holding (#1477).** An UNREADABLE cache directory is now named and reported as unknown rather than silently omitted: "missing" and "there but unreadable" were one value, and the note treated both as nothing to say — leaving the one user who most needs the directory named back at the disk-usage treemap both reporters used.
 - **an out-of-space refusal now names the DESTINATION volume (#1477).** `insufficientCacheSpaceMessage` has accepted `destDir`/`destFree` since it was written — it says, when the destination has room and the staging cache does not, that this is one setting rather than a fatal error. No caller ever passed them, so that clause could not fire. The final destination is threaded from `downloadWithCache` (the only layer that knows it; below it every path is the CACHE path) down to the precheck. That is the reported shape exactly: 32 GB bound for D:, staged on a C: that could not hold it.
+
+## [0.52.194] - 2026-09-04
+
+### MCP
+
+#### Fixed
+
+- panel_save_subgraph accepts overwrite:true so a user-blueprint name collision can replace in place instead of being rejected as an unrecognized key (#2865, #2866)
+
 
 ## [0.52.193] - 2026-09-04
 
