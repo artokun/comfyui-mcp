@@ -220,6 +220,81 @@ describe("buildCompletionNotification", () => {
     ]);
   });
 
+  it("#2845 collects a SaveVideoDexter dexter_video object as a video output", () => {
+    const entry: HistoryEntry = {
+      prompt: {},
+      outputs: {
+        "6335": {
+          dexter_video: {
+            filename: "ComfyUI_00067_.mp4",
+            subfolder: "video",
+            type: "output",
+          },
+        },
+      },
+      status: {
+        status_str: "success",
+        completed: true,
+        messages: [["execution_success", { prompt_id: PROMPT_ID, timestamp: START }]],
+      },
+    };
+
+    const notification = buildCompletionNotification(PROMPT_ID, entry, START);
+
+    expect(notification.outputs).toEqual([]);
+    expect(notification.video_outputs).toEqual([
+      {
+        node_id: "6335",
+        videos: [
+          expect.objectContaining({
+            filename: "ComfyUI_00067_.mp4",
+            subfolder: "video",
+            type: "output",
+          }),
+        ],
+      },
+    ]);
+  });
+
+  it("#2845 collects an nkd_video array the same way, and ignores nested non-media", () => {
+    const entry: HistoryEntry = {
+      prompt: {},
+      outputs: {
+        "44": {
+          nkd_video: [
+            { filename: "NKD_test__v012.mp4", subfolder: "unionen-time-machine/test", type: "output" },
+          ],
+        },
+        "50": {
+          wrapper: { inner: { filename: "hidden.mp4", subfolder: "video", type: "output" } },
+          notes: { filename: "readme.txt", type: "output" },
+          audio: [{ filename: "take.flac", subfolder: "", type: "output" }],
+        },
+      },
+      status: {
+        status_str: "success",
+        completed: true,
+        messages: [["execution_success", { prompt_id: PROMPT_ID, timestamp: START }]],
+      },
+    };
+
+    const notification = buildCompletionNotification(PROMPT_ID, entry, START);
+
+    expect(notification.outputs).toEqual([]);
+    expect(notification.video_outputs).toEqual([
+      {
+        node_id: "44",
+        videos: [
+          expect.objectContaining({
+            filename: "NKD_test__v012.mp4",
+            subfolder: "unionen-time-machine/test",
+            type: "output",
+          }),
+        ],
+      },
+    ]);
+  });
+
   it("#2512 interrupted duration/finished-at come from execution_interrupted, not delivery time", () => {
     const interruptAt = START + 21 * 60 * 1000 + 8 * 1000;
     const notification = buildCompletionNotification(
