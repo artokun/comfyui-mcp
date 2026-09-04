@@ -45,14 +45,23 @@ export const PLAIN_NODE_ID_PATTERN = /^-?\d+$/;
 const QUALIFIED = /^-?\d+(?::\d+)+$/;
 
 /**
- * Both spellings in ONE pattern, so it can be handed to `z.string().regex()`.
+ * #2855 — a named id the graph readers print for API-style / string-id graphs
+ * (`sampler`, `mac_studio_vlm`). Must start with a letter or underscore so it
+ * cannot collide with the integer/`42px` cases: `42px` is still refused, never
+ * truncated via parseInt.
+ */
+const NAMED = /^[A-Za-z_][A-Za-z0-9_-]*$/;
+
+/**
+ * Integer, subgraph-qualified, and named spellings in ONE pattern, so it can be
+ * handed to `z.string().regex()`.
  *
  * That matters beyond tidiness: `.regex()` puts a `pattern` on the advertised MCP
  * input schema, while `.refine()` renders as a bare `{"type":"string"}` (measured
  * with zod 4's toJSONSchema). Validating through a refine would therefore have told
  * every client LESS about a node id than the old integer-only rule did.
  */
-export const NODE_ID_PATTERN = /^-?\d+(?::\d+)*$/;
+export const NODE_ID_PATTERN = /^(?:-?\d+(?::\d+)*|[A-Za-z_][A-Za-z0-9_-]*)$/;
 
 /** Does this string name a node at all — either spelling? */
 export function isNodeIdString(v: string): boolean {
@@ -68,20 +77,21 @@ export function isQualifiedNodeId(v: string): boolean {
  * Normalize an accepted id to what goes on the wire.
  *
  * A plain id becomes the NUMBER the panel has always received, so nothing about
- * the existing surface changes. A qualified id is returned VERBATIM — parsing it
- * is precisely the bug. Callers must therefore treat a node id as `number | string`
- * rather than assuming the number.
+ * the existing surface changes. A qualified id and a named id are returned
+ * VERBATIM — parsing them is precisely the bug. Callers must therefore treat a
+ * node id as `number | string` rather than assuming the number.
  */
 export function normalizeNodeId(v: number | string): number | string {
   if (typeof v === "number") return v;
   if (QUALIFIED.test(v)) return v;
+  if (NAMED.test(v)) return v;
   return Number.parseInt(v, 10);
 }
 
-/** The message a rejected id gets. Names the qualified shape explicitly, because a
- *  caller holding `263:78` needs to know whether it is unsupported or malformed. */
+/** The message a rejected id gets. Names the qualified and named shapes, because a
+ *  caller holding `263:78` or `sampler` needs to know whether it is unsupported or malformed. */
 export const NODE_ID_MESSAGE =
-  "a node id must be an integer (e.g. 42) or a subgraph-qualified id (e.g. 120:104)";
+  "a node id must be an integer (e.g. 42), a subgraph-qualified id (e.g. 120:104), or a named id the graph readers printed (e.g. sampler)";
 
 /**
  * #1889 — a bare `z.union` renders as the word `Invalid input` and nothing else.
