@@ -538,6 +538,26 @@ describe("#1853: a dropped panel frame still yields the completed prompt's histo
     expect(refs.some((img) => img.filename === "still.png")).toBe(true);
     expect(refs.some((img) => img.filename === VIDEO_FILENAME && img.subfolder === VIDEO_SUBFOLDER)).toBe(true);
   });
+
+  it("#2845 historyOutputRefsFromEntry collects SaveVideoDexter dexter_video", () => {
+    const entry = {
+      prompt: {},
+      outputs: {
+        "6335": {
+          dexter_video: {
+            filename: "ComfyUI_00067_.mp4",
+            subfolder: "video",
+            type: "output",
+          },
+        },
+      },
+      status: { status_str: "success", completed: true, messages: [] },
+    } as HistoryEntry;
+    const refs = historyOutputRefsFromEntry(PID, entry);
+    expect(refs).toEqual([
+      { filename: "ComfyUI_00067_.mp4", subfolder: "video", type: "output" },
+    ]);
+  });
 });
 
 describe("#1556: reconnect reconciles owed panel_run ids against ComfyUI history immediately", () => {
