@@ -9,9 +9,16 @@ All notable changes to this project are documented here. This project adheres to
 ### MCP
 
 #### Fixed
-- **`panel_set_widget` / other mutations accept named node ids the graph readers print (#2855).** API-style graphs use string ids (`sampler`, `mac_studio_vlm`). `panel_graph_outline` already returned those; writes refused them at MCP validation (`NODE_ID_PATTERN` was integer / `120:104` only). Named ids stay strings on the wire — they are never `parseInt`'d. `"42px"` is still refused so it cannot become node 42.
 - **`get_image` bounds a BATCH of inline images against the transport frame, and bounds `action:"view"` at all (#2692).** A batch whose individual images each fit could still exceed the frame once concatenated, and the `view` action was not bounded at all; both now share one frame budget so an oversized reply is refused with what to do instead of dying as an unattributed transport error.
 - **`train_prepare_dataset action:"file"` joins the shared inline-frame accounting (#2692).** It returns an inline image through the same MCP transport as `image_management`, bounded only per-ITEM at 2MB — the bound this change exists to show is insufficient. Its bytes were never charged, so the FRAME BUDGET warning fired late or never, and with no slot open a concurrent `get_image` spent a full per-call budget beside it. The guard is a coverage assertion, so a third tool that emits inline content without charging fails the suite.
+
+## [0.52.191] - 2026-09-04
+
+### MCP
+
+#### Fixed
+- **`panel_set_widget` / other mutations accept named node ids the graph readers print (#2855, #2856).** API-style graphs use string ids (`sampler`, `mac_studio_vlm`). `panel_graph_outline` already returned those; writes refused them at MCP validation (`NODE_ID_PATTERN` was integer / `120:104` only). Named ids stay strings on the wire — they are never `parseInt`'d. `"42px"` is still refused so it cannot become node 42.
+
 
 ## [0.52.190] - 2026-09-04
 
