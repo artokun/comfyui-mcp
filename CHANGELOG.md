@@ -10,6 +10,14 @@ All notable changes to this project are documented here. This project adheres to
 #### Fixed
 - **`get_image` bounds a BATCH of inline images against the transport frame, and bounds `action:"view"` at all (#2692).** A batch whose individual images each fit could still exceed the frame once concatenated, and the `view` action was not bounded at all; both now share one frame budget so an oversized reply is refused with what to do instead of dying as an unattributed transport error.
 
+## [0.52.187] - 2026-09-03
+
+### MCP
+
+#### Fixed
+- **`get_history` and `get_system_stats` resolve the connected panel origin and API base before the read fallback, and fail closed with a named error when that origin is unproven (#2836, #2837).** An unreachable headless `127.0.0.1:8188` used to dispatch `fetch_comfyui_read` and then throw `Cannot read properties of undefined (reading api_base)`, which blocked diagnosis of the live-canvas run. The original transport failure is kept; an undefined `api_base` is reported as `PANEL_API_BASE_UNAVAILABLE` rather than a TypeError.
+
+
 ## [0.52.186] - 2026-09-03
 
 ### MCP

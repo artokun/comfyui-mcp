@@ -117,3 +117,50 @@ export function describeDeclinedPanelFallback(choice: PanelFallbackChoice): stri
   }
   return "";
 }
+
+/** #2836 — a published origin set that cannot be proven is not a guessed target. */
+export type PanelReadOriginResolution =
+  | { kind: "unknown" }
+  | { kind: "unproven" }
+  | { kind: "proven"; origin: string; apiBase: string };
+
+const UNDEFINED_API_BASE_RE =
+  /Cannot read propert(?:y|ies) of undefined \(reading ['"]?api_base['"]?\)|Cannot read property ['"]?api_base['"]? of undefined/i;
+
+/** Resolve the connected panel origin and API base before a fallback read. */
+export function resolvePanelReadOrigin(
+  origins: readonly string[],
+  apiBase: string | undefined,
+): PanelReadOriginResolution {
+  if (origins.length === 0) return { kind: "unknown" };
+  const proven: string[] = [];
+  for (const raw of origins) {
+    const origin = normalizePanelOrigin(raw);
+    if (origin === undefined) return { kind: "unproven" };
+    proven.push(origin);
+  }
+  if (proven.length === 0) return { kind: "unproven" };
+  if (typeof apiBase !== "string") return { kind: "unproven" };
+  return { kind: "proven", origin: proven[0], apiBase };
+}
+
+/** True when the panel-side crash was `undefined.api_base`, not a transport result. */
+export function isUndefinedApiBaseFailure(error: unknown): boolean {
+  const parts: string[] = [];
+  let current: unknown = error;
+  const seen = new Set<unknown>();
+  while (current !== undefined && current !== null && !seen.has(current)) {
+    seen.add(current);
+    if (typeof current === "string") {
+      parts.push(current);
+      break;
+    }
+    if (!(current instanceof Error)) break;
+    parts.push(current.message);
+    if ("reason" in current && typeof current.reason === "string") {
+      parts.push(current.reason);
+    }
+    current = current.cause;
+  }
+  return parts.some((part) => UNDEFINED_API_BASE_RE.test(part));
+}
