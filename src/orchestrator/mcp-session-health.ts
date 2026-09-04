@@ -157,6 +157,24 @@ export function inspectMcpServers(
  * Latched once per process: has ANY session listed a `mcp__*` tool? Until it has,
  * an absent namespace is an unknown harness, not an empty server. It only ever
  * moves false -> true, so the detection can widen but never narrow.
+ *
+ * HAZARD IF TOOL SEARCH IS EVER ENABLED. The SDK defers MCP tool schemas behind
+ * tool search by default ("tools are deferred when tool search is enabled", the
+ * `alwaysLoad` docs on every MCP server config type), and a deferred tool is not in
+ * the init message's `tools`. Today nothing in this repo sets `alwaysLoad` or
+ * enables tool search, so every server is treated alike and the list is populated.
+ *
+ * If that changes, the failure direction depends entirely on this latch:
+ *  - never latched -> no `mcp__` names -> silence. The check goes inert, which is
+ *    the safe direction and is what the first test pins.
+ *  - already latched by an earlier non-deferred session in the SAME process -> an
+ *    all-deferred session reads as EVERY server contributing zero tools, and the
+ *    notice fires on a healthy session. That is the exact false positive this
+ *    module exists to avoid.
+ *
+ * So the latch must become per-session, or deferral-aware, BEFORE tool search is
+ * turned on. Being process state is only correct while every session in the process
+ * shares one deferral mode.
  */
 let harnessListsNamespacedMcpTools = false;
 
