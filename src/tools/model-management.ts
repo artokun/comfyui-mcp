@@ -1181,7 +1181,7 @@ async function cacheFootprintNote(): Promise<string> {
   } catch {
     return "";
   }
-  if (f.unreadable || (f.retainedBytes === 0 && f.stagedBytes === 0)) return "";
+  if (f.unreadable || (f.retainedBytes === 0 && f.stagedBytes === 0 && f.sidecarBytes === 0)) return "";
   const gb = (n: number) => (n / CACHE_GB).toFixed(2);
   const parts: string[] = [];
   if (f.retainedEntries > 0) {
@@ -1191,6 +1191,13 @@ async function cacheFootprintNote(): Promise<string> {
   if (f.stagedEntries > 0) {
     const plural = f.stagedEntries === 1 ? "partial" : "partials";
     parts.push(`${gb(f.stagedBytes)} GB staged in ${f.stagedEntries} resumable ${plural}`);
+  }
+  // The third bucket exists so the numbers RECONCILE against `du`. Computing it and
+  // not printing it would leave the reader with the same unexplained remainder the
+  // two-bucket version had, which is the whole complaint behind #1477.
+  if (f.sidecarEntries > 0) {
+    const plural = f.sidecarEntries === 1 ? "sidecar" : "sidecars";
+    parts.push(`${gb(f.sidecarBytes)} GB in ${f.sidecarEntries} ${plural} (.ct/.etag, never evicted)`);
   }
   const levers =
     f.limitBytes > 0

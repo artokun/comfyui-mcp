@@ -160,6 +160,12 @@ describe('#1477 the WIRING: download_model action:"status" says it out loud', ()
     // discoverable by reading download-cache.js.
     expect(text).toContain("COMFYUI_LRU_CACHE_SIZE_GB");
     expect(text).toContain("COMFYUI_DOWNLOAD_CACHE_DIR");
+    // The sidecar bucket must be PRINTED, not merely computed. Without this the
+    // third number exists only in the return value, the reader is left with the
+    // same unexplained remainder against `du` that the two-bucket version had,
+    // and every assertion above still passes.
+    expect(text).toMatch(/sidecar/i);
+    expect(text).toContain(".ct/.etag");
   });
 
   it("reports the limit instead of the levers once eviction is on", async () => {
