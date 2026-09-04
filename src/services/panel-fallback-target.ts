@@ -144,6 +144,29 @@ export function resolvePanelReadOrigin(
   return { kind: "proven", origin: proven[0], apiBase };
 }
 
+/**
+ * #2839 — the compact comfyui child may list templates from its configured
+ * target only when that target is the unique published panel origin. Mixed,
+ * malformed, or empty sets stay unproven so a guessed URL is never contacted.
+ */
+export function provenPanelOriginMatchesConfiguredTarget(
+  origins: readonly string[],
+  configuredTarget: string,
+): boolean {
+  const targetOrigin = httpOriginOf(configuredTarget);
+  const targetCanon = targetOrigin ? canonicalOrigin(targetOrigin) : undefined;
+  if (!targetCanon || origins.length === 0) return false;
+  const canons = new Set<string>();
+  for (const raw of origins) {
+    const origin = normalizePanelOrigin(raw);
+    if (origin === undefined) return false;
+    const canon = canonicalOrigin(origin);
+    if (canon === undefined) return false;
+    canons.add(canon);
+  }
+  return canons.size === 1 && canons.has(targetCanon);
+}
+
 /** True when the panel-side crash was `undefined.api_base`, not a transport result. */
 export function isUndefinedApiBaseFailure(error: unknown): boolean {
   const parts: string[] = [];
