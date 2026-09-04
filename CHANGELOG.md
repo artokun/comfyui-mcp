@@ -9,8 +9,6 @@ All notable changes to this project are documented here. This project adheres to
 ### MCP
 
 #### Fixed
-
-- get_image(action:"get") saves an existing ZIP from ComfyUI input/ instead of misreporting IMAGE_NOT_FOUND when /view returned 2xx application/zip. IMAGE_NOT_FOUND stays reserved for a missing or failed /view. (#2858)
 - **a relaunch keeps the Python INTERPRETER flags (#2693).** `-s`, `-E`, `-I`, `-B`, `-O` and `-u`
   are consumed by CPython before `sys.argv` exists, so a relaunch rebuilt from the server's own
   `sys.argv` dropped them — the reporter's portable install needs `-s`, and losing it changes
@@ -20,6 +18,15 @@ All notable changes to this project are documented here. This project adheres to
   tokens before the script that begin with `-` are taken; a bare value there is an argument to a
   flag this code does not model.
 - **a relaunch keeps `-X utf8`, the encoding flag #2693 is actually about (#2693).** Interpreter-flag recovery refused any command line carrying a flag with a separate value, so a server started `python -X utf8 -s main.py` relaunched without it and the CP949 workaround was silently lost. `-X` and `-W` always consume the next token, so they are taken as pairs; every other bare token still reconstructs nothing rather than rebuilding a command the server never had. Measured against a real Windows `Win32_Process.CommandLine`, which is where the gap showed up — the unit tests supplied the argv they expected.
+
+## [0.52.192] - 2026-09-04
+
+### MCP
+
+#### Fixed
+
+- get_image(action:"get") saves an existing ZIP from ComfyUI input/ instead of misreporting IMAGE_NOT_FOUND when /view returned 2xx application/zip. IMAGE_NOT_FOUND stays reserved for a missing or failed /view. (#2858, #2859)
+
 
 ## [0.52.191] - 2026-09-04
 
