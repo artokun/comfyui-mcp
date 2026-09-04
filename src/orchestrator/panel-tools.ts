@@ -20186,8 +20186,9 @@ function validatePanelEditNodeArgs(args: Record<string, unknown>): string | null
  * number the wire has always carried, so the round trip closes.
  *
  * STRICT about what counts as a node id: an integer, a string that is exactly an
- * integer, or a subgraph-qualified id (`"120:104"`). `"42px"`, `"4.5"` and `""`
- * are still rejected.
+ * integer, a subgraph-qualified id (`"120:104"`), or a named id the readers print
+ * (`"sampler"`). `"42px"`, `"4.5"` and `""` are still rejected. Named ids stay
+ * strings — `Number.parseInt("sampler")` is NaN and must not reach the panel.
  *
  * #1425 added the qualified shape — the "separate, deliberate change to the wire
  * contract" this comment used to defer. Unpacking a subgraph leaves genuine ROOT
