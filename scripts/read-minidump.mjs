@@ -87,13 +87,31 @@ export function readMinidump(buf) {
   const streamCount = buf.readUInt32LE(8);
   const directoryRva = buf.readUInt32LE(12);
   const streams = new Map();
+  let directoryTruncated = false;
   for (let i = 0; i < streamCount; i += 1) {
     const at = directoryRva + i * 12;
-    if (at + 12 > buf.length) break;
-    streams.set(buf.readUInt32LE(at), { size: buf.readUInt32LE(at + 4), rva: buf.readUInt32LE(at + 8) });
+    if (at + 12 > buf.length) {
+      // The header PROMISED streamCount entries and the file does not carry them.
+      // Breaking silently here produced a normal-looking result from an incomplete
+      // file, which is the one thing this reader must not do: its whole job is to
+      // say WHICH crash a dump is, and half a dump cannot answer that.
+      directoryTruncated = true;
+      break;
+    }
+    const sType = buf.readUInt32LE(at);
+    const sSize = buf.readUInt32LE(at + 4);
+    const sRva = buf.readUInt32LE(at + 8);
+    // The DIRECTORY can be complete while the DATA it points at is not — which is
+    // what a real truncated dump looks like: the header and directory land in the
+    // first pages and the payload is missing. Detecting only a short directory
+    // therefore missed the actual case (measured: a 60,000-byte prefix of a real
+    // dump has an intact directory and a crashpad stream at rva 73,928).
+
+    if (sRva + sSize > buf.length) directoryTruncated = true;
+    streams.set(sType, { size: sSize, rva: sRva });
   }
 
-  const out = { streamCount, modules: [], annotations: {} };
+  const out = { streamCount, modules: [], annotations: {}, truncated: directoryTruncated };
 
   const exception = streams.get(STREAM_TYPE.exception);
   if (exception && exception.rva + 40 <= buf.length) {
@@ -178,7 +196,14 @@ export function readMinidump(buf) {
     //   objects.rva -> {u32 count, MinidumpAnnotation[12 bytes each]}
     //   MinidumpAnnotation = {u32 name_rva, u16 type, u16 reserved, u32 value_rva}
     // The entries are INLINE structs, not a list of RVAs. That was the whole error.
-    const modListRva = crashpad ? buf.readUInt32LE(crashpad.rva + 4 + 16 + 16 + 8 + 4) : 0;
+    // Bounds-checked like every other read in this file. It was not, and on a
+    // TRUNCATED dump -- an interrupted upload, a partially written crash file, the
+    // exact thing a reporter is most likely to hand over -- `crashpad.rva + 44` can
+    // sit past the end and readUInt32LE throws. The CLI then died with a Node
+    // RangeError stack trace instead of saying the file is incomplete.
+    const crashpadModListAt = crashpad ? crashpad.rva + 4 + 16 + 16 + 8 + 4 : 0;
+    const modListRva =
+      crashpad && crashpadModListAt + 4 <= buf.length ? buf.readUInt32LE(crashpadModListAt) : 0;
     if (modListRva && modListRva + 4 <= buf.length) {
       const modCount = buf.readUInt32LE(modListRva);
       for (let m = 0; m < Math.min(modCount, 16); m++) {
@@ -204,6 +229,19 @@ export function readMinidump(buf) {
 
 /** The text a bug report should carry. Kept separate so it is testable. */
 export function describeMinidump(name, dump) {
+  // A TRUNCATED file is answered as such, before anything else. The header declared
+  // more streams than the file carries, so every absence below is unexplained: the
+  // exception record may simply not be present yet. Rendering "not a crash dump" for
+  // it would be this tool asserting the one thing it cannot know -- and a reporter
+  // handing over a partially uploaded dump is exactly who reads that line.
+  if (dump && dump.truncated) {
+    return (
+      `=== ${name} ===` + String.fromCharCode(10) +
+      `  TRUNCATED — the header declares ${dump.streamCount} stream(s) and the file does not` +
+      String.fromCharCode(10) +
+      "             carry them. Nothing below can be concluded; re-copy the .dmp in full."
+    );
+  }
   const LF = String.fromCharCode(10);
   const lines = [`=== ${name} ===`];
   if (dump.error) return [...lines, `  ${dump.error}`].join("\n");

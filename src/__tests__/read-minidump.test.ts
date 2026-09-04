@@ -423,3 +423,82 @@ describe("panel#2023 the verdict must not answer a question it cannot see", () =
     expect(describeMinidump("x", readMinidump(d))).toMatch(/consistent with panel#2023/);
   });
 });
+
+describe("panel#2023 a TRUNCATED dump says so instead of guessing", () => {
+  // The file a reporter is most likely to hand over is a partial one -- an
+  // interrupted copy or a crash file still being written. Measured on a 60,000-byte
+  // prefix of a real 2 MB dump: the header and directory are intact and a crashpad
+  // stream points at rva 73,928, so an unguarded read threw a Node RangeError and
+  // killed the CLI with a stack trace.
+  function truncate(buf: Buffer, keep: number): Buffer {
+    return Buffer.from(buf.subarray(0, keep));
+  }
+
+  it("does not throw when a stream points past the end of the file", () => {
+    const full = makeDump({
+      code: 0xc0000005,
+      address: 0x7ffb0000_1234n,
+      modules: [{ base: 0x7ffb0000_0000n, size: 0x20000, name: "C:\Windows\System32\DWrite.dll" }],
+    });
+    const cut = truncate(full, Math.floor(full.length / 2));
+    expect(() => readMinidump(cut)).not.toThrow();
+  });
+
+  it("reports truncation rather than 'not a crash dump'", () => {
+    const full = makeDump({ code: 0xc0000005, address: 0x7ffb0000_1234n, modules: [] });
+    const cut = truncate(full, Math.floor(full.length / 2));
+    const d = readMinidump(cut) as { truncated?: boolean };
+    expect(d.truncated).toBe(true);
+    const text = describeMinidump("x", d);
+    expect(text).toMatch(/TRUNCATED/);
+    // The regression: an incomplete file described as a complete one with no crash.
+    expect(text).not.toMatch(/not a crash dump/);
+  });
+
+  it("a COMPLETE dump is never flagged truncated", () => {
+    // The control: without this the check could flag everything and still pass above.
+    const full = makeDump({
+      code: 0x80000003,
+      address: 0x7ffb0000_1234n,
+      modules: [{ base: 0x7ffb0000_0000n, size: 0x20000, name: "C:\Windows\System32\DWrite.dll" }],
+    });
+    const d = readMinidump(full) as { truncated?: boolean };
+    expect(d.truncated).toBe(false);
+    expect(describeMinidump("x", d)).not.toMatch(/TRUNCATED/);
+  });
+});
+
+describe("panel#2023 a crashpad stream pointing past the end does not kill the CLI", () => {
+  // The synthetic fixtures above carry no crashpad stream, so they never reach the
+  // read that actually threw on a real truncated dump. This builds the minimum that
+  // does: a valid header and directory whose crashpadInfo entry points beyond the
+  // file, which is precisely what a 60,000-byte prefix of a real 2 MB dump looks
+  // like (its crashpad stream sat at rva 73,928).
+  const CRASHPAD_INFO = 0x43500001;
+
+  function dumpWithDanglingCrashpad(): Buffer {
+    const HEADER = 32;
+    const dirAt = HEADER;
+    const buf = Buffer.alloc(HEADER + 12);
+    buf.writeUInt32LE(0x504d444d, 0); // "MDMP"
+    buf.writeUInt32LE(1, 8); // streamCount
+    buf.writeUInt32LE(dirAt, 12); // directoryRva
+    buf.writeUInt32LE(CRASHPAD_INFO, dirAt);
+    buf.writeUInt32LE(64, dirAt + 4); // size
+    buf.writeUInt32LE(500_000, dirAt + 8); // rva far past the end
+    return buf;
+  }
+
+  it("returns instead of throwing a RangeError", () => {
+    // The regression: `buf.readUInt32LE(crashpad.rva + 44)` with no bounds check
+    // threw ERR_OUT_OF_RANGE and the CLI died with a Node stack trace, on the file a
+    // reporter is most likely to hand over.
+    expect(() => readMinidump(dumpWithDanglingCrashpad())).not.toThrow();
+  });
+
+  it("and says the file is truncated", () => {
+    const d = readMinidump(dumpWithDanglingCrashpad()) as { truncated?: boolean };
+    expect(d.truncated).toBe(true);
+    expect(describeMinidump("x", d)).toMatch(/TRUNCATED/);
+  });
+});
