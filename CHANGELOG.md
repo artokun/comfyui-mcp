@@ -9,10 +9,17 @@ All notable changes to this project are documented here. This project adheres to
 ### MCP
 
 #### Fixed
-- **`panel_set_widget` / other mutations accept named node ids the graph readers print (#2855).** API-style graphs use string ids (`sampler`, `mac_studio_vlm`). `panel_graph_outline` already returned those; writes refused them at MCP validation (`NODE_ID_PATTERN` was integer / `120:104` only). Named ids stay strings on the wire — they are never `parseInt`'d. `"42px"` is still refused so it cannot become node 42.
 - read-minidump now runs from wherever the file was put (panel#2023). Its CLI guard matched the TAIL of the invoked path, so a renamed or copied script printed nothing and exited 0 -- indistinguishable from a clean run with no findings, on a script whose only purpose is to be handed to a reporter. Comparing import.meta.url to the entry point instead; verified against three real Comfy Desktop dumps on a Windows box
 - **the dump reader says WHICH crash, WHICH process, and WHICH renderer (#2023).** It now reports the crashing executable and its Chromium process type (browser / renderer / gpu-process) alongside the fault, so a dump from the wrong program or the wrong process is caught before anything else in the output is trusted — a gpu-process dump otherwise describes a different fault with identical confidence. It also names the Electron/Chromium build, since two text-stack crashes are only the same bug on the same renderer, and glosses three more exception codes (EXCEPTION_IN_PAGE_ERROR and the two corruption checks) that a reporter would otherwise quote as bare hex. A dump lacking Crashpad annotations reports none of it rather than inventing a value.
 - `scripts/read-minidump.mjs` — read a Windows crash dump far enough to say WHICH crash it
+
+## [0.52.191] - 2026-09-04
+
+### MCP
+
+#### Fixed
+- **`panel_set_widget` / other mutations accept named node ids the graph readers print (#2855, #2856).** API-style graphs use string ids (`sampler`, `mac_studio_vlm`). `panel_graph_outline` already returned those; writes refused them at MCP validation (`NODE_ID_PATTERN` was integer / `120:104` only). Named ids stay strings on the wire — they are never `parseInt`'d. `"42px"` is still refused so it cannot become node 42.
+
 
 ## [0.52.190] - 2026-09-04
 
