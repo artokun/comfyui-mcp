@@ -1,10 +1,11 @@
 // #1672 — get_system_stats(action:"stats") during a long VAE/audio decode
-// reported "The operation was aborted due to timeout" and then left the
-// enclosing call_tool cell pending until something killed it. The abort
-// cancelled fetch() after headers, but Response.text() / JSON.parse did not
-// observe it. These tests drive the SHIPPED path (call_tool → get_system_stats
-// → getSystemInfo → getSystemStats → fetch+decode) against a body that never
-// finishes, and assert call_tool settles promptly with a structured timeout.
+// reported "The operation was aborted due to timeout" but the enclosing
+// call_tool cell stayed pending until something killed it. The inner read
+// observed the abort; raceAbort exists to bound the enclosing promise.
+// JSON.parse is synchronous and unabortable. These tests drive the SHIPPED
+// path (call_tool → get_system_stats → getSystemInfo → getSystemStats →
+// fetch+decode) against a body that never finishes, and assert call_tool
+// settles promptly with a structured timeout.
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";

@@ -8,9 +8,17 @@ All notable changes to this project are documented here. This project adheres to
 
 ### MCP
 #### Fixed
-- **`panel_call_tool` recovers a unique inner panel tool from a self-referential call (#2717).** `name: "panel_call_tool"` with the real tool on `tool` / `tool_name`, a nested key, or sibling fields unwraps once and runs that tool. Several inner names, a non-object keyed payload, or a nested router still fail closed; the refusal names the inner tool when it is unique. The schema now says `name` is the inner tool, never this router.
-- **`panel_set_widget` accepts a complete promoted-subgraph ownership envelope that omits `truncated:false` (#2783).** `graph_get_subgraph` already proves completeness when `node_count === nodes.length`; an omitted or null `truncated` flag is then `false`. An asserted `truncated:true`, or a list shorter than `node_count`, stays fail-closed.
 - **the model picker's choice now survives a New chat (#2759).** `reset()` deleted the
+
+## [0.52.185] - 2026-09-03
+
+### MCP
+
+#### Fixed
+- **Manager body-read timeouts fail closed with a named diagnosis instead of a bare `TimeoutError` (#2773, #2827).** After headers arrive, undici still aborts a stalled `Response.text()` on supported Node, but `comfyuiFetch`'s transport rewrite has already returned. `managerFetch` now races both body reads against its own ceiling (without threading a signal into `comfyuiFetch`, which would drop the transport-timeout message) and reports URL, method, and OUTCOME UNKNOWN on a mutation. The `raceAbort` comment no longer claims the fetch signal leaves `Response.text()` pending.
+- **`panel_call_tool` recovers a unique inner panel tool from a self-referential call (#2717, #2826).** `name: "panel_call_tool"` with the real tool on `tool` / `tool_name`, a nested key, or sibling fields unwraps once and runs that tool. Several inner names, a non-object keyed payload, or a nested router still fail closed; the refusal names the inner tool when it is unique. The schema now says `name` is the inner tool, never this router.
+- **`panel_set_widget` accepts a complete promoted-subgraph ownership envelope that omits `truncated:false` (#2783, #2828).** `graph_get_subgraph` already proves completeness when `node_count === nodes.length`; an omitted or null `truncated` flag is then `false`. An asserted `truncated:true`, or a list shorter than `node_count`, stays fail-closed.
+
 
 ## [0.52.184] - 2026-09-03
 
