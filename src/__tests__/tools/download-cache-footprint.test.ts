@@ -15,7 +15,7 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { readFileSync } from "node:fs";
-import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, rm, writeFile, link, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -294,5 +294,59 @@ describe("#1477 the retention predicate is shared, not restated", () => {
     // not come back is a bare re-implementation of the RETENTION test.
     expect(SRC).not.toContain('entry.isFile() && !entry.name.startsWith(".")');
     expect(SRC).not.toContain('!entry.name.startsWith(".")');
+  });
+});
+
+describe("#1477 a hardlinked cache entry is not reclaimable disk", () => {
+  // `materializeCacheFile` prefers a hardlink when the cache and the destination
+  // share a volume, so a retained entry is often the SAME inode as the installed
+  // model. Measured on a real cache: 75 of 93 entries and 381 GB of 437 GB.
+  //
+  // The report used to say "A retained entry is a COPY ... deleting its cache file
+  // costs only [a re-download]", which told those users they could reclaim ~437 GB
+  // when the true figure was ~56 GB. Byte totals are unchanged; what is new is
+  // saying how much of it is shared.
+  it("counts bytes whose inode is also linked at the destination", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "cmcp-1477-link-"));
+    const dest = await mkdtemp(join(tmpdir(), "cmcp-1477-dest-"));
+    try {
+      const shared = join(dir, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.safetensors");
+      const only = join(dir, "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb.safetensors");
+      await writeFile(shared, Buffer.alloc(2048, 1));
+      await writeFile(only, Buffer.alloc(1024, 2));
+      // The destination link — exactly what materializeCacheFile creates.
+      await link(shared, join(dest, "model.safetensors"));
+      expect((await stat(shared)).nlink).toBe(2);
+
+      process.env.COMFYUI_DOWNLOAD_CACHE_DIR = dir;
+      const f = await downloadCacheFootprint();
+
+      expect(f.retainedEntries).toBe(2);
+      expect(f.retainedBytes).toBe(3072);
+      // Only the hardlinked one is shared.
+      expect(f.sharedEntries).toBe(1);
+      expect(f.sharedBytes).toBe(2048);
+      // ...so the genuinely reclaimable figure is the difference, not the total.
+      expect(f.retainedBytes - f.sharedBytes).toBe(1024);
+    } finally {
+      delete process.env.COMFYUI_DOWNLOAD_CACHE_DIR;
+      await rm(dir, { recursive: true, force: true });
+      await rm(dest, { recursive: true, force: true });
+    }
+  });
+
+  it("reports nothing shared when every entry has a single link", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "cmcp-1477-nolink-"));
+    try {
+      await writeFile(join(dir, "cccccccccccccccccccccccccccccccc.safetensors"), Buffer.alloc(512, 3));
+      process.env.COMFYUI_DOWNLOAD_CACHE_DIR = dir;
+      const f = await downloadCacheFootprint();
+      expect(f.retainedEntries).toBe(1);
+      expect(f.sharedEntries).toBe(0);
+      expect(f.sharedBytes).toBe(0);
+    } finally {
+      delete process.env.COMFYUI_DOWNLOAD_CACHE_DIR;
+      await rm(dir, { recursive: true, force: true });
+    }
   });
 });

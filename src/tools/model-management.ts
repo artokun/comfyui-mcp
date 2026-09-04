@@ -1233,13 +1233,29 @@ async function cacheFootprintNote(): Promise<string> {
       `${f.nonFileEntries} non-file ${plural} (subdirectory or symlink) NOT counted above, so these numbers may under-report what \`du\` shows`,
     );
   }
+  // #1477 — what deleting the cache would ACTUALLY reclaim. `materializeCacheFile`
+  // prefers a hardlink when the cache and the destination share a volume, so a
+  // retained entry is often the SAME inode as the installed model, not a second
+  // copy. Measured on a real cache: 75 of 93 entries and 381 GB of 437 GB were
+  // shared. Saying "a retained entry is a COPY ... deleting its cache file costs
+  // only [a re-download]" told those users they could reclaim ~437 GB when the
+  // true figure was ~56 GB.
+  const reclaim =
+    f.sharedEntries > 0
+      ? ` Of that, ${gb(f.sharedBytes)} GB in ${f.sharedEntries} entr${f.sharedEntries === 1 ? "y" : "ies"} ` +
+        "shares an inode with the installed model (a same-volume hardlink), so deleting those " +
+        `cache files reclaims no disk. About ${gb(Math.max(0, f.retainedBytes - f.sharedBytes))} GB is ` +
+        "held only by the cache."
+      : "";
+  // COMFYUI_DOWNLOAD_CACHE_DIR is the relocation lever whether or not eviction is
+  // on: a bounded cache on the wrong volume is exactly when you want to move it.
   const levers =
-    f.limitBytes > 0
-      ? `Eviction is ON at ${gb(f.limitBytes)} GB (COMFYUI_LRU_CACHE_SIZE_GB).`
-      : "Eviction is OFF — COMFYUI_LRU_CACHE_SIZE_GB is unset, so nothing here is removed " +
-        "automatically. Set it to bound the cache, or COMFYUI_DOWNLOAD_CACHE_DIR to stage on " +
-        "a different volume. A retained entry is a COPY kept to avoid a re-download: once a " +
-        "model has landed at its destination, deleting its cache file costs only that.";
+    (f.limitBytes > 0
+      ? `Eviction is ON at ${gb(f.limitBytes)} GB (COMFYUI_LRU_CACHE_SIZE_GB). ` +
+        "Set COMFYUI_DOWNLOAD_CACHE_DIR to stage on a different volume."
+      : "Eviction is OFF — COMFYUI_LRU_CACHE_SIZE_GB is not set to a positive number, so " +
+        "nothing here is removed automatically. Set it to bound the cache, or " +
+        "COMFYUI_DOWNLOAD_CACHE_DIR to stage on a different volume.") + reclaim;
   return `\n\n### Download cache\n\n\`${f.dir}\` — ${parts.join(", ")}.\n${levers}`;
 }
 

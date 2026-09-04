@@ -3579,6 +3579,17 @@ export interface DownloadCacheFootprint {
    * Normally 0 — the cache is flat and content-addressed.
    */
   nonFileEntries: number;
+  /**
+   * #1477 — bytes among `retainedBytes` whose file has MORE THAN ONE hard link,
+   * i.e. the same inode is also the model at its destination. Deleting the cache
+   * link frees NOTHING for these: the blocks stay live under the other name.
+   *
+   * Measured on a real cache: 75 of 93 entries, 381 GB of 437 GB. So "delete the
+   * cache to reclaim its size" was wrong for 87% of the bytes, and this tool said
+   * it anyway.
+   */
+  sharedBytes: number;
+  sharedEntries: number;
   /** COMFYUI_LRU_CACHE_SIZE_GB in bytes. 0 means eviction is OFF. */
   limitBytes: number;
   /** The directory could not be listed at all (missing, or unreadable). */
@@ -3606,6 +3617,8 @@ export async function downloadCacheFootprint(): Promise<DownloadCacheFootprint> 
     sidecarBytes: 0,
     sidecarEntries: 0,
     nonFileEntries: 0,
+    sharedBytes: 0,
+    sharedEntries: 0,
     limitBytes: cacheSizeLimitBytes(),
   };
   let entries;
@@ -3622,8 +3635,14 @@ export async function downloadCacheFootprint(): Promise<DownloadCacheFootprint> 
       continue;
     }
     let size: number;
+    let links = 1;
     try {
-      size = (await downloadCacheFs.stat(join(dir, entry.name))).size;
+      const st = await downloadCacheFs.stat(join(dir, entry.name));
+      size = st.size;
+      // #1477 — nlink > 1 means this inode is ALSO linked at the destination
+      // (materializeCacheFile prefers a hardlink on the same volume), so these
+      // bytes are not independently reclaimable.
+      links = Number.isFinite(st.nlink) && st.nlink > 0 ? st.nlink : 1;
     } catch {
       // A file that vanished between readdir and stat is a live eviction or a
       // finishing download, not an error worth surfacing here.
@@ -3637,6 +3656,10 @@ export async function downloadCacheFootprint(): Promise<DownloadCacheFootprint> 
     if (isRetainedCacheEntry(entry.name)) {
       out.retainedBytes += size;
       out.retainedEntries += 1;
+      if (links > 1) {
+        out.sharedBytes += size;
+        out.sharedEntries += 1;
+      }
     } else if (entry.name.endsWith(".partial")) {
       out.stagedBytes += size;
       out.stagedEntries += 1;
