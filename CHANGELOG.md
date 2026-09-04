@@ -13,6 +13,14 @@ All notable changes to this project are documented here. This project adheres to
 - **a `hello` frame carrying no `comfyui_url` is no longer reported as a dead instance (#2742).** The one verdict with no `base` fell through to the shared warning, rendering as `ignoring hello retarget to unreachable undefined (stale tab on a dead instance?)` — asserting a target was named AND found dead, about a frame that claimed neither. Seen 17 times in one report from tabs that were merely churning.
 - **an MCP server that connects and registers NO tools is now reported (#2742).** Once this process has seen ANY namespaced MCP tool -- proof the harness lists them -- a session with NONE reports every configured server, closing the blind spot where a failure that emptied EVERY server looked identical to a harness that does not namespace.
 
+## [0.52.195] - 2026-09-04
+
+### MCP
+
+#### Fixed
+- **`get_history` / `get_system_stats` read the unique proven connected-panel origin+api_base after the headless target is unreachable, instead of only dispatching `fetch_comfyui_read` (#2836, #2867).** On 0.52.193 the named `PANEL_API_BASE_UNAVAILABLE` path still left history/health unavailable while `panel_run` worked: the live tab origin was never contacted, and the panel API object's undefined `api_base` crashed the relay. Mixed or unproven origins stay fail-closed (`PANEL_ORIGIN_UNPROVEN`); a guessed origin is never dialed. Same-origin dead loopback still uses one panel relay; an undefined panel `api_base` remains `PANEL_API_BASE_UNAVAILABLE`.
+
+
 ## [0.52.194] - 2026-09-04
 
 ### MCP
