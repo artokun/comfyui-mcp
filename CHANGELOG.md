@@ -8,6 +8,10 @@ All notable changes to this project are documented here. This project adheres to
 
 ### MCP
 
+#### Fixed
+
+- panel_save_subgraph accepts overwrite:true so a user-blueprint name collision can replace in place instead of being rejected as an unrecognized key (#2865)
+
 #### Changed
 - **PROBE, not a fix: two panel live-canvas tools opt out of tool-search deferral (panel#291).** This does not claim panel#291 is resolved — deferral alone cannot explain an empty deferred catalog, and the reported setup has not been re-run. It removes the deferral variable so the NEXT report can distinguish "deferred and unfound" from "never registered".
   The SDK defers in-process MCP tool schemas by default once tool search is enabled, and

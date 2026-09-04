@@ -26280,13 +26280,22 @@ CHECKED FOR YOU: the graph read this message prescribes was just run, and it ` +
     ),
     def(
       "panel_save_subgraph",
-      "Save a SUBGRAPH node to the user's reusable blueprint LIBRARY (publish), so it can be dropped into any workflow later. Pass node_id to pick the subgraph node (else a single selected subgraph node is used) and name to title the blueprint (defaults to the node's title). Runs programmatically — NO save dialog pops. The blueprint becomes the addable type 'SubgraphBlueprint.<name>' (use panel_add_subgraph or panel_list_subgraphs). Returns {saved: {name, type}}.",
+      "Save a SUBGRAPH node to the user's reusable blueprint LIBRARY (publish), so it can be dropped into any workflow later. Pass node_id to pick the subgraph node (else a single selected subgraph node is used) and name to title the blueprint (defaults to the node's title). On a name collision with an existing USER blueprint, pass overwrite:true to replace it in place (the panel already implements this; without the flag the call is refused and names overwrite:true as the remedy). Bundled/global blueprints cannot be overwritten. Runs programmatically — NO save dialog pops. The blueprint becomes the addable type 'SubgraphBlueprint.<name>' (use panel_add_subgraph or panel_list_subgraphs). Returns {saved: {name, type}}.",
       {
         node_id: nodeId().optional().describe("Subgraph node id to publish (is_subgraph=true). Omit to use the selected subgraph node."),
         name: z.string().optional().describe("Blueprint name. Defaults to the subgraph node's title."),
+        overwrite: z
+          .boolean()
+          .optional()
+          .describe(
+            "Replace an existing USER blueprint of the same name in place. Required on a name collision; omitted/false refuses. Bundled/global blueprints stay refused.",
+          ),
       },
       async (args: A, ctx) =>
-        ctx.call({ cmd: "graph_save_subgraph", node_id: args.node_id, name: args.name }, 20000),
+        ctx.call(
+          { cmd: "graph_save_subgraph", node_id: args.node_id, name: args.name, overwrite: args.overwrite },
+          20000,
+        ),
     ),
     def(
       "panel_list_subgraphs",
