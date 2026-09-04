@@ -18,6 +18,7 @@ import {
 import {
   comfyuiFetch,
   connectedPanelFallbackOriginsNow,
+  connectedPanelOriginsNow,
   comfyHttpTimeoutSeconds,
   deliveryDoubt,
   describeMissingInputMediaDrift,
@@ -32,6 +33,8 @@ import {
   choosePanelFallbackOrigin,
   describeDeclinedPanelFallback,
   httpOriginOf,
+  isUndefinedApiBaseFailure,
+  resolvePanelReadOrigin,
 } from "../services/panel-fallback-target.js";
 import {
   PanelComfyUIReadRelayError,
@@ -282,16 +285,37 @@ function panelReadResponse(read: PanelComfyUIReadSuccess): Response {
 }
 
 /** Ask the authenticated panel only after the configured headless route failed
- * at the transport layer. No browser origin is selected or contacted here. */
+ * at the transport layer. Resolve the connected panel origin and API base
+ * first (#2836): an unproven origin is never a guessed fetch_comfyui_read
+ * target, and an undefined api_base is a named transport diagnostic. */
 async function panelReadFallback(
   operation: "history" | "system_stats" | "logs" | "object_info",
   primaryError: unknown,
 ): Promise<PanelComfyUIReadSuccess | undefined> {
+  const primary = primaryError instanceof Error ? primaryError.message : String(primaryError);
+  const resolved = resolvePanelReadOrigin(connectedPanelOriginsNow(), getComfyUIBasePath());
+  if (resolved.kind === "unproven") {
+    throw new ComfyUIError(
+      `${primary} The connected panel ComfyUI read fallback was not attempted (PANEL_ORIGIN_UNPROVEN). ` +
+        `The panel origin is unproven, so fetch_comfyui_read was not dispatched. A guessed origin is never contacted.`,
+      "PANEL_ORIGIN_UNPROVEN",
+    );
+  }
   try {
     return await requestPanelComfyUIRead(operation);
   } catch (error) {
     if (error instanceof PanelComfyUIReadRelayError && error.unavailable) return undefined;
-    const primary = primaryError instanceof Error ? primaryError.message : String(primaryError);
+    if (isUndefinedApiBaseFailure(error)) {
+      throw new ComfyUIError(
+        `${primary} The connected panel ComfyUI read fallback failed safely (PANEL_API_BASE_UNAVAILABLE). ` +
+          `fetch_comfyui_read could not read api_base because the panel's ComfyUI API object was undefined. ` +
+          `This is a transport diagnostic: the headless target was unreachable, and the panel read was not given a usable API base.`,
+        "PANEL_API_BASE_UNAVAILABLE",
+        resolved.kind === "proven"
+          ? { origin: resolved.origin, api_base: resolved.apiBase }
+          : undefined,
+      );
+    }
     const code = error instanceof PanelComfyUIReadRelayError ? error.code : "RELAY_ERROR";
     // #2703 - the code alone was the whole answer, and PANEL_FETCH_FAILED does
     // not distinguish "the read exceeded the relay's byte ceiling" from "the
