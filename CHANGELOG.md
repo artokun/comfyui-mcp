@@ -9,6 +9,8 @@ All notable changes to this project are documented here. This project adheres to
 ### MCP
 
 #### Fixed
+
+- **`panel_show_media` inlines a remote ComfyUI output through `fetchImage` (the same client `get_image` uses) instead of handing the browser a `/view` that 404s (#2861).** Local canvas tabs still get a viewRef. A remote/cloud tab that cannot be inlined (MCP 404, non-media, over the 20 MB cap) is refused rather than painted empty. Same-named local workspace files are never substituted (#877/#899).
 - the Manager-dialect guard's unit tests no longer probe the developer's real ComfyUI: three orchestrator test files passed on CI (nothing listening) and failed on any machine with ComfyUI actually running, because detection then succeeded and the git-URL guard refused the installs the fixtures are built on (test-only)
 
 ## [0.52.192] - 2026-09-04
