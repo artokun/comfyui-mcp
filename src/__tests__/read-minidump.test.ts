@@ -255,3 +255,25 @@ describe("#2023 exception codes a reporter would otherwise quote as bare hex", (
     expect(glossFor(0x1234abcd)).toBeNull();
   });
 });
+
+// WHICH PROCESS crashed, which the report did not say. That is not cosmetic for
+// panel#2023: a dump can arrive from the wrong place entirely and read as a
+// perfectly valid answer to the wrong question. Four dumps in an Electron app's
+// Crashpad directory looked like Comfy Desktop's by path alone; the module list
+// named them `…\oculus-client\Client.exe`, and a browser- or GPU-process dump is
+// likewise not the renderer dump a renderer crash needs.
+describe("#2023 the report names the process, not just the fault", () => {
+  it("reports the main image from module[0]", () => {
+    const d = makeDump({
+      code: 0xc0000005,
+      address: 0x7ff8_0000_1234n,
+      modules: [{ name: "C:/app/Comfy Desktop.exe", base: 0x7ff8_0000_0000n, size: 0x10000 }, DWRITE],
+    });
+    expect(describeMinidump("x", readMinidump(d))).toMatch(/process\s+C:\/app\/Comfy Desktop\.exe/);
+  });
+
+  it("says so plainly when there is no module list to name one", () => {
+    const d = makeDump({ code: 0xc0000005, address: 0x1n, modules: [] });
+    expect(describeMinidump("x", readMinidump(d))).toMatch(/process\s+<no module list>/);
+  });
+});

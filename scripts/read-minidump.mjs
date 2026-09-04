@@ -154,6 +154,14 @@ export function describeMinidump(name, dump) {
   }
   const text = dump.modules.filter((m) => /dwrite|d2d1|dcomp|gdi32/i.test(m.name));
   lines.push(
+  // WHICH PROCESS crashed. MINIDUMP_MODULE_LIST puts the main image first, so
+  // module[0] names the executable. Worth printing because a dump can arrive from
+  // the wrong place entirely -- another Electron app's Crashpad directory looks
+  // identical on disk, and a browser/GPU process dump is not the renderer one a
+  // renderer crash needs. Without this the report is confidently about a file
+  // nobody has confirmed is the right file.
+  `  process    ${dump.modules[0]?.name ?? "<no module list>"}
+` +
     `  modules    ${dump.modules.length} loaded` +
       (text.length
         ? `; text stack LOADED (not implicated): ${text.map((m) => m.name.split(/[\\/]/).pop()).join(", ")}`
