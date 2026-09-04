@@ -9,10 +9,17 @@ All notable changes to this project are documented here. This project adheres to
 ### MCP
 
 #### Fixed
-
-- **`panel_show_media` inlines a remote ComfyUI output through `fetchImage` (the same client `get_image` uses) instead of handing the browser a `/view` that 404s (#2861).** Local canvas tabs still get a viewRef. A remote/cloud tab that cannot be inlined (MCP 404, non-media, over the 20 MB cap) is refused rather than painted empty. Same-named local workspace files are never substituted (#877/#899).
 - pin that the picker's EFFORT survives a New chat as well as its model (#2759). The same change removes `this.effortByKey.delete(...)` from reset(), so two behaviours moved and only the model one was covered. effortFor reads through Map.has(), which makes an explicit return to the SDK default (undefined but PRESENT) a third state distinct from never-picked, so both halves are pinned separately. Found by the Copilot review on the PR
 - **the model picker's choice now survives a New chat (#2759).** `reset()` deleted the
+
+## [0.52.193] - 2026-09-04
+
+### MCP
+
+#### Fixed
+
+- **`panel_show_media` inlines a remote ComfyUI output through `fetchImage` (the same client `get_image` uses) instead of handing the browser a `/view` that 404s (#2861, #2862).** Local canvas tabs still get a viewRef. A remote/cloud tab that cannot be inlined (MCP 404, non-media, over the 20 MB cap) is refused rather than painted empty. Same-named local workspace files are never substituted (#877/#899).
+
 
 ## [0.52.192] - 2026-09-04
 
