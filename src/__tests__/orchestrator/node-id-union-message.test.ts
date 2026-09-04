@@ -119,7 +119,7 @@ describe("#1889 the message an agent actually receives over MCP", () => {
     // Every spelling #845/#1425/#1497 fought for still validates. A union-level
     // `error` that accidentally narrowed the union would be a far worse bug than
     // the one being fixed, and it would not show up in any message assertion.
-    for (const id of [42, "42", "120:104", "120:113:78", -20, "-20", "-20:3"]) {
+    for (const id of [42, "42", "120:104", "120:113:78", -20, "-20", "-20:3", "sampler"]) {
       const r = await client.callTool({
         name: "panel_set_node_title",
         arguments: { node_id: id, title: "t" },
@@ -130,7 +130,7 @@ describe("#1889 the message an agent actually receives over MCP", () => {
       );
     }
     // …and what was refused is still refused.
-    for (const id of ["4.5", "", "abc", "1:", ":1", "1::2", "1:-2"]) {
+    for (const id of ["4.5", "", "42px", "1:", ":1", "1::2", "1:-2"]) {
       const text = await errorText("panel_set_node_title", { node_id: id, title: "t" });
       expect(text, JSON.stringify(id)).toContain(NODE_ID_MESSAGE);
     }
@@ -179,7 +179,7 @@ describe("#1889 the advertised input schema is untouched", () => {
     expect(json.properties.node_id).toEqual({
       anyOf: [
         { type: "integer", minimum: -9007199254740991, maximum: 9007199254740991 },
-        { type: "string", pattern: "^-?\\d+(?::\\d+)*$" },
+        { type: "string", pattern: "^(?:-?\\d+(?::\\d+)*|[A-Za-z_][A-Za-z0-9_-]*)$" },
       ],
     });
   });
