@@ -3562,6 +3562,23 @@ export interface DownloadCacheFootprint {
    */
   sidecarBytes: number;
   sidecarEntries: number;
+  /**
+   * Directory entries that are not regular FILES — a subdirectory, or a symlink
+   * (`Dirent.isFile()` is false for those).
+   *
+   * The three buckets above account for every file, which is what lets them
+   * reconcile against `du`. Anything that is not a file is skipped, and skipping
+   * it silently would make that reconciliation true-unless: the one scenario this
+   * report exists for is a user comparing it against a disk-usage treemap (both
+   * #1477 reporters found the problem exactly that way), and that is precisely
+   * where an unexplained remainder reads as the tool being wrong rather than as
+   * something the tool declined to measure.
+   *
+   * Counted, not sized: `stat` on a directory returns the inode size, not the
+   * bytes underneath it, so a number here would be more misleading than none.
+   * Normally 0 — the cache is flat and content-addressed.
+   */
+  nonFileEntries: number;
   /** COMFYUI_LRU_CACHE_SIZE_GB in bytes. 0 means eviction is OFF. */
   limitBytes: number;
   /** The directory could not be listed at all (missing, or unreadable). */
@@ -3588,6 +3605,7 @@ export async function downloadCacheFootprint(): Promise<DownloadCacheFootprint> 
     stagedEntries: 0,
     sidecarBytes: 0,
     sidecarEntries: 0,
+    nonFileEntries: 0,
     limitBytes: cacheSizeLimitBytes(),
   };
   let entries;
@@ -3599,7 +3617,10 @@ export async function downloadCacheFootprint(): Promise<DownloadCacheFootprint> 
   }
   const out = { ...base, unreadable: false };
   for (const entry of entries) {
-    if (!entry.isFile()) continue;
+    if (!entry.isFile()) {
+      out.nonFileEntries += 1;
+      continue;
+    }
     let size: number;
     try {
       size = (await downloadCacheFs.stat(join(dir, entry.name))).size;

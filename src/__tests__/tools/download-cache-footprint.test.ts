@@ -126,6 +126,30 @@ describe("#1477 downloadCacheFootprint measures what the cache is holding", () =
     expect(f.retainedEntries + f.stagedEntries + f.sidecarEntries).toBe(3);
   });
 
+  it("counts a SUBDIRECTORY as a non-file entry, in no byte bucket", async () => {
+    // #1477 — the three byte buckets account for every FILE, which is what lets them
+    // reconcile against `du`. A subdirectory is skipped by `entry.isFile()`, and
+    // skipping it silently makes that reconciliation true-unless, in exactly the
+    // situation this report exists for: a user comparing it against a treemap.
+    await seedCache();
+    const before = await downloadCacheFootprint();
+    await mkdir(join(cacheDir, "a-subdir"), { recursive: true });
+    const f = await downloadCacheFootprint();
+    expect(f.nonFileEntries).toBe(1);
+    // ...and it must not have leaked into any byte bucket, which would be worse
+    // than not counting it: a directory stat is the inode, not the bytes under it.
+    expect(f.retainedBytes).toBe(before.retainedBytes);
+    expect(f.stagedBytes).toBe(before.stagedBytes);
+    expect(f.sidecarBytes).toBe(before.sidecarBytes);
+    expect(f.retainedEntries + f.stagedEntries + f.sidecarEntries).toBe(3);
+  });
+
+  it("reports 0 non-file entries for an ordinary flat cache", async () => {
+    // The negative: a plain cache must not start claiming an unexplained remainder.
+    await seedCache();
+    const f = await downloadCacheFootprint();
+    expect(f.nonFileEntries).toBe(0);
+  });
   it("counts a resumable partial as STAGED, never as retained", async () => {
     await seedCache();
     const f = await downloadCacheFootprint();

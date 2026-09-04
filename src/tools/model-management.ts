@@ -1194,7 +1194,14 @@ async function cacheFootprintNote(): Promise<string> {
       `can read.`
     );
   }
-  if (f.retainedBytes === 0 && f.stagedBytes === 0 && f.sidecarBytes === 0) return "";
+  if (
+    f.retainedBytes === 0 &&
+    f.stagedBytes === 0 &&
+    f.sidecarBytes === 0 &&
+    f.nonFileEntries === 0
+  ) {
+    return "";
+  }
   const gb = (n: number) => (n / CACHE_GB).toFixed(2);
   const parts: string[] = [];
   if (f.retainedEntries > 0) {
@@ -1211,6 +1218,17 @@ async function cacheFootprintNote(): Promise<string> {
   if (f.sidecarEntries > 0) {
     const plural = f.sidecarEntries === 1 ? "sidecar" : "sidecars";
     parts.push(`${gb(f.sidecarBytes)} GB in ${f.sidecarEntries} ${plural} (.ct/.etag, never evicted)`);
+  }
+  // #1477 — the three buckets above account for every FILE, which is what lets them
+  // reconcile against `du`. A non-file entry is skipped, and skipping it silently
+  // makes that reconciliation true-unless — in exactly the situation this report
+  // exists for, a user comparing it against a treemap. Counted, never sized: `stat`
+  // on a directory reports the inode, not the bytes under it.
+  if (f.nonFileEntries > 0) {
+    const plural = f.nonFileEntries === 1 ? "entry" : "entries";
+    parts.push(
+      `${f.nonFileEntries} non-file ${plural} (subdirectory or symlink) NOT counted above, so these numbers will under-report what \`du\` shows`,
+    );
   }
   const levers =
     f.limitBytes > 0
