@@ -1022,6 +1022,7 @@ describe("authenticated loopback panel image relay", () => {
     expect(isPanelComfyUIReadOperation("models/checkpoints")).toBe(true);
     expect(isPanelComfyUIReadOperation("models/../object_info")).toBe(false);
     expect(isPanelComfyUIReadOperation("object_info")).toBe(true);
+    expect(isPanelComfyUIReadOperation("workflow_templates")).toBe(true);
     const seen: Array<{ cmd: string; operation?: string }> = [];
     const body = JSON.stringify(["remote-ckpt.safetensors"]);
     const server = await startPanelImageRelayServer({
