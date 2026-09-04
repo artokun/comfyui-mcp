@@ -29432,6 +29432,21 @@ CHECKED FOR YOU: the graph read this message prescribes was just run, and it ` +
  * surface the report is about; `panel_canvas` is the cheapest panel tool whose
  * presence is still meaningful. Together ~1.4k characters of description against
  * ~77k for the full set.
+ *
+ * INVALIDATES AN ASSUMPTION IN `mcp-session-health.ts` (#2742/#2774). Its
+ * empty-toolset check reads the init message's `tools: string[]`, and its comment
+ * states "nothing in this repo sets `alwaysLoad` or enables tool search, so every
+ * server is treated alike". This is the first `alwaysLoad` in the repo, so that
+ * sentence stops being true the moment both land.
+ *
+ * No behaviour changes today: `alwaysLoad` only opts OUT of deferral, and deferral
+ * happens only when tool search is enabled, which nothing does. But that check's
+ * documented hazard is precisely a deferral-aware one — a deferred tool is absent
+ * from `tools`, and its per-process latch can make an all-deferred session read as
+ * EVERY server contributing zero. If tool search is ever turned on with this in
+ * place, the panel server would report these two and pass, while a fully-deferred
+ * stdio server would report zero and be flagged: the one server #2742 is about
+ * becomes the one whose emptiness that check can no longer see.
  */
 const PROBE_ALWAYS_LOAD: ReadonlySet<string> = new Set([
   "panel_graph_outline",
