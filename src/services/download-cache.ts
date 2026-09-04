@@ -1607,6 +1607,11 @@ async function streamUrlToFile(
   callerAuth = false,
   /** Download-only fetch route. Defaults to the proxy-aware dispatcher wrapper. */
   fetchImpl: DownloadFetch = downloadFetch,
+  /** #1477 — the FINAL destination directory, when known, so a cache-volume
+   *  refusal can say the DESTINATION has room and name COMFYUI_DOWNLOAD_CACHE_DIR.
+   *  Appended deliberately: this list is positional and long, and inserting
+   *  anywhere else risks a silent re-binding at the call sites. */
+  destDir?: string,
 ): Promise<string> {
   // Fail fast if we were cancelled before any bytes moved — no request, no partial.
   if (signal?.aborted) throw new DOMException("The download was cancelled.", "AbortError");
@@ -2356,6 +2361,16 @@ async function streamUrlToFile(
     const refusal = await checkCacheVolumeSpace({
       needBytes,
       cacheDir: dirname(targetPath),
+      // #1477 — the DESTINATION volume, when it differs from the cache's. Without it
+      // the refusal can only say "the staging volume is full"; with it, it can say
+      // the destination HAS room and name COMFYUI_DOWNLOAD_CACHE_DIR, turning a
+      // fatal error into one setting. That is the reported shape exactly: a 32 GB
+      // model bound for D:, staged on a C: that could not hold it.
+      //
+      // `insufficientCacheSpaceMessage` has accepted `destDir`/`destFree` since it
+      // was written and no caller ever supplied them, so that clause was
+      // unreachable — the capability existed and was not connected.
+      destDir,
       // `resuming` is "we are APPENDING"; `partialExists` is "there are bytes on disk
       // either way". Review found these conflated, so a restart after a server ignored
       // our Range told the user nothing had been downloaded while a partial sat there.
@@ -2670,6 +2685,9 @@ async function downloadIntoCache(
   callerAuth = false,
   /** Download-only fetch route. */
   fetchImpl: DownloadFetch = downloadFetch,
+  /** #1477 — forwarded to the volume precheck so a refusal can name the
+   *  destination volume. Appended for the same positional-safety reason. */
+  destDir?: string,
 ): Promise<string> {
   // Representation-aware identity (#467): a same-URL download with different HTTP
   // auth headers OR different cloud (S3/Azure) credentials gets its OWN cache file,
@@ -3171,6 +3189,7 @@ async function downloadIntoCache(
           true,
           callerAuth,
           fetchImpl,
+          destDir, // #1477 — so the volume refusal can name the destination
         );
         await downloadCacheFs.rename(partial, target);
         await touch(target);
@@ -3722,6 +3741,9 @@ export async function downloadWithCache(
       options.signal,
       options.callerAuth,
       fetchImpl,
+      // #1477 — the FINAL destination's directory. Known only here (the layers below
+      // see the CACHE path), which is why it is threaded rather than derived.
+      dirname(options.targetPath),
     );
     // CANCEL GUARD (#515): a COALESCED caller (or a CACHE HIT) reaches here without
     // ever streaming — it awaited another job's shared physical download. If THIS
