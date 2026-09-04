@@ -10,7 +10,6 @@ All notable changes to this project are documented here. This project adheres to
 ### MCP
 
 #### Fixed
-- **History/completion harvests a ComfyUI media ref under an unrecognised key (`dexter_video`, `nkd_video`) instead of only `images`/`videos`/`video`/`gifs` (#2845).** SaveVideoDexter emits `{filename, subfolder?, type?}` as a single object (or a one-item array); `buildCompletionNotification` / the panel_run watchdog now collect that one-level shape and classify by extension so completion names the mp4. Nested non-media values stay ignored. Panel v0.15.163 already collects the array form of this shape (#2128).
 - **the panel's live-canvas tools are no longer deferred behind tool search (panel#291).**
   The SDK defers in-process MCP tool schemas by default once tool search is enabled, and
   `alwaysLoad` exists because "the tools must be present when the turn-1 prompt is built".
@@ -19,6 +18,14 @@ All notable changes to this project are documented here. This project adheres to
   them. NOT asserted as the cause — deferral would still leave the tools findable via
   ToolSearch, and the report says they are not — this removes the variable so the next
   report distinguishes "deferred and unfound" from "never registered".
+
+## [0.52.189] - 2026-09-03
+
+### MCP
+
+#### Fixed
+- **History/completion harvests a ComfyUI media ref under an unrecognised key (`dexter_video`, `nkd_video`) instead of only `images`/`videos`/`video`/`gifs` (#2845, #2847).** SaveVideoDexter emits `{filename, subfolder?, type?}` as a single object (or a one-item array); `buildCompletionNotification` / the panel_run watchdog now collect that one-level shape and classify by extension so completion names the mp4. Nested non-media values stay ignored. Panel v0.15.163 already collects the array form of this shape.
+
 
 ## [0.52.188] - 2026-09-03
 
