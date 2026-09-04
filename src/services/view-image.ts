@@ -68,6 +68,16 @@ export async function viewAssetImage(
   const fetchType: "output" | "input" | "temp" = validType
     ? (record.type as "output" | "input" | "temp")
     : "output";
+  // #2692 — the prescribed recovery must name the DIRECTORY too. `get_image
+  // action:"get"` defaults to `args.type ?? "output"` (image-management.ts), so a
+  // command omitting it fetches `output/` for an asset that lives in `input/` or
+  // `temp/` — the wrong file, or none, exactly when the inline preview was refused
+  // and this string is the only instruction the caller has. `output` is the default
+  // and stays implicit; anything else is stated.
+  const getArgs = (): string =>
+    `filename:"${record.filename}"` +
+    (record.subfolder ? `, subfolder:"${record.subfolder}"` : "") +
+    (fetchType === "output" ? "" : `, type:"${fetchType}"`);
 
   const { base64, mimeType } = await getOutputImage(
     record.filename,
@@ -98,8 +108,7 @@ export async function viewAssetImage(
           text:
             `Asset ${assetId} — ${record.filename} (${mimeType}). NOT rendered inline: ` +
             `${bounded.refused.reason}. Nothing was written locally either — this action ` +
-            `only inlines. Use get_image (action:"get", filename:"${record.filename}"` +
-            (record.subfolder ? `, subfolder:"${record.subfolder}"` : "") +
+            `only inlines. Use get_image (action:"get", ${getArgs()}` +
             `) to save the full-resolution file to disk, or retry with a smaller ` +
             `max_preview_dimension. The output is intact on the ComfyUI server; do NOT ` +
             `re-run the render.`,
@@ -121,9 +130,7 @@ export async function viewAssetImage(
           (bounded.preview
             ? previewCaveats(bounded.preview) +
               `fetch the full-resolution file with get_image (action:"get", ` +
-              `filename:"${record.filename}"` +
-              (record.subfolder ? `, subfolder:"${record.subfolder}"` : "") +
-              `), which writes it to disk.`
+              `${getArgs()}), which writes it to disk.`
             : ""),
       },
       {

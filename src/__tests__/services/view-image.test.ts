@@ -1,3 +1,5 @@
+import { fileURLToPath } from "node:url";
+import { readFileSync } from "node:fs";
 import { describe, expect, it, beforeEach, vi } from "vitest";
 
 vi.mock("../../services/image-management.js", () => ({
@@ -90,3 +92,23 @@ describe("viewAssetImage", () => {
     expect((text as { text: string }).text).toContain("b.jpg");
   });
 });
+
+describe("#2692 the prescribed recovery names the asset's DIRECTORY", () => {
+  // `get_image action:"get"` defaults to `args.type ?? "output"`. A prescription
+  // that omits the type therefore fetches output/ for an asset living in input/ or
+  // temp/ — the wrong file, or none, exactly when the inline preview was refused
+  // and this string is the only instruction the caller has.
+  it("adds type: for a non-output asset, on both prescriptions", () => {
+    const src = readFileSync(
+      fileURLToPath(new URL("../../services/view-image.ts", import.meta.url)),
+      "utf8",
+    );
+    // One builder, used by both sites, so they cannot drift apart.
+    expect(src).toMatch(/const getArgs = \(\): string =>/);
+    expect(src).toMatch(/fetchType === "output" \? "" : `, type:"\$\{fetchType\}"`/);
+    const uses = src.match(/\$\{getArgs\(\)\}/g) ?? [];
+    expect(uses.length).toBe(2);
+    // The regression: a prescription built from filename/subfolder alone.
+    expect(src).not.toMatch(/action:"get", filename:"\$\{record\.filename\}"/);
+  });
+});
