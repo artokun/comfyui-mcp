@@ -441,18 +441,34 @@ describe("panel image relay orchestrator poll", () => {
     expect(readResponse(dir, unknownId)).toMatchObject({ ok: false, error: "NO_LIVE_PANEL" });
   });
 
-  it("carries one deadline through the bridge and refuses a late panel result", async () => {
+  // The original single test asserted TWO independent things through ONE wall-clock
+  // window — that the deadline is propagated to the bridge, and that an expired
+  // request is refused — and it failed under full-suite concurrency on five branches
+  // because the budget is measured from `createdAt` and the runner can deschedule the
+  // task before `processPanelImageRequests` reaches the record. `send` was then never
+  // called and the assertion read the uninitialised `timeoutMs` as 0, which looks like
+  // a propagation bug and is not one.
+  //
+  // Widening the budget makes that rarer, not impossible: vitest.config.ts raised this
+  // suite's per-test timeout 5s -> 30s precisely because this runner starves tasks for
+  // SECONDS, and it says outright that a test needing more headroom is a signal to make
+  // it deterministic rather than to raise the ceiling. A rare flake is worse than a
+  // frequent one — it reappears on an unrelated PR with no memory of why.
+  //
+  // Split, neither half depends on how long the runner takes to get here.
+
+  it("carries the deadline through to the bridge as timeoutMs", async () => {
+    // The LARGEST budget the record validator accepts: `deadlineAt - createdAt` above
+    // PANEL_IMAGE_RELAY_TIMEOUT_MS is rejected as malformed, so a deliberately huge
+    // budget never reaches the bridge at all and this test would fail for a reason
+    // that has nothing to do with propagation. Taken from the constant rather than
+    // written as 8000, so it tracks the ceiling instead of silently exceeding it.
+    // 20x the previous budget, and no starvation this runner produces can consume it.
+    // The panel answers immediately, so no timer is involved on either side.
     const dir = tempChannel();
-    const id = "deadline-race-123456";
+    const id = "deadline-propagate-123456";
     const createdAt = Date.now();
-    // 400ms, not 50. The budget is WALL-CLOCK and starts at `createdAt`, so on a
-    // loaded runner it could expire before processing even began -- the request
-    // was then refused as already-expired, `send` was never called, and the
-    // assertion below read `timeoutMs` as 0. That is the measurement apparatus
-    // being starved, not a race in the code under test (which is why widening is
-    // the right move here and not elsewhere -- see vitest.config.ts on #852).
-    // The panel still answers LATER than this, so the TIMEOUT verdict is real.
-    const budgetMs = 400;
+    const budgetMs = PANEL_IMAGE_RELAY_TIMEOUT_MS;
     writeFileSync(requestFile(dir, id), JSON.stringify(request(id, {
       createdAt,
       deadlineAt: createdAt + budgetMs,
@@ -466,13 +482,43 @@ describe("panel image relay orchestrator poll", () => {
         canReach: () => true,
         send: async (_command, options) => {
           timeoutMs = options.timeoutMs;
-          await new Promise((resolve) => setTimeout(resolve, budgetMs * 2));
           return { ok: true, base64: "AQID", mimeType: "image/png", bytes: 3 };
         },
       },
     });
     expect(timeoutMs).toBeGreaterThan(0);
     expect(timeoutMs).toBeLessThanOrEqual(budgetMs);
+    expect(readResponse(dir, id)).toMatchObject({ ok: true });
+  });
+
+  it("refuses a request whose deadline has ALREADY passed, without calling the bridge", async () => {
+    // No timer at all: the deadline is in the past when the record is written, so the
+    // expiry path is reached deterministically however loaded the machine is. This is
+    // also the exact state the old test kept falling into by accident — asserted on
+    // purpose now, instead of being the thing that made it flake.
+    const dir = tempChannel();
+    const id = "deadline-expired-123456";
+    const createdAt = Date.now() - 60_000;
+    writeFileSync(requestFile(dir, id), JSON.stringify(request(id, {
+      createdAt,
+      deadlineAt: createdAt + 50,
+    })));
+    let sendCalls = 0;
+    await processPanelImageRequests({
+      dir,
+      resolvePanelAgentKey: () => "orchestrator::claude",
+      resolvePanelTab: () => "panel-tab",
+      bridge: {
+        canReach: () => true,
+        send: async () => {
+          sendCalls += 1;
+          return { ok: true, base64: "AQID", mimeType: "image/png", bytes: 3 };
+        },
+      },
+    });
+    // Spending a panel round-trip on work whose answer is already too late to use is
+    // the point of checking first; that it never dispatched is the load-bearing half.
+    expect(sendCalls).toBe(0);
     expect(readResponse(dir, id)).toMatchObject({ ok: false, error: "TIMEOUT" });
   });
 
