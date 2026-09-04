@@ -54,6 +54,18 @@ const KNOWN_CODES = new Map([
 ]);
 
 /** MINIDUMP_STRING: a u32 byte length followed by UTF-16LE. */
+/**
+ * A Crashpad MinidumpUTF8String: u32 byte length, then UTF-8, then a NUL.
+ * Bounds-checked because these RVAs come from a file that may be truncated or
+ * simply not the shape claimed — a diagnostic must not throw on a bad dump.
+ */
+function readAnnotationString(buf, rva) {
+  if (!rva || rva + 4 > buf.length) return null;
+  const len = buf.readUInt32LE(rva);
+  if (len > 4096 || rva + 4 + len > buf.length) return null;
+  return buf.toString("utf8", rva + 4, rva + 4 + len);
+}
+
 function readMinidumpString(buf, rva) {
   if (!rva || rva + 4 > buf.length) return "";
   const bytes = buf.readUInt32LE(rva);
@@ -143,22 +155,49 @@ export function readMinidump(buf) {
     if (dictRva && dictRva + 4 <= buf.length) {
       const count = buf.readUInt32LE(dictRva);
       if (count > 0 && count <= 64) {
-        const str = (rva) => {
-          if (!rva || rva + 4 > buf.length) return null;
-          const len = buf.readUInt32LE(rva);
-          if (len > 4096 || rva + 4 + len > buf.length) return null;
-          return buf.toString("utf8", rva + 4, rva + 4 + len);
-        };
         for (let i = 0; i < count; i++) {
           const e = dictRva + 4 + i * 8;
           if (e + 8 > buf.length) break;
-          const k = str(buf.readUInt32LE(e));
-          const v = str(buf.readUInt32LE(e + 4));
+          const k = readAnnotationString(buf, buf.readUInt32LE(e));
+          const v = readAnnotationString(buf, buf.readUInt32LE(e + 4));
           if (k && v !== null) out.annotations[k] = v;
         }
       }
     }
   }
+    // PER-MODULE annotation OBJECTS, where Chromium writes `ptype` — browser vs
+    // renderer vs gpu-process. For panel#2023 that is the triage question before any
+    // other line matters: a renderer crash needs the RENDERER's dump, and a
+    // gpu-process dump describes a different fault with equal confidence.
+    //
+    // Layout, derived from a real dump rather than guessed (a first attempt read the
+    // entries as RVAs and printed garbage memory):
+    //   CrashpadInfo.module_list -> {u32 count, entries[{u32 index, LOC{size,rva}}]}
+    //   entry.loc.rva -> ModuleCrashpadInfo {u32 version, LOC list, LOC simple, LOC objects}
+    //   objects.rva -> {u32 count, MinidumpAnnotation[12 bytes each]}
+    //   MinidumpAnnotation = {u32 name_rva, u16 type, u16 reserved, u32 value_rva}
+    // The entries are INLINE structs, not a list of RVAs. That was the whole error.
+    const modListRva = crashpad ? buf.readUInt32LE(crashpad.rva + 4 + 16 + 16 + 8 + 4) : 0;
+    if (modListRva && modListRva + 4 <= buf.length) {
+      const modCount = buf.readUInt32LE(modListRva);
+      for (let m = 0; m < Math.min(modCount, 16); m++) {
+        const entry = modListRva + 4 + m * 12;
+        if (entry + 12 > buf.length) break;
+        const miRva = buf.readUInt32LE(entry + 8);
+        if (!miRva || miRva + 28 > buf.length) continue;
+        const objRva = buf.readUInt32LE(miRva + 4 + 8 + 8 + 4);
+        if (!objRva || objRva + 4 > buf.length) continue;
+        const objCount = buf.readUInt32LE(objRva);
+        if (objCount === 0 || objCount > 64) continue;
+        for (let k = 0; k < objCount; k++) {
+          const a = objRva + 4 + k * 12;
+          if (a + 12 > buf.length) break;
+          const name = readAnnotationString(buf, buf.readUInt32LE(a));
+          const value = readAnnotationString(buf, buf.readUInt32LE(a + 8));
+          if (name && value !== null) out.annotations[name] = value;
+        }
+      }
+    }
   return out;
 }
 
@@ -196,6 +235,13 @@ export function describeMinidump(name, dump) {
   `  process    ${dump.modules[0]?.name ?? "<no module list>"}
 ` +
     // The Electron/Chromium build, when the dump carries Crashpad annotations. Two
+    // WHICH PROCESS TYPE, when Chromium wrote it. For panel#2023 this is the first
+    // line to read: a renderer crash needs the RENDERER's dump, and a browser- or
+    // gpu-process dump describes a different fault with exactly the same confidence.
+    (dump.annotations?.ptype || dump.annotations?.process_type
+      ? `  proc type  ${dump.annotations.ptype ?? dump.annotations.process_type}
+`
+      : "") +
     // text-stack crashes are only the SAME bug if they are the same renderer, and an
     // app version does not give that.
     (dump.annotations?.prod || dump.annotations?.ver

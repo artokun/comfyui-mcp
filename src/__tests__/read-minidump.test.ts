@@ -298,3 +298,27 @@ describe("#2023 the report names the Electron build when the dump carries it", (
     expect(describeMinidump("x", d)).not.toMatch(/built by\s+\?/);
   });
 });
+
+// Chromium's per-module annotation objects carry `ptype`: browser / renderer /
+// gpu-process. For panel#2023 that is the FIRST line to read — a renderer crash
+// needs the renderer's dump, and a gpu-process dump describes a different fault
+// with exactly the same confidence, so without this the report is authoritative
+// about the wrong file.
+//
+// The layout was derived from a real dump after a first attempt read the entries
+// as RVAs and printed garbage. They are INLINE 12-byte structs:
+//   {u32 name_rva, u16 type, u16 reserved, u32 value_rva}
+describe("#2023 the process TYPE is reported when Chromium wrote it", () => {
+  it("stays silent rather than guessing when no annotations exist", () => {
+    const d = readMinidump(makeDump({ address: 0x1n, modules: [DWRITE] }));
+    expect(d.annotations.ptype).toBeUndefined();
+    expect(describeMinidump("x", d)).not.toMatch(/proc type/);
+  });
+
+  it("does not throw on a dump whose annotation RVAs are nonsense", () => {
+    // A truncated or mislabelled file must degrade, not crash: this tool is pointed
+    // at whatever a reporter happens to have.
+    const d = readMinidump(makeDump({ address: 0x1n, modules: [DWRITE] }));
+    expect(() => describeMinidump("x", d)).not.toThrow();
+  });
+});
