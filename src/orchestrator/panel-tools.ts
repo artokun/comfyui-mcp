@@ -3468,12 +3468,45 @@ function currentPanelRestartTarget(ctx: PanelToolCtx): string | null {
 }
 
 /**
+ * #1593 — a live panel tab whose SERVER-OBSERVED handshake Origin is a proven
+ * local loopback ComfyUI, even when that port is not COMFYUI_URL (the
+ * recurrence: panel on :8189, MCP on :8188). Authorizes only the Manager reboot
+ * on THIS tab — never a guessed origin, never a local kill of the configured
+ * 8188 process. Requires the tab socket to have arrived on the server-trusted
+ * local listener, and a concrete loopback family literal (not `localhost`).
+ * DNS-ambiguous / missing / relayed origins stay fail-closed.
+ */
+function currentPanelBoundLocalRestartOrigin(ctx: PanelToolCtx): string | null {
+  if (ctx.bridge?.tabIsLocal?.(ctx.tabId) !== true) return null;
+  const origin = ctx.bridge?.tabServerOrigin?.(ctx.tabId);
+  if (!origin) return null;
+  if (isDnsAmbiguousLoopback(origin) || !isLoopbackOrigin(origin)) return null;
+  try {
+    const u = new URL(origin);
+    if (u.protocol !== "http:" && u.protocol !== "https:") return null;
+    if (!u.hostname) return null;
+  } catch {
+    return null;
+  }
+  return origin.replace(/\/+$/, "");
+}
+
+function stillBoundPanelLocalRestartOrigin(
+  ctx: PanelToolCtx,
+  previous: string | undefined,
+): string | undefined {
+  if (previous == null) return undefined;
+  const next = currentPanelBoundLocalRestartOrigin(ctx);
+  return next != null && sameHttpBase(next, previous) ? next : undefined;
+}
+
+/**
  * #2804 — a live panel tab whose SERVER-OBSERVED handshake Origin is a concrete
  * non-loopback ComfyUI. The Manager reboot is sent to THIS tab, never to a
  * guessed URL, and never via a local process restart of the configured
- * 127.0.0.1 target. Loopback / `localhost` origins stay on the existing
- * local-instance confirmation (including the tunnelled-loopback FORCE_REMOTE
- * case).
+ * 127.0.0.1 target. DNS-ambiguous `localhost` stays fail-closed. A proven
+ * local loopback Origin (even on a different port than COMFYUI_URL) is
+ * currentPanelBoundLocalRestartOrigin (#1593), not this path.
  */
 function currentPanelRemoteRestartOrigin(ctx: PanelToolCtx): string | null {
   const origin = ctx.bridge?.tabServerOrigin?.(ctx.tabId);
@@ -26934,7 +26967,7 @@ CHECKED FOR YOU: the graph read this message prescribes was just run, and it ` +
     ),
     def(
       "panel_restart_comfyui",
-      "Restart the user's ComfyUI server via the built-in Manager — needed to load newly installed/updated custom nodes. CALL THIS DIRECTLY when a restart is needed: it pops a confirm card and only restarts on a yes (don't ask separately first). If the user has already explicitly authorized automatic restarts in the conversation, pass already_authorized:true to skip only that card; this does NOT imply force and does not bypass any target, relaunch, or busy guard. When this panel tab is authoritatively bound to a remote ComfyUI (server-observed non-loopback Origin), the restart is the Manager reboot of THAT instance — not a local 127.0.0.1 process, and not a guessed origin. Unbound local tabs still require local-instance confirmation. ComfyUI and this agent go down briefly, then the panel auto-reconnects and you resume. ⚠️ BUSY GUARD: a restart ABORTS any in-progress or queued generation — if ComfyUI is generating, this tool REFUSES and tells you (it does NOT restart). When that happens, tell the user a render is running and WAIT for it (poll panel_node_queue_status), or pass force:true ONLY if the user explicitly confirms they want to kill the running generation. Best practice: before restarting after an install, check the queue is idle first. Only call when a restart is actually needed. If a crash takes the panel bridge offline so the confirmation card cannot be shown, this tool falls back to a headless restart of the configured local process (or COMFYUI_RESTART_COMMAND) instead of depending on the dead bridge — it still refuses a readable busy queue without force:true, and still refuses when a relaunch cannot be proven. On an externally-managed install whose relaunch can't be proven from here (e.g. Pinokio), the restart is REFUSED before anything is stopped — restart from the launcher that owns the server instead, or set COMFYUI_RESTART_COMMAND to the exact command that restarts the instance (e.g. `docker restart <container>`): the restart then runs through that command (the busy guard above still applies) instead of needing the launch path.",
+      "Restart the user's ComfyUI server via the built-in Manager — needed to load newly installed/updated custom nodes. CALL THIS DIRECTLY when a restart is needed: it pops a confirm card and only restarts on a yes (don't ask separately first). If the user has already explicitly authorized automatic restarts in the conversation, pass already_authorized:true to skip only that card; this does NOT imply force and does not bypass any target, relaunch, or busy guard. When this panel tab is authoritatively bound to a ComfyUI — a server-observed non-loopback Origin, or a proven local loopback instance even on a different port than COMFYUI_URL — the restart is the Manager reboot of THAT instance, not a guessed origin and not the configured 127.0.0.1 process unless it is that same origin. Unbound or DNS-ambiguous local tabs still require local-instance confirmation. ComfyUI and this agent go down briefly, then the panel auto-reconnects and you resume. ⚠️ BUSY GUARD: a restart ABORTS any in-progress or queued generation — if ComfyUI is generating, this tool REFUSES and tells you (it does NOT restart). When that happens, tell the user a render is running and WAIT for it (poll panel_node_queue_status), or pass force:true ONLY if the user explicitly confirms they want to kill the running generation. Best practice: before restarting after an install, check the queue is idle first. Only call when a restart is actually needed. If a crash takes the panel bridge offline so the confirmation card cannot be shown, this tool falls back to a headless restart of the configured local process (or COMFYUI_RESTART_COMMAND) instead of depending on the dead bridge — it still refuses a readable busy queue without force:true, and still refuses when a relaunch cannot be proven. On an externally-managed install whose relaunch can't be proven from here (e.g. Pinokio), the restart is REFUSED before anything is stopped — restart from the launcher that owns the server instead, or set COMFYUI_RESTART_COMMAND to the exact command that restarts the instance (e.g. `docker restart <container>`): the restart then runs through that command (the busy guard above still applies) instead of needing the launch path.",
       { force: z.boolean().optional(), already_authorized: z.boolean().optional() },
       // panel#1554 — `note` rides WHICHEVER reply this handler returns, so a decision
       // recovered from an earlier confirmation card is disclosed on every branch, not
@@ -26972,10 +27005,16 @@ CHECKED FOR YOU: the graph read this message prescribes was just run, and it ` +
         // authenticated relative Manager dispatch; it is never a health or
         // headless-restart target.
         let panelRestartTarget: string | undefined;
+        // #1593: a live tab whose handshake Origin is a proven local loopback
+        // ComfyUI on a different port than COMFYUI_URL. Authorizes only the
+        // Manager reboot on THIS tab — never a guessed origin and never a
+        // local kill of the configured 8188 process.
+        let panelLocalRestartOrigin: string | undefined;
         // #2804: a live tab whose handshake Origin is a concrete non-loopback
         // ComfyUI. Authorizes only the Manager reboot on THIS tab — never a
         // guessed origin and never a local kill of the configured 127.0.0.1
-        // target. Loopback tabs stay on the local-instance confirmation below.
+        // target. DNS-ambiguous localhost stays fail-closed; proven local
+        // loopback is panelLocalRestartOrigin above.
         let panelRemoteRestartOrigin: string | undefined;
         // #1819: resolve instance identity BEFORE the confirmation card. Asking the
         // user to confirm a restart, then refusing because we cannot tell which
@@ -27000,6 +27039,13 @@ CHECKED FOR YOU: the graph read this message prescribes was just run, and it ` +
               panelRestartTarget = currentPanelRestartTarget(ctx) ?? undefined;
             }
             if (proxyRestartTarget == null && panelRestartTarget == null) {
+              panelLocalRestartOrigin = currentPanelBoundLocalRestartOrigin(ctx) ?? undefined;
+            }
+            if (
+              proxyRestartTarget == null &&
+              panelRestartTarget == null &&
+              panelLocalRestartOrigin == null
+            ) {
               panelRemoteRestartOrigin = currentPanelRemoteRestartOrigin(ctx) ?? undefined;
             }
             const tabStillHere =
@@ -27010,6 +27056,7 @@ CHECKED FOR YOU: the graph read this message prescribes was just run, and it ` +
               tabStillHere &&
               proxyRestartTarget == null &&
               panelRestartTarget == null &&
+              panelLocalRestartOrigin == null &&
               panelRemoteRestartOrigin == null
             ) {
               return restartRefusedPreservingBinding(
@@ -27654,6 +27701,7 @@ CHECKED FOR YOU: the graph read this message prescribes was just run, and it ` +
           configuredRestartCommand &&
           !isRemoteMode() &&
           !isCloudMode() &&
+          panelLocalRestartOrigin == null &&
           panelRemoteRestartOrigin == null
         ) {
           if (proxyRestartTarget != null) {
@@ -27815,6 +27863,16 @@ CHECKED FOR YOU: the graph read this message prescribes was just run, and it ` +
               : undefined;
         }
         if (proxyRestartTarget == null && panelRestartTarget == null) {
+          panelLocalRestartOrigin = stillBoundPanelLocalRestartOrigin(
+            ctx,
+            panelLocalRestartOrigin,
+          );
+        }
+        if (
+          proxyRestartTarget == null &&
+          panelRestartTarget == null &&
+          panelLocalRestartOrigin == null
+        ) {
           panelRemoteRestartOrigin = stillBoundPanelRemoteRestartOrigin(
             ctx,
             panelRemoteRestartOrigin,
@@ -27828,7 +27886,8 @@ CHECKED FOR YOU: the graph read this message prescribes was just run, and it ` +
           panelRestartTarget != null ||
           (preflightHealthBase != null &&
             sameHttpBase(getComfyUIBaseUrl(), preflightHealthBase));
-        const remotePanelBound = panelRemoteRestartOrigin != null;
+        const boundPanelOriginRestart =
+          panelLocalRestartOrigin != null || panelRemoteRestartOrigin != null;
         // #848: what the instance was OBSERVED running with, taken from the preflight
         // that already had to resolve it. Nothing new is probed before the dispatch —
         // the no-await invariant between the binding capture and the reboot stands.
@@ -27849,7 +27908,7 @@ CHECKED FOR YOU: the graph read this message prescribes was just run, and it ` +
         // local process to assess, and the Manager reboot is their ONLY restart path —
         // a supervised remote (the tunnelled Desktop app) restarts through it by
         // design, so refusing there would remove a path that works.
-        if (!preflightBound && !remotePanelBound && !isRemoteMode() && !isCloudMode()) {
+        if (!preflightBound && !boundPanelOriginRestart && !isRemoteMode() && !isCloudMode()) {
           // Identity was proven before the card; landing here means the binding
           // was lost during the confirm wait. Same refusal, and the tab that is
           // still here must stay usable (#1819).
@@ -27858,7 +27917,7 @@ CHECKED FOR YOU: the graph read this message prescribes was just run, and it ` +
             unboundLocalRestartRefusalNote(ctx, preflightHealthBase, preflightBinding.blocker),
           );
         }
-        if (preflightBound && !remotePanelBound) {
+        if (preflightBound && !boundPanelOriginRestart) {
           // Snapshot the target GENERATION at the decision (r11): a final-state
           // base comparison (A vs A) cannot detect an intervening A→B→A
           // retarget, so stability is judged by the monotonic epoch bumped on
@@ -28002,13 +28061,26 @@ CHECKED FOR YOU: the graph read this message prescribes was just run, and it ` +
               : undefined;
         }
         if (proxyRestartTarget == null && panelRestartTarget == null) {
+          panelLocalRestartOrigin = stillBoundPanelLocalRestartOrigin(
+            ctx,
+            panelLocalRestartOrigin,
+          );
+        }
+        if (
+          proxyRestartTarget == null &&
+          panelRestartTarget == null &&
+          panelLocalRestartOrigin == null
+        ) {
           panelRemoteRestartOrigin = stillBoundPanelRemoteRestartOrigin(
             ctx,
             panelRemoteRestartOrigin,
           );
         }
         const healthBase =
-          proxyRestartTarget?.backendBase ?? captureRebootHealthBase(ctx);
+          proxyRestartTarget?.backendBase ??
+          (panelLocalRestartOrigin != null || panelRemoteRestartOrigin != null
+            ? null
+            : captureRebootHealthBase(ctx));
         // THE BINDING RULE APPLIES AT THE DISPATCH POINT, NOT ONLY BEFORE THE AWAIT.
         //
         // The check above happens before the preflight; a tab or connection rebind
@@ -28021,13 +28093,15 @@ CHECKED FOR YOU: the graph read this message prescribes was just run, and it ` +
         //
         // Same rule, same exclusions: only a LOCAL target we cannot tie to the
         // instance this server accounts for is refused. A still-bound remote
-        // panel origin (#2804) is the Manager reboot of that tab, not a local
-        // process we have to identify.
+        // panel origin (#2804) or proven local loopback origin on a different
+        // port than COMFYUI_URL (#1593) is the Manager reboot of that tab, not
+        // a local process we have to identify from the configured URL.
         const dispatchBound =
           proxyRestartTarget != null ||
           (healthBase != null && sameHttpBase(getComfyUIBaseUrl(), healthBase)) ||
           (panelRestartTarget != null &&
             sameHttpBase(getComfyUIBaseUrl(), panelRestartTarget)) ||
+          panelLocalRestartOrigin != null ||
           panelRemoteRestartOrigin != null;
         if (!dispatchBound && !isRemoteMode() && !isCloudMode()) {
           return restartRefusedPreservingBinding(
@@ -28222,6 +28296,7 @@ CHECKED FOR YOU: the graph read this message prescribes was just run, and it ` +
           if (
             !isRemoteMode() &&
             panelRemoteRestartOrigin == null &&
+            panelLocalRestartOrigin == null &&
             rebootNoEndpoint(res) &&
             // ENDPOINT BINDING: restartComfyUI() acts on the orchestrator's GLOBAL config
             // target (a hello can retarget it). Only run it when the bound tab fronts our
