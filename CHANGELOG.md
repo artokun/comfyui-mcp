@@ -6,6 +6,18 @@ All notable changes to this project are documented here. This project adheres to
 
 ## Unreleased
 
+### MCP
+#### Fixed
+- **the pi backend works when pi was installed from npm on Windows (#2835).** `npm i -g pi`
+  writes `pi` (an extensionless bash script), `pi.cmd` and `pi.ps1`, and no `pi.exe`. Node
+  spawns the first with ENOENT and the second with EINVAL (measured), and discovery returned
+  the extensionless one — so the model probe failed and the panel connected degraded with
+  an empty model list, while `COMFYUI_MCP_PI_PATH` pointed at the `.cmd` was refused and the
+  advice named a `pi.exe` the package does not ship. npm's shim names its own entry point, so
+  it is now resolved to that script and launched as `node <script>`. NOT via `shell: true`:
+  the prompt rides argv, so a shell would make every prompt a potential command line, which is
+  what the no-shell rule exists to prevent. An unresolvable shim is still refused.
+
 ## [0.52.186] - 2026-09-03
 
 ### MCP
