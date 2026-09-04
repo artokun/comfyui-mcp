@@ -46,9 +46,16 @@ const scoped = allSources.filter((f) => f.startsWith("src/orchestrator/"));
 
 /** Deletes are searched repo-wide: any of them unsets the var for this process. */
 const everything = allSources.map((f) => readFileSync(f, "utf8")).join("\n");
-const deleted = new Set(
-  [...everything.matchAll(/delete\s+process\.env\.([A-Z_][A-Z0-9_]*)/g)].map((m) => m[1]),
-);
+// Dot AND bracket access. `delete process.env["ANTHROPIC_API_KEY"]` is the same
+// delete, and matching only the dot form meant a harmless syntax refactor would
+// empty this set and let the gate report success while the advice it guards was
+// still shipping. A gate that a rename can silence is not a gate.
+const deleted = new Set([
+  ...[...everything.matchAll(/delete\s+process\.env\.([A-Z_][A-Z0-9_]*)/g)].map((m) => m[1]),
+  ...[...everything.matchAll(/delete\s+process\.env\[\s*["'\`]([A-Z_][A-Z0-9_]*)["'\`]\s*\]/g)].map(
+    (m) => m[1],
+  ),
+]);
 
 /**
  * Prose, not a bare key. The shortest real finding was 92 chars and the longest
