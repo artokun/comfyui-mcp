@@ -127,20 +127,28 @@ export type PanelReadOriginResolution =
 const UNDEFINED_API_BASE_RE =
   /Cannot read propert(?:y|ies) of undefined \(reading ['"]?api_base['"]?\)|Cannot read property ['"]?api_base['"]? of undefined/i;
 
-/** Resolve the connected panel origin and API base before a fallback read. */
+/**
+ * Resolve the connected panel origin and API base before a fallback read.
+ * Mixed, malformed, or missing-prefix sets stay unproven so a guessed
+ * origin is never contacted. Loopback aliases of one host collapse to one.
+ */
 export function resolvePanelReadOrigin(
   origins: readonly string[],
   apiBase: string | undefined,
 ): PanelReadOriginResolution {
   if (origins.length === 0) return { kind: "unknown" };
+  if (typeof apiBase !== "string") return { kind: "unproven" };
   const proven: string[] = [];
+  const canons = new Set<string>();
   for (const raw of origins) {
     const origin = normalizePanelOrigin(raw);
     if (origin === undefined) return { kind: "unproven" };
+    const canon = canonicalOrigin(origin);
+    if (canon === undefined) return { kind: "unproven" };
+    canons.add(canon);
     proven.push(origin);
   }
-  if (proven.length === 0) return { kind: "unproven" };
-  if (typeof apiBase !== "string") return { kind: "unproven" };
+  if (proven.length === 0 || canons.size !== 1) return { kind: "unproven" };
   return { kind: "proven", origin: proven[0], apiBase };
 }
 
