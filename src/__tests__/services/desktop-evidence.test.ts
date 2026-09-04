@@ -17,7 +17,7 @@
 // These pin that the weakest one identifies itself as weak, because that is the one
 // a user can recognise and contest.
 
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 import { __processControlTestHooks } from "../../services/process-control.js";
 
 /** The marker set, as the shipped predicate holds it. */
@@ -110,5 +110,52 @@ describe("#2784 the refusal carries the clause", () => {
     const at = text.indexOf("ComfyUI Desktop started the server on port");
     expect(at).toBeGreaterThan(-1);
     expect(text.slice(at, at + 1600)).toContain("desktopEvidenceClause(info.desktopEvidence)");
+  });
+
+  // ---------------------------------------------------------------------------
+  // #2784 — the SELECTION, now reachable.
+  //
+  // The two tests above pin the sentence; neither pins WHICH signal produced it.
+  // Verified by mutation: making the marker branch or the ancestor branch
+  // unreachable left all fourteen green, so the refusal could have named the
+  // weakest signal in place of the strongest and nothing would have said so —
+  // and pointing the reader at an argv NAME match that did not decide is the same
+  // misdirection the unfalsifiable claim was.
+  describe("#2784 which signal is named", () => {
+    const { detectDesktopLaunch, reset, setParentPidResolver, setProcessIdentityResolver } =
+      __processControlTestHooks;
+
+    afterEach(() => reset());
+
+    it("names the argv substring when that is all there was, and quotes the marker it hit", () => {
+      // No Desktop-2-shaped path, so the ancestor walk is deliberately never run.
+      const r = detectDesktopLaunch(4242, ["C:/Apps/Comfy Desktop/python.exe", "main.py"]);
+      expect(r.isDesktopApp).toBe(true);
+      expect(r.desktopEvidence).toContain('the substring "comfy desktop"');
+      expect(r.desktopEvidence).toContain("NAME match");
+    });
+
+    it("names the ANCESTOR binary instead, once the process tree can answer", () => {
+      // Same install, plus a real Desktop supervisor overhead. The stronger fact
+      // must displace the contestable one — that ordering is the whole point of
+      // saying which signal decided.
+      setParentPidResolver((pid) => (pid === 4242 ? 99 : null));
+      setProcessIdentityResolver((pid) =>
+        pid === 99
+          ? { pid: 99, executablePath: "C:/Programs/ComfyUI/Comfy Desktop/Comfy Desktop.exe" }
+          : undefined,
+      );
+      const r = detectDesktopLaunch(4242, ["C:/Users/x/comfyui-installs/python.exe", "main.py"]);
+      expect(r.isDesktopApp).toBe(true);
+      expect(r.desktopEvidence).toContain("ancestors");
+      expect(r.desktopEvidence).not.toContain("NAME match");
+    });
+
+    it("says nothing at all when no signal fires", () => {
+      // The one path with no evidence to give, and the clause renders "" for it.
+      const r = detectDesktopLaunch(4242, ["C:/Python/python.exe", "main.py"]);
+      expect(r.isDesktopApp).toBe(false);
+      expect(r.desktopEvidence).toBeUndefined();
+    });
   });
 });

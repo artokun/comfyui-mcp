@@ -6919,6 +6919,14 @@ function observedLaunch(info: ProcessInfo): {
 }
 
 export const __processControlTestHooks = {
+  /**
+   * #2784 — the SELECTION, not just the sentence. Three signals reach the same
+   * `true` and the refusal names which one decided; a test that only calls
+   * `desktopEvidenceClause` pins the wording and leaves the choice unpinned, so
+   * reporting the weakest signal in place of the strongest would go unnoticed --
+   * and that misdirects the reader exactly like the claim this replaced.
+   */
+  detectDesktopLaunch,
   reset(): void {
     detachSupervisor();
     lastProcessInfo = null;
