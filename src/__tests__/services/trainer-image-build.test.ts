@@ -132,6 +132,40 @@ describe("#2723 a re-issue adopts the running build", () => {
     expect(buildTrainerImage).toHaveBeenCalledTimes(1);
   });
 
+  it("REFUSES rather than adopting a build of a different ai-toolkit ref", () => {
+    // `aiToolkitRef` is caller-controlled and exists to pin the commit "for
+    // reproducibility". Adopting across it would report success for an image built
+    // from another ref, and the tag that lands would not be the one requested --
+    // the parameter's entire purpose, defeated silently.
+    deferredBuild();
+    const first = startTrainerImageBuild({ contextDir: "/ctx", aiToolkitRef: "main" });
+    const second = startTrainerImageBuild({ contextDir: "/ctx", aiToolkitRef: "v1.2.3" });
+    expect(second.adopted).toBe(false);
+    expect(second.refMismatch?.id).toBe(first.build.id);
+    expect(second.refMismatch?.ai_toolkit_ref).toBe("main");
+    // And it does NOT start a second one either: two docker builds against one tag
+    // race for the layer cache, which is no less true when the refs differ.
+    expect(buildTrainerImage).toHaveBeenCalledTimes(1);
+  });
+
+  it("adopts when the ref MATCHES, including when both are absent", () => {
+    // The neighbour that must keep working: undefined and undefined are the same
+    // request, so the reporter's plain re-issue still adopts.
+    deferredBuild();
+    const a = startTrainerImageBuild({ contextDir: "/ctx" });
+    const b = startTrainerImageBuild({ contextDir: "/ctx" });
+    expect(b.adopted).toBe(true);
+    expect(b.refMismatch).toBeUndefined();
+    expect(b.build.id).toBe(a.build.id);
+
+    __resetTrainerImageBuildsForTests();
+    deferredBuild();
+    const c = startTrainerImageBuild({ contextDir: "/ctx", aiToolkitRef: "v1.2.3" });
+    const d = startTrainerImageBuild({ contextDir: "/ctx", aiToolkitRef: "v1.2.3" });
+    expect(d.adopted).toBe(true);
+    expect(d.build.id).toBe(c.build.id);
+  });
+
   it("starts a NEW build once the previous one settled", async () => {
     const { settle } = deferredBuild();
     const first = startTrainerImageBuild({ contextDir: "/ctx" });

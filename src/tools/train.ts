@@ -710,10 +710,29 @@ export function registerTrainTools(server: McpServer): void {
             // not slow. Return a handle and let doctor report it — the same shape
             // download_model and enqueue_workflow already use.
             const { startTrainerImageBuild } = await import("../services/trainer-image-build.js");
-            const { build, adopted } = startTrainerImageBuild({
+            const { build, adopted, refMismatch } = startTrainerImageBuild({
               contextDir,
               aiToolkitRef: args.aiToolkitRef,
             });
+            if (refMismatch) {
+              // Adopting across a different `aiToolkitRef` would report success for
+              // an image built from another commit — silently defeating the one
+              // thing that parameter is for.
+              return textEnvelope({
+                ok: false,
+                error: {
+                  code: "build_ref_mismatch",
+                  message:
+                    `A build of ${refMismatch.image} is already running (${refMismatch.id}) from ` +
+                    `ai-toolkit ref ${refMismatch.ai_toolkit_ref ?? "(default)"}, and this call asked for ` +
+                    `${args.aiToolkitRef ?? "(default)"}. It was NOT adopted: the tag that lands would be ` +
+                    `the running build's, not the one requested. Two docker builds against one tag race ` +
+                    `for the layer cache, so a second was not started either. Poll train_doctor ` +
+                    `(action:"doctor") until that build settles, then re-issue with the ref you want.`,
+                },
+                data: { running_build: refMismatch, requested_ai_toolkit_ref: args.aiToolkitRef ?? null },
+              });
+            }
             return textEnvelope({
               ok: true,
               command: TRAINER_COMMAND.buildImage,

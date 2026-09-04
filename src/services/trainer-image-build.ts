@@ -51,10 +51,25 @@ const TAIL_LIMIT = 200;
 export function startTrainerImageBuild(opts: {
   contextDir: string;
   aiToolkitRef?: string;
-}): { build: TrainerImageBuild; adopted: boolean } {
+}): { build: TrainerImageBuild; adopted: boolean; refMismatch?: TrainerImageBuild } {
   if (running) {
     const existing = builds.get(running);
-    if (existing && existing.status === "running") return { build: existing, adopted: true };
+    if (existing && existing.status === "running") {
+      // Adoption must not SUBSTITUTE. `aiToolkitRef` is caller-controlled and its
+      // whole purpose is reproducibility ("pins the ai-toolkit commit/tag"), so
+      // handing back a build of a different ref and reporting `adopted: true`
+      // answers a question nobody asked -- and the tag that lands is not the one
+      // that was pinned. The record already carries `ai_toolkit_ref`; this is
+      // simply the first thing to read it.
+      //
+      // Refusing rather than starting a second build: the reason adoption exists
+      // at all is that two `docker build` runs against one tag race for the layer
+      // cache, and that is no less true when the refs differ.
+      if ((existing.ai_toolkit_ref ?? undefined) !== (opts.aiToolkitRef ?? undefined)) {
+        return { build: existing, adopted: false, refMismatch: existing };
+      }
+      return { build: existing, adopted: true };
+    }
     // A stale pointer to a settled build: clear it rather than refuse forever.
     running = null;
   }
