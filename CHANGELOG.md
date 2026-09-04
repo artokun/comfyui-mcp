@@ -18,6 +18,7 @@ All notable changes to this project are documented here. This project adheres to
   that makes `sys.argv` the preferred source is re-established rather than traded away. Only
   tokens before the script that begin with `-` are taken; a bare value there is an argument to a
   flag this code does not model.
+- **a relaunch keeps `-X utf8`, the encoding flag #2693 is actually about (#2693).** Interpreter-flag recovery refused any command line carrying a flag with a separate value, so a server started `python -X utf8 -s main.py` relaunched without it and the CP949 workaround was silently lost. `-X` and `-W` always consume the next token, so they are taken as pairs; every other bare token still reconstructs nothing rather than rebuilding a command the server never had. Measured against a real Windows `Win32_Process.CommandLine`, which is where the gap showed up — the unit tests supplied the argv they expected.
 
 ## [0.52.189] - 2026-09-03
 

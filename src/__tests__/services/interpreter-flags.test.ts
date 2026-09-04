@@ -80,20 +80,23 @@ describe("#2693 recovery refuses without the identity binding", () => {
     ).toEqual([]);
   });
 
-  it("takes NOTHING when a flag carries a separate value", () => {
-    // `python -X utf8 -s main.py`. My first version filtered to tokens starting with
-    // "-" and returned ["-X", "-s"] — which rebuilds as `python -X -s main.py`,
-    // where -X swallows -s. That loses the very flag this recovery exists to
-    // preserve AND passes an invalid implementation option. Dropping a value while
-    // keeping its flag is worse than either alternative.
+  it("takes NOTHING when an UNMODELLED flag carries a separate value", () => {
+    // My first version filtered to tokens starting with "-" and returned
+    // ["-X", "-s"] — which rebuilds as `python -X -s main.py`, where -X swallows
+    // -s. Dropping a value while keeping its flag is worse than either alternative,
+    // so an unmodellable command line is not rebuilt at all.
     //
-    // Modelling which CPython options take a value is not something to hand-roll,
-    // so an unmodellable command line is simply not rebuilt. `-X utf8` is the
-    // likeliest shape to meet here, since this issue is about encoding.
+    // NARROWED, not relaxed. This used to assert the same of `-X utf8`, on the
+    // grounds that modelling the CPython option table is not something to
+    // hand-roll. That holds for the table at large and NOT for -X and -W, which
+    // always consume the next token — there is no ambiguity left to hand-roll.
+    // And the old rule's cost was measured on a REAL Windows command line:
+    // `-X utf8`, the encoding flag this issue is about, was the one flag a
+    // relaunch dropped. Those two are modelled now; everything else still refuses.
     expect(
       interpreterFlagsFromOsArgv({
         argv: [SCRIPT],
-        osArgv: [PY, "-X", "utf8", "-s", SCRIPT],
+        osArgv: [PY, "--jit", "yes", SCRIPT],
         osArgvExact: true,
       }),
     ).toEqual([]);
@@ -144,5 +147,44 @@ describe("#2693 relaunchArgv actually re-attaches them", () => {
     const argv = [SCRIPT, "--listen"];
     expect(relaunchArgv({ argv, osArgv: [PY, SCRIPT], osArgvExact: true } as never)).toEqual(argv);
     expect(relaunchArgv({ argv } as never)).toEqual(argv);
+  });
+});
+
+// `-X` and `-W` are the only interpreter options that plausibly appear on a ComfyUI
+// launch AND always consume the next token, so taking them as pairs is the one part
+// of CPython's option table with no ambiguity in it.
+//
+// This is not a hypothetical shape. Captured from a real Windows process via
+// Win32_Process.CommandLine while writing these:
+//
+//     "C:\Users\...\python.exe" -X utf8 -s C:\...\main.py
+//
+// and before the pair handling it reconstructed to [] — so the encoding flag #2693
+// is ABOUT was precisely the one a relaunch dropped. Restart, and the CP949
+// workaround the user started the server with is gone.
+describe("#2693 a value-taking interpreter flag survives the relaunch", () => {
+  const SCRIPT = "C:/x/main.py";
+  const PY = "C:/py/python.exe";
+  const recover = (osArgv: string[]) =>
+    interpreterFlagsFromOsArgv({ argv: [SCRIPT], osArgv, osArgvExact: true });
+
+  it("keeps -X and its value, alongside ordinary flags", () => {
+    expect(recover([PY, "-X", "utf8", "-s", SCRIPT])).toEqual(["-X", "utf8", "-s"]);
+    expect(recover([PY, "-X", "utf8", SCRIPT])).toEqual(["-X", "utf8"]);
+    expect(recover([PY, "-W", "once", SCRIPT])).toEqual(["-W", "once"]);
+  });
+
+  it("leaves the joined form alone — it was never a bare token", () => {
+    expect(recover([PY, "-Xutf8", SCRIPT])).toEqual(["-Xutf8"]);
+  });
+
+  // The bail-out is the safety property and must not have widened: a flag whose
+  // value belongs to an option this code does NOT model still reconstructs nothing,
+  // because keeping the flag and dropping its value would rebuild a command the
+  // server never had.
+  it("still refuses every shape it cannot model", () => {
+    expect(recover([PY, "--jit", "yes", SCRIPT])).toEqual([]);
+    expect(recover([PY, "-X", SCRIPT])).toEqual([]);
+    expect(recover([PY, "-X", "-s", SCRIPT])).toEqual([]);
   });
 });

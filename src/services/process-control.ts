@@ -2891,8 +2891,30 @@ export function interpreterFlagsFromOsArgv(info: {
   // We cannot tell which flags take a separate value without modelling CPython's
   // option table, so the honest answer is to reconstruct nothing: an unmodellable
   // command line is not a command line we may rebuild.
-  if (pre.some((tok) => !tok.startsWith("-"))) return [];
-  return pre;
+  // …with ONE exception, and it is the case above: `-X` and `-W` are the only
+  // interpreter options that plausibly appear on a ComfyUI launch AND always
+  // consume the next token. Taking those as PAIRS is not a guess about CPython's
+  // option table -- it is the one part of that table with no ambiguity in it.
+  // Measured before adding this: a real Windows `python -X utf8 -s main.py`
+  // (captured from Win32_Process.CommandLine) previously reconstructed to [],
+  // so the encoding flag #2693 is ABOUT was the one flag a relaunch dropped.
+  //
+  // Everything else bare still refuses, and so does a `-X` with no value or one
+  // whose value looks like another flag: a malformed pair is not a shape we may
+  // rebuild either.
+  const TAKES_VALUE = new Set(["-X", "-W"]);
+  const kept: string[] = [];
+  for (let i = 0; i < pre.length; i++) {
+    const tok = pre[i];
+    if (!tok.startsWith("-")) return [];
+    kept.push(tok);
+    if (!TAKES_VALUE.has(tok)) continue;
+    const value = pre[i + 1];
+    if (value === undefined || value.startsWith("-")) return [];
+    kept.push(value);
+    i += 1;
+  }
+  return kept;
 }
 
 function relaunchArgv(info: ProcessInfo): string[] {
