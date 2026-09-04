@@ -6,12 +6,17 @@ All notable changes to this project are documented here. This project adheres to
 
 ## Unreleased
 
+### MCP
+#### Fixed
+- **`train_doctor action:"build_image"` is asynchronous, so it can finish at all (#2723).** A detached build that WEDGES is now reported as such instead of staying "running" forever — while it is in that state every later build_image ADOPTS it rather than starting a new one, so an invisible hang would burn the same ability the timeout did. A re-issue that pins a DIFFERENT `aiToolkitRef` is refused rather than silently adopting the running build: adoption keyed only on "a build is running", so the tag that landed was the in-flight build's ref, not the one requested — defeating the only thing that parameter is for.
+
+## [0.52.188] - 2026-09-03
 
 ### MCP
 
 #### Fixed
-- **`list_packs` `action:"list_templates"` uses the bound panel's `fetch_comfyui_read` relay when the template-index HTTP origin is unproven, and fails closed with `NO_PANEL_ORIGIN` when that origin stays unproven (#2839).** Compact `call_tool` listed templates through a loopback-only origin gate even while `panel_graph_outline` had a live bound canvas (`canvas_binding` / `graph_binding` bound). Native panel replies that carry the viewing witness are accepted; a unique published origin that matches the child's configured target may still be listed; mixed or malformed origin sets are not contacted.
-- **`train_doctor action:"build_image"` is asynchronous, so it can finish at all (#2723).** A detached build that WEDGES is now reported as such instead of staying "running" forever — while it is in that state every later build_image ADOPTS it rather than starting a new one, so an invisible hang would burn the same ability the timeout did. A re-issue that pins a DIFFERENT `aiToolkitRef` is refused rather than silently adopting the running build: adoption keyed only on "a build is running", so the tag that landed was the in-flight build's ref, not the one requested — defeating the only thing that parameter is for.
+- **`list_packs` `action:"list_templates"` uses the bound panel's `fetch_comfyui_read` relay when the template-index HTTP origin is unproven, and fails closed with `NO_PANEL_ORIGIN` when that origin stays unproven (#2839, #2843).** Compact `call_tool` listed templates through a loopback-only origin gate even while `panel_graph_outline` had a live bound canvas (`canvas_binding` / `graph_binding` bound). Native panel replies that carry the viewing witness are accepted; a unique published origin that matches the child's configured target may still be listed; mixed or malformed origin sets are not contacted.
+
 
 ## [0.52.187] - 2026-09-03
 
