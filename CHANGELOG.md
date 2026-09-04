@@ -9,7 +9,6 @@ All notable changes to this project are documented here. This project adheres to
 ### MCP
 
 #### Fixed
-- **`panel_set_widget` / other mutations accept named node ids the graph readers print (#2855).** API-style graphs use string ids (`sampler`, `mac_studio_vlm`). `panel_graph_outline` already returned those; writes refused them at MCP validation (`NODE_ID_PATTERN` was integer / `120:104` only). Named ids stay strings on the wire — they are never `parseInt`'d. `"42px"` is still refused so it cannot become node 42.
 - the npm POSIX shim now resolves too, not just the .cmd (#2835). npm's sh shim names the interpreter and the script on one line, so the permissive pattern anchored on the first `$basedir/` and captured a path with embedded quotes; it never existed, so that branch resolved nothing at all. Measured against the real npm shims on a Windows box: 0/10 before, 10/10 after, with the .cmd branch unchanged at 10/10
 - **the pi backend works when pi was installed from npm on Windows (#2835).** `npm i -g pi`
   writes `pi` (an extensionless bash script), `pi.cmd` and `pi.ps1`, and no `pi.exe`. Node
@@ -20,6 +19,14 @@ All notable changes to this project are documented here. This project adheres to
   it is now resolved to that script and launched as `node <script>`. NOT via `shell: true`:
   the prompt rides argv, so a shell would make every prompt a potential command line, which is
   what the no-shell rule exists to prevent. An unresolvable shim is still refused.
+
+## [0.52.191] - 2026-09-04
+
+### MCP
+
+#### Fixed
+- **`panel_set_widget` / other mutations accept named node ids the graph readers print (#2855, #2856).** API-style graphs use string ids (`sampler`, `mac_studio_vlm`). `panel_graph_outline` already returned those; writes refused them at MCP validation (`NODE_ID_PATTERN` was integer / `120:104` only). Named ids stay strings on the wire — they are never `parseInt`'d. `"42px"` is still refused so it cannot become node 42.
+
 
 ## [0.52.190] - 2026-09-04
 
