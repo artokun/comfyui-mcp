@@ -9,9 +9,16 @@ All notable changes to this project are documented here. This project adheres to
 ### MCP
 
 #### Fixed
-
-- get_image(action:"get") saves an existing ZIP from ComfyUI input/ instead of misreporting IMAGE_NOT_FOUND when /view returned 2xx application/zip. IMAGE_NOT_FOUND stays reserved for a missing or failed /view. (#2858)
 - panel_load_workflow path: loads API/prompt graphs (including graph.api.json) onto the canvas instead of refusing them as non-UI (panel#2011)
+
+## [0.52.192] - 2026-09-04
+
+### MCP
+
+#### Fixed
+
+- get_image(action:"get") saves an existing ZIP from ComfyUI input/ instead of misreporting IMAGE_NOT_FOUND when /view returned 2xx application/zip. IMAGE_NOT_FOUND stays reserved for a missing or failed /view. (#2858, #2859)
+
 
 ## [0.52.191] - 2026-09-04
 
