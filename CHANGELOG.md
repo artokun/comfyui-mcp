@@ -10,6 +10,7 @@ All notable changes to this project are documented here. This project adheres to
 ### MCP
 
 #### Fixed
+- **`get_workflow` `action:"strip"` does not Win32-resolve a remote Linux path on the MCP host (#2782).** Against a remote ComfyUI, an absolute POSIX `path` such as `/mydata/.../models/workflows/example.json` is no longer opened as `C:\mydata\...`. Library-shaped tails (`user/default/workflows`, `user/workflows`, `models/workflows`) are fetched from that server's userdata API; any other remote absolute path is refused instead of a local ENOENT.
 - **the panel's live-canvas tools are no longer deferred behind tool search (panel#291).**
   The SDK defers in-process MCP tool schemas by default once tool search is enabled, and
   `alwaysLoad` exists because "the tools must be present when the turn-1 prompt is built".
