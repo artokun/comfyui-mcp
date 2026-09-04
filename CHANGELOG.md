@@ -9,10 +9,16 @@ All notable changes to this project are documented here. This project adheres to
 ### MCP
 
 #### Fixed
-
-- **`get_image(action:"get")` connected-panel image relay is one hop: one `fetch_image` after the headless `/view` is unreachable, then one bounded error (#2864).** An unreachable headless `127.0.0.1:8188` used to wrap `PANEL_FETCH_FAILED` / `MALFORMED_REPLY` until `Maximum call stack size exceeded` while the live panel stayed connected. Nested fallback into `fetchImage` is refused. Published diagnostic origins are still not dialed as `/view` targets.
 - **the evidence rides on all THREE surfaces the Desktop verdict drives, not just the refusal (#2784).** The same classification also turns auto-restart supervision OFF ("Auto-restart supervision is only supported for directly spawned Python ComfyUI processes.") and produces "Could not determine ComfyUI Desktop executable path." — which is exactly the branch a NAME-match false positive lands in, since it has no Desktop install and so no exe path to find. Both asserted Desktop with nothing attached to check, and the auto-restart one is the hardest to trace back to a directory name because nothing was refused, a capability just quietly went away. Both now carry the same disclosure, worded for a statement rather than a refusal (the refusal clause says "this refusal is wrong with it" and points at "the arguments below", neither of which is true on these surfaces). The auto-restart message is pinned by a real call through a new test seam, not a source grep.
 - **a Desktop restart refusal now names the evidence that classified the install (#2784).**
+
+## [0.52.196] - 2026-09-04
+
+### MCP
+
+#### Fixed
+
+- **`get_image(action:"get")` connected-panel image relay is one hop: one `fetch_image` after the headless `/view` is unreachable, then one bounded error (#2864, #2870).** An unreachable headless `127.0.0.1:8188` used to wrap `PANEL_FETCH_FAILED` / `MALFORMED_REPLY` until `Maximum call stack size exceeded` while the live panel stayed connected. Nested fallback into `fetchImage` is refused. Published diagnostic origins are still not dialed as `/view` targets.
 
 
 ## [0.52.195] - 2026-09-04
