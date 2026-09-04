@@ -4212,6 +4212,20 @@ export async function runPanelOrchestrator(): Promise<void> {
           probe: (u) => probeOk(u, 3_000),
         });
         if (!verdict.apply) {
+          // #2742 ask 3 — a hello carrying no usable `comfyui_url` is the ONE verdict
+          // with no `base` ("when usable", per the type), and it fell through to the
+          // message below: `to unreachable undefined ... (stale tab on a dead
+          // instance?)`. That asserts two things that did not happen — a target was
+          // named, and it was found dead — about a frame that claimed neither. The
+          // reporter saw it 17 times from tabs that were merely churning. Nothing was
+          // claimed, so there is nothing to retarget and nothing to warn about; kept
+          // at debug so the frame stays traceable.
+          if (verdict.reason === "not-a-url") {
+            logger.debug(
+              `[panel-orchestrator] hello carried no usable comfyui_url — keeping ${comfyuiUrl}`,
+            );
+            return;
+          }
           logger.warn(
             verdict.reason === "vetoed-untrusted"
               ? `[panel-orchestrator] refusing hello retarget to ${verdict.base}: the tab's handshake origin does not ` +
