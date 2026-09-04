@@ -189,3 +189,84 @@ describe("#2784 the refusal carries the clause", () => {
     });
   });
 });
+
+// #2784 — the verdict drives THREE user-facing outcomes, not one. The refusal was
+// the only one carrying its evidence; the other two asserted Desktop with nothing
+// attached, and they are the ones a misclassified user is least able to trace back
+// to a directory name.
+describe("#2784 the OTHER surfaces the same classification drives", () => {
+  const NAME_MATCH =
+    `the substring "comfy-desktop" in the server's own launch command — a NAME match`;
+
+  it("the note renders the signal, and says the limitation may not apply", async () => {
+    const { desktopEvidenceNote } = await import("../../services/process-control.js");
+    const out = desktopEvidenceNote(NAME_MATCH);
+    expect(out).toContain("Classified as Desktop-managed by:");
+    expect(out).toContain(NAME_MATCH);
+    expect(out).toContain("this limitation does not apply");
+  });
+
+  it("says NOTHING when no evidence was recorded", async () => {
+    const { desktopEvidenceNote } = await import("../../services/process-control.js");
+    expect(desktopEvidenceNote(undefined)).toBe("");
+    expect(desktopEvidenceNote("")).toBe("");
+  });
+
+  it("does NOT reuse the refusal wording, which does not fit these surfaces", async () => {
+    const { desktopEvidenceNote, desktopEvidenceClause } = await import(
+      "../../services/process-control.js"
+    );
+    // "this refusal is wrong with it" / "the arguments below" are both false here.
+    expect(desktopEvidenceNote(NAME_MATCH)).not.toContain("this refusal");
+    expect(desktopEvidenceNote(NAME_MATCH)).not.toContain("below");
+    expect(desktopEvidenceClause(NAME_MATCH)).toContain("this refusal");
+  });
+
+  it("auto-restart's unsupported message carries the evidence — a REAL call", async () => {
+    const { supervisorResult } = __processControlTestHooks;
+    const prev = process.env.COMFYUI_ALWAYS_RESTART;
+    process.env.COMFYUI_ALWAYS_RESTART = "1";
+    try {
+      const out = supervisorResult({
+        isDesktopApp: true,
+        desktopEvidence: NAME_MATCH,
+      } as never);
+      expect(out.supported).toBe(false);
+      expect(out.message).toContain("only supported for directly spawned");
+      expect(out.message).toContain("Classified as Desktop-managed by:");
+      expect(out.message).toContain(NAME_MATCH);
+    } finally {
+      if (prev === undefined) delete process.env.COMFYUI_ALWAYS_RESTART;
+      else process.env.COMFYUI_ALWAYS_RESTART = prev;
+    }
+  });
+
+  it("a NON-Desktop install's supervisor message is unchanged (no stray note)", async () => {
+    const { supervisorResult } = __processControlTestHooks;
+    const prev = process.env.COMFYUI_ALWAYS_RESTART;
+    process.env.COMFYUI_ALWAYS_RESTART = "1";
+    try {
+      const out = supervisorResult({ isDesktopApp: false } as never);
+      expect(out.supported).toBe(true);
+      expect(out.message).toBeUndefined();
+    } finally {
+      if (prev === undefined) delete process.env.COMFYUI_ALWAYS_RESTART;
+      else process.env.COMFYUI_ALWAYS_RESTART = prev;
+    }
+  });
+
+  it("the exe-path failure names the evidence too", async () => {
+    // Structural, and labelled as such: this message is built inside a start path
+    // that needs a real spawn to reach. Scoped to the message's own template so it
+    // cannot pass on a mention elsewhere in the file.
+    const { readFileSync } = await import("node:fs");
+    const { fileURLToPath } = await import("node:url");
+    const text = readFileSync(
+      fileURLToPath(new URL("../../services/process-control.ts", import.meta.url)),
+      "utf-8",
+    );
+    const at = text.indexOf("Could not determine ComfyUI Desktop executable path");
+    expect(at).toBeGreaterThan(-1);
+    expect(text.slice(at, at + 300)).toContain("desktopEvidenceNote(info.desktopEvidence)");
+  });
+});

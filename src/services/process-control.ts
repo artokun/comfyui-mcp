@@ -2105,7 +2105,8 @@ function supervisorResult(info?: ProcessInfo): SupervisorResult {
     message: !policy.enabled
       ? "Auto-restart is disabled."
       : info?.isDesktopApp
-        ? "Auto-restart supervision is only supported for directly spawned Python ComfyUI processes."
+        ? "Auto-restart supervision is only supported for directly spawned Python ComfyUI processes." +
+          desktopEvidenceNote(info.desktopEvidence)
         : undefined,
   };
 }
@@ -3387,6 +3388,31 @@ export function desktopEvidenceClause(why: string | undefined): string {
     `If that is wrong for this install — say, an ordinary ComfyUI that happens to live under a ` +
     `directory with a Desktop-like name — this refusal is wrong with it, and the launch ` +
     `arguments below are the thing to check it against.`
+  );
+}
+
+/**
+ * The same disclosure for the surfaces that are NOT the refusal (#2784).
+ *
+ * The Desktop verdict drives three user-facing outcomes, not one: the restart
+ * refusal, the "could not determine the Desktop executable" message, and turning
+ * auto-restart supervision OFF. The refusal is the only one that carried its
+ * evidence, so the other two still asserted Desktop with nothing attached — and
+ * they are the ones a misclassified user is least able to connect back to a
+ * directory name.
+ *
+ * Separate from `desktopEvidenceClause` rather than a parameter on it because the
+ * wording has to differ: that one says "this refusal is wrong with it" and points
+ * at "the launch arguments below", neither of which is true here. Same fact, same
+ * escape hatch, sentence that fits the surface.
+ */
+export function desktopEvidenceNote(why: string | undefined): string {
+  if (!why) return "";
+  return (
+    ` Classified as Desktop-managed by: ${why}. ` +
+    `If that is wrong for this install — say, an ordinary ComfyUI that happens to live ` +
+    `under a directory with a Desktop-like name — then this limitation does not apply ` +
+    `to it, and the classification is what to fix.`
   );
 }
 
@@ -4737,7 +4763,8 @@ export async function startComfyUI(anchor?: {
       // No command was ever spawned — a refusal, not a startup that went wrong.
       startup: "not-attempted",
       message: info.isDesktopApp
-        ? "Could not determine ComfyUI Desktop executable path. Please start it manually."
+        ? "Could not determine ComfyUI Desktop executable path. Please start it manually." +
+          desktopEvidenceNote(info.desktopEvidence)
         : "No command-line info captured from previous run. Start ComfyUI manually.",
       auto_restart: supervisorResult(info),
       listener_ownership: unclassifiedOwnership(),
@@ -6927,6 +6954,14 @@ export const __processControlTestHooks = {
    * and that misdirects the reader exactly like the claim this replaced.
    */
   detectDesktopLaunch,
+  /**
+   * #2784 — the auto-restart surface, so its disclosure is a REAL call rather
+   * than a grep. The Desktop verdict turns supervision off as well as refusing a
+   * restart, and that message asserted Desktop with nothing attached; a source
+   * check there could not fail if the note rendered empty or the field were never
+   * populated. Reads the policy from env like production does.
+   */
+  supervisorResult,
   reset(): void {
     detachSupervisor();
     lastProcessInfo = null;
