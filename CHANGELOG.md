@@ -10,7 +10,6 @@ All notable changes to this project are documented here. This project adheres to
 ### MCP
 
 #### Fixed
-- **History/completion harvests a ComfyUI media ref under an unrecognised key (`dexter_video`, `nkd_video`) instead of only `images`/`videos`/`video`/`gifs` (#2845).** SaveVideoDexter emits `{filename, subfolder?, type?}` as a single object (or a one-item array); `buildCompletionNotification` / the panel_run watchdog now collect that one-level shape and classify by extension so completion names the mp4. Nested non-media values stay ignored. Panel v0.15.163 already collects the array form of this shape (#2128).
 - **the pi backend works when pi was installed from npm on Windows (#2835).** `npm i -g pi`
   writes `pi` (an extensionless bash script), `pi.cmd` and `pi.ps1`, and no `pi.exe`. Node
   spawns the first with ENOENT and the second with EINVAL (measured), and discovery returned
@@ -20,6 +19,14 @@ All notable changes to this project are documented here. This project adheres to
   it is now resolved to that script and launched as `node <script>`. NOT via `shell: true`:
   the prompt rides argv, so a shell would make every prompt a potential command line, which is
   what the no-shell rule exists to prevent. An unresolvable shim is still refused.
+
+## [0.52.189] - 2026-09-03
+
+### MCP
+
+#### Fixed
+- **History/completion harvests a ComfyUI media ref under an unrecognised key (`dexter_video`, `nkd_video`) instead of only `images`/`videos`/`video`/`gifs` (#2845, #2847).** SaveVideoDexter emits `{filename, subfolder?, type?}` as a single object (or a one-item array); `buildCompletionNotification` / the panel_run watchdog now collect that one-level shape and classify by extension so completion names the mp4. Nested non-media values stay ignored. Panel v0.15.163 already collects the array form of this shape.
+
 
 ## [0.52.188] - 2026-09-03
 
