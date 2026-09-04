@@ -9,6 +9,8 @@ All notable changes to this project are documented here. This project adheres to
 ### MCP
 
 #### Fixed
+
+- get_image(action:"get") saves an existing ZIP from ComfyUI input/ instead of misreporting IMAGE_NOT_FOUND when /view returned 2xx application/zip. IMAGE_NOT_FOUND stays reserved for a missing or failed /view. (#2858)
 - **`train_doctor action:"build_image"` says when it adopted a WEDGED build (#2723).** `doctor` already disclosed that a hung build has pinned the slot and that restarting the orchestrator clears it; `build_image` — the action a caller takes to make progress — reported a plain `adopted: true` and advised polling. Re-issuing after the old 300s timeout is exactly what the reporter did, so the reported behaviour landed on the one path that stayed silent, sending them back to poll a build that will never settle. A healthy adoption is unchanged.
 - **`train_doctor action:"build_image"` is asynchronous, so it can finish at all (#2723).** A detached build that WEDGES is now reported as such instead of staying "running" forever — while it is in that state every later build_image ADOPTS it rather than starting a new one, so an invisible hang would burn the same ability the timeout did. A re-issue that pins a DIFFERENT `aiToolkitRef` is refused rather than silently adopting the running build: adoption keyed only on "a build is running", so the tag that landed was the in-flight build's ref, not the one requested — defeating the only thing that parameter is for.
 
