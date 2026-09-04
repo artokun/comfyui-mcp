@@ -140,6 +140,24 @@ describe("panel-tools: copy/paste + subgraph blueprints", () => {
     });
   });
 
+  it("panel_save_subgraph accepts overwrite:true and forwards it (#2865)", async () => {
+    const def = defByName("panel_save_subgraph");
+    const parsed = z.object(def.schema).strict().safeParse({
+      node_id: 7,
+      name: "MyBlock",
+      overwrite: true,
+    });
+    expect(parsed.success).toBe(true);
+    const { ctx, calls } = makeFakeCtx();
+    await def.handler({ node_id: 7, name: "MyBlock", overwrite: true }, ctx);
+    expect(calls[0]).toMatchObject({
+      cmd: "graph_save_subgraph",
+      node_id: 7,
+      name: "MyBlock",
+      overwrite: true,
+    });
+  });
+
   it("panel_list_subgraphs forwards graph_list_subgraphs", async () => {
     const { ctx, calls } = makeFakeCtx();
     await defByName("panel_list_subgraphs").handler({}, ctx);
