@@ -763,6 +763,47 @@ export type ViewRefProbe = {
   nonMedia: { filename: string; detail: string }[];
 };
 
+/** Map a /view Content-Type onto the panel painter kind, or null if not media. */
+export function mediaKindFromMime(mimeType: string): "image" | "video" | "audio" | null {
+  const mime = mimeType.split(";")[0]!.trim().toLowerCase();
+  if (mime.startsWith("image/")) return "image";
+  if (mime.startsWith("video/")) return "video";
+  if (mime.startsWith("audio/")) return "audio";
+  return null;
+}
+
+/** Narrow a caller-supplied ComfyUI type to what fetchImage accepts. */
+export function viewRefTypeForFetch(type: string | undefined): "output" | "input" | "temp" {
+  return type === "input" || type === "temp" ? type : "output";
+}
+
+/**
+ * #2861 — fail-closed copy when a REMOTE /view ref cannot be inlined.
+ *
+ * A browser panel probes `/view` in ITS session. That is not get_image's
+ * authenticated/configured route, and forwarding the ref paints 0 cards.
+ * The handler fetches through fetchImage instead. If that fetch cannot be
+ * painted (transport, non-media, over the inline cap), this is the reply —
+ * never a broken viewRef, and never a same-named local workspace file
+ * (#877/#899).
+ */
+export function remoteViewRefInlineFailedNote(args: {
+  filename: string;
+  detail: string;
+  capBytes: number;
+}): string {
+  const capMb = Math.round(args.capBytes / (1024 * 1024));
+  return (
+    `panel_show_media cannot paint "${args.filename}" as a ComfyUI /view reference ` +
+    `on this REMOTE target: the panel's browser-facing /view is not the same route ` +
+    `get_image uses, and forwarding the ref would return painted:0 (HTTP 404). ` +
+    `${args.detail} ` +
+    `I did not substitute a same-named local workspace file (that is a different machine). ` +
+    `If get_image(action:"get") already saved the bytes locally and they are under the ` +
+    `${capMb} MB inline cap, call panel_show_media with that absolute path.`
+  );
+}
+
 /**
  * The caveat a forwarded /view reference has to carry (#941).
  *
