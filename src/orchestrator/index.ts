@@ -4580,7 +4580,7 @@ export async function runPanelOrchestrator(): Promise<void> {
               bridge.tabLocale(panelTab),
               "say.pi_no_credential",
               "pi has no usable provider credential — the connection would greet ready and then fail on your first message. " +
-                "Configure a provider: set a provider API key (e.g. ANTHROPIC_API_KEY / OPENAI_API_KEY / CEREBRAS_API_KEY) and restart the orchestrator, " +
+                "Configure a provider: set a provider API key (e.g. OPENAI_API_KEY / CEREBRAS_API_KEY) and restart the orchestrator, " +
                 "or run `pi` once and `/login` (stored in ~/.pi/agent/auth.json), then Disconnect → Connect. " +
                 "If you already did one of those, check the entry is complete — an ~/.pi/agent/auth.json record with no `key`, " +
                 "a models.json provider with no `apiKey`, or GOOGLE_APPLICATION_CREDENTIALS pointing at a missing file cannot authenticate. https://pi.dev",
