@@ -6,13 +6,18 @@ All notable changes to this project are documented here. This project adheres to
 
 ## Unreleased
 
+### MCP
+
+#### Fixed
+- **`get_image` bounds a BATCH of inline images against the transport frame, and bounds `action:"view"` at all (#2692).** A batch whose individual images each fit could still exceed the frame once concatenated, and the `view` action was not bounded at all; both now share one frame budget so an oversized reply is refused with what to do instead of dying as an unattributed transport error.
+- **`train_prepare_dataset action:"file"` joins the shared inline-frame accounting (#2692).** It returns an inline image through the same MCP transport as `image_management`, bounded only per-ITEM at 2MB — the bound this change exists to show is insufficient. Its bytes were never charged, so the FRAME BUDGET warning fired late or never, and with no slot open a concurrent `get_image` spent a full per-call budget beside it. The guard is a coverage assertion, so a third tool that emits inline content without charging fails the suite.
+
+## [0.52.190] - 2026-09-04
 
 ### MCP
 
 #### Fixed
-- **`get_workflow` `action:"strip"` does not Win32-resolve a remote Linux path on the MCP host (#2782).** Against a remote ComfyUI, an absolute POSIX `path` such as `/mydata/.../models/workflows/example.json` is no longer opened as `C:\mydata\...`. Library-shaped tails (`user/default/workflows`, `user/workflows`, `models/workflows`) are fetched from that server's userdata API; any other remote absolute path is refused instead of a local ENOENT.
-- **`get_image` bounds a BATCH of inline images against the transport frame, and bounds `action:"view"` at all (#2692).** A batch whose individual images each fit could still exceed the frame once concatenated, and the `view` action was not bounded at all; both now share one frame budget so an oversized reply is refused with what to do instead of dying as an unattributed transport error.
-- **`train_prepare_dataset action:"file"` joins the shared inline-frame accounting (#2692).** It returns an inline image through the same MCP transport as `image_management`, bounded only per-ITEM at 2MB — the bound this change exists to show is insufficient. Its bytes were never charged, so the FRAME BUDGET warning fired late or never, and with no slot open a concurrent `get_image` spent a full per-call budget beside it. The guard is a coverage assertion, so a third tool that emits inline content without charging fails the suite.
+- **`get_workflow` `action:"strip"` does not Win32-resolve a remote Linux path on the MCP host (#2782, #2811).** Against a remote ComfyUI, an absolute POSIX `path` such as `/mydata/.../models/workflows/example.json` is no longer opened as `C:\mydata\...`. Library-shaped tails (`user/default/workflows`, `user/workflows`, `models/workflows`) are fetched from that server's userdata API; any other remote absolute path is refused instead of a local ENOENT.
 
 ## [0.52.189] - 2026-09-03
 
