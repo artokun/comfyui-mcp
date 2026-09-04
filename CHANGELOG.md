@@ -6,6 +6,17 @@ All notable changes to this project are documented here. This project adheres to
 
 ## Unreleased
 
+### MCP
+#### Fixed
+- **a relaunch keeps the Python INTERPRETER flags (#2693).** `-s`, `-E`, `-I`, `-B`, `-O` and `-u`
+  are consumed by CPython before `sys.argv` exists, so a relaunch rebuilt from the server's own
+  `sys.argv` dropped them — the reporter's portable install needs `-s`, and losing it changes
+  which packages the relaunched server imports. They are recovered from the OS's view of the same
+  process, but only when that reading is EXACT and names the SAME script, so the identity binding
+  that makes `sys.argv` the preferred source is re-established rather than traded away. Only
+  tokens before the script that begin with `-` are taken; a bare value there is an argument to a
+  flag this code does not model.
+
 ## [0.52.187] - 2026-09-03
 
 ### MCP

@@ -2848,8 +2848,50 @@ function isUrlLike(p: string): boolean {
  * server's answer simply comes with an identity binding the OS reading cannot have,
  * so it is used whenever it exists.
  */
+/**
+ * Interpreter flags the SERVER's own `sys.argv` structurally cannot carry (#2693).
+ *
+ * `-s`, `-E`, `-I`, `-B`, `-O`, `-u` and friends are consumed by CPython itself and
+ * never appear in `sys.argv` — so a relaunch rebuilt from `sys.argv` silently drops
+ * them. The reporter's portable install needs `-s` (no user site-packages); losing
+ * it changes which packages the relaunched server imports.
+ *
+ * They ARE in the OS's view of the same process. Taking them from there is only
+ * sound with the identity binding `relaunchArgv` is built around, so this refuses
+ * unless the OS reading is EXACT and its script path CORROBORATES `sys.argv[0]` —
+ * the same file, from two independent sources. That re-establishes the binding the
+ * OS reading lacks on its own; without it, nothing is recovered.
+ *
+ * Only tokens BEFORE the script and beginning with `-` are taken: a bare value
+ * there is an argument to a flag this code does not model, and copying it blind is
+ * how a recovery invents a command the server never had.
+ */
+export function interpreterFlagsFromOsArgv(info: {
+  argv: readonly string[];
+  osArgv?: readonly string[];
+  osArgvExact?: boolean;
+}): string[] {
+  if (!info.osArgvExact) return [];
+  const os = info.osArgv ?? [];
+  const script = info.argv[0];
+  if (!script || os.length < 2) return [];
+  const same = (a: string, b: string): boolean =>
+    a.split(String.fromCharCode(92)).join("/").toLowerCase() ===
+    b.split(String.fromCharCode(92)).join("/").toLowerCase();
+  const at = os.findIndex((tok, i) => i > 0 && same(tok, script));
+  if (at <= 0) return [];
+  return os.slice(1, at).filter((tok) => tok.startsWith("-"));
+}
+
 function relaunchArgv(info: ProcessInfo): string[] {
-  if (info.argv.length > 0) return info.argv;
+  if (info.argv.length > 0) {
+    // #2693 — re-attach the interpreter flags `sys.argv` cannot report. The server's
+    // answer still leads (it carries the identity binding); this only restores
+    // tokens it was never able to include, and only when the OS reading names the
+    // same script.
+    const flags = interpreterFlagsFromOsArgv(info);
+    return flags.length > 0 ? [info.argv[0]!, ...flags, ...info.argv.slice(1)] : info.argv;
+  }
   // A FLATTENED reading is not a command. It is still reported to the user, who can
   // see where the quotes belong; we cannot, and guessing would spawn arguments the
   // server never had (codex gate round 6).
