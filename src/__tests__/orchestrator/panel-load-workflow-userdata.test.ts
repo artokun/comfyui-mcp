@@ -168,6 +168,27 @@ describe("panel_load_workflow: userdata fallback for a custom --user-directory (
     expect(graphLoadCall(calls).graph).toMatchObject(api);
   });
 
+  it("#2011 loads an API graph whose node ids are NOT digits", async () => {
+    // The detection used to require EVERY key to match /^\d+$/, on the stated
+    // grounds that it was "the same test the panel uses". It is not: the panel's
+    // graph_load treats anything without a `nodes` array as API. ComfyUI ids are
+    // not guaranteed to be digits — subgraph and newer exports carry string ids —
+    // so that condition refused graphs the panel loads happily, and the caller got
+    // a refusal naming the wrong reason.
+    const api = {
+      "9c1f4e2a-3b77-4f10-9c2e-6f0a1b2c3d4e": { class_type: "KSampler", inputs: { seed: 1 } },
+      "node:sampler": { class_type: "VAEDecode", inputs: {} },
+    };
+    fetchApi.mockResolvedValue({ ok: true, status: 200, text: async () => JSON.stringify(api) });
+
+    const { ctx, calls } = makeCtx();
+    const res = await loadWorkflow().handler({ path: "uuid.api.json" }, ctx);
+
+    expect(res.isError).toBeUndefined();
+    expect(calls.filter((c) => c.cmd === "graph_load")).toHaveLength(1);
+    expect(graphLoadCall(calls).graph).toMatchObject(api);
+  });
+
   it("surfaces an honest error (no graph_load) when the userdata file is neither UI nor API", async () => {
     fetchApi.mockResolvedValue({ ok: true, status: 200, text: async () => JSON.stringify({ foo: 1 }) });
 

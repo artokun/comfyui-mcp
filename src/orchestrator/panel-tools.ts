@@ -16008,15 +16008,26 @@ function assertUiWorkflow(parsed: unknown, sourceLabel: string): UiWorkflow & Re
  * Is this the API/prompt shape — a map of node id to `{class_type, inputs}`?
  *
  * Same test the panel's `graph_load` uses (panel#775 / panel#2011): every key
- * numeric, at least one entry carrying `class_type`. A UI workflow has a
- * top-level `nodes` array and fails the first condition.
+ * at least one entry carrying `class_type`. A UI workflow has a top-level `nodes`
+ * array and fails the first condition.
+ *
+ * NOT "the same test the panel uses" — that claim was here and was wrong. The
+ * panel's `graph_load` treats ANYTHING without a `nodes` array as API and hands it
+ * to the frontend importer. This is deliberately tighter (it also wants a
+ * `class_type`), because refusing here is cheap and a wrong guess loads a
+ * non-workflow onto the canvas.
+ *
+ * What it must NOT do is require every key to be NUMERIC, which it used to.
+ * ComfyUI node ids are not guaranteed to be digits — subgraph and newer exports
+ * carry string ids — so that condition refused API graphs the panel loads
+ * happily, and the caller got a refusal naming the wrong reason.
  */
 function looksLikeApiWorkflow(data: unknown): boolean {
   if (!data || typeof data !== "object" || Array.isArray(data)) return false;
   if (Array.isArray((data as Record<string, unknown>).nodes)) return false;
   const keys = Object.keys(data);
   if (keys.length === 0) return false;
-  if (!keys.every((k) => /^\d+$/.test(k))) return false;
+
   return keys.some((k) => {
     const v = (data as Record<string, unknown>)[k];
     return v && typeof v === "object" && "class_type" in v;
