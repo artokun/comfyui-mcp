@@ -266,6 +266,39 @@ describe("authenticated panel template relay (#2196)", () => {
     expect(remoteCalls).toEqual([]);
   });
 
+  it("accepts the panel viewing witness on a native template-index reply (#2839)", async () => {
+    const seen: Array<{ cmd: string; operation?: string }> = [];
+    const relay = await startPanelTemplateRelayServer({
+      bridge: {
+        canReach: () => true,
+        send: async (command) => {
+          seen.push(command);
+          return {
+            ...nativeIndex({ "bound-pack": [{ name: "from-viewing" }] }),
+            viewing: {
+              scope: "root",
+              workflow_uuid: "workflow-live-2839",
+              graph_identity: "graph:live-2839",
+            },
+          };
+        },
+      },
+      resolvePanelAgent: () => ({ agentKey: "shared::codex", secret: SECRET }),
+      resolvePanelTab: () => "tab-1",
+      resolveCurrentTarget: () => ({ url: "https://remote.example/comfyapi", generation: 0 }),
+      resolvePanelUrl: () => undefined,
+      resolveAllowedPanelOrigin: () => undefined,
+    });
+    servers.push(relay);
+    process.env.COMFYUI_MCP_RELAY_SECRET = SECRET;
+    process.env.COMFYUI_MCP_TEMPLATE_RELAY_URL = relay.endpointUrl;
+
+    await expect(requestPanelTemplateIndex()).resolves.toEqual({
+      "bound-pack": [{ name: "from-viewing" }],
+    });
+    expect(seen).toEqual([{ cmd: "fetch_comfyui_read", operation: "workflow_templates" }]);
+  });
+
   it("asks the live panel when localhost and 127.0.0.1 are a mixed pair (#2196)", async () => {
     const seen: string[] = [];
     const relay = await startPanelTemplateRelayServer({

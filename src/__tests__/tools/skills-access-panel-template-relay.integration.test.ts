@@ -16,6 +16,7 @@ vi.mock("../../comfyui/fetch.js", () => ({
     state.headlessCalls += 1;
     throw new Error("the panel-backed path must not use COMFYUI_URL");
   },
+  connectedPanelOriginsNow: () => [],
 }));
 
 vi.mock("../../services/api-nodes.js", () => ({
