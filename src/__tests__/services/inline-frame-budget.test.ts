@@ -286,13 +286,16 @@ describe("#2692 every tool that emits inline images shares the frame", () => {
     // satisfied by the IMPORT line alone, so deleting the call leaves the guard
     // green — a mutation proved exactly that on the first version of this test.
     const NEWLINE = String.fromCharCode(10);
-    const callsBudget = (file: string) =>
+    const callsBudget = (file: string, name: string) =>
       readFileSync(file, "utf8")
         .split(NEWLINE)
         .filter((l) => !l.trimStart().startsWith("import"))
         .join(NEWLINE)
-        .includes("chargeInlineEmission(");
-    const charging = emitters.filter(callsBudget);
+        .includes(name);
+    const callsBoth = (file: string) =>
+      callsBudget(file, "chargeInlineEmission(") &&
+      callsBudget(file, "acquireInlineImageSlot(");
+    const charging = emitters.filter(callsBoth);
     expect(emitters.sort()).toEqual(["src/tools/image-management.ts", "src/tools/train.ts"]);
     // Every emitter must participate. A new one that does not will fail here rather
     // than quietly spending frame nobody is counting.
