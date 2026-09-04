@@ -435,6 +435,30 @@ describe("train_start actions call the same services with the same arguments", (
 });
 
 describe("train_doctor actions call the same services with the same arguments", () => {
+  it('action:"doctor" DISCLOSES a wedged build, not just "running" (#2723)', async () => {
+    // The WIRING, not the helper. `trainerImageBuildLooksStalled` being correct is
+    // worth nothing if `doctor` never prints its verdict — and computing a field
+    // that no output carries is the exact defect this pass keeps finding. A build
+    // that hangs pins the slot: every later build_image ADOPTS it rather than
+    // starting one, so "running" forever is indistinguishable from progress.
+    const { startTrainerImageBuild, __resetTrainerImageBuildsForTests } = await import(
+      "../../services/trainer-image-build.js"
+    );
+    __resetTrainerImageBuildsForTests();
+    mocks.buildTrainerImage.mockReturnValueOnce(new Promise(() => {})); // never settles
+    const { build } = startTrainerImageBuild({ contextDir: "/ctx" });
+    build.started_at = Date.now() - 90 * 60_000; // far beyond any plausible build
+
+    mocks.trainerDoctor.mockResolvedValueOnce({ ok: true, command: "train_doctor", data: { docker: true } });
+    mocks.bootstrapStatus.mockResolvedValueOnce({ dir: "/tk", cloned: true, venv: true, ready: true, ref: "abc" });
+    const res = await handler("train_doctor")({ action: "doctor" });
+    const body = JSON.parse(text(res));
+
+    expect(body.data.image_build).toMatchObject({ looks_stalled: true });
+    expect(String(body.data.image_build.note)).toMatch(/ADOPTS it/);
+    __resetTrainerImageBuildsForTests();
+  });
+
   it('action:"doctor" reports the preflight plus the training roots', async () => {
     mocks.trainerDoctor.mockResolvedValueOnce({ ok: true, command: "train_doctor", data: { docker: true } });
     mocks.bootstrapStatus.mockResolvedValueOnce({ dir: "/tk", cloned: true, venv: true, ready: true, ref: "abc" });
