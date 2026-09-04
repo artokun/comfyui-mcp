@@ -6,16 +6,27 @@ All notable changes to this project are documented here. This project adheres to
 
 ## Unreleased
 
+### MCP
+
+#### Fixed
+- **a `hello` frame carrying no `comfyui_url` is no longer reported as a dead instance (#2742).** The one verdict with no `base` fell through to the shared warning, rendering as `ignoring hello retarget to unreachable undefined (stale tab on a dead instance?)` — asserting a target was named AND found dead, about a frame that claimed neither. Seen 17 times in one report from tabs that were merely churning.
+- **an MCP server that connects and registers NO tools is now reported (#2742).** Once this process has seen ANY namespaced MCP tool -- proof the harness lists them -- a session with NONE reports every configured server, closing the blind spot where a failure that emptied EVERY server looked identical to a harness that does not namespace.
+- **the same check now runs at every turn boundary, and can recover (#1524).** A server
+
+## [0.52.190] - 2026-09-04
 
 ### MCP
 
 #### Fixed
-- **History/completion harvests a ComfyUI media ref under an unrecognised key (`dexter_video`, `nkd_video`) instead of only `images`/`videos`/`video`/`gifs` (#2845).** SaveVideoDexter emits `{filename, subfolder?, type?}` as a single object (or a one-item array); `buildCompletionNotification` / the panel_run watchdog now collect that one-level shape and classify by extension so completion names the mp4. Nested non-media values stay ignored. Panel v0.15.163 already collects the array form of this shape (#2128).
-- **a `hello` frame carrying no `comfyui_url` is no longer reported as a dead instance (#2742).** The one verdict with no `base` fell through to the shared warning, rendering as `ignoring hello retarget to unreachable undefined (stale tab on a dead instance?)` — asserting a target was named AND found dead, about a frame that claimed neither. Seen 17 times in one report from tabs that were merely churning.
-- **an MCP server that connects and registers NO tools is now reported (#2742).** Once this process has seen ANY namespaced MCP tool -- proof the harness lists them -- a session with NONE reports every configured server, closing the blind spot where a failure that emptied EVERY server looked identical to a harness that does not namespace.
-- **a `hello` frame carrying no `comfyui_url` is no longer reported as a dead instance (#2742).** The one verdict with no `base` fell through to the shared warning, rendering as `ignoring hello retarget to unreachable undefined (stale tab on a dead instance?)` — asserting a target was named AND found dead, about a frame that claimed neither. Seen 17 times in one report from tabs that were merely churning.
-- **an MCP server that connects and registers NO tools is now reported (#2742).** Once this process has seen ANY namespaced MCP tool -- proof the harness lists them -- a session with NONE reports every configured server, closing the blind spot where a failure that emptied EVERY server looked identical to a harness that does not namespace.
-- **the same check now runs at every turn boundary, and can recover (#1524).** A server
+- **`get_workflow` `action:"strip"` does not Win32-resolve a remote Linux path on the MCP host (#2782, #2811).** Against a remote ComfyUI, an absolute POSIX `path` such as `/mydata/.../models/workflows/example.json` is no longer opened as `C:\mydata\...`. Library-shaped tails (`user/default/workflows`, `user/workflows`, `models/workflows`) are fetched from that server's userdata API; any other remote absolute path is refused instead of a local ENOENT.
+
+## [0.52.189] - 2026-09-03
+
+### MCP
+
+#### Fixed
+- **History/completion harvests a ComfyUI media ref under an unrecognised key (`dexter_video`, `nkd_video`) instead of only `images`/`videos`/`video`/`gifs` (#2845, #2847).** SaveVideoDexter emits `{filename, subfolder?, type?}` as a single object (or a one-item array); `buildCompletionNotification` / the panel_run watchdog now collect that one-level shape and classify by extension so completion names the mp4. Nested non-media values stay ignored. Panel v0.15.163 already collects the array form of this shape.
+
 
 ## [0.52.188] - 2026-09-03
 
