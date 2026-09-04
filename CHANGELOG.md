@@ -6,11 +6,9 @@ All notable changes to this project are documented here. This project adheres to
 
 ## Unreleased
 
-
 ### MCP
 
 #### Fixed
-- **`get_workflow` `action:"strip"` does not Win32-resolve a remote Linux path on the MCP host (#2782).** Against a remote ComfyUI, an absolute POSIX `path` such as `/mydata/.../models/workflows/example.json` is no longer opened as `C:\mydata\...`. Library-shaped tails (`user/default/workflows`, `user/workflows`, `models/workflows`) are fetched from that server's userdata API; any other remote absolute path is refused instead of a local ENOENT.
 - **the pi backend works when pi was installed from npm on Windows (#2835).** `npm i -g pi`
   writes `pi` (an extensionless bash script), `pi.cmd` and `pi.ps1`, and no `pi.exe`. Node
   spawns the first with ENOENT and the second with EINVAL (measured), and discovery returned
@@ -20,6 +18,13 @@ All notable changes to this project are documented here. This project adheres to
   it is now resolved to that script and launched as `node <script>`. NOT via `shell: true`:
   the prompt rides argv, so a shell would make every prompt a potential command line, which is
   what the no-shell rule exists to prevent. An unresolvable shim is still refused.
+
+## [0.52.190] - 2026-09-04
+
+### MCP
+
+#### Fixed
+- **`get_workflow` `action:"strip"` does not Win32-resolve a remote Linux path on the MCP host (#2782, #2811).** Against a remote ComfyUI, an absolute POSIX `path` such as `/mydata/.../models/workflows/example.json` is no longer opened as `C:\mydata\...`. Library-shaped tails (`user/default/workflows`, `user/workflows`, `models/workflows`) are fetched from that server's userdata API; any other remote absolute path is refused instead of a local ENOENT.
 
 ## [0.52.189] - 2026-09-03
 
