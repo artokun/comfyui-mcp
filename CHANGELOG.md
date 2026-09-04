@@ -20,6 +20,14 @@ All notable changes to this project are documented here. This project adheres to
   flag this code does not model.
 - **a relaunch keeps `-X utf8`, the encoding flag #2693 is actually about (#2693).** Interpreter-flag recovery refused any command line carrying a flag with a separate value, so a server started `python -X utf8 -s main.py` relaunched without it and the CP949 workaround was silently lost. `-X` and `-W` always consume the next token, so they are taken as pairs; every other bare token still reconstructs nothing rather than rebuilding a command the server never had. Measured against a real Windows `Win32_Process.CommandLine`, which is where the gap showed up — the unit tests supplied the argv they expected.
 
+## [0.52.195] - 2026-09-04
+
+### MCP
+
+#### Fixed
+- **`get_history` / `get_system_stats` read the unique proven connected-panel origin+api_base after the headless target is unreachable, instead of only dispatching `fetch_comfyui_read` (#2836, #2867).** On 0.52.193 the named `PANEL_API_BASE_UNAVAILABLE` path still left history/health unavailable while `panel_run` worked: the live tab origin was never contacted, and the panel API object's undefined `api_base` crashed the relay. Mixed or unproven origins stay fail-closed (`PANEL_ORIGIN_UNPROVEN`); a guessed origin is never dialed. Same-origin dead loopback still uses one panel relay; an undefined panel `api_base` remains `PANEL_API_BASE_UNAVAILABLE`.
+
+
 ## [0.52.194] - 2026-09-04
 
 ### MCP
