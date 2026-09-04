@@ -15,6 +15,14 @@ All notable changes to this project are documented here. This project adheres to
 - **the dump reader says WHICH crash, WHICH process, and WHICH renderer (#2023).** It now reports the crashing executable and its Chromium process type (browser / renderer / gpu-process) alongside the fault, so a dump from the wrong program or the wrong process is caught before anything else in the output is trusted — a gpu-process dump otherwise describes a different fault with identical confidence. It also names the Electron/Chromium build, since two text-stack crashes are only the same bug on the same renderer, and glosses three more exception codes (EXCEPTION_IN_PAGE_ERROR and the two corruption checks) that a reporter would otherwise quote as bare hex. A dump lacking Crashpad annotations reports none of it rather than inventing a value.
 - `scripts/read-minidump.mjs` — read a Windows crash dump far enough to say WHICH crash it
 
+## [0.52.195] - 2026-09-04
+
+### MCP
+
+#### Fixed
+- **`get_history` / `get_system_stats` read the unique proven connected-panel origin+api_base after the headless target is unreachable, instead of only dispatching `fetch_comfyui_read` (#2836, #2867).** On 0.52.193 the named `PANEL_API_BASE_UNAVAILABLE` path still left history/health unavailable while `panel_run` worked: the live tab origin was never contacted, and the panel API object's undefined `api_base` crashed the relay. Mixed or unproven origins stay fail-closed (`PANEL_ORIGIN_UNPROVEN`); a guessed origin is never dialed. Same-origin dead loopback still uses one panel relay; an undefined panel `api_base` remains `PANEL_API_BASE_UNAVAILABLE`.
+
+
 ## [0.52.194] - 2026-09-04
 
 ### MCP
