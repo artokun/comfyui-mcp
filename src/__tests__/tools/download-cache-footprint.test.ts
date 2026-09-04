@@ -14,6 +14,7 @@
 // separate decision and deliberately not made here.
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { readFileSync } from "node:fs";
 import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -239,5 +240,35 @@ describe('#1477 the WIRING: download_model action:"status" says it out loud', ()
       else process.env.COMFYUI_URL = savedUrl;
       await rm(progressDir, { recursive: true, force: true });
     }
+  });
+});
+
+// The footprint's "retained" bucket is only meaningful if it means exactly what
+// eviction would free. Both sites used to carry their OWN copy of
+// `!name.startsWith(".")`, while the footprint's comment asserted the two "cannot
+// disagree" — true by coincidence, not by construction. A later change to either
+// copy would silently invalidate the one number the report exists to provide.
+describe("#1477 the retention predicate is shared, not restated", () => {
+  const SRC = readFileSync(
+    new URL("../../services/download-cache.ts", import.meta.url),
+    "utf8",
+  );
+
+  it("defines the predicate exactly once", () => {
+    const defs = SRC.split("function isRetainedCacheEntry(").length - 1;
+    expect(defs).toBe(1);
+  });
+
+  it("uses it at BOTH the eviction and footprint sites", () => {
+    const uses = SRC.split("isRetainedCacheEntry(").length - 1;
+    // one definition + two call sites
+    expect(uses).toBe(3);
+  });
+
+  it("leaves no second copy of the raw dot-prefix test", () => {
+    // `.partial` / sidecar classification legitimately inspects names; what must
+    // not come back is a bare re-implementation of the RETENTION test.
+    expect(SRC).not.toContain('entry.isFile() && !entry.name.startsWith(".")');
+    expect(SRC).not.toContain('!entry.name.startsWith(".")');
   });
 });

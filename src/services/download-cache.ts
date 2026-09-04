@@ -3511,6 +3511,21 @@ async function materializeCacheFile(
   }
 }
 
+/**
+ * A cache entry eviction would CONSIDER: a plain file, not a dot-prefixed
+ * staging partial or sidecar (#1477).
+ *
+ * One function on purpose. `evictLruIfNeeded` and `downloadCacheFootprint` each
+ * carried their own copy of this test, and the footprint's comment asserted they
+ * could not disagree — which was true only because both copies happened to be
+ * written the same way. The report exists to be reconciled against what eviction
+ * would actually free, so a future change to one copy would silently invalidate
+ * exactly the number the report is for.
+ */
+function isRetainedCacheEntry(name: string): boolean {
+  return !name.startsWith(".");
+}
+
 /** What the download cache is holding right now (#1477).
  *
  * Retention is the POINT of a cache, but with COMFYUI_LRU_CACHE_SIZE_GB unset the
@@ -3593,8 +3608,12 @@ export async function downloadCacheFootprint(): Promise<DownloadCacheFootprint> 
       // finishing download, not an error worth surfacing here.
       continue;
     }
-    // The same predicate evictLruIfNeeded uses, so "retained" means "evictable".
-    if (!entry.name.startsWith(".")) {
+    // The SAME predicate evictLruIfNeeded applies, shared rather than restated:
+    // these two were separate copies of `!name.startsWith(".")`, so the comment
+    // claiming they could not disagree was true only by coincidence. Reconciling
+    // eviction against the footprint is the whole point of the report, so the
+    // predicate is now one function and the claim holds by construction.
+    if (isRetainedCacheEntry(entry.name)) {
       out.retainedBytes += size;
       out.retainedEntries += 1;
     } else if (entry.name.endsWith(".partial")) {
@@ -3618,7 +3637,7 @@ async function evictLruIfNeeded(): Promise<void> {
   const entries = await downloadCacheFs.readdir(dir, { withFileTypes: true });
   const files = await Promise.all(
     entries
-      .filter((entry) => entry.isFile() && !entry.name.startsWith("."))
+      .filter((entry) => entry.isFile() && isRetainedCacheEntry(entry.name))
       .map(async (entry) => {
         const path = join(dir, entry.name);
         const info = await downloadCacheFs.stat(path);
