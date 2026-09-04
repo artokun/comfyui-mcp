@@ -9,10 +9,17 @@ All notable changes to this project are documented here. This project adheres to
 ### MCP
 
 #### Fixed
-
-- get_image(action:"get") saves an existing ZIP from ComfyUI input/ instead of misreporting IMAGE_NOT_FOUND when /view returned 2xx application/zip. IMAGE_NOT_FOUND stays reserved for a missing or failed /view. (#2858)
 - **`get_image` bounds a BATCH of inline images against the transport frame, and bounds `action:"view"` at all (#2692).** A batch whose individual images each fit could still exceed the frame once concatenated, and the `view` action was not bounded at all; both now share one frame budget so an oversized reply is refused with what to do instead of dying as an unattributed transport error.
 - **`train_prepare_dataset action:"file"` joins the shared inline-frame accounting (#2692).** It returns an inline image through the same MCP transport as `image_management`, bounded only per-ITEM at 2MB — the bound this change exists to show is insufficient. Its bytes were never charged, so the FRAME BUDGET warning fired late or never, and with no slot open a concurrent `get_image` spent a full per-call budget beside it. The guard is a coverage assertion, so a third tool that emits inline content without charging fails the suite.
+
+## [0.52.192] - 2026-09-04
+
+### MCP
+
+#### Fixed
+
+- get_image(action:"get") saves an existing ZIP from ComfyUI input/ instead of misreporting IMAGE_NOT_FOUND when /view returned 2xx application/zip. IMAGE_NOT_FOUND stays reserved for a missing or failed /view. (#2858, #2859)
+
 
 ## [0.52.191] - 2026-09-04
 
