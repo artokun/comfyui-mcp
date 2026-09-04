@@ -43,7 +43,14 @@ const RELAY_ID_RE = /^[A-Za-z0-9_-]{16,80}$/;
 const RELAY_CAPABILITY_RE = /^[a-f0-9]{64}$/;
 const RELAY_SECRET_RE = /^[a-f0-9]{64}$/;
 const IMAGE_TYPES = new Set<PanelImageType>(["output", "input", "temp"]);
-const FIXED_READ_OPERATIONS = new Set<string>(["history", "system_stats", "logs", "object_info", "models"]);
+const FIXED_READ_OPERATIONS = new Set<string>([
+  "history",
+  "system_stats",
+  "logs",
+  "object_info",
+  "models",
+  "workflow_templates",
+]);
 const MODELS_FOLDER_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
 const MIME_RE = /^[A-Za-z0-9][A-Za-z0-9!#$&^_.+-]{0,62}\/[A-Za-z0-9][A-Za-z0-9!#$&^_.+-]{0,62}$/;
 
@@ -54,9 +61,10 @@ export type PanelComfyUIReadOperation =
   | "logs"
   | "object_info"
   | "models"
+  | "workflow_templates"
   | `models/${string}`;
 
-/** Closed allowlist: the four diagnostics reads, `/models`, or `/models/<folder>`. */
+/** Closed allowlist: diagnostics reads, workflow templates, `/models`, or `/models/<folder>`. */
 export function isPanelComfyUIReadOperation(value: string): value is PanelComfyUIReadOperation {
   if (FIXED_READ_OPERATIONS.has(value)) return true;
   if (!value.startsWith("models/")) return false;
