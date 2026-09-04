@@ -36,13 +36,16 @@ import { existsSync, lstatSync, readdirSync, readFileSync, realpathSync, statSyn
 import type { Stats } from "node:fs";
 import {
   forwardedByReferenceNote,
+  mediaKindFromMime,
   oversizedInlineRefusal,
+  remoteViewRefInlineFailedNote,
   resolveServableViewRef,
   stageFileIntoServedDir,
   stagedForDisplayNote,
   readShowMediaAck,
   unaccountedShowMediaNote,
   unverifiedViewRefNote,
+  viewRefTypeForFetch,
   type DispatchedMediaItem,
   type ForwardedByReference,
   type StagedForDisplay,
@@ -464,6 +467,7 @@ import {
   type AskRecovery,
 } from "./ask-answer-journal.js";
 import {
+  fetchImage,
   getClient,
   getLogs,
   getQueueVerified,
@@ -28959,30 +28963,37 @@ CHECKED FOR YOU: the graph read this message prescribes was just run, and it ` +
             const filename = p.replace(/.*[\/]/, "");
             resolved.push({ kind, dataUrl, filename, caption: item.caption });
           } else {
-            // ComfyUI /view ref. A browser panel fetches it same-origin — but a
-            // HEADLESS (mobile/remote) client can't reach ComfyUI, so resolve the
-            // bytes HERE and inline them as a data URL. Best-effort: any failure
-            // (fetch error, non-media, too big) falls back to forwarding the ref,
-            // which the client renders as a caption card.
+            // ComfyUI /view ref. A local browser panel fetches it same-origin —
+            // but a HEADLESS client cannot, and a REMOTE/CLOUD browser panel's
+            // /view is a different route from get_image's authenticated client
+            // (the panel 404s while get_image succeeds — #2861).
             //
             // #2012 — judge the DESTINATION, not the address. `ctx.tabId` may be
             // a scope / prefix / alias; `isHeadless` on the address is a lookup
             // miss that answers false and a phone gets a /view URL it cannot
-            // fetch. Positive requirement: inline only a proven headless
-            // destination.
+            // fetch. Positive requirement: inline a proven headless destination,
+            // or a proven interactive destination whose ComfyUI is not local.
+            //
+            // #877/#899 — remote bytes come from fetchImage (the get_image
+            // path), never a same-named file on the orchestrator disk. A remote
+            // interactive tab that cannot be inlined is refused rather than
+            // handed a viewRef the panel will drop (painted:0).
             let inlined = false;
-            if (resolveClientKind(ctx).kind === "headless") {
+            const dest = resolveClientKind(ctx);
+            const remoteTarget = isRemoteMode() || isCloudMode();
+            if (dest.kind === "headless") {
               try {
-                const base = (process.env.COMFYUI_URL ?? "http://127.0.0.1:8188").replace(/\/+$/, "");
+                const base = getComfyUIBaseUrl().replace(/\/+$/, "");
                 const qs = new URLSearchParams({ filename: src.filename, type: src.type ?? "output" });
                 if (src.subfolder) qs.set("subfolder", src.subfolder);
                 const resp = await comfyuiFetch(`${base}/view?${qs.toString()}`);
                 if (resp.ok) {
                   const mime = resp.headers.get("content-type") ?? "";
                   const buf = Buffer.from(await resp.arrayBuffer());
-                  if ((mime.startsWith("image/") || mime.startsWith("video/")) && buf.length <= MAX_BYTES) {
+                  const kindFromMime = mediaKindFromMime(mime);
+                  if (kindFromMime && kindFromMime !== "audio" && buf.length <= MAX_BYTES) {
                     resolved.push({
-                      kind: mime.startsWith("video/") ? "video" : "image",
+                      kind: kindFromMime,
                       dataUrl: `data:${mime};base64,${buf.toString("base64")}`,
                       filename: src.filename,
                       caption: item.caption,
@@ -28992,6 +29003,47 @@ CHECKED FOR YOU: the graph read this message prescribes was just run, and it ` +
                 }
               } catch {
                 // fall through to the viewRef path
+              }
+            } else if (remoteTarget && dest.kind === "interactive") {
+              try {
+                const fetched = await fetchImage(
+                  src.filename,
+                  viewRefTypeForFetch(src.type),
+                  src.subfolder ?? "",
+                  { maxBytes: MAX_BYTES },
+                );
+                const mime = fetched.mimeType.split(";")[0]!.trim();
+                const buf = Buffer.from(fetched.base64, "base64");
+                const kindFromMime = mediaKindFromMime(mime);
+                if (kindFromMime && buf.length <= MAX_BYTES) {
+                  resolved.push({
+                    kind: kindFromMime,
+                    dataUrl: `data:${mime};base64,${fetched.base64}`,
+                    filename: src.filename,
+                    caption: item.caption,
+                  });
+                  inlined = true;
+                } else {
+                  const detail = !kindFromMime
+                    ? `The MCP client fetched it, but the body was not media (content-type "${mime || "unset"}").`
+                    : `The MCP client fetched it, but it is ${buf.length} bytes — over the ${MAX_BYTES} byte inline cap.`;
+                  return fail(
+                    remoteViewRefInlineFailedNote({
+                      filename: src.filename,
+                      detail,
+                      capBytes: MAX_BYTES,
+                    }),
+                  );
+                }
+              } catch (err) {
+                const detail = err instanceof Error ? err.message : String(err);
+                return fail(
+                  remoteViewRefInlineFailedNote({
+                    filename: src.filename,
+                    detail,
+                    capBytes: MAX_BYTES,
+                  }),
+                );
               }
             }
             if (!inlined) {

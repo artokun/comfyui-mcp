@@ -9,6 +9,8 @@ All notable changes to this project are documented here. This project adheres to
 ### MCP
 
 #### Fixed
+
+- **`panel_show_media` inlines a remote ComfyUI output through `fetchImage` (the same client `get_image` uses) instead of handing the browser a `/view` that 404s (#2861).** Local canvas tabs still get a viewRef. A remote/cloud tab that cannot be inlined (MCP 404, non-media, over the 20 MB cap) is refused rather than painted empty. Same-named local workspace files are never substituted (#877/#899).
 - **two panel live-canvas tools are no longer deferred behind tool search (panel#291).**
   The SDK defers in-process MCP tool schemas by default once tool search is enabled, and
   `alwaysLoad` exists because "the tools must be present when the turn-1 prompt is built".
