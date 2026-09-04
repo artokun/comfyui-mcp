@@ -10,6 +10,14 @@ All notable changes to this project are documented here. This project adheres to
 #### Fixed
 - **`train_doctor action:"build_image"` is asynchronous, so it can finish at all (#2723).** A detached build that WEDGES is now reported as such instead of staying "running" forever — while it is in that state every later build_image ADOPTS it rather than starting a new one, so an invisible hang would burn the same ability the timeout did. A re-issue that pins a DIFFERENT `aiToolkitRef` is refused rather than silently adopting the running build: adoption keyed only on "a build is running", so the tag that landed was the in-flight build's ref, not the one requested — defeating the only thing that parameter is for.
 
+## [0.52.187] - 2026-09-03
+
+### MCP
+
+#### Fixed
+- **`get_history` and `get_system_stats` resolve the connected panel origin and API base before the read fallback, and fail closed with a named error when that origin is unproven (#2836, #2837).** An unreachable headless `127.0.0.1:8188` used to dispatch `fetch_comfyui_read` and then throw `Cannot read properties of undefined (reading api_base)`, which blocked diagnosis of the live-canvas run. The original transport failure is kept; an undefined `api_base` is reported as `PANEL_API_BASE_UNAVAILABLE` rather than a TypeError.
+
+
 ## [0.52.186] - 2026-09-03
 
 ### MCP
