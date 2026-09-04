@@ -9,6 +9,8 @@ All notable changes to this project are documented here. This project adheres to
 ### MCP
 
 #### Fixed
+
+- panel_save_subgraph accepts overwrite:true so a user-blueprint name collision can replace in place instead of being rejected as an unrecognized key (#2865)
 - **a relaunched ComfyUI no longer dies on an emoji under a legacy Windows codepage The explicit opt-out is honoured in ANY case: Windows environment names are case-insensitive and these paths hand the helper a plain object rather than `process.env`, whose case-insensitivity does not survive a spread — so a deliberate `PythonUtf8=0` was invisible and would have been overridden by a second key differing only in case.
 
 ## [0.52.193] - 2026-09-04
