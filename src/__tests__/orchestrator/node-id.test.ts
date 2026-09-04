@@ -32,9 +32,30 @@ describe("#1425 which strings name a node", () => {
   });
 
   it("still rejects what #845 rejected", () => {
-    for (const v of ["42px", "4.5", "", " ", "abc", "1:", ":1", "1::2", "1:2:", "1:-2", "1: 2"]) {
+    for (const v of ["42px", "4.5", "", " ", "1:", ":1", "1::2", "1:2:", "1:-2", "1: 2"]) {
       expect(isNodeIdString(v)).toBe(false);
     }
+  });
+});
+
+describe("#2855 named ids the graph readers print", () => {
+  it("accepts named ids like sampler / mac_studio_vlm", () => {
+    for (const v of ["sampler", "mac_studio_vlm", "KSampler", "node_1", "t2i-encoder"]) {
+      expect(isNodeIdString(v)).toBe(true);
+      expect(isQualifiedNodeId(v)).toBe(false);
+    }
+  });
+
+  it("a named id is passed through UNTOUCHED — parseInt would be NaN", () => {
+    expect(normalizeNodeId("sampler")).toBe("sampler");
+    expect(normalizeNodeId("mac_studio_vlm")).toBe("mac_studio_vlm");
+    expect(Number.parseInt("sampler", 10)).toBeNaN();
+    expect(normalizeNodeId("sampler")).not.toBeNaN();
+  });
+
+  it("still refuses 42px so it cannot become node 42", () => {
+    expect(isNodeIdString("42px")).toBe(false);
+    expect(Number.parseInt("42px", 10)).toBe(42);
   });
 
   it("a plain id is not a qualified one", () => {
@@ -67,7 +88,7 @@ describe("#1425 what goes on the wire", () => {
   });
 
   it("never returns NaN — an unparseable id must not reach the panel as one", () => {
-    for (const v of ["42", "-20", "263:78", "120:113:78"]) {
+    for (const v of ["42", "-20", "263:78", "120:113:78", "sampler"]) {
       const out = normalizeNodeId(v);
       expect(typeof out === "number" ? Number.isNaN(out) : false).toBe(false);
     }
@@ -95,6 +116,8 @@ describe("#1425 what the tool schema ADVERTISES", () => {
     const advertised = new RegExp(schema.properties.node_id.pattern!);
     expect(advertised.test("263:78")).toBe(true);
     expect(advertised.test("42")).toBe(true);
+    expect(advertised.test("sampler")).toBe(true);
     expect(advertised.test("1:-2")).toBe(false);
+    expect(advertised.test("42px")).toBe(false);
   });
 });
