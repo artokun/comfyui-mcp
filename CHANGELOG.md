@@ -10,7 +10,6 @@ All notable changes to this project are documented here. This project adheres to
 ### MCP
 
 #### Fixed
-- **History/completion harvests a ComfyUI media ref under an unrecognised key (`dexter_video`, `nkd_video`) instead of only `images`/`videos`/`video`/`gifs` (#2845).** SaveVideoDexter emits `{filename, subfolder?, type?}` as a single object (or a one-item array); `buildCompletionNotification` / the panel_run watchdog now collect that one-level shape and classify by extension so completion names the mp4. Nested non-media values stay ignored. Panel v0.15.163 already collects the array form of this shape (#2128).
 - **a relaunch keeps the Python INTERPRETER flags (#2693).** `-s`, `-E`, `-I`, `-B`, `-O` and `-u`
   are consumed by CPython before `sys.argv` exists, so a relaunch rebuilt from the server's own
   `sys.argv` dropped them — the reporter's portable install needs `-s`, and losing it changes
@@ -19,6 +18,14 @@ All notable changes to this project are documented here. This project adheres to
   that makes `sys.argv` the preferred source is re-established rather than traded away. Only
   tokens before the script that begin with `-` are taken; a bare value there is an argument to a
   flag this code does not model.
+
+## [0.52.189] - 2026-09-03
+
+### MCP
+
+#### Fixed
+- **History/completion harvests a ComfyUI media ref under an unrecognised key (`dexter_video`, `nkd_video`) instead of only `images`/`videos`/`video`/`gifs` (#2845, #2847).** SaveVideoDexter emits `{filename, subfolder?, type?}` as a single object (or a one-item array); `buildCompletionNotification` / the panel_run watchdog now collect that one-level shape and classify by extension so completion names the mp4. Nested non-media values stay ignored. Panel v0.15.163 already collects the array form of this shape.
+
 
 ## [0.52.188] - 2026-09-03
 
