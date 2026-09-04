@@ -22,6 +22,9 @@ import { stringLiterals } from "../../scripts/lib/ts-string-literals.mjs";
 
 const BT = String.fromCharCode(96);
 const BS = String.fromCharCode(92);
+const DQ = String.fromCharCode(34);
+const SQ = String.fromCharCode(39);
+const NL = String.fromCharCode(10);
 
 describe("stringLiterals", () => {
   it("keeps a literal whole across an ESCAPED backtick", () => {
@@ -60,6 +63,19 @@ describe("stringLiterals", () => {
     const lits = stringLiterals(src).map((l: { text: string }) => l.text);
     expect(lits).toHaveLength(1);
     expect(lits[0]).toContain("THE_KEY");
+  });
+
+  it("treats a regex after a KEYWORD as a regex, not a division", () => {
+    // `return /[quote]/` decided on the preceding CHARACTER reads as a division,
+    // and the quote inside the character class then opens a string that swallows
+    // the next real message. src/orchestrator holds a dozen keyword-preceded regex
+    // literals; none contains a quote today, so only a probe like this shows it.
+    const src = [
+      `function f(s) { return /[${DQ}${SQ}]/.test(s); }`,
+      `const msg = ${DQ}a later message long enough to be prose, naming THE_KEY${DQ};`,
+    ].join(NL);
+    const lits = stringLiterals(src).map((l: { text: string }) => l.text);
+    expect(lits.some((t: string) => t.includes("THE_KEY"))).toBe(true);
   });
 
   it("reports the line the literal STARTS on", () => {

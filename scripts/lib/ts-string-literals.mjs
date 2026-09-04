@@ -17,11 +17,40 @@
 
 const REGEX_PRECEDERS = /[(,=:[!&|?{};+\-~*%^<>]/;
 
+/**
+ * Keywords after which a `/` opens a REGEX, not a division.
+ *
+ * Deciding from the preceding CHARACTER alone reads `return /[quote]/` as a
+ * division: that character is `n`, so the quote inside the regex character class
+ * opens a string and swallows the next real message — the same silent undercount
+ * this scanner exists to prevent. The decision is therefore made on the preceding
+ * TOKEN. src/orchestrator holds a dozen keyword-preceded regex literals today and
+ * none contains a quote, which is why the tree was unaffected and why only a
+ * deliberate probe surfaced it.
+ */
+const REGEX_KEYWORDS = new Set([
+  "return",
+  "typeof",
+  "case",
+  "in",
+  "of",
+  "do",
+  "else",
+  "yield",
+  "await",
+  "new",
+  "delete",
+  "void",
+  "throw",
+  "instanceof",
+]);
+
 export function stringLiterals(src) {
   const out = [];
   const stack = [{ kind: "code", brace: 0 }];
   let line = 1;
   let prev = "";
+  let prevWord = "";
   let i = 0;
   const n = src.length;
 
@@ -86,7 +115,7 @@ export function stringLiterals(src) {
       i += 2;
       continue;
     }
-    if (c === "/" && REGEX_PRECEDERS.test(prev)) {
+    if (c === "/" && (REGEX_PRECEDERS.test(prev) || REGEX_KEYWORDS.has(prevWord))) {
       i++;
       let inClass = false;
       for (; i < n; i++) {
@@ -111,7 +140,17 @@ export function stringLiterals(src) {
       i++;
       continue;
     }
-    if (!/\s/.test(c)) prev = c;
+    if (!/\s/.test(c)) {
+      prev = c;
+      if (/[A-Za-z_$]/.test(c)) {
+        let j = i;
+        while (j < n && /[A-Za-z0-9_$]/.test(src[j])) j++;
+        prevWord = src.slice(i, j);
+        i = j;
+        continue;
+      }
+      prevWord = "";
+    }
     i++;
   }
   return out;
