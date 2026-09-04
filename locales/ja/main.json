@@ -6,7 +6,7 @@
       "chatgpt": "🟢 comfyui-mcp エージェントの準備ができました — {label}、あなたの ChatGPT サブスクリプション（直接 OAuth）で動きます。何でも聞いてください。",
       "claude": "🟢 comfyui-mcp エージェントの準備ができました — {label}、あなたの Claude サブスクリプションで動きます。何でも聞いてください。",
       "codex": "🟢 comfyui-mcp エージェントの準備ができました — {label}、あなたの Codex（ChatGPT）アカウントで動きます。何でも聞いてください。",
-      "copilot": "🟢 comfyui-mcp エージェントの準備ができました — {label}、あなたの GitHub Copilot サブスクリプションで動きます（⚠️ 実験的機能、利用規約に関するリスクあり — あなたが同意して有効にしました）。何でも聞いてください。",
+      "copilot": "🟢 comfyui-mcp エージェントの準備ができました — {label}、あなたの GitHub Copilot サブスクリプションで動きます（⚠ 実験的機能、利用規約に関するリスクあり — あなたが同意して有効にしました）。何でも聞いてください。",
       "custom": "🟢 comfyui-mcp エージェントの準備ができました — {label}、あなたのカスタムエンドポイント（{url}）経由で動きます。何でも聞いてください。",
       "gemini": "🟢 comfyui-mcp エージェントの準備ができました — {label}、あなたの Google アカウント（Gemini Code Assist）で動きます。何でも聞いてください。",
       "glm": "🟢 comfyui-mcp エージェントの準備ができました — {label}、あなたの Z.AI GLM Coding Plan で動きます。何でも聞いてください。",

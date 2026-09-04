@@ -6,7 +6,7 @@
       "chatgpt": "🟢 وكيل comfyui-mcp جاهز — ‏{label} على اشتراك ChatGPT الخاص بك (OAuth مباشر). اسأل ما تشاء.",
       "claude": "🟢 وكيل comfyui-mcp جاهز — ‏{label} على اشتراك Claude الخاص بك. اسأل ما تشاء.",
       "codex": "🟢 وكيل comfyui-mcp جاهز — ‏{label} على حساب Codex (ChatGPT) الخاص بك. اسأل ما تشاء.",
-      "copilot": "🟢 وكيل comfyui-mcp جاهز — ‏{label} على اشتراك GitHub Copilot الخاص بك (⚠️ تجريبي، فيه مخاطرة تتعلق بشروط الخدمة — وقد فعّلته بنفسك). اسأل ما تشاء.",
+      "copilot": "🟢 وكيل comfyui-mcp جاهز — ‏{label} على اشتراك GitHub Copilot الخاص بك (⚠ تجريبي، فيه مخاطرة تتعلق بشروط الخدمة — وقد فعّلته بنفسك). اسأل ما تشاء.",
       "custom": "🟢 وكيل comfyui-mcp جاهز — ‏{label} عبر نقطة النهاية المخصّصة لديك ({url}). اسأل ما تشاء.",
       "gemini": "🟢 وكيل comfyui-mcp جاهز — ‏{label} على حساب Google الخاص بك (Gemini Code Assist). اسأل ما تشاء.",
       "glm": "🟢 وكيل comfyui-mcp جاهز — ‏{label} على خطة Z.AI GLM Coding Plan الخاصة بك. اسأل ما تشاء.",

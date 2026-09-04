@@ -6,7 +6,7 @@
       "chatgpt": "🟢 Agente comfyui-mcp listo — {label} con tu suscripción de ChatGPT (OAuth directo). Pregunta lo que quieras.",
       "claude": "🟢 Agente comfyui-mcp listo — {label} con tu suscripción de Claude. Pregunta lo que quieras.",
       "codex": "🟢 Agente comfyui-mcp listo — {label} con tu cuenta de Codex (ChatGPT). Pregunta lo que quieras.",
-      "copilot": "🟢 Agente comfyui-mcp listo — {label} con tu suscripción de GitHub Copilot (⚠️ experimental, riesgo respecto a los términos de servicio — lo activaste tú). Pregunta lo que quieras.",
+      "copilot": "🟢 Agente comfyui-mcp listo — {label} con tu suscripción de GitHub Copilot (⚠ experimental, riesgo respecto a los términos de servicio — lo activaste tú). Pregunta lo que quieras.",
       "custom": "🟢 Agente comfyui-mcp listo — {label} mediante tu endpoint personalizado ({url}). Pregunta lo que quieras.",
       "gemini": "🟢 Agente comfyui-mcp listo — {label} con tu cuenta de Google (Gemini Code Assist). Pregunta lo que quieras.",
       "glm": "🟢 Agente comfyui-mcp listo — {label} con tu Z.AI GLM Coding Plan. Pregunta lo que quieras.",

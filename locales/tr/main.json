@@ -6,7 +6,7 @@
       "chatgpt": "🟢 comfyui-mcp aracısı hazır — {label}, ChatGPT aboneliğinizle (doğrudan OAuth). Sorularınızı bekliyorum.",
       "claude": "🟢 comfyui-mcp aracısı hazır — {label}, Claude aboneliğinizle. Sorularınızı bekliyorum.",
       "codex": "🟢 comfyui-mcp aracısı hazır — {label}, Codex (ChatGPT) hesabınızla. Sorularınızı bekliyorum.",
-      "copilot": "🟢 comfyui-mcp aracısı hazır — {label}, GitHub Copilot aboneliğinizle (⚠️ deneysel, kullanım koşulları açısından risk taşır — bunu siz açtınız). Sorularınızı bekliyorum.",
+      "copilot": "🟢 comfyui-mcp aracısı hazır — {label}, GitHub Copilot aboneliğinizle (⚠ deneysel, kullanım koşulları açısından risk taşır — bunu siz açtınız). Sorularınızı bekliyorum.",
       "custom": "🟢 comfyui-mcp aracısı hazır — {label}, kendi özel uç noktanız ({url}) üzerinden. Sorularınızı bekliyorum.",
       "gemini": "🟢 comfyui-mcp aracısı hazır — {label}, Google hesabınızla (Gemini Code Assist). Sorularınızı bekliyorum.",
       "glm": "🟢 comfyui-mcp aracısı hazır — {label}, Z.AI GLM Coding Plan aboneliğinizle. Sorularınızı bekliyorum.",

@@ -6,6 +6,11 @@ All notable changes to this project are documented here. This project adheres to
 
 ## Unreleased
 
+### MCP
+
+#### Fixed
+- **the ready banner no longer REQUESTS the emoji font the panel#2023 crash correlates with (panel#2023).** comfyui-mcp-panel#2210 removed `U+FE0F` from nine panel strings because the selector does not merely permit emoji presentation, it requests it, pinning the glyph to `seguiemj.ttf` — the file KB5120998 replaced two days before the crash cluster. The orchestrator renders on the same canvas (`{ type: "say" }` → agent bubble) through the same font stack, so a panel-only sweep left `banner.ready.copilot` requesting that font on every Copilot-backend session: the identical `U+26A0 U+FE0F` sequence sat in the source fallback and in all twelve catalogs. The selector goes; the glyph stays — pinned in both directions, so deleting the warning sign cannot pass either. Does NOT fix panel#2023 (the null-deref is upstream); same class of mitigation as #2210
+
 ## [0.52.196] - 2026-09-04
 
 ### MCP

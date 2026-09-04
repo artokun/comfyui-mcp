@@ -28,7 +28,7 @@ import { processLocale, trFor } from "../i18n/index.js";
  * panel reports its language, threading it here is a one-argument change and every
  * greeting below follows automatically.
  *
- * The 🟢/⚠️ markers are NOT translated. They are the status signal a reader scans for
+ * The 🟢/⚠ markers are NOT translated. They are the status signal a reader scans for
  * before reading a word, they mean the same thing in every language, and a catalog
  * that drops or swaps one changes what the line asserts — so each fallback carries
  * its marker and every translation is expected to reproduce it verbatim.
@@ -75,7 +75,7 @@ export function readyBannerText(
     case "openrouter":
       return t("banner.ready.openrouter", "🟢 comfyui-mcp agent ready — {label} via OpenRouter (hosted API, your OPENROUTER_API_KEY). Ask away.");
     case "copilot":
-      return t("banner.ready.copilot", "🟢 comfyui-mcp agent ready — {label} on your GitHub Copilot subscription (⚠️ experimental, ToS risk — you opted in). Ask away.");
+      return t("banner.ready.copilot", "🟢 comfyui-mcp agent ready — {label} on your GitHub Copilot subscription (⚠ experimental, ToS risk — you opted in). Ask away.");
     default:
       return t("banner.ready.claude", "🟢 comfyui-mcp agent ready — {label} on your Claude subscription. Ask away.");
   }

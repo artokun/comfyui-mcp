@@ -6,7 +6,7 @@
       "chatgpt": "🟢 Агент comfyui-mcp готов — {label} на вашей подписке ChatGPT (прямой OAuth). Спрашивайте.",
       "claude": "🟢 Агент comfyui-mcp готов — {label} на вашей подписке Claude. Спрашивайте.",
       "codex": "🟢 Агент comfyui-mcp готов — {label} на вашем аккаунте Codex (ChatGPT). Спрашивайте.",
-      "copilot": "🟢 Агент comfyui-mcp готов — {label} на вашей подписке GitHub Copilot (⚠️ экспериментально, риск нарушения условий использования — вы включили это сами). Спрашивайте.",
+      "copilot": "🟢 Агент comfyui-mcp готов — {label} на вашей подписке GitHub Copilot (⚠ экспериментально, риск нарушения условий использования — вы включили это сами). Спрашивайте.",
       "custom": "🟢 Агент comfyui-mcp готов — {label} через ваш собственный эндпоинт ({url}). Спрашивайте.",
       "gemini": "🟢 Агент comfyui-mcp готов — {label} на вашем аккаунте Google (Gemini Code Assist). Спрашивайте.",
       "glm": "🟢 Агент comfyui-mcp готов — {label} на вашем тарифе Z.AI GLM Coding Plan. Спрашивайте.",

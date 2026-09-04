@@ -6,7 +6,7 @@
       "chatgpt": "🟢 عامل comfyui-mcp آماده است — ‏{label} روی اشتراک ChatGPT شما (OAuth مستقیم). هرچه می‌خواهید بپرسید.",
       "claude": "🟢 عامل comfyui-mcp آماده است — ‏{label} روی اشتراک Claude شما. هرچه می‌خواهید بپرسید.",
       "codex": "🟢 عامل comfyui-mcp آماده است — ‏{label} روی حساب Codex ‏(ChatGPT) شما. هرچه می‌خواهید بپرسید.",
-      "copilot": "🟢 عامل comfyui-mcp آماده است — ‏{label} روی اشتراک GitHub Copilot شما (⚠️ آزمایشی، با ریسک شرایط استفاده — خودتان آن را فعال کرده‌اید). هرچه می‌خواهید بپرسید.",
+      "copilot": "🟢 عامل comfyui-mcp آماده است — ‏{label} روی اشتراک GitHub Copilot شما (⚠ آزمایشی، با ریسک شرایط استفاده — خودتان آن را فعال کرده‌اید). هرچه می‌خواهید بپرسید.",
       "custom": "🟢 عامل comfyui-mcp آماده است — ‏{label} از طریق نقطهٔ پایانی سفارشی شما ({url}). هرچه می‌خواهید بپرسید.",
       "gemini": "🟢 عامل comfyui-mcp آماده است — ‏{label} روی حساب Google شما (Gemini Code Assist). هرچه می‌خواهید بپرسید.",
       "glm": "🟢 عامل comfyui-mcp آماده است — ‏{label} روی Z.AI GLM Coding Plan شما. هرچه می‌خواهید بپرسید.",
