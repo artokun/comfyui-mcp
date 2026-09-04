@@ -575,17 +575,18 @@ function abortReasonOf(signal: AbortSignal): unknown {
 /**
  * Reject as soon as `signal` aborts, even if `work` is still running.
  *
- * `AbortSignal.timeout` on `fetch` only cancels the HTTP exchange. Once headers
- * have arrived, `Response.text()` / `JSON.parse` can keep the caller pending for
- * as long as the body takes to finish — and a ComfyUI that is mid-decode
- * (VAEDecodeAudio, a long VAE, …) often accepts `/system_stats` and then stalls
- * on the body. The abort event IS fired; the decode does not observe it. Racing
- * the abort against the whole fetch+decode is what lets `call_tool` settle
- * instead of hanging until the decode ends or the process is killed (#1672).
+ * Bounds an enclosing promise whose inner work may not settle. On supported
+ * Node (`engines` is >=22) undici errors the response body stream when the
+ * `fetch` signal fires, so a pending `Response.text()` rejects at the deadline
+ * — the quoted "headers-only" story is false here. `raceAbort` still earns its
+ * place by bounding everything ELSE in `work`: a test double that ignores abort,
+ * a consumer that does not pass the signal through, or the enclosing `call_tool`
+ * cell. #1672's inner read DID reject ("The operation was aborted due to
+ * timeout"); the outer cell is what stayed pending. `JSON.parse` is genuinely
+ * unabortable, and racing it cannot preempt it because it blocks the same thread.
  *
- * The inner promise is attached so a late rejection (the decode finally
- * noticing the abort) cannot become an unhandledRejection after we already
- * settled.
+ * The inner promise is attached so a late rejection cannot become an
+ * unhandledRejection after we already settled.
  */
 export function raceAbort<T>(signal: AbortSignal | undefined, work: () => Promise<T>): Promise<T> {
   if (!signal) return work();
@@ -614,6 +615,38 @@ export function raceAbort<T>(signal: AbortSignal | undefined, work: () => Promis
   });
 }
 
+/** GET/HEAD learned nothing; a mutation that timed out is OUTCOME UNKNOWN. */
+function timeoutRetryClause(method: string): string {
+  if (method === "GET" || method === "HEAD") {
+    return (
+      `Nothing was learned about the server from this — a timeout is not a refusal and not a ` +
+      `"not found". `
+    );
+  }
+  return (
+    `OUTCOME UNKNOWN: this request may already have been received and acted on, so do NOT ` +
+    `blindly re-issue it — check the server's state first (for a queued prompt, queue ` +
+    `(action:"list") and get_history (action:"list")). `
+  );
+}
+
+/**
+ * Named diagnosis for a stall AFTER headers: `comfyuiFetch` has already returned,
+ * so its transport rewrite never runs and a raw `TimeoutError` would escape with
+ * no URL and no method (#2773). Distinct from the transport-timeout formatter:
+ * the connection DID happen; only the body failed to finish.
+ */
+export function describeComfyBodyTimeout(target: string, method: string): Error {
+  const seconds = comfyHttpTimeoutSeconds();
+  const err = new Error(
+    `No reply from ComfyUI within ${seconds}s — while reading the response body of ${target} (${method}). ` +
+      `Headers had already arrived; the body did not finish. ` +
+      timeoutRetryClause(method),
+  );
+  (err as { code?: string }).code = "COMFYUI_HTTP_BODY_TIMEOUT";
+  return err;
+}
+
 /**
  * Say what the ceiling did and did NOT establish.
  *
@@ -627,7 +660,6 @@ function describeComfyTimeout(input: string | URL | Request, init: RequestInit):
   const target = targetOf(input);
   const method = methodOf(input, init);
   const seconds = comfyHttpTimeoutSeconds();
-  const mutating = method !== "GET" && method !== "HEAD";
   // #1896 — the comparison the TRANSPORT path has made since #1553, on the path
   // that shares its cause.
   //
@@ -646,12 +678,7 @@ function describeComfyTimeout(input: string | URL | Request, init: RequestInit):
   const drift = classifyTargetDrift(target);
   const err = new Error(
     `No reply from ComfyUI within ${seconds}s — while requesting ${target} (${method}). ` +
-      (mutating
-        ? `OUTCOME UNKNOWN: this request may already have been received and acted on, so do NOT ` +
-          `blindly re-issue it — check the server's state first (for a queued prompt, queue ` +
-          `(action:"list") and get_history (action:"list")). `
-        : `Nothing was learned about the server from this — a timeout is not a refusal and not a ` +
-          `"not found". `) +
+      timeoutRetryClause(method) +
       // #1896 — this asserted "The connection was accepted but no answer arrived
       // in time". The ceiling covers the WHOLE exchange, connecting included, so
       // a black-holed SYN times out here having established no connection at all
