@@ -9,8 +9,15 @@ All notable changes to this project are documented here. This project adheres to
 ### MCP
 
 #### Fixed
-- **`panel_set_widget` / other mutations accept named node ids the graph readers print (#2855).** API-style graphs use string ids (`sampler`, `mac_studio_vlm`). `panel_graph_outline` already returned those; writes refused them at MCP validation (`NODE_ID_PATTERN` was integer / `120:104` only). Named ids stay strings on the wire — they are never `parseInt`'d. `"42px"` is still refused so it cannot become node 42.
 - clarify MiniMax H3 source-video frame-rate conversion and complete ComfyMathExpression edits (#2479)
+
+## [0.52.191] - 2026-09-04
+
+### MCP
+
+#### Fixed
+- **`panel_set_widget` / other mutations accept named node ids the graph readers print (#2855, #2856).** API-style graphs use string ids (`sampler`, `mac_studio_vlm`). `panel_graph_outline` already returned those; writes refused them at MCP validation (`NODE_ID_PATTERN` was integer / `120:104` only). Named ids stay strings on the wire — they are never `parseInt`'d. `"42px"` is still refused so it cannot become node 42.
+
 
 ## [0.52.190] - 2026-09-04
 
