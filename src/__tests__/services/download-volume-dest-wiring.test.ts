@@ -67,7 +67,12 @@ describe("#1477 the production download path actually supplies it", () => {
   it("the volume precheck is given destDir", () => {
     const at = src.indexOf("checkCacheVolumeSpace({");
     expect(at).toBeGreaterThan(-1);
-    expect(src.slice(at, src.indexOf("});", at))).toContain("destDir");
+    const call = src.slice(at, src.indexOf("});", at));
+    // The SHORTHAND pass-through specifically. `toContain("destDir")` also passes on
+    // `destDir: undefined`, which disables the feature while reading as wired — a
+    // guard that matches a different clause than the one it is named for.
+    expect(call).toMatch(/(^|\s)destDir,/m);
+    expect(call).not.toMatch(/destDir\s*:\s*undefined/);
   });
 
   it("downloadWithCache threads the FINAL destination down", () => {
