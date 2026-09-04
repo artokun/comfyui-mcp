@@ -134,6 +134,24 @@ describe("#2835 resolvePiLaunch prefers a runnable script over an unspawnable sh
     expect(resolvePiLaunch()).toBeNull();
   });
 
+  it("an extensionless shim with NO resolvable .cmd is refused on Windows", () => {
+    // The other half of the report. Discovery scans ["pi.exe", "pi"], so existsSync
+    // matches the extensionless bash script npm writes -- which Windows cannot
+    // execute (spawn -> ENOENT, measured). Returning it produced the reporter's
+    // "spawn ...\npm\pi ENOENT"; "not found" with actionable guidance is the
+    // honest answer. On POSIX that same file IS the executable, so the refusal is
+    // win32-only and this asserts both directions.
+    writeFileSync(join(dir, "pi"), "#!/bin/sh");
+    process.env.PATH = dir;
+    const launch = resolvePiLaunch();
+    if (process.platform === "win32") {
+      expect(launch).toBeNull();
+    } else {
+      expect(launch?.command).toBe(join(dir, "pi"));
+      expect(launch?.prefixArgs).toEqual([]);
+    }
+  });
+
   it("a real executable still launches as itself, with no prefix", () => {
     const exe = join(dir, process.platform === "win32" ? "pi.exe" : "pi");
     writeFileSync(exe, "");
