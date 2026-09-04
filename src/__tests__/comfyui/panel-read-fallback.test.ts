@@ -449,3 +449,79 @@ describe("connected-panel read fallback origin/API base (#2836)", () => {
     },
   );
 });
+
+describe("connected-panel image relay one hop (#2864)", () => {
+  const JPEG = {
+    base64: "AQID",
+    mimeType: "image/jpeg",
+    bytes: 3,
+  };
+
+  it("does not dial a published diagnostic origin as a /view target (#2149)", async () => {
+    fetchApi.mockRejectedValue(transportFailure());
+    setConnectedPanelOrigins(() => ["http://127.0.0.1:8189"]);
+    panelImage.mockResolvedValue(JPEG);
+    const fetchMock = vi.fn(async () => {
+      throw transportFailure();
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(fetchImage("render.png", "output", "shots")).resolves.toEqual({
+      base64: JPEG.base64,
+      mimeType: JPEG.mimeType,
+    });
+    expect(fetchMock.mock.calls.some(([input]) => String(input).includes("8189"))).toBe(false);
+    expect(panelImage).toHaveBeenCalledTimes(1);
+    expect(panelImage).toHaveBeenCalledWith("render.png", "output", "shots");
+  });
+
+  it("relays through the panel once when the live tab is the dead loopback", async () => {
+    fetchApi.mockRejectedValue(transportFailure());
+    setConnectedPanelOrigins(() => ["http://127.0.0.1:8188"]);
+    panelImage.mockResolvedValue(JPEG);
+
+    await expect(fetchImage("render.png", "output", "shots")).resolves.toEqual({
+      base64: JPEG.base64,
+      mimeType: JPEG.mimeType,
+    });
+    expect(panelImage).toHaveBeenCalledTimes(1);
+    expect(panelImage).toHaveBeenCalledWith("render.png", "output", "shots");
+  });
+
+  it("returns one structured error when the one-hop relay fails", async () => {
+    fetchApi.mockRejectedValue(transportFailure());
+    setConnectedPanelOrigins(() => ["http://127.0.0.1:8188"]);
+    panelImage.mockRejectedValue(
+      new PanelImageRelayError(
+        "The connected panel could not fetch that image.",
+        "PANEL_FETCH_FAILED",
+        false,
+        "Maximum call stack size exceeded",
+      ),
+    );
+
+    const failure = await fetchImage("render.png").then(
+      () => undefined,
+      (error: unknown) => error as Error,
+    );
+    expect(failure?.message).toContain("image relay failed safely (PANEL_FETCH_FAILED)");
+    expect(failure?.message).toContain("The panel reported: Maximum call stack size exceeded");
+    expect(failure?.message).not.toMatch(/image relay failed safely \(PANEL_FETCH_FAILED\).+image relay failed safely/);
+    expect(panelImage).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not recurse when the image relay loops back into fetchImage", async () => {
+    fetchApi.mockRejectedValue(transportFailure());
+    setConnectedPanelOrigins(() => ["http://127.0.0.1:8188"]);
+    panelImage.mockImplementation(async () => fetchImage("render.png"));
+
+    const failure = await fetchImage("render.png").then(
+      () => undefined,
+      (error: unknown) => error as Error,
+    );
+    expect(failure).toBeInstanceOf(Error);
+    expect(failure?.name).not.toBe("RangeError");
+    expect(String(failure?.message ?? failure)).not.toMatch(/Maximum call stack size exceeded/);
+    expect(panelImage).toHaveBeenCalledTimes(1);
+  });
+});
