@@ -142,10 +142,47 @@ interface HistoryMediaRef {
   type?: string;
 }
 
+const KNOWN_IMAGE_KEYS = new Set(["images"]);
+const KNOWN_VIDEO_KEYS = new Set(["videos", "video", "gifs"]);
+const IMAGE_EXTS = new Set([".png", ".jpg", ".jpeg", ".bmp"]);
+const VIDEO_EXTS = new Set([".mp4", ".webm", ".mov", ".mkv", ".m4v", ".avi", ".gif", ".webp"]);
+
 function isHistoryMediaRef(value: unknown): value is HistoryMediaRef {
-  if (value === null || typeof value !== "object") return false;
-  const filename = (value as { filename?: unknown }).filename;
-  return typeof filename === "string" && filename.length > 0;
+  if (value === null || typeof value !== "object" || Array.isArray(value)) return false;
+  const rec = value as { filename?: unknown; subfolder?: unknown; type?: unknown };
+  if (typeof rec.filename !== "string" || rec.filename.length === 0) return false;
+  if (rec.subfolder != null && typeof rec.subfolder !== "string") return false;
+  if (rec.type != null && typeof rec.type !== "string") return false;
+  return true;
+}
+
+/** One-level bags only: a media ref, or an array of them. Nested objects are not walked. */
+function historyMediaRefs(value: unknown): HistoryMediaRef[] {
+  if (Array.isArray(value)) return value.filter(isHistoryMediaRef);
+  return isHistoryMediaRef(value) ? [value] : [];
+}
+
+function filenameExt(filename: string): string {
+  const base = filename.slice(Math.max(filename.lastIndexOf("/"), filename.lastIndexOf("\\")) + 1);
+  const dot = base.lastIndexOf(".");
+  return dot >= 0 ? base.slice(dot).toLowerCase() : "";
+}
+
+function unknownKeyMediaKind(filename: string): "image" | "video" | null {
+  const ext = filenameExt(filename);
+  if (VIDEO_EXTS.has(ext)) return "video";
+  if (IMAGE_EXTS.has(ext)) return "image";
+  return null;
+}
+
+function toMediaOutput(ref: HistoryMediaRef): MediaOutput {
+  const type = normalizeAssetType(ref.type);
+  return {
+    filename: ref.filename,
+    subfolder: ref.subfolder ?? "",
+    type,
+    url: buildImageUrl(ref.filename, ref.subfolder ?? "", type),
+  };
 }
 
 export function buildCompletionNotification(
@@ -195,20 +232,10 @@ export function buildCompletionNotification(
     // Extract image outputs (SaveImage, PreviewImage) — malformed refs are
     // filtered BEFORE any use, so a bad /history entry can neither crash the
     // parse nor surface as an output with filename=undefined.
+    const images: MediaOutput[] = [];
     if (Array.isArray(out.images)) {
-      const images = (out.images as unknown[])
-        .filter(isHistoryMediaRef)
-        .map((img) => {
-          const type = normalizeAssetType(img.type);
-          return {
-            filename: img.filename,
-            subfolder: img.subfolder ?? "",
-            type,
-            url: buildImageUrl(img.filename, img.subfolder ?? "", type),
-          };
-        });
-      if (images.length > 0) {
-        outputs.push({ node_id: nodeId, images });
+      for (const img of out.images.filter(isHistoryMediaRef)) {
+        images.push(toMediaOutput(img));
       }
     }
 
@@ -217,18 +244,28 @@ export function buildCompletionNotification(
     // keys into a single entry per node, mirroring how images group once.
     // Adapted from jcd315's fork (jcd315/comfyui-mcp-muse, commit e13342ec).
     const videos: MediaOutput[] = [];
-    for (const videoKey of ["videos", "video", "gifs"] as const) {
+    for (const videoKey of KNOWN_VIDEO_KEYS) {
       const videoData = out[videoKey];
       if (!Array.isArray(videoData)) continue;
-      for (const vid of (videoData as unknown[]).filter(isHistoryMediaRef)) {
-        const type = normalizeAssetType(vid.type);
-        videos.push({
-          filename: vid.filename,
-          subfolder: vid.subfolder ?? "",
-          type,
-          url: buildImageUrl(vid.filename, vid.subfolder ?? "", type),
-        });
+      for (const vid of videoData.filter(isHistoryMediaRef)) {
+        videos.push(toMediaOutput(vid));
       }
+    }
+
+    // #2845 — SaveVideoDexter (`dexter_video`) and NKDVideoViewer (`nkd_video`)
+    // emit a `{filename, subfolder?, type?}` ref under a custom key, as a single
+    // object or a one-item array. Harvest that one level; nested bags stay closed.
+    for (const [key, raw] of Object.entries(out)) {
+      if (KNOWN_IMAGE_KEYS.has(key) || KNOWN_VIDEO_KEYS.has(key)) continue;
+      for (const ref of historyMediaRefs(raw)) {
+        const kind = unknownKeyMediaKind(ref.filename);
+        if (kind === "video") videos.push(toMediaOutput(ref));
+        else if (kind === "image") images.push(toMediaOutput(ref));
+      }
+    }
+
+    if (images.length > 0) {
+      outputs.push({ node_id: nodeId, images });
     }
     if (videos.length > 0) {
       video_outputs.push({ node_id: nodeId, videos });
