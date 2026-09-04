@@ -5,6 +5,7 @@ All notable changes to this project are documented here. This project adheres to
 [Keep a Changelog](https://keepachangelog.com/).
 
 ## Unreleased
+- **a `hello` frame carrying no `comfyui_url` is no longer reported as a dead instance (#2742).** The one verdict with no `base` fell through to the shared warning, rendering as `ignoring hello retarget to unreachable undefined (stale tab on a dead instance?)` — asserting a target was named AND found dead, about a frame that claimed neither. Seen 17 times in one report from tabs that were merely churning.
 
 ### MCP
 #### Fixed
