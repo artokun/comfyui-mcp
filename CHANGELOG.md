@@ -6,11 +6,12 @@ All notable changes to this project are documented here. This project adheres to
 
 ## Unreleased
 
+
 ### MCP
 
 #### Fixed
+- **`get_workflow` `action:"strip"` does not Win32-resolve a remote Linux path on the MCP host (#2782).** Against a remote ComfyUI, an absolute POSIX `path` such as `/mydata/.../models/workflows/example.json` is no longer opened as `C:\mydata\...`. Library-shaped tails (`user/default/workflows`, `user/workflows`, `models/workflows`) are fetched from that server's userdata API; any other remote absolute path is refused instead of a local ENOENT.
 - **Credential errors told the user to set `ANTHROPIC_API_KEY`, which the orchestrator deletes from its own environment at startup (#2849).** `runPanelOrchestrator()` unsets the key so the agent authenticates against the claude.ai login; three of its own messages went on naming it as the remedy, one of them alongside "restart the orchestrator" — so a blocked user sets it, restarts as instructed and gets the identical error. The pi and Claude remedies now name only routes that reach the agent. The comfyui MCP child is a separate process with two lanes — the panel BUILDS its env (the allowlist omits the key) while a standalone client inherits the shell env — so its caption error is now lane-aware via `COMFYUI_MCP_TAB` instead of dropping advice that is correct for standalone users, and the `train` tool description (read by the MODEL, so it taught the dead remedy on paths no error string covers) no longer names a variable. New `check:env-advice` gate fails the build if an orchestrator message names a variable the process deletes.
-
 
 ## [0.52.189] - 2026-09-03
 
