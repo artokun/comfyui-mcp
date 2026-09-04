@@ -9,6 +9,7 @@ All notable changes to this project are documented here. This project adheres to
 ### MCP
 
 #### Fixed
+- pin the upload body on the CLOUD client too, not just the self-hosted one (#2770). Both call uploadBody(data), but the cloud path is wired independently and only the self-hosted client had the byte-slice assertions — so it could revert to new Uint8Array(data.buffer), which ignores byteOffset/length and uploads the whole 8KB pool, with nothing failing. A shared helper is not shared coverage
 - the upload body and the bridge probe's socket chunks are typed so they still compile
 
 ## [0.52.193] - 2026-09-04
