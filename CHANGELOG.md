@@ -10,7 +10,14 @@ All notable changes to this project are documented here. This project adheres to
 
 #### Fixed
 - **Credential errors told the user to set `ANTHROPIC_API_KEY`, which the orchestrator deletes from its own environment at startup (#2849).** `runPanelOrchestrator()` unsets the key so the agent authenticates against the claude.ai login; three of its own messages went on naming it as the remedy, one of them alongside "restart the orchestrator" — so a blocked user sets it, restarts as instructed and gets the identical error. The pi and Claude remedies now name only routes that reach the agent. The comfyui MCP child is a separate process with two lanes — the panel BUILDS its env (the allowlist omits the key) while a standalone client inherits the shell env — so its caption error is now lane-aware via `COMFYUI_MCP_TAB` instead of dropping advice that is correct for standalone users, and the `train` tool description (read by the MODEL, so it taught the dead remedy on paths no error string covers) no longer names a variable. New `check:env-advice` gate fails the build if an orchestrator message names a variable the process deletes.
-- **History/completion harvests a ComfyUI media ref under an unrecognised key (`dexter_video`, `nkd_video`) instead of only `images`/`videos`/`video`/`gifs` (#2845).** SaveVideoDexter emits `{filename, subfolder?, type?}` as a single object (or a one-item array); `buildCompletionNotification` / the panel_run watchdog now collect that one-level shape and classify by extension so completion names the mp4. Nested non-media values stay ignored. Panel v0.15.163 already collects the array form of this shape (#2128).
+
+
+## [0.52.189] - 2026-09-03
+
+### MCP
+
+#### Fixed
+- **History/completion harvests a ComfyUI media ref under an unrecognised key (`dexter_video`, `nkd_video`) instead of only `images`/`videos`/`video`/`gifs` (#2845, #2847).** SaveVideoDexter emits `{filename, subfolder?, type?}` as a single object (or a one-item array); `buildCompletionNotification` / the panel_run watchdog now collect that one-level shape and classify by extension so completion names the mp4. Nested non-media values stay ignored. Panel v0.15.163 already collects the array form of this shape.
 
 
 ## [0.52.188] - 2026-09-03
