@@ -9,9 +9,15 @@ All notable changes to this project are documented here. This project adheres to
 ### MCP
 
 #### Fixed
-
-- **`get_image(action:"get")` connected-panel image relay is one hop: one `fetch_image` after the headless `/view` is unreachable, then one bounded error (#2864).** An unreachable headless `127.0.0.1:8188` used to wrap `PANEL_FETCH_FAILED` / `MALFORMED_REPLY` until `Maximum call stack size exceeded` while the live panel stayed connected. Nested fallback into `fetchImage` is refused. Published diagnostic origins are still not dialed as `/view` targets.
 - **`extract_deps` no longer names a pack the catalogue cannot prove owns the node (#2765).**
+
+## [0.52.196] - 2026-09-04
+
+### MCP
+
+#### Fixed
+
+- **`get_image(action:"get")` connected-panel image relay is one hop: one `fetch_image` after the headless `/view` is unreachable, then one bounded error (#2864, #2870).** An unreachable headless `127.0.0.1:8188` used to wrap `PANEL_FETCH_FAILED` / `MALFORMED_REPLY` until `Maximum call stack size exceeded` while the live panel stayed connected. Nested fallback into `fetchImage` is refused. Published diagnostic origins are still not dialed as `/view` targets.
 
 
 ## [0.52.195] - 2026-09-04
