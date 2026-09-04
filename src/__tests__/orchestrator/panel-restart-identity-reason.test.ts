@@ -196,9 +196,12 @@ describe("panel#1546 — the identity refusal names the missing proof", () => {
   });
 
   it("a DIFFERENT host:port is named as a different server", async () => {
-    const note = await refusalNote({ serverOrigin: "http://127.0.0.1:8189" });
+    // DNS-ambiguous + a different port: resolving localhost never reconciles
+    // :8189 with the boot :8188, so this stays a refusal. A proven
+    // 127.0.0.1:8189 tab (server-trusted local) is the #1593 restart path.
+    const note = await refusalNote({ serverOrigin: "http://localhost:8189" });
 
-    expect(note).toMatch(/http:\/\/127\.0\.0\.1:8189/);
+    expect(note).toMatch(/http:\/\/localhost:8189/);
     expect(note).toMatch(/a different server/);
     expect(note).not.toMatch(/127\.0\.0\.1 or ::1/);
   });
