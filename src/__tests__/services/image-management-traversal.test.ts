@@ -186,6 +186,122 @@ describe("getOutputImage — happy path (legitimate ComfyUI references)", () => 
   });
 });
 
+describe("getOutputImage — ZIP attachments (#2858)", () => {
+  const zipLocal = Buffer.from([0x50, 0x4b, 0x03, 0x04, 0x14, 0x00, 0x00, 0x00]);
+  const zipEmptyArchive = Buffer.from([0x50, 0x4b, 0x05, 0x06, 0x00, 0x00, 0x00, 0x00]);
+  const zipSpanned = Buffer.from([0x50, 0x4b, 0x07, 0x08, 0x00, 0x00, 0x00, 0x00]);
+  const zipFilename = "PCIDOL_Smart_Save_Suite_Image_v0.6.3_Video_v0.6.6.zip";
+
+  it("accepts a ZIP labeled application/zip with PK local-file magic", async () => {
+    fetchImageMock.mockResolvedValue({
+      base64: zipLocal.toString("base64"),
+      mimeType: "application/zip",
+    });
+
+    await expect(
+      getOutputImage(zipFilename, "input", "", { allowAttachment: true }),
+    ).resolves.toMatchObject({
+      base64: zipLocal.toString("base64"),
+      mimeType: "application/zip",
+      filename: zipFilename,
+    });
+  });
+
+  it("accepts application/x-zip-compressed with PK magic", async () => {
+    fetchImageMock.mockResolvedValue({
+      base64: zipLocal.toString("base64"),
+      mimeType: "application/x-zip-compressed",
+    });
+
+    await expect(
+      getOutputImage("suite.zip", "input", "", { allowAttachment: true }),
+    ).resolves.toMatchObject({
+      mimeType: "application/x-zip-compressed",
+      filename: "suite.zip",
+    });
+  });
+
+  it("accepts application/octet-stream ZIP with PK magic", async () => {
+    fetchImageMock.mockResolvedValue({
+      base64: zipLocal.toString("base64"),
+      mimeType: "application/octet-stream",
+    });
+
+    await expect(
+      getOutputImage("suite.zip", "input", "", { allowAttachment: true }),
+    ).resolves.toMatchObject({
+      mimeType: "application/octet-stream",
+      filename: "suite.zip",
+    });
+  });
+
+  it.each([
+    ["empty-archive EOCD", zipEmptyArchive],
+    ["spanned archive", zipSpanned],
+  ])("accepts PK %s signature", async (_label, bytes) => {
+    fetchImageMock.mockResolvedValue({
+      base64: bytes.toString("base64"),
+      mimeType: "application/zip",
+    });
+
+    await expect(
+      getOutputImage("empty.zip", "input", "", { allowAttachment: true }),
+    ).resolves.toMatchObject({ filename: "empty.zip", mimeType: "application/zip" });
+  });
+
+  it.each([
+    ["HTML login page", Buffer.from("<html>login</html>", "utf8").toString("base64")],
+    ["JSON error envelope", Buffer.from('{"error":"not found"}', "utf8").toString("base64")],
+  ])("refuses a ZIP-labeled %s as IMAGE_NOT_FOUND", async (_label, base64) => {
+    fetchImageMock.mockResolvedValue({ base64, mimeType: "application/zip" });
+
+    await expect(
+      getOutputImage("suite.zip", "input", "", { allowAttachment: true }),
+    ).rejects.toMatchObject({ code: "IMAGE_NOT_FOUND" });
+  });
+
+  it("refuses an empty ZIP body as IMAGE_NOT_FOUND", async () => {
+    fetchImageMock.mockResolvedValue({ base64: "", mimeType: "application/zip" });
+
+    await expect(
+      getOutputImage("suite.zip", "input", "", { allowAttachment: true }),
+    ).rejects.toMatchObject({ code: "IMAGE_NOT_FOUND" });
+  });
+
+  it("refuses a real ZIP without allowAttachment as ATTACHMENT_TYPE_UNSUPPORTED", async () => {
+    fetchImageMock.mockResolvedValue({
+      base64: zipLocal.toString("base64"),
+      mimeType: "application/zip",
+    });
+
+    await expect(getOutputImage("suite.zip", "input", "")).rejects.toMatchObject({
+      code: "ATTACHMENT_TYPE_UNSUPPORTED",
+    });
+  });
+
+  it("still refuses model/obj MIME on an OBJ even when ZIP MIME is accepted", async () => {
+    fetchImageMock.mockResolvedValue({
+      base64: Buffer.from("# mesh\n", "utf8").toString("base64"),
+      mimeType: "model/obj",
+    });
+
+    await expect(
+      getOutputImage("mesh.obj", "output", "", { allowAttachment: true }),
+    ).rejects.toMatchObject({ code: "IMAGE_NOT_FOUND" });
+  });
+
+  it("does not treat foo.txt labeled application/zip as an attachment", async () => {
+    fetchImageMock.mockResolvedValue({
+      base64: zipLocal.toString("base64"),
+      mimeType: "application/zip",
+    });
+
+    await expect(
+      getOutputImage("foo.txt", "input", "", { allowAttachment: true }),
+    ).rejects.toMatchObject({ code: "IMAGE_NOT_FOUND" });
+  });
+});
+
 describe("getOutputImage — local fallback for ComfyUI's 400 rejection (#2194)", () => {
   const filename = "dreamina-2026-08-12-1653-Locked-off camera, static 16_9 frame.smo....mp4";
   const mp4 = Buffer.from([
