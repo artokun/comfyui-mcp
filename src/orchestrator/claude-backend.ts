@@ -564,6 +564,23 @@ private async pollEmptyToolsets(
   for (const entry of entries) {
     if (typeof entry?.server_name === "string") withTools.add(entry.server_name);
   }
+  if (entries.length > 0 && withTools.size === 0) {
+    // Entries EXIST but not one of them carried a usable `server_name`. That is a
+    // shape this code does not understand, not a session whose servers all went
+    // quiet -- and the difference matters, because concluding the latter reports
+    // every healthy server as empty and burns its one reconnect.
+    //
+    // Exact discriminator, not a heuristic: a single parseable `server_name` puts a
+    // name in this set, so entries-but-no-names means NONE parsed. Both neighbours
+    // stay reportable -- an EMPTY list (every server contributed nothing, the #2742
+    // signal, already gated by the latch above) and "tools exist, none of them ours"
+    // (a populated set that simply omits our names).
+    //
+    // The `typeof` check above already declines to trust the field's type; drawing a
+    // confident conclusion from its absence would spend that distrust and then
+    // ignore it. Same shape as the #1539 refusal that fired on absence of evidence.
+    return null;
+  }
   const health = inspectMcpServers(names, reported);
   const notUp = new Set<string>([...health.degraded.map((d) => d.name), ...health.pending]);
   return names.filter((name) => !notUp.has(name) && !withTools.has(name));

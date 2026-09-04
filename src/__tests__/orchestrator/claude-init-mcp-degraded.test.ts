@@ -59,7 +59,7 @@ const hoisted = vi.hoisted(() => ({
   /** #1524 — successive getContextUsage() readings. The LAST one repeats once
    *  the queue drains, so a test that only cares about the pre-reconnect world
    *  supplies one entry. null throws, modelling a harness that cannot answer. */
-  usageQueue: [] as Array<null | { mcp_tools: Array<{ name: string; server_name: string; tokens: number }> }>,
+  usageQueue: [] as Array<null | { mcp_tools: Array<Record<string, unknown>> }>,
   usagePolls: 0,
 }));
 
@@ -565,6 +565,36 @@ describe("#1524 a server that keeps `connected` and stops contributing tools", (
     expect(notices[0].message).toContain("panel");
     expect(notices[0].message).toContain("ZERO tools");
     expect(notices[0].message).not.toContain("comfyui");
+  });
+
+  it("says NOTHING when entries exist but carry no usable server_name", async () => {
+    // A populated `mcp_tools` whose entries this code cannot attribute is a shape it
+    // does not understand -- not a session whose servers all went quiet. Concluding
+    // the latter reports every HEALTHY server as empty and spends its one reconnect.
+    //
+    // Not reachable on the pinned SDK, where `server_name: string` is required. It is
+    // reachable the moment that shape drifts, and the failure is silent to us and
+    // wrong in the direction that fabricates an outage.
+    hoisted.statusPoll = CONNECTED;
+    hoisted.usageQueue = [
+      { mcp_tools: [{ name: "mcp__comfyui__generate_image", server: "comfyui", tokens: 100 }] },
+    ];
+    const events = await driveTurns(deps, initWith(CONNECTED));
+    expect(noticesOf(events)).toHaveLength(0);
+    expect(hoisted.reconnectCalls).toHaveLength(0);
+  });
+
+  it("still reports when server_names parse but none of them is ours", async () => {
+    // The legitimate neighbour of the case above, and the reason the guard keys on
+    // "nothing parsed" rather than "our name is missing": tools exist, they are
+    // attributable, and none belongs to a configured server -- a real observation.
+    hoisted.statusPoll = CONNECTED;
+    hoisted.usageQueue = [{ mcp_tools: [tool("somethingelse", "a_tool")] }];
+    const events = await driveTurns(deps, initWith(CONNECTED));
+    const notices = noticesOf(events);
+    expect(notices).toHaveLength(1);
+    expect(notices[0].message).toContain("panel");
+    expect(notices[0].message).toContain("comfyui");
   });
 
   it("attempts the one reconnect the episode is owed", async () => {
