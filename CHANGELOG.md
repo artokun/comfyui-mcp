@@ -6,8 +6,11 @@ All notable changes to this project are documented here. This project adheres to
 
 ## Unreleased
 
+
 ### MCP
+
 #### Fixed
+- **`list_packs` `action:"list_templates"` uses the bound panel's `fetch_comfyui_read` relay when the template-index HTTP origin is unproven, and fails closed with `NO_PANEL_ORIGIN` when that origin stays unproven (#2839).** Compact `call_tool` listed templates through a loopback-only origin gate even while `panel_graph_outline` had a live bound canvas (`canvas_binding` / `graph_binding` bound). Native panel replies that carry the viewing witness are accepted; a unique published origin that matches the child's configured target may still be listed; mixed or malformed origin sets are not contacted.
 - **an MCP server that connects and registers NO tools is now reported (#2742).** Once this process has seen ANY namespaced MCP tool -- proof the harness lists them -- a session with NONE reports every configured server, closing the blind spot where a failure that emptied EVERY server looked identical to a harness that does not namespace.
 - **the same check now runs at every turn boundary, and can recover (#1524).** A server
 
