@@ -7,10 +7,16 @@ All notable changes to this project are documented here. This project adheres to
 ## Unreleased
 
 ### MCP
+#### Fixed
+- **download_model action:"status" now reports what the download cache is holding (#1477).** An UNREADABLE cache directory is now named and reported as unknown rather than silently omitted: "missing" and "there but unreadable" were one value, and the note treated both as nothing to say — leaving the one user who most needs the directory named back at the disk-usage treemap both reporters used.
+
+## [0.52.186] - 2026-09-03
+
+### MCP
 
 #### Fixed
-- **`panel_restart_comfyui` restarts the panel's bound local ComfyUI when that origin is a proven loopback instance on a different port than `COMFYUI_URL` (#1593).** A live tab whose server-observed Origin is a concrete loopback host (and whose socket arrived on the local listener) is Manager-rebooted even if MCP is still configured for `:8188` while the panel is on `:8189`. The busy guard still applies, a guessed or DNS-ambiguous origin is never restarted, and a relayed tab stays fail-closed.
-- **download_model action:"status" now reports what the download cache is holding (#1477).** An UNREADABLE cache directory is now named and reported as unknown rather than silently omitted: "missing" and "there but unreadable" were one value, and the note treated both as nothing to say — leaving the one user who most needs the directory named back at the disk-usage treemap both reporters used.
+- **`panel_restart_comfyui` restarts the panel's bound local ComfyUI when that origin is a proven loopback instance on a different port than `COMFYUI_URL` (#1593, #2832).** A live tab whose server-observed Origin is a concrete loopback host (and whose socket arrived on the local listener) is Manager-rebooted even if MCP is still configured for `:8188` while the panel is on `:8189`. The busy guard still applies, a guessed or DNS-ambiguous origin is never restarted, and a relayed tab stays fail-closed.
+
 
 ## [0.52.185] - 2026-09-03
 
