@@ -9,6 +9,7 @@ All notable changes to this project are documented here. This project adheres to
 ### MCP
 
 #### Fixed
+- **`panel_set_widget` / other mutations accept named node ids the graph readers print (#2855).** API-style graphs use string ids (`sampler`, `mac_studio_vlm`). `panel_graph_outline` already returned those; writes refused them at MCP validation (`NODE_ID_PATTERN` was integer / `120:104` only). Named ids stay strings on the wire — they are never `parseInt`'d. `"42px"` is still refused so it cannot become node 42.
 - **a relaunched ComfyUI no longer dies on an emoji under a legacy Windows codepage The explicit opt-out is honoured in ANY case: Windows environment names are case-insensitive and these paths hand the helper a plain object rather than `process.env`, whose case-insensitivity does not survive a spread — so a deliberate `PythonUtf8=0` was invisible and would have been overridden by a second key differing only in case.
 
 ## [0.52.190] - 2026-09-04
