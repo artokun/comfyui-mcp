@@ -12,7 +12,10 @@
 // script — the same file from two independent sources.
 
 import { describe, expect, it } from "vitest";
-import { interpreterFlagsFromOsArgv } from "../../services/process-control.js";
+import {
+  interpreterFlagsFromOsArgv,
+  __processControlTestHooks,
+} from "../../services/process-control.js";
 
 const SCRIPT = "C:/ComfyUI/main.py";
 const PY = "C:/ComfyUI/python_embeded/python.exe";
@@ -101,5 +104,27 @@ describe("#2693 recovery refuses without the identity binding", () => {
     expect(
       interpreterFlagsFromOsArgv({ argv: [], osArgv: [PY, "-s", SCRIPT], osArgvExact: true }),
     ).toEqual([]);
+  });
+});
+
+describe("#2693 relaunchArgv actually re-attaches them", () => {
+  // The helper tests above all passed with the recovery severed from relaunchArgv --
+  // extraction covered, re-attachment not. That is the half a relaunch uses.
+  const { relaunchArgv } = __processControlTestHooks;
+
+  it("splices the flags between the script and its arguments", () => {
+    const out = relaunchArgv({
+      argv: [SCRIPT, "--listen", "0.0.0.0"],
+      osArgv: [PY, "-s", SCRIPT, "--listen", "0.0.0.0"],
+      osArgvExact: true,
+    } as never);
+    expect(out).toEqual([SCRIPT, "-s", "--listen", "0.0.0.0"]);
+  });
+
+  it("returns sys.argv UNCHANGED when there is nothing to recover", () => {
+    // The ordinary case must be byte-identical to before this existed.
+    const argv = [SCRIPT, "--listen"];
+    expect(relaunchArgv({ argv, osArgv: [PY, SCRIPT], osArgvExact: true } as never)).toEqual(argv);
+    expect(relaunchArgv({ argv } as never)).toEqual(argv);
   });
 });

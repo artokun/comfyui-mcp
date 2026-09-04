@@ -6875,6 +6875,13 @@ function observedLaunch(info: ProcessInfo): {
 }
 
 export const __processControlTestHooks = {
+  /**
+   * #2693 — the WIRING, not just the helper. Mutation showed the flag recovery could
+   * be severed from `relaunchArgv` with every helper test still green: the extraction
+   * was covered and the re-attachment was not, which is the half a relaunch actually
+   * uses.
+   */
+  relaunchArgv,
   reset(): void {
     detachSupervisor();
     lastProcessInfo = null;
