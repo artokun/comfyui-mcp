@@ -1923,11 +1923,11 @@ describe("restart truthfulness + Pinokio-shaped refusal (#742)", () => {
   });
 
   it("bounds the version read when HEADERS arrive but the BODY stalls (#2320)", async () => {
-    // Codex gate r2, P1: AbortSignal.timeout only cancels the exchange up to
-    // headers. Once they land, res.text() keeps the caller pending for as long as
-    // the body takes — the #1672 failure mode raceAbort exists for. The previous
-    // test stalls BEFORE headers and cannot see this; here the response is fully
-    // formed and only its body never completes.
+    // Codex gate r2, P1: raceAbort bounds the enclosing version read when the
+    // body never completes. On supported Node undici errors the stream when the
+    // fetch signal fires, so this settles at the budget either way; the previous
+    // test stalls BEFORE headers and cannot see a headers-then-stall. Here the
+    // response is fully formed and only its body never completes.
     installRemoteRebootFixture();
     const fetchMock = vi.fn(async (url: unknown) => {
       const u = String(url);

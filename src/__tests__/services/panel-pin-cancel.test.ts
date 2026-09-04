@@ -53,12 +53,16 @@ const managerCalls: Array<{ url: string; method: string }> = [];
 let managerHandler: (url: string, init?: RequestInit) => Response = () =>
   new Response("not found", { status: 404 });
 
-vi.mock("../../comfyui/fetch.js", () => ({
-  comfyuiFetch: vi.fn(async (url: string, init?: RequestInit) => {
-    managerCalls.push({ url, method: init?.method ?? "GET" });
-    return managerHandler(url, init);
-  }),
-}));
+vi.mock("../../comfyui/fetch.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../../comfyui/fetch.js")>();
+  return {
+    ...actual,
+    comfyuiFetch: vi.fn(async (url: string, init?: RequestInit) => {
+      managerCalls.push({ url, method: init?.method ?? "GET" });
+      return managerHandler(url, init);
+    }),
+  };
+});
 
 import { config } from "../../config.js";
 import {
