@@ -1471,6 +1471,7 @@ _No user-facing changes._
 
 #### Fixed
 - target tunnels at the bound host (#2023) (#2036)
+- **the dump reader names three more exception codes a reporter would otherwise quote as bare hex (#2023).** Found by running it against real Windows minidumps rather than only its fixtures: a genuine `0xC0000006` printed the number and no explanation, though EXCEPTION_IN_PAGE_ERROR (a failing disk or a mapping that went away) is a materially different diagnosis from an access violation. The two corruption checks (`0xC0000409`, `0xC0000374`) are named with the caveat that decides how to read them — for both, the faulting module is where the damage was NOTICED, not where it was done.
 - recover subgraph widget write scope (#2037)
 - default the panel bridge to 9199 and never kill a foreign holder (#2034)
 

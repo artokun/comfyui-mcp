@@ -223,3 +223,35 @@ describe("#2023 the report states the verdict, rather than leaving it to be infe
     expect(describeMinidump("x", base as never)).toContain("cannot say either way");
   });
 });
+
+// Found by pointing this at three REAL dumps rather than only the fixtures above:
+// a genuine 0xC0000006 printed the bare hex and no gloss. That is a materially
+// different diagnosis from an access violation — the pager could not read a page,
+// which is a failing disk or a mapping that went away, not a pointer bug — and a
+// reporter quoting only the number cannot tell those apart. Which is the entire
+// premise of this script.
+//
+// The two corruption codes are here for the same reason and carry the caveat that
+// matters for panel#2023: for both, the faulting module is where the damage was
+// NOTICED, not where it was done, so "module X faulted" must not be read as
+// "module X has the bug".
+describe("#2023 exception codes a reporter would otherwise quote as bare hex", () => {
+  const glossFor = (code: number) =>
+    readMinidump(makeDump({ code, address: 0x7ff8_0000_1234n, modules: [DWRITE] })).exception?.meaning;
+
+  it("names EXCEPTION_IN_PAGE_ERROR", () => {
+    expect(glossFor(0xc0000006)).toMatch(/EXCEPTION_IN_PAGE_ERROR/);
+    expect(glossFor(0xc0000006)).toMatch(/NOT a pointer bug/);
+  });
+
+  it("names the two corruption checks, and says the site is not the cause", () => {
+    expect(glossFor(0xc0000409)).toMatch(/STACK_BUFFER_OVERRUN/);
+    expect(glossFor(0xc0000409)).toMatch(/not the bug/);
+    expect(glossFor(0xc0000374)).toMatch(/HEAP_CORRUPTION/);
+    expect(glossFor(0xc0000374)).toMatch(/not where it happened/);
+  });
+
+  it("still leaves an unknown code as bare hex rather than inventing a name", () => {
+    expect(glossFor(0x1234abcd)).toBeNull();
+  });
+});

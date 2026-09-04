@@ -41,6 +41,13 @@ const KNOWN_CODES = new Map([
   [0xc00000fd, "EXCEPTION_STACK_OVERFLOW"],
   [0xc000001d, "EXCEPTION_ILLEGAL_INSTRUCTION"],
   [0xc0000094, "EXCEPTION_INT_DIVIDE_BY_ZERO"],
+  // Seen on a real dump while validating this against files it did not construct:
+  // a bare 0xC0000006 printed no gloss, and it is a genuinely different diagnosis
+  // from an access violation — the pager could not read the page, classically a
+  // failing disk or a network mapping that went away, not a pointer bug.
+  [0xc0000006, "EXCEPTION_IN_PAGE_ERROR — the pager could not read a page (failing disk, or a mapping that went away), NOT a pointer bug"],
+  [0xc0000409, "STATUS_STACK_BUFFER_OVERRUN — /GS or __fastfail; a corruption CHECK fired, so the address is the check site, not the bug"],
+  [0xc0000374, "STATUS_HEAP_CORRUPTION — the heap detected damage done EARLIER; the faulting module is where it was noticed, not where it happened"],
   [0x80000003, "EXCEPTION_BREAKPOINT — a deliberate __debugbreak/abort, NOT a memory fault"],
   [0xe0000008, "a RAISED exception (RaiseException), not a hardware fault"],
   [0x0517a7ed, "Crashpad's SIMULATED code — a dump someone REQUESTED, not a crash"],
