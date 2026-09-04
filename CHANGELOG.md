@@ -6,13 +6,18 @@ All notable changes to this project are documented here. This project adheres to
 
 ## Unreleased
 
+### MCP
+
+#### Fixed
+- **download_model action:"status" now reports what the download cache is holding (#1477).** An UNREADABLE cache directory is now named and reported as unknown rather than silently omitted: "missing" and "there but unreadable" were one value, and the note treated both as nothing to say — leaving the one user who most needs the directory named back at the disk-usage treemap both reporters used.
+- **an out-of-space refusal now names the DESTINATION volume (#1477).** `insufficientCacheSpaceMessage` has accepted `destDir`/`destFree` since it was written — it says, when the destination has room and the staging cache does not, that this is one setting rather than a fatal error. No caller ever passed them, so that clause could not fire. The final destination is threaded from `downloadWithCache` (the only layer that knows it; below it every path is the CACHE path) down to the precheck. That is the reported shape exactly: 32 GB bound for D:, staged on a C: that could not hold it.
+
+## [0.52.190] - 2026-09-04
 
 ### MCP
 
 #### Fixed
-- **`get_workflow` `action:"strip"` does not Win32-resolve a remote Linux path on the MCP host (#2782).** Against a remote ComfyUI, an absolute POSIX `path` such as `/mydata/.../models/workflows/example.json` is no longer opened as `C:\mydata\...`. Library-shaped tails (`user/default/workflows`, `user/workflows`, `models/workflows`) are fetched from that server's userdata API; any other remote absolute path is refused instead of a local ENOENT.
-- **download_model action:"status" now reports what the download cache is holding (#1477).** An UNREADABLE cache directory is now named and reported as unknown rather than silently omitted: "missing" and "there but unreadable" were one value, and the note treated both as nothing to say — leaving the one user who most needs the directory named back at the disk-usage treemap both reporters used.
-- **an out-of-space refusal now names the DESTINATION volume (#1477).** `insufficientCacheSpaceMessage` has accepted `destDir`/`destFree` since it was written — it says, when the destination has room and the staging cache does not, that this is one setting rather than a fatal error. No caller ever passed them, so that clause could not fire. The final destination is threaded from `downloadWithCache` (the only layer that knows it; below it every path is the CACHE path) down to the precheck. That is the reported shape exactly: 32 GB bound for D:, staged on a C: that could not hold it.
+- **`get_workflow` `action:"strip"` does not Win32-resolve a remote Linux path on the MCP host (#2782, #2811).** Against a remote ComfyUI, an absolute POSIX `path` such as `/mydata/.../models/workflows/example.json` is no longer opened as `C:\mydata\...`. Library-shaped tails (`user/default/workflows`, `user/workflows`, `models/workflows`) are fetched from that server's userdata API; any other remote absolute path is refused instead of a local ENOENT.
 
 ## [0.52.189] - 2026-09-03
 
