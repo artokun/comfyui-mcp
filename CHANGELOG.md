@@ -9,6 +9,8 @@ All notable changes to this project are documented here. This project adheres to
 ### MCP
 
 #### Fixed
+
+- get_image(action:"get") saves an existing ZIP from ComfyUI input/ instead of misreporting IMAGE_NOT_FOUND when /view returned 2xx application/zip. IMAGE_NOT_FOUND stays reserved for a missing or failed /view. (#2858)
 - **`extract_deps` no longer names a pack the catalogue cannot prove owns the node (#2765).**
 
 ## [0.52.191] - 2026-09-04
