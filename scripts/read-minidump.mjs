@@ -29,6 +29,7 @@
 // little-endian. Nothing here writes, uploads, or phones anywhere: a crash dump
 // contains process memory, so this stays a local read.
 import { readFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
 
 const MDMP_SIGNATURE = 0x504d444d; // 'MDMP'
 const STREAM_TYPE = { threadList: 3, moduleList: 4, exception: 6, systemInfo: 7, crashpadInfo: 0x43500001 };
@@ -272,8 +273,13 @@ export function describeMinidump(name, dump) {
   return lines.join("\n");
 }
 
+// Run the CLI only when THIS file is the entry point. Comparing URLs rather than
+// matching the path's tail: the tail test made the script silent the moment it was
+// copied or renamed -- it printed nothing and exited 0, which is indistinguishable
+// from "ran fine, found nothing". That matters because the whole point of this file
+// is to be handed to a reporter, who will put it wherever they put it.
 const invokedDirectly =
-  process.argv[1] && process.argv[1].replace(/\\/g, "/").endsWith("scripts/read-minidump.mjs");
+  !!process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href;
 if (invokedDirectly) {
   const files = process.argv.slice(2);
   if (files.length === 0) {

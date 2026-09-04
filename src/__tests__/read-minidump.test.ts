@@ -14,6 +14,11 @@
 // machine happened to produce.
 
 import { describe, expect, it } from "vitest";
+import { spawnSync } from "node:child_process";
+import { copyFileSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 // @ts-expect-error plain-JS module under scripts/, no type declarations
 import { readMinidump, describeMinidump } from "../../scripts/read-minidump.mjs";
 
@@ -320,5 +325,53 @@ describe("#2023 the process TYPE is reported when Chromium wrote it", () => {
     // at whatever a reporter happens to have.
     const d = readMinidump(makeDump({ address: 0x1n, modules: [DWRITE] }));
     expect(() => describeMinidump("x", d)).not.toThrow();
+  });
+});
+
+describe("panel#2023 the CLI runs wherever the reporter put the file", () => {
+  // The guard used to match the tail of process.argv[1] against
+  // "scripts/read-minidump.mjs". A copy under any other name then printed NOTHING
+  // and exited 0 — indistinguishable from a clean run with no findings, on a script
+  // whose entire purpose is to be handed to someone else and run from their disk.
+  const SCRIPT = fileURLToPath(new URL("../../scripts/read-minidump.mjs", import.meta.url));
+
+  function runCli(scriptPath: string, dumpPath: string) {
+    return spawnSync(process.execPath, [scriptPath, dumpPath], { encoding: "utf8" });
+  }
+
+  it("produces the same report from a renamed copy as from its own path", () => {
+    const dir = mkdtempSync(join(tmpdir(), "cmcp-2023-cli-"));
+    try {
+      const dump = join(dir, "sample.dmp");
+      writeFileSync(
+        dump,
+        makeDump({
+          code: 0xc0000005,
+          address: 0x7ffb0000_1234n,
+          modules: [{ base: 0x7ffb0000_0000n, size: 0x20000, name: "C:\Windows\System32\DWrite.dll" }],
+        }),
+      );
+
+      const original = runCli(SCRIPT, dump);
+      expect(original.status).toBe(0);
+      expect(original.stdout).toMatch(/DWrite\.dll/);
+
+      const renamed = join(dir, "dumpreader.mjs");
+      copyFileSync(SCRIPT, renamed);
+      const copied = runCli(renamed, dump);
+
+      // The regression: this used to be "" with status 0.
+      expect(copied.stdout.trim().length).toBeGreaterThan(0);
+      expect(copied.stdout).toBe(original.stdout);
+      expect(copied.status).toBe(0);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("still refuses to run its CLI when merely IMPORTED", () => {
+    // This suite imports the module at the top of the file. If the guard were wrong
+    // in the other direction, importing it would have run the CLI and exited 2.
+    expect(typeof readMinidump).toBe("function");
   });
 });
