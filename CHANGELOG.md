@@ -9,7 +9,10 @@ All notable changes to this project are documented here. This project adheres to
 ### MCP
 
 #### Fixed
+
+- **`get_image(action:"get")` connected-panel image relay is one hop: one `fetch_image` after the headless `/view` is unreachable, then one bounded error (#2864).** An unreachable headless `127.0.0.1:8188` used to wrap `PANEL_FETCH_FAILED` / `MALFORMED_REPLY` until `Maximum call stack size exceeded` while the live panel stayed connected. Nested fallback into `fetchImage` is refused. Published diagnostic origins are still not dialed as `/view` targets.
 - list_local_models recovers remote inventory from panel object_info when fetch_comfyui_read rejects models/<category> as outside the panel allowlist (#2511)
+
 
 ## [0.52.195] - 2026-09-04
 
