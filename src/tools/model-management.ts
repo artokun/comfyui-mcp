@@ -1224,10 +1224,13 @@ async function cacheFootprintNote(): Promise<string> {
   // makes that reconciliation true-unless — in exactly the situation this report
   // exists for, a user comparing it against a treemap. Counted, never sized: `stat`
   // on a directory reports the inode, not the bytes under it.
+  // "may", not "will": an EMPTY subdirectory contributes nothing, so the totals can
+  // still agree. Saying "will" would assert a discrepancy this code has not measured —
+  // the same overclaim the sized-vs-counted decision above avoids.
   if (f.nonFileEntries > 0) {
     const plural = f.nonFileEntries === 1 ? "entry" : "entries";
     parts.push(
-      `${f.nonFileEntries} non-file ${plural} (subdirectory or symlink) NOT counted above, so these numbers will under-report what \`du\` shows`,
+      `${f.nonFileEntries} non-file ${plural} (subdirectory or symlink) NOT counted above, so these numbers may under-report what \`du\` shows`,
     );
   }
   const levers =
