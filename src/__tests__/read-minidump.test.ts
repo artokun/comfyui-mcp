@@ -158,12 +158,13 @@ describe("panel#2023 the reader answers which crash this is", () => {
     expect(describeMinidump("x", d)).toMatch(/not a crash dump/);
   });
 
-  it("reports whether the text stack was even loaded", () => {
+  it("reports whether the text-rendering DLLs were even loaded", () => {
     const withText = describeMinidump("x", readMinidump(makeDump({ modules: [DWRITE, APP] })));
     // Labelled "LOADED (not implicated)" since DWrite.dll is loaded in EVERY GUI
     // process — measured on three real Comfy Desktop dumps. The old wording read as
     // a hit to anyone scanning for it, which is the one thing this tool must not do.
-    expect(withText).toMatch(/text stack LOADED \(not implicated\): DWrite\.dll/);
+    expect(withText).toMatch(/text-rendering DLLs LOADED \(module list, NOT call stack\): DWrite\.dll/);
+    expect(withText).not.toMatch(/text stack LOADED/);
     const without = describeMinidump("x", readMinidump(makeDump({ modules: [APP] })));
     expect(without).toMatch(/no DirectWrite\/Direct2D loaded/);
   });
@@ -204,14 +205,18 @@ describe("#2023 the report states the verdict, rather than leaving it to be infe
     exception: { codeHex: "0xc0000005", addressHex: "0x5" },
   };
 
-  it("says NOT the #2023 shape when a text DLL is merely loaded", () => {
+  it("does NOT rule out #2023 when a text DLL is merely loaded", () => {
     const out = describeMinidump("x", {
       ...base,
       faultingModule: { name: "C:/Program Files/Comfy Desktop/Comfy Desktop.exe", offset: "0x1" },
     } as never);
     expect(out).toContain("is NOT a text-rendering DLL");
     // And the module list must not imply otherwise.
-    expect(out).toContain("LOADED (not implicated)");
+    // #2023's own dump faults in Comfy Desktop.exe with DWrite up the CALL stack,
+    // so this branch describes the canonical case and must not dismiss it.
+    expect(out).toMatch(/does NOT rule out/);
+    expect(out).not.toMatch(/not the panel#2023 shape/);
+    expect(out).toContain("module list, NOT call stack");
     expect(out).not.toContain("text stack present");
   });
 
@@ -373,5 +378,48 @@ describe("panel#2023 the CLI runs wherever the reporter put the file", () => {
     // This suite imports the module at the top of the file. If the guard were wrong
     // in the other direction, importing it would have run the CLI and exited 2.
     expect(typeof readMinidump).toBe("function");
+  });
+});
+
+describe("panel#2023 the verdict must not answer a question it cannot see", () => {
+  // #2023's OWN dump: EXCEPTION_ACCESS_VIOLATION at `Comfy Desktop.exe+0x4147f6e`,
+  // with `DWrite.dll` TEN FRAMES UP the call stack. The faulting module is therefore
+  // NOT a text DLL on the canonical instance of the bug, and an earlier revision
+  // answered exactly that dump "not the panel#2023 shape".
+  //
+  // This parser reads the exception record and the module list; it does not walk the
+  // stack. So on a non-text faulting module it may report what it saw and must not
+  // rule the hypothesis out.
+  const reportShaped = () =>
+    makeDump({
+      code: 0xc0000005,
+      address: 0x7ff6_0414_7f6en,
+      modules: [
+        { base: 0x7ff6_0000_0000n, size: 0x8000000, name: "C:\Program Files\Comfy Desktop\Comfy Desktop.exe" },
+        { base: 0x7ffb_0000_0000n, size: 0x200000, name: "C:\Windows\System32\DWrite.dll" },
+      ],
+    });
+
+  it("does NOT rule out #2023 when the fault is outside a text DLL", () => {
+    const text = describeMinidump("x", readMinidump(reportShaped()));
+    expect(text).toContain("Comfy Desktop.exe");
+    expect(text).toMatch(/does NOT rule out/);
+    // The regression: this exact sentence, on this exact dump shape, was the bug.
+    expect(text).not.toMatch(/not the panel#2023 shape/);
+  });
+
+  it("still says the loaded text DLLs are a MODULE LIST, not a call stack", () => {
+    const text = describeMinidump("x", readMinidump(reportShaped()));
+    expect(text).toMatch(/module list, NOT call stack/);
+    expect(text).not.toMatch(/text stack LOADED/);
+  });
+
+  it("a fault INSIDE a text DLL is still reported as consistent with #2023", () => {
+    const d = makeDump({
+      code: 0xc0000005,
+      address: 0x7ffb_0000_1234n,
+      modules: [{ base: 0x7ffb_0000_0000n, size: 0x200000, name: "C:\Windows\System32\DWrite.dll" }],
+    });
+    expect(describeMinidump("x", readMinidump(d))).toMatch(/consistent with panel#2023/);
   });
 });

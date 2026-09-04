@@ -204,6 +204,7 @@ export function readMinidump(buf) {
 
 /** The text a bug report should carry. Kept separate so it is testable. */
 export function describeMinidump(name, dump) {
+  const LF = String.fromCharCode(10);
   const lines = [`=== ${name} ===`];
   if (dump.error) return [...lines, `  ${dump.error}`].join("\n");
   if (dump.system) lines.push(`  Windows ${dump.system.major}.${dump.system.minor} build ${dump.system.build}`);
@@ -251,7 +252,7 @@ export function describeMinidump(name, dump) {
       : "") +
     `  modules    ${dump.modules.length} loaded` +
       (text.length
-        ? `; text stack LOADED (not implicated): ${text.map((m) => m.name.split(/[\\/]/).pop()).join(", ")}`
+        ? `; text-rendering DLLs LOADED (module list, NOT call stack): ${text.map((m) => m.name.split(/[\\/]/).pop()).join(", ")}`
         : "; no DirectWrite/Direct2D loaded"),
   );
   // panel#2023 asks ONE question -- is the faulting module a text-rendering DLL --
@@ -262,10 +263,21 @@ export function describeMinidump(name, dump) {
   // verdict instead of leaving it to be inferred from a list.
   if (dump.faultingModule) {
     const faultingIsText = /dwrite|d2d1|dcomp|gdi32/i.test(dump.faultingModule.name);
+    // The NEGATIVE branch must not conclude "not panel#2023". That issue's own dump
+    // faults at `Comfy Desktop.exe+0x4147f6e` with DWrite.dll TEN FRAMES UP the call
+    // stack -- so the canonical instance of the bug has a non-text faulting module,
+    // and the old wording answered it "not the panel#2023 shape". A false negative on
+    // the one case this exists to recognise.
+    //
+    // This parser reads the exception record and the module list. It does not walk
+    // the call stack, so it cannot see a text DLL that is a CALLER rather than the
+    // fault site, and must not pronounce on a hypothesis that lives there.
     lines.push(
       faultingIsText
-        ? '  verdict    the FAULTING module is a text-rendering DLL -- the panel#2023 shape'
-        : '  verdict    the faulting module is NOT a text-rendering DLL -- not the panel#2023 shape',
+        ? '  verdict    the FAULTING module is a text-rendering DLL -- consistent with panel#2023'
+        : '  verdict    the faulting module is NOT a text-rendering DLL. This does NOT rule out'
+          + LF + '             panel#2023: its own dump faults inside Comfy Desktop.exe with DWrite'
+          + LF + '             ten frames up the stack, which this reader does not walk.',
     );
   } else {
     lines.push('  verdict    <no faulting module resolved -- cannot say either way>');
