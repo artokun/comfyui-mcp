@@ -31,7 +31,7 @@
 import { readFileSync } from "node:fs";
 
 const MDMP_SIGNATURE = 0x504d444d; // 'MDMP'
-const STREAM_TYPE = { threadList: 3, moduleList: 4, exception: 6, systemInfo: 7 };
+const STREAM_TYPE = { threadList: 3, moduleList: 4, exception: 6, systemInfo: 7, crashpadInfo: 0x43500001 };
 /** MINIDUMP_MODULE is a fixed 108 bytes on both 32- and 64-bit dumps. */
 const MODULE_RECORD_BYTES = 108;
 
@@ -80,7 +80,7 @@ export function readMinidump(buf) {
     streams.set(buf.readUInt32LE(at), { size: buf.readUInt32LE(at + 4), rva: buf.readUInt32LE(at + 8) });
   }
 
-  const out = { streamCount, modules: [] };
+  const out = { streamCount, modules: [], annotations: {} };
 
   const exception = streams.get(STREAM_TYPE.exception);
   if (exception && exception.rva + 40 <= buf.length) {
@@ -126,6 +126,39 @@ export function readMinidump(buf) {
       build: buf.readUInt32LE(systemInfo.rva + 16),
     };
   }
+
+  // Crashpad's SIMPLE annotation dictionary (#2023). Electron writes the product
+  // and the Chromium/Electron version here, which is the correlator a text-stack
+  // crash needs: two reports are only the same bug if they are the same renderer.
+  //
+  // Only the simple dictionary is read. Crashpad ALSO carries per-module annotation
+  // objects (where `ptype` lives, naming browser vs renderer vs gpu-process), but
+  // that structure is nested differently and a first attempt at it read garbage
+  // memory. A diagnostic that prints rubbish is worse than one that omits a field,
+  // so it is left unread rather than guessed at.
+  const crashpad = streams.get(STREAM_TYPE.crashpadInfo);
+  if (crashpad && crashpad.rva + 48 <= buf.length) {
+    // version u32 | report_id 16 | client_id 16 | simple_annotations {size,rva}
+    const dictRva = buf.readUInt32LE(crashpad.rva + 4 + 16 + 16 + 4);
+    if (dictRva && dictRva + 4 <= buf.length) {
+      const count = buf.readUInt32LE(dictRva);
+      if (count > 0 && count <= 64) {
+        const str = (rva) => {
+          if (!rva || rva + 4 > buf.length) return null;
+          const len = buf.readUInt32LE(rva);
+          if (len > 4096 || rva + 4 + len > buf.length) return null;
+          return buf.toString("utf8", rva + 4, rva + 4 + len);
+        };
+        for (let i = 0; i < count; i++) {
+          const e = dictRva + 4 + i * 8;
+          if (e + 8 > buf.length) break;
+          const k = str(buf.readUInt32LE(e));
+          const v = str(buf.readUInt32LE(e + 4));
+          if (k && v !== null) out.annotations[k] = v;
+        }
+      }
+    }
+  }
   return out;
 }
 
@@ -162,6 +195,13 @@ export function describeMinidump(name, dump) {
   // nobody has confirmed is the right file.
   `  process    ${dump.modules[0]?.name ?? "<no module list>"}
 ` +
+    // The Electron/Chromium build, when the dump carries Crashpad annotations. Two
+    // text-stack crashes are only the SAME bug if they are the same renderer, and an
+    // app version does not give that.
+    (dump.annotations?.prod || dump.annotations?.ver
+      ? `  built by   ${dump.annotations.prod ?? "?"} ${dump.annotations.ver ?? "?"}
+`
+      : "") +
     `  modules    ${dump.modules.length} loaded` +
       (text.length
         ? `; text stack LOADED (not implicated): ${text.map((m) => m.name.split(/[\\/]/).pop()).join(", ")}`

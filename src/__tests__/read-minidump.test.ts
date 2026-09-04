@@ -277,3 +277,24 @@ describe("#2023 the report names the process, not just the fault", () => {
     expect(describeMinidump("x", readMinidump(d))).toMatch(/process\s+<no module list>/);
   });
 });
+
+// Crashpad's SIMPLE annotation dictionary carries the Electron/Chromium build.
+// That is the correlator a text-stack crash needs: two reports are only the same
+// bug if they are the same renderer, and an app version does not give that.
+//
+// Only the simple dictionary is read. Crashpad also stores per-module annotation
+// OBJECTS — where `ptype` lives, naming browser vs renderer vs gpu-process — but a
+// first attempt at that nesting read garbage memory, so it is deliberately left
+// unparsed. A diagnostic that prints rubbish is worse than one that omits a field.
+describe("#2023 the report names the Electron build when the dump carries it", () => {
+  it("survives a dump with no CrashpadInfo stream", () => {
+    const d = readMinidump(makeDump({ address: 0x1n, modules: [DWRITE] }));
+    expect(d.annotations).toEqual({});
+    expect(describeMinidump("x", d)).not.toMatch(/built by/);
+  });
+
+  it("never invents a build line from an empty dictionary", () => {
+    const d = readMinidump(makeDump({ address: 0x1n, modules: [DWRITE] }));
+    expect(describeMinidump("x", d)).not.toMatch(/built by\s+\?/);
+  });
+});
