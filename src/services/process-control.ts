@@ -5245,11 +5245,11 @@ async function probeManagerMajorForReport(base: string): Promise<number | undefi
   const signal = AbortSignal.timeout(REPORT_VERSION_PROBE_BUDGET_MS);
   for (const path of MANAGER_VERSION_ROUTES) {
     try {
-      // raceAbort covers the BODY too (codex gate r2, P1). AbortSignal.timeout only
-      // cancels the exchange up to headers — once they arrive, `res.text()` keeps the
-      // caller pending for as long as the body takes, which is the #1672 failure mode
-      // this helper exists for. A host that answers headers and then stalls the body
-      // is the same stalled proxy the budget is here to survive.
+      // raceAbort covers the enclosing read (codex gate r2, P1). On supported Node,
+      // undici errors the body stream when the fetch signal fires, so `res.text()`
+      // does reject at the deadline; raceAbort still bounds a consumer that does not
+      // observe abort. A host that answers headers and then stalls the body is the
+      // same stalled proxy the budget is here to survive.
       const major = await raceAbort(signal, async () => {
         const res = await comfyuiFetch(`${base}${path}`, { method: "GET", signal });
         if (!res.ok) return undefined;
