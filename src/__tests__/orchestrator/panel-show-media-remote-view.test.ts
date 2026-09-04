@@ -95,7 +95,7 @@ function makeCtx(opts?: {
     tabId: "wf:workflows/a.json",
     bridge: {
       isHeadless: opts?.isHeadless ?? (() => false),
-    } as unknown as PanelToolCtx["bridge"],
+    },
   } as PanelToolCtx;
   return { ctx, calls };
 }
