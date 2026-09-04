@@ -6,6 +6,17 @@ All notable changes to this project are documented here. This project adheres to
 
 ## Unreleased
 
+### MCP
+#### Fixed
+- **the panel's live-canvas tools are no longer deferred behind tool search (panel#291).**
+  The SDK defers in-process MCP tool schemas by default once tool search is enabled, and
+  `alwaysLoad` exists because "the tools must be present when the turn-1 prompt is built".
+  The reported Claude-backend failure has every `panel_*` tool absent while the SPAWNED
+  `comfyui` server works, and in-process-vs-spawned is the one relevant difference between
+  them. NOT asserted as the cause — deferral would still leave the tools findable via
+  ToolSearch, and the report says they are not — this removes the variable so the next
+  report distinguishes "deferred and unfound" from "never registered".
+
 ## [0.52.186] - 2026-09-03
 
 ### MCP

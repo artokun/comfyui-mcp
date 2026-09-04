@@ -29521,6 +29521,24 @@ export function createPanelMcpServer(
     name: "comfyui-panel",
     version: "1.0.0",
     tools,
+    // panel#291 — these tools must be in the turn-1 prompt, not behind tool search.
+    //
+    // The SDK defers MCP tool schemas by default once tool search is on
+    // ("Default: tools are deferred when tool search is enabled", on
+    // `CreateSdkMcpServerOptions.alwaysLoad`), and the transport configs spell out
+    // why that matters: `alwaysLoad` exists "since the tools must be present when
+    // the turn-1 prompt is built".
+    //
+    // The reported failure is a Claude session where every `panel_*` tool is absent
+    // from BOTH the declared list and the deferred catalog, while the spawned
+    // `comfyui` stdio server is fine — the two differ precisely in being deferred
+    // in-process vs. spawned. Deferral alone does not explain the catalog being
+    // empty too, so this is not asserted as the cause; it removes the deferral
+    // variable so the next report distinguishes the two remaining explanations.
+    //
+    // Cost is prompt size for a bounded, known tool set that a panel session is
+    // expected to use on turn 1 anyway.
+    alwaysLoad: true,
   }) as McpSdkServerConfigWithInstance & { rebindTab?: (newTabId: string) => void };
   // Re-point this server's bound tab after a panel tab-id migration (#568 Defect
   // 1). ctx.tabId is read LIVE by every handler (and by call/confirm), so updating
