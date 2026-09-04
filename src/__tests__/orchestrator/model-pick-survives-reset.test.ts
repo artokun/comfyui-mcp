@@ -123,3 +123,45 @@ describe("#2759 the picker's model survives a New chat", () => {
     expect(backend.models[0]).toBe("claude-opus-5");
   });
 });
+
+describe("#2759 the picker's EFFORT survives a New chat too", () => {
+  // The same commit removes `this.effortByKey.delete(tabId)` from reset(), so two
+  // behaviours changed and only the model one was covered. `effortFor` reads through
+  // `Map.has()`, which makes an explicit "use the SDK default" (undefined, but
+  // PRESENT) a third state distinct from "never picked" — so both halves need
+  // pinning or either can regress alone.
+  it("respawns on the PICKED effort after reset()", async () => {
+    const backend = new ModelRecordingBackend();
+    const manager = makeManager(backend);
+    const key = "scope::claude";
+
+    await manager.setOptions(key, { effort: "high" });
+    expect(manager.currentEffortFor(key)).toBe("high");
+
+    manager.reset(key);
+    // The regression this guards: reset() used to delete the key, so a New chat
+    // silently dropped back to the shared default while the picker still showed "high".
+    expect(manager.currentEffortFor(key)).toBe("high");
+  });
+
+  it("an EXPLICIT return to the SDK default also survives, and is not 'never picked'", async () => {
+    const backend = new ModelRecordingBackend();
+    const manager = makeManager(backend);
+    const key = "scope::claude";
+
+    await manager.setOptions(key, { effort: "high" });
+    // Explicitly back to the SDK default: stored as undefined, but PRESENT.
+    await manager.setOptions(key, { effort: undefined });
+    const before = manager.currentEffortFor(key);
+
+    manager.reset(key);
+    expect(manager.currentEffortFor(key)).toBe(before);
+  });
+
+  it("still isolates providers — an effort on one key is invisible to the other", async () => {
+    const backend = new ModelRecordingBackend();
+    const manager = makeManager(backend);
+    await manager.setOptions("scope::claude", { effort: "high" });
+    expect(manager.currentEffortFor("scope::codex")).not.toBe("high");
+  });
+});
