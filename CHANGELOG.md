@@ -10,6 +10,14 @@ All notable changes to this project are documented here. This project adheres to
 #### Fixed
 - **`get_workflow` `action:"strip"` does not Win32-resolve a remote Linux path on the MCP host (#2782).** Against a remote ComfyUI, an absolute POSIX `path` such as `/mydata/.../models/workflows/example.json` is no longer opened as `C:\mydata\...`. Library-shaped tails (`user/default/workflows`, `user/workflows`, `models/workflows`) are fetched from that server's userdata API; any other remote absolute path is refused instead of a local ENOENT.
 
+## [0.52.186] - 2026-09-03
+
+### MCP
+
+#### Fixed
+- **`panel_restart_comfyui` restarts the panel's bound local ComfyUI when that origin is a proven loopback instance on a different port than `COMFYUI_URL` (#1593, #2832).** A live tab whose server-observed Origin is a concrete loopback host (and whose socket arrived on the local listener) is Manager-rebooted even if MCP is still configured for `:8188` while the panel is on `:8189`. The busy guard still applies, a guessed or DNS-ambiguous origin is never restarted, and a relayed tab stays fail-closed.
+
+
 ## [0.52.185] - 2026-09-03
 
 ### MCP
