@@ -24,6 +24,12 @@ const ALWAYS_LOAD_META = "anthropic/alwaysLoad";
 const EXPECTED_PROBE_TOOLS = ["panel_canvas", "panel_graph_outline"];
 
 function fakeBridge(): UiBridge {
+  /* `UiBridge` is a CLASS with private fields (`wss`, `extraServers`, …), so no
+     structural literal can satisfy it and there is no narrower cast available.
+     Nothing here calls the bridge: these assertions read tool DEFINITIONS from
+     `tools/list`, and a handler is never invoked — so a real bridge would be a
+     websocket server bound for no reason. */
+  // oxlint-disable-next-line anti-slop/no-chained-type-assertions -- test double for a class with private fields; no handler runs
   return {
     send: async () => ({}),
   } as unknown as UiBridge;
