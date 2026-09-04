@@ -162,3 +162,43 @@ describe("get_image — video/audio save-to-disk (#663)", () => {
     expect(vi.mocked(writeFile)).not.toHaveBeenCalled();
   });
 });
+
+describe("get_image — ZIP save-to-disk (#2858)", () => {
+  afterEach(() => vi.clearAllMocks());
+
+  it("saves a ZIP to disk and returns text only (no inline image)", async () => {
+    const base64 = Buffer.from([0x50, 0x4b, 0x03, 0x04, 0x14, 0x00, 0x00, 0x00]).toString(
+      "base64",
+    );
+    const filename = "PCIDOL_Smart_Save_Suite_Image_v0.6.3_Video_v0.6.6.zip";
+    getOutputImageMock.mockResolvedValue({
+      base64,
+      mimeType: "application/zip",
+      filename,
+    });
+
+    const out = await getHandler("get_image")({
+      action: "get",
+      filename,
+      type: "input",
+      save_dir: "/tmp/x",
+    });
+
+    expect(out.isError).toBeUndefined();
+    expect(getOutputImageMock).toHaveBeenCalledWith(filename, "input", "", {
+      allowMedia: true,
+      allowAttachment: true,
+      allowJson: true,
+      forInlinePreview: true,
+    });
+    expect(vi.mocked(writeFile)).toHaveBeenCalledWith(
+      join(resolve("/tmp/x"), filename),
+      Buffer.from(base64, "base64"),
+    );
+    expect(out.content.find((c) => c.type === "image")).toBeUndefined();
+    const text = out.content.map((c) => c.text ?? "").join("");
+    expect(text).toContain(filename);
+    expect(text).toContain("application/zip");
+    expect(text).toContain("not rendered inline");
+  });
+});
