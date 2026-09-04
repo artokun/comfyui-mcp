@@ -10,6 +10,14 @@ All notable changes to this project are documented here. This project adheres to
 #### Fixed
 - **a relaunched ComfyUI no longer dies on an emoji under a legacy Windows codepage The explicit opt-out is honoured in ANY case: Windows environment names are case-insensitive and these paths hand the helper a plain object rather than `process.env`, whose case-insensitivity does not survive a spread — so a deliberate `PythonUtf8=0` was invisible and would have been overridden by a second key differing only in case.
 
+## [0.52.187] - 2026-09-03
+
+### MCP
+
+#### Fixed
+- **`get_history` and `get_system_stats` resolve the connected panel origin and API base before the read fallback, and fail closed with a named error when that origin is unproven (#2836, #2837).** An unreachable headless `127.0.0.1:8188` used to dispatch `fetch_comfyui_read` and then throw `Cannot read properties of undefined (reading api_base)`, which blocked diagnosis of the live-canvas run. The original transport failure is kept; an undefined `api_base` is reported as `PANEL_API_BASE_UNAVAILABLE` rather than a TypeError.
+
+
 ## [0.52.186] - 2026-09-03
 
 ### MCP
