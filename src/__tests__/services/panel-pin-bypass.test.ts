@@ -66,8 +66,11 @@ let managerFailAfterGate = false;
 // would hold the panel lock until the test times out, cascading into every
 // later lock-taking test.)
 let managerLegacyPersona = false;
-vi.mock("../../comfyui/fetch.js", () => ({
-  comfyuiFetch: vi.fn(async (url: string) => {
+vi.mock("../../comfyui/fetch.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../../comfyui/fetch.js")>();
+  return {
+    ...actual,
+    comfyuiFetch: vi.fn(async (url: string) => {
     managerCalls.push(url);
     if (managerGate) await managerGate;
     if (managerFailAfterGate) throw new Error("test: Manager went away");
@@ -89,8 +92,9 @@ vi.mock("../../comfyui/fetch.js", () => ({
       }
     }
     return new Response("{}", { status: 200 });
-  }),
-}));
+    }),
+  };
+});
 
 import {
   fixCustomNode,

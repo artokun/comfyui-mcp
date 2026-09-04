@@ -92,13 +92,15 @@ const manager = vi.hoisted(() => ({
   installed: {} as Record<string, unknown> | unknown[],
   calls: [] as string[],
 }));
-vi.mock("../../comfyui/fetch.js", () => {
+vi.mock("../../comfyui/fetch.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../../comfyui/fetch.js")>();
   const json = (body: unknown) =>
     new Response(JSON.stringify(body), {
       status: 200,
       headers: { "content-type": "application/json" },
     });
   return {
+    ...actual,
     comfyuiFetch: async (url: string) => {
       manager.calls.push(url);
       const { pathname } = new URL(url);
