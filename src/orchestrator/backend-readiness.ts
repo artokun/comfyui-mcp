@@ -15,7 +15,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { readOAuthStatus } from "../services/code-provider-auth.js";
 import { resolveAgyBin } from "./antigravity-backend.js";
-import { resolvePiBin } from "./pi-backend.js";
+import { resolvePiLaunch } from "./pi-backend.js";
 // pi's credential detection is large enough (pi's whole env map + auth.json /
 // models.json / Vertex-ADC parsing) to live in its own module; re-exported below
 // so existing importers of `piCredentialPresent` are unaffected.
@@ -61,7 +61,7 @@ const CLI_NAMES: Record<string, string[]> = {
   gemini: ["gemini", "gemini.cmd", "gemini.exe"],
   grok: ["grok", "grok.cmd", "grok.exe"],
   qwen: ["qwen", "qwen.cmd", "qwen.exe"],
-  pi: ["pi", "pi.exe"], // no .cmd — Node can't shell-lessly spawn it (see resolvePiBin)
+  pi: ["pi", "pi.exe"], // presence only; the pi READINESS path uses resolvePiLaunch (#2835)
   ollama: ["ollama", "ollama.exe"],
   lmstudio: ["lms", "lms.exe"],
   llamacpp: ["llama-server", "llama-server.exe"],
@@ -395,7 +395,13 @@ export function backendReadiness(
     // Residual (accepted, and the UI wording must not over-promise): a present
     // but revoked/quota-exhausted key is indistinguishable from a good one here
     // and still fails on the first turn.
-    const cli = !!resolvePiBin(home);
+    // #2835 — the SAME resolver prepare() launches with. Readiness used to call
+    // resolvePiBin, whose candidate list is ["pi", "pi.exe"] with .cmd excluded on
+    // the premise that Node cannot spawn one. That premise no longer holds: an npm
+    // .cmd resolves to the script it runs. Keeping the two apart reported a
+    // .cmd-only install as ABSENT though it runs, and an unresolvable extensionless
+    // shim as PRESENT though it spawns ENOENT -- which is #2835's own symptom.
+    const cli = !!resolvePiLaunch(home);
     const authKnown = piCredentialPresent(home);
     const auth = authKnown ? true : cli ? null : false;
     return { backend: "pi", cli, auth, ready: cli && authKnown };

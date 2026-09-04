@@ -222,3 +222,42 @@ describe("#2835 the POSIX shim npm writes beside the .cmd", () => {
     expect(resolveNpmShimTarget(join(dir, "pi"))).toBeNull();
   });
 });
+
+// These two are win32-only BEHAVIOUR and are skipped elsewhere rather than
+// asserted falsely: on POSIX the extensionless shim is directly executable and
+// resolvePiLaunch deliberately never enters the shim branch.
+const winOnly = process.platform === "win32" ? describe : describe.skip;
+
+winOnly("#2835 an explicit COMFYUI_MCP_PI_PATH is decided before PATH", () => {
+  it("an override EXECUTABLE beats a resolvable shim earlier on PATH", () => {
+    const script = seedScript();
+    // A perfectly good npm shim on PATH...
+    writeFileSync(join(dir, "pi.cmd"), npmCmdShim(REL));
+    process.env.PATH = dir;
+    // ...and an explicit override pointing at a real executable elsewhere.
+    const exeDir = mkdtempSync(join(tmpdir(), "cmcp-2835-exe-"));
+    const exe = join(exeDir, "pi.exe");
+    writeFileSync(exe, "MZ");
+    process.env.COMFYUI_MCP_PI_PATH = exe;
+    try {
+      const launch = resolvePiLaunch();
+      // The regression: the shim pre-pass ran over every candidate, so the PATH
+      // shim won and the override was never consulted as an executable.
+      expect(launch?.command).toBe(exe);
+      expect(launch?.prefixArgs).toEqual([]);
+      expect(launch?.prefixArgs).not.toEqual([script]);
+    } finally {
+      rmSync(exeDir, { recursive: true, force: true });
+    }
+  });
+
+  it("a PATH entry wrapped in quotes still resolves", () => {
+    const script = seedScript();
+    writeFileSync(join(dir, "pi.cmd"), npmCmdShim(REL));
+    // Windows writes quoted PATH entries when a directory contains spaces.
+    process.env.PATH = '"' + dir + '"';
+    const launch = resolvePiLaunch();
+    expect(launch?.command).toBe(process.execPath);
+    expect(launch?.prefixArgs).toEqual([script]);
+  });
+});

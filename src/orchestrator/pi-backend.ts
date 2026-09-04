@@ -178,6 +178,40 @@ export function resolveNpmShimTarget(shimPath: string): string | null {
 }
 
 /**
+ * #2835 — PATH entries as Windows actually writes them. A quoted entry
+ * (`"C:\Program Files\nodejs"`) concatenates into an invalid path, and a dead
+ * UNC entry makes the synchronous read below block for an SMB timeout during
+ * backend startup. `src/services/self-update.ts` already strips wrapping quotes
+ * and skips UNC before its own sync probes; same treatment here.
+ */
+function windowsPathDirs(): string[] {
+  const out: string[] = [];
+  for (const raw of (process.env.PATH || "").split(";")) {
+    const dir = raw.trim().replace(/^"(.*)"$/, "$1").trim();
+    if (!dir) continue;
+    if (dir.startsWith(String.fromCharCode(92, 92))) continue; // UNC — may hang
+    out.push(dir);
+  }
+  return out;
+}
+
+/**
+ * One candidate, classified: a runnable executable launches as itself, a
+ * resolvable npm shim launches as `node <script>`, anything else is null. Kept
+ * separate so BOTH the launch path and readiness ask the same question.
+ */
+function launchFromWindowsCandidate(candidate: string): PiLaunch | null {
+  const script = resolveNpmShimTarget(candidate);
+  if (script) return { command: process.execPath, prefixArgs: [script] };
+  // A .cmd/.bat that named no resolvable script stays unspawnable: Node cannot
+  // run one shell-lessly and we never spawn through a shell (the prompt is user
+  // data). An extensionless file is a POSIX script, never runnable on Windows.
+  if (/[.](cmd|bat)$/i.test(candidate)) return null;
+  if (!/[.][a-z0-9]+$/i.test(candidate)) return null;
+  return existsSync(candidate) ? { command: candidate, prefixArgs: [] } : null;
+}
+
+/**
  * What to actually spawn for `pi`, including the npm-shim case (#2835).
  *
  * A real executable launches as itself. A resolvable npm shim launches as
@@ -193,15 +227,25 @@ export function resolvePiLaunch(home: string = homedir()): PiLaunch | null {
   // on Windows at all and spawns ENOENT. That is #2835's first symptom, and taking
   // the PATH answer first would reproduce it here.
   if (isWin) {
-    const candidates: string[] = [];
-    if (override) candidates.push(override, override + ".cmd");
-    for (const dir of (process.env.PATH || "").split(";").filter(Boolean)) {
-      candidates.push(join(dir, "pi.cmd"), join(dir, "pi"));
+    // Resolve IN SOURCE ORDER. An earlier revision collected every candidate and
+    // ran the shim pre-pass over all of them, which let a shim anywhere on PATH
+    // beat an explicit COMFYUI_MCP_PI_PATH executable: the override is not a shim,
+    // resolveNpmShimTarget returns null for it, and the loop walked on to PATH.
+    // An override exists precisely to win, so it is decided on its own first.
+    if (override) {
+      const viaOverride = launchFromWindowsCandidate(override) ?? launchFromWindowsCandidate(override + ".cmd");
+      if (viaOverride) return viaOverride;
     }
-    for (const c of candidates) {
-      const script = resolveNpmShimTarget(c);
-      if (script) return { command: process.execPath, prefixArgs: [script] };
+    for (const dir of windowsPathDirs()) {
+      const found =
+        launchFromWindowsCandidate(join(dir, "pi.exe")) ??
+        launchFromWindowsCandidate(join(dir, "pi.cmd")) ??
+        launchFromWindowsCandidate(join(dir, "pi"));
+      if (found) return found;
     }
+    // Fall THROUGH, do not return null: resolvePiBin also probes the well-known
+    // install locations (%LOCALAPPDATA%/pi/bin/pi.exe, ~/.local/bin/pi.exe) that
+    // are not on PATH. Returning here dropped those and broke 26 existing tests.
   }
 
   const direct = resolvePiBin(home);
