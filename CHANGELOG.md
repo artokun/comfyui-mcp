@@ -10,6 +10,8 @@ All notable changes to this project are documented here. This project adheres to
 ### MCP
 
 #### Fixed
+- **`get_workflow` `action:"strip"` does not Win32-resolve a remote Linux path on the MCP host (#2782).** Against a remote ComfyUI, an absolute POSIX `path` such as `/mydata/.../models/workflows/example.json` is no longer opened as `C:\mydata\...`. Library-shaped tails (`user/default/workflows`, `user/workflows`, `models/workflows`) are fetched from that server's userdata API; any other remote absolute path is refused instead of a local ENOENT.
+- **the dump reader says WHICH crash, WHICH process, and WHICH renderer (#2023).** It now reports the crashing executable and its Chromium process type (browser / renderer / gpu-process) alongside the fault, so a dump from the wrong program or the wrong process is caught before anything else in the output is trusted — a gpu-process dump otherwise describes a different fault with identical confidence. It also names the Electron/Chromium build, since two text-stack crashes are only the same bug on the same renderer, and glosses three more exception codes (EXCEPTION_IN_PAGE_ERROR and the two corruption checks) that a reporter would otherwise quote as bare hex. A dump lacking Crashpad annotations reports none of it rather than inventing a value.
 - `scripts/read-minidump.mjs` — read a Windows crash dump far enough to say WHICH crash it
 
 ## [0.52.189] - 2026-09-03
@@ -1471,10 +1473,6 @@ _No user-facing changes._
 
 #### Fixed
 - target tunnels at the bound host (#2023) (#2036)
-- **the dump report names the Electron/Chromium build when the dump carries Crashpad annotations (#2023).** Two text-stack crashes are only the same bug if they are the same renderer, and an app version does not establish that. Read from the Crashpad simple annotation dictionary; the per-module annotation objects (where the `ptype` annotation distinguishes browser/renderer/gpu-process) are deliberately left unparsed after a first attempt read garbage memory.
-- **the dump report names the PROCESS TYPE — browser, renderer or gpu-process (#2023).** For a renderer crash this is the first line to read: a gpu-process or browser dump describes a different fault with exactly the same confidence, so without it the report is authoritative about the wrong file. Read from Chromium's per-module annotation objects, whose layout was derived from a real dump after a first attempt read the entries as RVAs and printed garbage memory — they are inline 12-byte structs.
-- **the dump report names the crashing PROCESS, not only the faulting module (#2023).** A dump can arrive from the wrong program or the wrong process and read as a valid answer to the wrong question: four dumps sitting in an Electron app`s Crashpad directory looked like Comfy Desktop`s by path alone and turned out to be the Oculus client. `MINIDUMP_MODULE_LIST` puts the main image first, so this is free to read; a dump with no module list says so rather than guessing.
-- **the dump reader names three more exception codes a reporter would otherwise quote as bare hex (#2023).** Found by running it against real Windows minidumps rather than only its fixtures: a genuine `0xC0000006` printed the number and no explanation, though EXCEPTION_IN_PAGE_ERROR (a failing disk or a mapping that went away) is a materially different diagnosis from an access violation. The two corruption checks (`0xC0000409`, `0xC0000374`) are named with the caveat that decides how to read them — for both, the faulting module is where the damage was NOTICED, not where it was done.
 - recover subgraph widget write scope (#2037)
 - default the panel bridge to 9199 and never kill a foreign holder (#2034)
 
