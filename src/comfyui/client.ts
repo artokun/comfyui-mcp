@@ -284,22 +284,76 @@ function panelReadResponse(read: PanelComfyUIReadSuccess): Response {
   return new Response(read.body, { status: 200, headers });
 }
 
-/** Ask the authenticated panel only after the configured headless route failed
- * at the transport layer. Resolve the connected panel origin and API base
- * first (#2836): an unproven origin is never a guessed fetch_comfyui_read
- * target, and an undefined api_base is a named transport diagnostic. */
+const PANEL_READ_PATHS = {
+  history: "/history",
+  system_stats: "/system_stats",
+  logs: "/internal/logs",
+  object_info: "/object_info",
+} as const;
+
+/**
+ * One HTTP GET against a unique proven loopback panel origin (#2836 recurrence).
+ * Configured auth stays on the headless target. A guessed origin is never
+ * contacted — the caller already required choosePanelFallbackOrigin kind "use".
+ */
+async function fetchProvenPanelRead(
+  origin: string,
+  apiBase: string,
+  operation: keyof typeof PANEL_READ_PATHS,
+): Promise<PanelComfyUIReadSuccess | undefined> {
+  const url = `${origin}${apiBase.replace(/\/+$/, "")}${PANEL_READ_PATHS[operation]}`;
+  try {
+    const res = await fetch(url, {
+      method: "GET",
+      redirect: "error",
+      signal: AbortSignal.timeout(8_000),
+    });
+    if (!res.ok) return undefined;
+    const body = await res.text();
+    const bytes = Buffer.byteLength(body, "utf8");
+    const max =
+      operation === "object_info"
+        ? PANEL_COMFYUI_READ_OBJECT_INFO_MAX_BYTES
+        : PANEL_COMFYUI_READ_MAX_BYTES;
+    if (bytes > max) return undefined;
+    return {
+      operation,
+      body,
+      contentType: res.headers.get("content-type"),
+      bytes,
+    };
+  } catch {
+    return undefined;
+  }
+}
+
+/** Ask the connected panel after the configured headless route failed at the
+ * transport layer. Resolve origin+api_base first (#2836): an unproven origin
+ * is never contacted. A unique proven loopback origin that differs from the
+ * dead target is fetched here (the panel's own api_base object can be
+ * undefined, so fetch_comfyui_read is not the first hop). Same-origin or
+ * unknown still uses one panel relay; an undefined panel api_base is a named
+ * transport diagnostic. */
 async function panelReadFallback(
   operation: "history" | "system_stats" | "logs" | "object_info",
   primaryError: unknown,
 ): Promise<PanelComfyUIReadSuccess | undefined> {
   const primary = primaryError instanceof Error ? primaryError.message : String(primaryError);
-  const resolved = resolvePanelReadOrigin(connectedPanelOriginsNow(), getComfyUIBasePath());
+  const origins = connectedPanelOriginsNow();
+  const resolved = resolvePanelReadOrigin(origins, getComfyUIBasePath());
   if (resolved.kind === "unproven") {
     throw new ComfyUIError(
       `${primary} The connected panel ComfyUI read fallback was not attempted (PANEL_ORIGIN_UNPROVEN). ` +
         `The panel origin is unproven, so fetch_comfyui_read was not dispatched. A guessed origin is never contacted.`,
       "PANEL_ORIGIN_UNPROVEN",
     );
+  }
+  if (resolved.kind === "proven") {
+    const choice = choosePanelFallbackOrigin(getComfyUIBaseUrl(), origins);
+    if (choice.kind === "use") {
+      const fromOrigin = await fetchProvenPanelRead(choice.origin, resolved.apiBase, operation);
+      if (fromOrigin) return fromOrigin;
+    }
   }
   try {
     return await requestPanelComfyUIRead(operation);
