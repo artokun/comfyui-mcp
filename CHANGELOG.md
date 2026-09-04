@@ -9,6 +9,8 @@ All notable changes to this project are documented here. This project adheres to
 ### MCP
 
 #### Fixed
+
+- panel_save_subgraph accepts overwrite:true so a user-blueprint name collision can replace in place instead of being rejected as an unrecognized key (#2865)
 - list_local_models recovers remote inventory from panel object_info when fetch_comfyui_read rejects models/<category> as outside the panel allowlist (#2511)
 
 ## [0.52.193] - 2026-09-04
