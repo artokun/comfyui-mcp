@@ -9,9 +9,16 @@ All notable changes to this project are documented here. This project adheres to
 ### MCP
 
 #### Fixed
-
-- panel_save_subgraph accepts overwrite:true so a user-blueprint name collision can replace in place instead of being rejected as an unrecognized key (#2865)
 - **`extract_deps` no longer names a pack the catalogue cannot prove owns the node (#2765).**
+
+## [0.52.194] - 2026-09-04
+
+### MCP
+
+#### Fixed
+
+- panel_save_subgraph accepts overwrite:true so a user-blueprint name collision can replace in place instead of being rejected as an unrecognized key (#2865, #2866)
+
 
 ## [0.52.193] - 2026-09-04
 
