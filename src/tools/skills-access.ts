@@ -7,8 +7,13 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { parse as parseYaml } from "yaml";
 import { errorToToolResult, ValidationError } from "../utils/errors.js";
 import { getComfyUIBaseUrl } from "../config.js";
-import { comfyuiFetch } from "../comfyui/fetch.js";
-import { requestPanelTemplateIndex } from "../services/panel-template-relay.js";
+import { comfyuiFetch, connectedPanelOriginsNow } from "../comfyui/fetch.js";
+import { provenPanelOriginMatchesConfiguredTarget } from "../services/panel-fallback-target.js";
+import {
+  PanelComfyUIReadRelayError,
+  requestPanelComfyUIRead,
+} from "../services/panel-image-relay.js";
+import { PanelTemplateRelayError, requestPanelTemplateIndex } from "../services/panel-template-relay.js";
 import { checkWorkflowRuntime, extractWorkflowClassTypes } from "../services/api-nodes.js";
 import {
   extractWorkflowDependencies,
@@ -691,6 +696,52 @@ function readPackManifestAction(rawName: string): ToolText {
   return { content: [{ type: "text" as const, text }] };
 }
 
+function isNoPanelOrigin(error: unknown): boolean {
+  return error instanceof PanelTemplateRelayError && error.code === "NO_PANEL_ORIGIN";
+}
+
+function templateIndexFromUnknown(value: unknown): Record<string, unknown> | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+  return Object.fromEntries(Object.entries(value));
+}
+
+/** Same bound-tab `fetch_comfyui_read` channel as get_history / panel_graph_outline. */
+async function readBoundPanelTemplateIndex(): Promise<Record<string, unknown> | undefined> {
+  try {
+    const read = await requestPanelComfyUIRead("workflow_templates");
+    if (!read) return undefined;
+    return templateIndexFromUnknown(JSON.parse(read.body));
+  } catch (error) {
+    if (
+      error instanceof PanelComfyUIReadRelayError &&
+      (error.code === "STALE_TARGET" || error.code === "NO_LIVE_PANEL" || error.code === "AMBIGUOUS_REQUESTER")
+    ) {
+      throw error;
+    }
+    return undefined;
+  }
+}
+
+async function resolveWorkflowTemplateIndex(): Promise<Record<string, unknown> | undefined> {
+  try {
+    const panelIndex = await requestPanelTemplateIndex();
+    if (panelIndex !== undefined) return panelIndex;
+  } catch (error) {
+    if (!isNoPanelOrigin(error)) throw error;
+    // Template-index HTTP is loopback-only. A live bound canvas still has the
+    // authenticated panel read relay used by mcp__panel__* tools (#2839).
+    const bound = await readBoundPanelTemplateIndex();
+    if (bound !== undefined) return bound;
+    if (!provenPanelOriginMatchesConfiguredTarget(connectedPanelOriginsNow(), getComfyUIBaseUrl())) {
+      throw error;
+    }
+    // Unique published origin matches this child's configured target: listing
+    // that URL is not a new destination. Mixed/malformed/empty stays thrown.
+    return undefined;
+  }
+  return undefined;
+}
+
 /** action:"list_templates" */
 async function listWorkflowTemplatesAction(): Promise<ToolText> {
   traceToolCall("list_packs", { action: "list_templates" });
@@ -700,7 +751,7 @@ async function listWorkflowTemplatesAction(): Promise<ToolText> {
   // children return undefined here and keep the established headless path.
   // Once a panel route exists, relay failures stay fail-closed: falling back
   // to COMFYUI_URL could silently list a different server's templates.
-  const panelIndex = await requestPanelTemplateIndex();
+  const panelIndex = await resolveWorkflowTemplateIndex();
   if (panelIndex !== undefined) return renderWorkflowTemplateIndex(panelIndex);
   // Canonical base URL + auth headers — same connected-ComfyUI path
   // enqueue_workflow (action:"template_schema") uses, so a proxied/authed
