@@ -9,6 +9,8 @@ All notable changes to this project are documented here. This project adheres to
 ### MCP
 
 #### Fixed
+
+- **`panel_save_workflow` returns `saved:true` when a matching `late_save_receipts` entry proves the timed-out in-place save completed (#2880).** After the panel's 13s budget, settle used to also require `modified:false persisted:true` on top-level `active`, which live `workflow_list` does not carry (those flags are on the flagged-active `workflows[]` row). A later `panel_list_workflows` already showed the rid-matched receipt. A current panel with no matching receipt stays OUTCOME UNKNOWN so a retry does not write twice.
 - pin the upload body on the CLOUD client too, not just the self-hosted one (#2770). Both call uploadBody(data), but the cloud path is wired independently and only the self-hosted client had the byte-slice assertions — so it could revert to new Uint8Array(data.buffer), which ignores byteOffset/length and uploads the whole 8KB pool, with nothing failing. A shared helper is not shared coverage
 - the upload body and the bridge probe's socket chunks are typed so they still compile
 
