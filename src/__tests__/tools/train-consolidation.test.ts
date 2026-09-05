@@ -75,14 +75,22 @@ vi.mock("../../services/train-caption.js", () => ({
   captionImage: (...a: unknown[]) => mocks.captionImage(...a),
   captionDataset: (...a: unknown[]) => mocks.captionDataset(...a),
 }));
-vi.mock("../../services/ai-toolkit.js", () => ({
-  TRAINER_IMAGE: "trainer:test",
-  dockerAvailable: (...a: unknown[]) => mocks.dockerAvailable(...a),
-  trainerImageExists: (...a: unknown[]) => mocks.trainerImageExists(...a),
-  trainerDoctor: (...a: unknown[]) => mocks.trainerDoctor(...a),
-  buildTrainerImage: (...a: unknown[]) => mocks.buildTrainerImage(...a),
-  nativeToolkitReady: (...a: unknown[]) => mocks.nativeToolkitReady(...a),
-}));
+// TRAINER_COMMAND comes from the REAL module rather than a literal: the command
+// names are vocabulary-gated, so spelling one here would either trip check:vocabulary
+// or silently drift from the name the tool actually reports. Everything else stays
+// explicitly mocked — this is not a partial passthrough.
+vi.mock("../../services/ai-toolkit.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../../services/ai-toolkit.js")>();
+  return {
+    TRAINER_IMAGE: "trainer:test",
+    TRAINER_COMMAND: actual.TRAINER_COMMAND,
+    dockerAvailable: (...a: unknown[]) => mocks.dockerAvailable(...a),
+    trainerImageExists: (...a: unknown[]) => mocks.trainerImageExists(...a),
+    trainerDoctor: (...a: unknown[]) => mocks.trainerDoctor(...a),
+    buildTrainerImage: (...a: unknown[]) => mocks.buildTrainerImage(...a),
+    nativeToolkitReady: (...a: unknown[]) => mocks.nativeToolkitReady(...a),
+  };
+});
 vi.mock("../../services/trainer-bootstrap.js", () => ({
   bootstrapStatus: (...a: unknown[]) => mocks.bootstrapStatus(...a),
   bootstrapToolkit: (...a: unknown[]) => mocks.bootstrapToolkit(...a),
@@ -427,6 +435,30 @@ describe("train_start actions call the same services with the same arguments", (
 });
 
 describe("train_doctor actions call the same services with the same arguments", () => {
+  it('action:"doctor" DISCLOSES a wedged build, not just "running" (#2723)', async () => {
+    // The WIRING, not the helper. `trainerImageBuildLooksStalled` being correct is
+    // worth nothing if `doctor` never prints its verdict — and computing a field
+    // that no output carries is the exact defect this pass keeps finding. A build
+    // that hangs pins the slot: every later build_image ADOPTS it rather than
+    // starting one, so "running" forever is indistinguishable from progress.
+    const { startTrainerImageBuild, __resetTrainerImageBuildsForTests } = await import(
+      "../../services/trainer-image-build.js"
+    );
+    __resetTrainerImageBuildsForTests();
+    mocks.buildTrainerImage.mockReturnValueOnce(new Promise(() => {})); // never settles
+    const { build } = startTrainerImageBuild({ contextDir: "/ctx" });
+    build.started_at = Date.now() - 90 * 60_000; // far beyond any plausible build
+
+    mocks.trainerDoctor.mockResolvedValueOnce({ ok: true, command: "train_doctor", data: { docker: true } });
+    mocks.bootstrapStatus.mockResolvedValueOnce({ dir: "/tk", cloned: true, venv: true, ready: true, ref: "abc" });
+    const res = await handler("train_doctor")({ action: "doctor" });
+    const body = JSON.parse(text(res));
+
+    expect(body.data.image_build).toMatchObject({ looks_stalled: true });
+    expect(String(body.data.image_build.note)).toMatch(/ADOPTS it/);
+    __resetTrainerImageBuildsForTests();
+  });
+
   it('action:"doctor" reports the preflight plus the training roots', async () => {
     mocks.trainerDoctor.mockResolvedValueOnce({ ok: true, command: "train_doctor", data: { docker: true } });
     mocks.bootstrapStatus.mockResolvedValueOnce({ dir: "/tk", cloned: true, venv: true, ready: true, ref: "abc" });
@@ -475,6 +507,32 @@ describe("train_doctor actions call the same services with the same arguments", 
       expect.objectContaining({ aiToolkitRef: "deadbeef" }),
     );
     expect(JSON.parse(text(res)).ok).toBe(true);
+  });
+
+  it('action:"build_image" says a WEDGED build is wedged instead of a bare adoption (#2723)', async () => {
+    // doctor already discloses this; build_image did not. That is the wrong way
+    // round: re-issuing build_image after the old 300s timeout is exactly what the
+    // reporter did, so the one action taken to make progress was the silent one,
+    // and a plain `adopted: true` sends the caller back to polling a corpse.
+    const { startTrainerImageBuild, __resetTrainerImageBuildsForTests } = await import(
+      "../../services/trainer-image-build.js"
+    );
+    __resetTrainerImageBuildsForTests();
+    mocks.buildTrainerImage.mockReturnValueOnce(new Promise(() => {})); // never settles
+    const { build } = startTrainerImageBuild({ contextDir: "/ctx" });
+    build.started_at = Date.now() - 90 * 60_000; // far beyond any plausible build
+
+    mocks.dockerAvailable.mockResolvedValueOnce(true);
+    const body = JSON.parse(text(await handler("train_doctor")({ action: "build_image" })));
+    expect(body.data.adopted).toBe(true);
+    expect(String(body.data.note)).toMatch(/wedged/i);
+    expect(String(body.data.note)).toMatch(/restarting the orchestrator/i);
+    // and a HEALTHY adoption must stay quiet about wedging
+    build.started_at = Date.now();
+    mocks.dockerAvailable.mockResolvedValueOnce(true);
+    const ok = JSON.parse(text(await handler("train_doctor")({ action: "build_image" })));
+    expect(String(ok.data.note)).not.toMatch(/wedged/i);
+    __resetTrainerImageBuildsForTests();
   });
 });
 

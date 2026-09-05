@@ -10,6 +10,7 @@ import {
   dockerAvailable,
   trainerDoctor,
   trainerImageExists,
+  TRAINER_COMMAND,
   TRAINER_IMAGE,
 } from "../services/ai-toolkit.js";
 import { DEFAULT_PARAMS } from "../services/training-config.js";
@@ -575,7 +576,7 @@ export function registerTrainTools(server: McpServer): void {
     "Preflight and set up the TRAINER ITSELF — the docker/GPU/venv machinery every training job needs. Touches no dataset and no job. Driven by the `action` parameter:\n" +
       '- action:"doctor" — Preflight the local trainer: docker daemon reachable, `--gpus all` GPU passthrough working (NVIDIA Container Toolkit), trainer image built. Read-only, takes no other parameters. Returns per-check booleans + setup hints. Also reports the training data root and whether HF_TOKEN is set (needed to download FLUX.1-dev on first run), the native (dockerless) bootstrap status, and the connected pod. Run this first when a training start fails.\n' +
       '- action:"bootstrap" — Set up the NATIVE (dockerless) trainer on this machine (`target` \'local\', the default) or on a pod (`target` \'pod\', optional `pod_id`): clone ai-toolkit at the pinned commit, create its venv, install torch + requirements. One-time per machine/pod (~10 min fresh, idempotent; a pod\'s /workspace persists it across restarts). Needed before a target \'pod\' train_start on a fresh pod (no docker there). Long-running.\n' +
-      `- action:"build_image" — Build the headless GPU trainer image (${TRAINER_IMAGE}) from docker/trainer/Dockerfile — one-time, several minutes (CUDA + torch + ai-toolkit). Requires a reachable docker daemon. \`aiToolkitRef\` pins the ai-toolkit commit/tag for reproducibility. The docker alternative to action:"bootstrap".`,
+      `- action:"build_image" — Build the headless GPU trainer image (${TRAINER_IMAGE}) from docker/trainer/Dockerfile — one-time, several minutes (CUDA + torch + ai-toolkit). ASYNC: returns a build id immediately and keeps building in the background, because the build outlasts any tool-call timeout (#2723). Poll action:"doctor" — it reports the build under \`image_build\` and flips \`image\` true when the tag lands. Re-issuing while one runs ADOPTS it rather than starting a second. Requires a reachable docker daemon. \`aiToolkitRef\` pins the ai-toolkit commit/tag for reproducibility. The docker alternative to action:"bootstrap".`,
     {
       action: z
         .enum(["doctor", "bootstrap", "build_image"])
@@ -600,6 +601,31 @@ export function registerTrainTools(server: McpServer): void {
             const doctor = await trainerDoctor();
             const { bootstrapStatus } = await import("../services/trainer-bootstrap.js");
             const native = await bootstrapStatus();
+            const { trainerImageBuildStatus, trainerImageBuildLooksStalled } = await import(
+              "../services/trainer-image-build.js"
+            );
+            // Sampled here only to decide the stalled note; RE-SAMPLED and snapshotted
+            // just before serialising, because several awaits follow (the pod probe
+            // does network I/O) and this is a LIVE object the builder mutates in
+            // place. Reporting the object read here could serialise a status that
+            // changed after it was chosen.
+            const liveBuild = trainerImageBuildStatus();
+            // A detached build that hangs pins the slot: every later build_image
+            // adopts it instead of starting one. Say so rather than reporting
+            // "running" forever, which is indistinguishable from progress.
+            const imageBuild =
+              liveBuild && trainerImageBuildLooksStalled(liveBuild)
+                ? {
+                    ...liveBuild,
+                    looks_stalled: true,
+                    note:
+                      `This build has been running far longer than a docker build of this image takes. ` +
+                      `It is most likely wedged (a stalled base-image pull, or a hung daemon). While it ` +
+                      `is in this state every build_image call ADOPTS it rather than starting a new one. ` +
+                      `Check \`docker ps\` for the build container; restarting the orchestrator clears ` +
+                      `the slot.`,
+                  }
+                : liveBuild;
             // Connected pod (if any): enough for the wizard's Local/Pod switch.
             let pod: Record<string, unknown> | null = null;
             try {
@@ -621,6 +647,15 @@ export function registerTrainTools(server: McpServer): void {
                 }
               }
             } catch { /* pod reporting is best-effort */ }
+            // #2723 — re-sample and FREEZE immediately before serialising. `doctor`
+            // was awaited first, so its `image` flag is older than everything below;
+            // a build that finishes in between yields `image:false` alongside a
+            // build reporting "done", which reads as a contradiction rather than as
+            // two observations taken at different times. Say so instead.
+            const settled = trainerImageBuildStatus();
+            const finalBuild = settled ? { ...(imageBuild ?? settled), ...settled } : imageBuild;
+            const imageCheckIsStale =
+              doctor.data?.image === false && finalBuild?.status === "done";
             return textEnvelope({
               ...doctor,
               data: {
@@ -635,6 +670,23 @@ export function registerTrainTools(server: McpServer): void {
                 // Native (dockerless) trainer bootstrap status — the pod path.
                 native: { dir: native.dir, cloned: native.cloned, venv: native.venv, ready: native.ready, ref: native.ref },
                 pod,
+                // #2723 — doctor is the surface a caller polls after build_image,
+                // and it is the one the reporter polled. `image:false` with a
+                // build RUNNING, `image:false` with one that ERRORED, and
+                // `image:false` with nothing ever attempted are three different
+                // situations that used to render identically.
+                image_build: finalBuild,
+                // #2723 — `image` was sampled by trainerDoctor() before the awaits
+                // above; `image_build` is sampled after them. When the build settled
+                // in between, the pair reads as a contradiction. Name the skew rather
+                // than emit two timestamps as if they were one observation.
+                ...(imageCheckIsStale
+                  ? {
+                      image_check_stale:
+                        "The image check ran BEFORE this build finished, so `image:false` above is " +
+                        "older than `image_build.status:\"done\"`. Re-run doctor for a consistent read.",
+                    }
+                  : {}),
               },
             });
           }
@@ -675,8 +727,57 @@ export function registerTrainTools(server: McpServer): void {
             if (!existsSync(join(contextDir, "Dockerfile"))) {
               return textEnvelope({ ok: false, error: { code: "no_dockerfile", message: `Trainer Dockerfile not found at ${contextDir} — the docker/ dir may not be shipped in this install.` } });
             }
-            const result = await buildTrainerImage({ contextDir, aiToolkitRef: args.aiToolkitRef });
-            return textEnvelope(result);
+            // #2723 — do NOT await it. This is a CUDA + torch + ai-toolkit image
+            // build, documented as several minutes, and the panel's call_tool
+            // transport hard-times out at 300s: awaiting it meant the call ALWAYS
+            // returned "timed out awaiting tools/call after 300s" and a follow-up
+            // doctor still said image:false. Local Docker training was unreachable,
+            // not slow. Return a handle and let doctor report it — the same shape
+            // download_model and enqueue_workflow already use.
+            const { startTrainerImageBuild, trainerImageBuildLooksStalled } = await import("../services/trainer-image-build.js");
+            const { build, adopted, refMismatch } = startTrainerImageBuild({
+              contextDir,
+              aiToolkitRef: args.aiToolkitRef,
+            });
+            if (refMismatch) {
+              // Adopting across a different `aiToolkitRef` would report success for
+              // an image built from another commit — silently defeating the one
+              // thing that parameter is for.
+              return textEnvelope({
+                ok: false,
+                error: {
+                  code: "build_ref_mismatch",
+                  message:
+                    `A build of ${refMismatch.image} is already running (${refMismatch.id}) from ` +
+                    `ai-toolkit ref ${refMismatch.ai_toolkit_ref ?? "(default)"}, and this call asked for ` +
+                    `${args.aiToolkitRef ?? "(default)"}. It was NOT adopted: the tag that lands would be ` +
+                    `the running build's, not the one requested. Two docker builds against one tag race ` +
+                    `for the layer cache, so a second was not started either. Poll train_doctor ` +
+                    `(action:"doctor") until that build settles, then re-issue with the ref you want.`,
+                },
+                data: { running_build: refMismatch, requested_ai_toolkit_ref: args.aiToolkitRef ?? null },
+              });
+            }
+            return textEnvelope({
+              ok: true,
+              command: TRAINER_COMMAND.buildImage,
+              data: {
+                build,
+                // Adoption rather than a second build: two `docker build` runs
+                // against one tag race for the layer cache. A caller who
+                // re-issues after the old 300s timeout must not start another.
+                adopted,
+                // #2723 — a wedged build pins the slot, and ADOPTING one is exactly what a
+                // caller re-issuing after the old 300s timeout does. A plain `adopted: true`
+                // there sends them back to polling a corpse: doctor already knew it looked
+                // stalled, and the one action taken to make progress stayed quiet.
+                note: adopted
+                  ? trainerImageBuildLooksStalled(build)
+                    ? `A build of ${build.image} was already running (${build.id}) and this call ADOPTED it — but it has been going far longer than this image takes to build, so it is most likely wedged (a stalled base-image pull, or a hung daemon). Polling will NOT clear it: check docker ps for the build container, and restarting the orchestrator clears the slot so a fresh build can start.`
+                    : `A build of ${build.image} was already running (${build.id}); this call adopted it rather than starting a second one. Poll train_doctor (action:"doctor") — it reports this build under \`image_build\`.`
+                  : `Started building ${build.image} in the background (${build.id}). This takes several minutes on a cold cache. It is NOT tied to this call, so poll train_doctor (action:"doctor") — it reports progress under \`image_build\` and \`image\` flips true when the tag lands.`,
+              },
+            });
           }
           default: {
             const exhaustive: never = args.action;
