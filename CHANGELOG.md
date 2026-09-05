@@ -9,6 +9,8 @@ All notable changes to this project are documented here. This project adheres to
 ### MCP
 
 #### Fixed
+
+- **`panel_save_workflow` returns `saved:true` when a matching `late_save_receipts` entry proves the timed-out in-place save completed (#2880).** After the panel's 13s budget, settle used to also require `modified:false persisted:true` on top-level `active`, which live `workflow_list` does not carry (those flags are on the flagged-active `workflows[]` row). A later `panel_list_workflows` already showed the rid-matched receipt. A current panel with no matching receipt stays OUTCOME UNKNOWN so a retry does not write twice.
 - interpreter-flag recovery compares script paths by HOST rules (#2693). The corroboration folded case and rewrote backslashes on every platform, so on Linux /ComfyUI/main.py and /comfyui/main.py corroborated each other and a backslash — a legal POSIX filename character — was rewritten. Reachable: argvFidelity "exact" is set on the /proc/<pid>/cmdline path too, where the kernel NUL-separates argv, so only the ps fallback is "flattened". Now uses the module's own sameRecoveryPath, which preserves POSIX spelling and folds only on Windows. Found by the Copilot review on the PR
 - **a relaunch keeps the Python INTERPRETER flags (#2693).** `-s`, `-E`, `-I`, `-B`, `-O` and `-u`
   are consumed by CPython before `sys.argv` exists, so a relaunch rebuilt from the server's own
