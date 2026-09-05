@@ -9,6 +9,8 @@ All notable changes to this project are documented here. This project adheres to
 ### MCP
 
 #### Fixed
+
+- **Connected-panel `get_image` fallback stays one `fetch_image` hop after headless `ECONNREFUSED`; it succeeds when the panel fetches `/view` via `fileURL` instead of ComfyUI `fetchApi`'s `/api` prefix (#2884).** History / system_stats keep `fetchApi` so cloud auth stays intact. Nested `fetchImage` retry and guessed origins stay refused.
 - interpreter-flag recovery compares script paths by HOST rules (#2693). The corroboration folded case and rewrote backslashes on every platform, so on Linux /ComfyUI/main.py and /comfyui/main.py corroborated each other and a backslash — a legal POSIX filename character — was rewritten. Reachable: argvFidelity "exact" is set on the /proc/<pid>/cmdline path too, where the kernel NUL-separates argv, so only the ps fallback is "flattened". Now uses the module's own sameRecoveryPath, which preserves POSIX spelling and folds only on Windows. Found by the Copilot review on the PR
 - **a relaunch keeps the Python INTERPRETER flags (#2693).** `-s`, `-E`, `-I`, `-B`, `-O` and `-u`
   are consumed by CPython before `sys.argv` exists, so a relaunch rebuilt from the server's own
