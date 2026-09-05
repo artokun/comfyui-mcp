@@ -64,7 +64,8 @@
     "check:blog": "node scripts/check-blog-boilerplate.mjs",
     "check:blog-packs": "node scripts/check-blog-packs.mjs",
     "check:blog-stale": "node scripts/check-blog-staleness.mjs --check",
-    "check:blog-structure": "node scripts/check-blog-structure.mjs"
+    "check:blog-structure": "node scripts/check-blog-structure.mjs",
+    "check:env-advice": "node scripts/check-env-advice.mjs"
   },
   "dependencies": {
     "@comfyorg/sdk": "^0.1.7",

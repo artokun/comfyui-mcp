@@ -168,9 +168,22 @@ export async function captionImage(opts: {
         (m.result ?? "").trim() ||
         `caption run failed (${m.subtype ?? "error"})`;
       if (isAuthFailureText(detail)) {
+        // #2849 — the panel BUILDS this server's environment from its own secret
+        // allowlist (and the orchestrator unsets ANTHROPIC_API_KEY outright for the
+        // subscription lane), so a key exported in the user's shell never arrives
+        // here. Naming it as the remedy sends an already-blocked user to a setting
+        // that cannot take effect. Standalone — this server run from the user's own
+        // MCP client — DOES inherit the shell env, and there the advice is correct;
+        // COMFYUI_MCP_TAB is the lane marker the orchestrator stamps per spawn.
+        const panelLane = Boolean(process.env.COMFYUI_MCP_TAB?.trim());
+        const remedy = panelLane
+          ? "Run `claude /login` in a TERMINAL, then retry — this server's environment is " +
+            "built by the panel, so an API key exported in your shell never reaches it. "
+          : "Run `claude /login`, or set ANTHROPIC_API_KEY, then retry. ";
         throw new CaptionAuthError(
           `Claude captioning is unavailable — the Claude Code session is not authenticated ` +
-            `(SDK said: ${detail}). Run \`claude /login\`, or set ANTHROPIC_API_KEY, then retry. ` +
+            `(SDK said: ${detail}). ` +
+            remedy +
             `Captioning always runs through Claude regardless of the panel's active backend.`,
         );
       }

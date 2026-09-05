@@ -198,7 +198,7 @@
     "oauth_signin_failed": "{provider} 登入失敗：{message}",
     "openrouter_no_key": "OpenRouter 還沒有 API 金鑰 —— 這樣連線會在你的第一則訊息時失敗。請在設定 → OpenRouter →「設定 API 金鑰…」中填寫（會遮罩，由編排器儲存 —— 立即生效，不需重新連線），或設定 OPENROUTER_API_KEY 環境變數並重新啟動編排器。金鑰取得：https://openrouter.ai/keys",
     "options_change_failed": "無法變更模型 / 推理強度：{message}",
-    "pi_no_credential": "pi 沒有可用的供應商憑證 —— 連線時會顯示就緒，但你的第一則訊息就會失敗。請設定一個供應商：設定供應商 API 金鑰（例如 ANTHROPIC_API_KEY / OPENAI_API_KEY / CEREBRAS_API_KEY ）並重新啟動編排器，或執行一次 `pi` 再執行 `/login`（儲存在 ~/.pi/agent/auth.json），然後依序「中斷連線」→「連線」。如果你已經做過其中之一，請檢查項目是否完整 —— 缺少 `key` 的 ~/.pi/agent/auth.json 記錄、缺少 `apiKey` 的 models.json 供應商，或指向不存在檔案的 GOOGLE_APPLICATION_CREDENTIALS 都無法通過驗證。https://pi.dev",
+    "pi_no_credential": "pi 沒有可用的供應商憑證 —— 連線時會顯示就緒，但你的第一則訊息就會失敗。請設定一個供應商：設定供應商 API 金鑰（例如 OPENAI_API_KEY / CEREBRAS_API_KEY ）並重新啟動編排器，或執行一次 `pi` 再執行 `/login`（儲存在 ~/.pi/agent/auth.json），然後依序「中斷連線」→「連線」。如果你已經做過其中之一，請檢查項目是否完整 —— 缺少 `key` 的 ~/.pi/agent/auth.json 記錄、缺少 `apiKey` 的 models.json 供應商，或指向不存在檔案的 GOOGLE_APPLICATION_CREDENTIALS 都無法通過驗證。https://pi.dev",
     "restart_lost": {
       "answers": "你在問題卡片上給出的 {count} 則回答沒有送達代理程式：{answers}。回答不是算圖 —— 沒有歷史紀錄可以回查，這次重新啟動完成後代理程式也無法把它找回來。等它回來後，請再把你的選擇告訴它（或直接貼上上面的內容）。",
       "header": "正在重新啟動代理程式後端。",

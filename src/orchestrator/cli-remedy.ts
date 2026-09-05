@@ -77,7 +77,7 @@ export function providerAuthRemedy(backend: string, detail?: string): string {
     case "pi":
       return (
         `pi has no usable provider credentials. Fix it in a TERMINAL, not here: either set a provider ` +
-        `API key (ANTHROPIC_API_KEY / OPENAI_API_KEY / …), or run \`pi\` once and type \`/login\` at its ` +
+        `API key (OPENAI_API_KEY / CEREBRAS_API_KEY / …), or run \`pi\` once and type \`/login\` at its ` +
         `prompt — that writes ~/.pi/agent/auth.json. Then Disconnect → Connect and send your message ` +
         `again.${tail}`
       );
@@ -88,8 +88,8 @@ export function providerAuthRemedy(backend: string, detail?: string): string {
       );
     case "claude":
       return (
-        `Claude has no usable credentials. In a TERMINAL run \`claude setup-token\`, or set ANTHROPIC_API_KEY, ` +
-        `then Disconnect → Connect.${tail}`
+        `Claude has no usable credentials. In a TERMINAL run \`claude setup-token\`, ` +
+        `then Disconnect → Connect. The agent authenticates from that login, not from an environment API key.${tail}`
       );
     case "gemini":
       return (

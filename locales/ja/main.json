@@ -198,7 +198,7 @@
     "oauth_signin_failed": "{provider} のサインインに失敗しました: {message}",
     "openrouter_no_key": "OpenRouter の API キーがありません — このまま接続しても最初のメッセージで失敗します。設定 → OpenRouter →「API キーを設定…」で指定するか（マスクされ、オーケストレーターが保存します。すぐに反映され、接続し直す必要はありません）、OPENROUTER_API_KEY 環境変数を設定してオーケストレーターを再起動してください。キーの取得: https://openrouter.ai/keys",
     "options_change_failed": "モデル / 推論の強さを変更できませんでした: {message}",
-    "pi_no_credential": "pi に使えるプロバイダーの資格情報がありません — 接続は準備完了と挨拶しますが、最初のメッセージで失敗します。プロバイダーを設定してください: プロバイダーの API キーを設定して（例: ANTHROPIC_API_KEY / OPENAI_API_KEY / CEREBRAS_API_KEY ）オーケストレーターを再起動するか、`pi` を一度実行して `/login` してください（~/.pi/agent/auth.json に保存されます）。そのあと切断 → 接続してください。すでに行っている場合は、項目が完全か確認してください — `key` のない ~/.pi/agent/auth.json のレコード、`apiKey` のない models.json のプロバイダー、存在しないファイルを指す GOOGLE_APPLICATION_CREDENTIALS では認証できません。https://pi.dev",
+    "pi_no_credential": "pi に使えるプロバイダーの資格情報がありません — 接続は準備完了と挨拶しますが、最初のメッセージで失敗します。プロバイダーを設定してください: プロバイダーの API キーを設定して（例: OPENAI_API_KEY / CEREBRAS_API_KEY ）オーケストレーターを再起動するか、`pi` を一度実行して `/login` してください（~/.pi/agent/auth.json に保存されます）。そのあと切断 → 接続してください。すでに行っている場合は、項目が完全か確認してください — `key` のない ~/.pi/agent/auth.json のレコード、`apiKey` のない models.json のプロバイダー、存在しないファイルを指す GOOGLE_APPLICATION_CREDENTIALS では認証できません。https://pi.dev",
     "restart_lost": {
       "answers": "質問カードでいただいた回答 {count} 件がエージェントに届きませんでした: {answers}。回答はレンダーではないため、あとから探せる履歴がなく、この再起動が終わってもエージェントが取り戻す方法はありません。戻ってきたら、選んだ内容をもう一度伝えてください（上の内容を貼り付けても構いません）。",
       "header": "エージェントのバックエンドを再起動しています。",

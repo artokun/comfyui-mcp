@@ -16,6 +16,7 @@ const checks = [
   { name: "asset-counts", cmd: "node", args: ["scripts/asset-counts.mjs", "--check"] },
   { name: "check:vocabulary", cmd: "npm", args: ["run", "check:vocabulary"] },
   { name: "check:unknown-collapse", cmd: "npm", args: ["run", "check:unknown-collapse"] },
+  { name: "check:env-advice", cmd: "node", args: ["scripts/check-env-advice.mjs"] },
   { name: "vocab:export", cmd: "npm", args: ["run", "vocab:export", "--", "--check"] },
   // #2407 — the release notes are the ONE artefact nothing verified. Three cuts in
   // one evening shipped a fix they did not list (0.52.133/#2378, 0.52.138/#2400)
