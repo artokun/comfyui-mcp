@@ -1020,6 +1020,11 @@ async function extractDepsAction(input: string | Record<string, unknown>): Promi
   }
 
   lines.push("### Per-node mapping");
+  // #2765 — a pack matched by a catalogue REGEX is a materially weaker claim than
+  // one whose publisher listed the class name, and install_deps acts on this list.
+  // Four unrelated nodes once came back owned by one pack they have nothing to do
+  // with, and the reader had no way to see the answer was a guess. Mark it.
+  const heuristic = result.dependencies.filter((d) => d.source === "manager_pattern");
   for (const dep of result.dependencies) {
     const where = dep.builtin
       ? "built-in"
@@ -1028,7 +1033,17 @@ async function extractDepsAction(input: string | Record<string, unknown>): Promi
         : dep.installed
           ? "installed, pack unknown"
           : "UNRESOLVED";
-    lines.push(`- \`${dep.class_type}\` → ${where}`);
+    const how = dep.source === "manager_pattern" ? " — matched by catalogue PATTERN" : "";
+    lines.push(`- \`${dep.class_type}\` → ${where}${how}`);
+  }
+  if (heuristic.length > 0) {
+    lines.push(
+      "",
+      `${heuristic.length} of the mappings above came from a ComfyUI-Manager ` +
+        "`nodename_pattern` regex rather than from a pack listing that class name. That is a " +
+        "heuristic published by whoever wrote the catalogue entry, not a statement of " +
+        "ownership — confirm the pack is the one you expect before installing it.",
+    );
   }
 
   return { content: [{ type: "text" as const, text: lines.join("\n") }] };

@@ -259,7 +259,10 @@ describe("extractWorkflowDependencies", () => {
     expect(result.dependencies[0]).toMatchObject({
       pack: "Pattern-Pack",
       installed: false,
-      source: "manager_mappings",
+      // #2765 renamed this source. A regex match and a publisher listing its own
+      // class name are different strength of claim, and install_deps acts on the
+      // result; the pack itself is unchanged.
+      source: "manager_pattern",
     });
   });
 
@@ -589,5 +592,166 @@ describe("extract_deps flags an unanswered mappings lookup (#1136)", () => {
       mk(async () => ({ "some-pack": [["SomeMissingNodeType"], { title_aux: "Some Pack" }] })),
     );
     expect(res.mappings_unavailable).toBeUndefined();
+  });
+});
+
+// #2765 — extract_deps returned an unrelated repository as the owner of four
+// distinct nodes, and the readiness result then reported THAT pack missing. The
+// reporter's own summary of the cost: it "could make the user install unrelated
+// third-party code". The owner's ruling: anything pointing at a non-canonical
+// pack is hack territory.
+//
+// Two claims were being consulted as equals. A catalogue entry's class-name list
+// is a publisher naming its own classes; its `nodename_pattern` is a regex anyone
+// may publish about anyone. Measured against the live ComfyUI-Manager catalogue
+// (40,656 known class names, 39 patterns), the difference is not theoretical:
+// one entry's `Hunyuan` pattern matches 188 names of which 182 belong to other
+// packs, and one entry's `Inspire$` takes all 101 of Inspire Pack's nodes.
+describe("#2765 pack ownership prefers evidence over a catalogue guess", () => {
+  const api = (classTypes: string[]) =>
+    Object.fromEntries(classTypes.map((t, i) => [String(i + 1), { class_type: t }]));
+
+  /** Installed, with the loaded module that says which pack the code came from. */
+  const installed = (classType: string, packDir: string) => ({
+    [classType]: { python_module: `custom_nodes.${packDir}` },
+  });
+
+  it("does NOT let a pattern rename an installed node's real pack", async () => {
+    // The reported shape: rgthree's node is installed from rgthree-comfy, and a
+    // third party's pattern captures it.
+    const deps = makeDeps({
+      fetchObjectInfo: vi.fn(async () => installed("Power Lora Loader (rgthree)", "rgthree-comfy")),
+      fetchManagerMappings: vi.fn(
+        async () =>
+          ({
+            "https://github.com/DemonGatanjieu/Anomalous_Model_Browser": [
+              [],
+              { title: "Anomalous_Model_Browser", nodename_pattern: "Loader" },
+            ],
+          }) as never,
+      ),
+    });
+    const res = await extractWorkflowDependencies(api(["Power Lora Loader (rgthree)"]), deps);
+    expect(res.dependencies[0].pack).toBe("rgthree-comfy");
+    expect(res.dependencies[0].source).toBe("object_info");
+    expect(res.requiredPacks).not.toContain("Anomalous_Model_Browser");
+  });
+
+  it("still takes the friendly name from an EXACT catalogue entry", async () => {
+    // The publisher naming its own class is a statement, not a guess, so it may
+    // still improve on a directory name. Only the regex path is distrusted.
+    const deps = makeDeps({
+      fetchObjectInfo: vi.fn(async () => installed("ImpactSomething", "ComfyUI-Impact-Pack-dir")),
+    });
+    const res = await extractWorkflowDependencies(api(["ImpactSomething"]), deps);
+    expect(res.dependencies[0].pack).toBe("ComfyUI-Impact-Pack");
+    expect(res.dependencies[0].source).toBe("manager_mappings");
+  });
+
+  it("refuses to pick when two packs' patterns both match", async () => {
+    const deps = makeDeps({
+      fetchObjectInfo: vi.fn(async () => ({})),
+      fetchManagerMappings: vi.fn(
+        async () =>
+          ({
+            "https://github.com/a/one": [[], { title: "PackOne", nodename_pattern: "^Krea2Edit" }],
+            "https://github.com/b/two": [[], { title: "PackTwo", nodename_pattern: "Encode$" }],
+          }) as never,
+      ),
+    });
+    const res = await extractWorkflowDependencies(api(["Krea2EditGroundedEncode"]), deps);
+    expect(res.dependencies[0].pack).toBeNull();
+    expect(res.dependencies[0].source).toBe("unresolved");
+    expect(res.unresolved).toEqual(["Krea2EditGroundedEncode"]);
+  });
+
+  it("ignores a regex two different packs publish", async () => {
+    // Live catalogue: `_jru$`, `Inspire$` and `- Ostris$` are each published twice.
+    // Same unanimity rule as above rather than a rule of its own — an earlier draft
+    // had a dedicated `contested` flag, and mutating it away killed no test because
+    // it could not: where BOTH claimants survive, unanimity already refuses, and
+    // where one is disqualified as over-broad the survivor is the right answer, so
+    // refusing there threw a correct mapping away. Against the live catalogue that
+    // is the difference between `SomethingInspire` resolving to Inspire Pack and
+    // resolving to nothing.
+    const deps = makeDeps({
+      fetchObjectInfo: vi.fn(async () => ({})),
+      fetchManagerMappings: vi.fn(
+        async () =>
+          ({
+            "https://github.com/a/one": [[], { title: "PackOne", nodename_pattern: "Inspire$" }],
+            "https://github.com/b/two": [[], { title: "PackTwo", nodename_pattern: "Inspire$" }],
+          }) as never,
+      ),
+    });
+    const res = await extractWorkflowDependencies(api(["SomethingInspire"]), deps);
+    expect(res.dependencies[0].pack).toBeNull();
+  });
+
+  it("ignores a pattern that mostly captures other packs' listed nodes", async () => {
+    // Six names, five of them explicitly listed by a different pack. That is a
+    // capture, not a namespace.
+    const deps = makeDeps({
+      fetchObjectInfo: vi.fn(async () => ({})),
+      fetchManagerMappings: vi.fn(
+        async () =>
+          ({
+            "https://github.com/real/owner": [
+              ["HunyuanA", "HunyuanB", "HunyuanC", "HunyuanD", "HunyuanE"],
+              { title: "RealOwner" },
+            ],
+            "https://github.com/greedy/pack": [
+              ["HunyuanMine"],
+              { title: "GreedyPack", nodename_pattern: "Hunyuan" },
+            ],
+          }) as never,
+      ),
+    });
+    const res = await extractWorkflowDependencies(api(["HunyuanUnknownNode"]), deps);
+    expect(res.dependencies[0].pack).toBeNull();
+    expect(res.dependencies[0].source).toBe("unresolved");
+  });
+
+  it("does NOT refuse a narrow pattern on thin evidence", async () => {
+    // The over-refusal direction, which would quietly break every legitimate
+    // per-pack pattern. rgthree's ` \(rgthree\)$` matches exactly one known name
+    // in the live catalogue, and that name lost the first-writer race to another
+    // entry — judging it on a majority of one would refuse a good pattern.
+    const deps = makeDeps({
+      fetchObjectInfo: vi.fn(async () => ({})),
+      fetchManagerMappings: vi.fn(
+        async () =>
+          ({
+            "https://github.com/other/pack": [["Power Lora Loader (rgthree)"], { title: "Other" }],
+            "https://github.com/rgthree/rgthree-comfy": [
+              [],
+              { title: "rgthree-comfy", nodename_pattern: " \\(rgthree\\)$" },
+            ],
+          }) as never,
+      ),
+    });
+    const res = await extractWorkflowDependencies(api(["Seed (rgthree)"]), deps);
+    expect(res.dependencies[0].pack).toBe("rgthree-comfy");
+  });
+
+  it("names a pattern-derived owner as the weaker claim it is", async () => {
+    // install_deps acts on this result, so "a regex matched" must not read the
+    // same as "the publisher listed this class".
+    const deps = makeDeps({
+      fetchObjectInfo: vi.fn(async () => ({})),
+      fetchManagerMappings: vi.fn(
+        async () =>
+          ({
+            "https://github.com/c/three": [
+              [],
+              { title: "Crystools", nodename_pattern: " \\[Crystools\\]$" },
+            ],
+          }) as never,
+      ),
+    });
+    const res = await extractWorkflowDependencies(api(["Switch latent [Crystools]"]), deps);
+    expect(res.dependencies[0].pack).toBe("Crystools");
+    expect(res.dependencies[0].source).toBe("manager_pattern");
+    expect(res.missingPacks).toEqual(["Crystools"]);
   });
 });

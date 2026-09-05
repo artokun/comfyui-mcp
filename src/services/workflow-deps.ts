@@ -72,7 +72,15 @@ export interface NodeDependency {
   /** True when the node is currently installed/available on the server. */
   installed: boolean;
   /** How the pack was resolved (for transparency). */
-  source: "object_info" | "manager_mappings" | "unresolved";
+  /**
+   * How the pack was resolved (for transparency).
+   *
+   * `manager_pattern` is the weak one (#2765): a catalogue `nodename_pattern`
+   * matched, which is a heuristic published by whoever wrote the entry rather
+   * than a publisher naming its own class. It is only ever used for a node that
+   * is NOT installed, since an installed one has its loaded module to go on.
+   */
+  source: "object_info" | "manager_mappings" | "manager_pattern" | "unresolved";
 }
 
 export interface ExtractDepsResult {
@@ -326,20 +334,58 @@ function packFromPythonModule(pythonModule: string | undefined): {
   return { builtin: false, pack: pythonModule.split(".")[0] || null };
 }
 
-/** Build a class_type -> pack lookup from Manager mappings (incl. regex patterns). */
-function buildMappingIndex(mappings: ManagerMappings): {
+/** A `nodename_pattern` entry, plus the two verdicts #2765 needs about it. */
+interface PatternClaim {
+  re: RegExp;
+  pack: string;
+
+  /** Memoised isOverBroad verdict; undefined until first asked. */
+  overBroad?: boolean;
+}
+
+interface MappingIndex {
+  /** class_type -> pack, first writer wins (the lookup). */
   exact: Map<string, string>;
-  patterns: Array<{ re: RegExp; pack: string }>;
-} {
+  /** class_type -> EVERY pack that exactly lists it (used to judge patterns). */
+  owners: Map<string, Set<string>>;
+  patterns: PatternClaim[];
+}
+
+/** Which pack claimed a class_type, and on what evidence. */
+interface MappingHit {
+  pack: string;
+  /** `exact`: the publisher listed this class name. `pattern`: a regex matched. */
+  via: "exact" | "pattern";
+}
+
+/**
+ * Build a class_type -> pack lookup from Manager mappings.
+ *
+ * TWO KINDS OF CLAIM, and #2765 is what happens when they are treated as one.
+ * An entry's `nodename_pattern` is a regex any publisher may put in the catalogue;
+ * an entry's class-name list is that publisher naming its own classes. The first
+ * is a heuristic, the second is a statement. They were being consulted as equals.
+ *
+ * `owners` exists only to judge the patterns: it records EVERY pack that exactly
+ * lists a class name, not just the first (which is what `exact` keeps, and what
+ * makes `exact` unusable for this — a pack losing the first-writer race would
+ * look like a stranger to its own nodes).
+ */
+function buildMappingIndex(mappings: ManagerMappings): MappingIndex {
   const exact = new Map<string, string>();
-  const patterns: Array<{ re: RegExp; pack: string }> = [];
+  const owners = new Map<string, Set<string>>();
+  const patterns: PatternClaim[] = [];
   for (const [repoOrId, value] of Object.entries(mappings)) {
     if (!Array.isArray(value)) continue;
     const [classNames, meta] = value;
     const pack = (meta && meta.title) || repoOrId;
     if (Array.isArray(classNames)) {
       for (const cn of classNames) {
-        if (typeof cn === "string" && !exact.has(cn)) exact.set(cn, pack);
+        if (typeof cn !== "string") continue;
+        if (!exact.has(cn)) exact.set(cn, pack);
+        let set = owners.get(cn);
+        if (!set) owners.set(cn, (set = new Set()));
+        set.add(pack);
       }
     }
     const pattern = meta?.nodename_pattern;
@@ -351,20 +397,63 @@ function buildMappingIndex(mappings: ManagerMappings): {
       }
     }
   }
-  return { exact, patterns };
+  return { exact, owners, patterns };
 }
 
-function resolveFromMappings(
-  classType: string,
-  index: { exact: Map<string, string>; patterns: Array<{ re: RegExp; pack: string }> },
-): string | null {
-  const exact = index.exact.get(classType);
-  if (exact) return exact;
-  for (const { re, pack } of index.patterns) {
-    if (re.test(classType)) return pack;
+/**
+ * Is this pattern claiming mostly OTHER packs' nodes?
+ *
+ * A per-pack pattern (` \(rgthree\)$`, ` \[Crystools\]$`) matches names its own
+ * pack owns. A pattern that mostly matches names some OTHER entry explicitly
+ * lists is not describing a namespace — it is capturing one. Measured against the
+ * live catalogue (40,656 known class names, 39 patterns), four are that shape,
+ * and they are not marginal: `Hunyuan` takes 182 of the 188 names it matches from
+ * other packs, and one entry's `Inspire$` takes all 101 of Inspire Pack's.
+ *
+ * MIN_JUDGED exists because a majority of one is not evidence. rgthree's pattern
+ * matches exactly one known name, and that name went to another pack in the
+ * first-writer race above; judging it on that would refuse a good pattern for a
+ * bookkeeping artefact.
+ *
+ * Lazy and memoised: the scan is patterns x known-names, and it only ever runs
+ * for a pattern that actually matched a class_type the caller asked about.
+ */
+function isOverBroad(p: PatternClaim, index: MappingIndex): boolean {
+  if (p.overBroad !== undefined) return p.overBroad;
+  const MIN_JUDGED = 5;
+  let total = 0;
+  let foreign = 0;
+  for (const [name, packs] of index.owners) {
+    if (!p.re.test(name)) continue;
+    total += 1;
+    if (!packs.has(p.pack)) foreign += 1;
   }
-  return null;
+  return (p.overBroad = total >= MIN_JUDGED && foreign * 2 > total);
 }
+
+/**
+ * Which pack claims this class_type, and on what evidence.
+ *
+ * Exact first, and an exact hit ends it — a publisher naming its own class beats
+ * every regex. Otherwise the usable patterns vote, and they must be unanimous:
+ * two packs matching one name is a question this cannot answer, and answering it
+ * anyway is #2765 (four unrelated nodes came back owned by one pack, and the
+ * readiness result then said that pack was missing — one step from installing
+ * unrelated third-party code).
+ */
+function resolveFromMappings(classType: string, index: MappingIndex): MappingHit | null {
+  const exact = index.exact.get(classType);
+  if (exact) return { pack: exact, via: "exact" };
+  const packs = new Set<string>();
+  for (const p of index.patterns) {
+    if (!p.re.test(classType)) continue;
+    if (isOverBroad(p, index)) continue;
+    packs.add(p.pack);
+  }
+  if (packs.size !== 1) return null;
+  return { pack: [...packs][0], via: "pattern" };
+}
+
 
 /**
  * Extract the custom node packs a workflow depends on.
@@ -383,8 +472,9 @@ export async function extractWorkflowDependencies(
 
   // Manager mappings are best-effort: extraction must still work if Manager
   // is absent, falling back to object_info's python_module for installed nodes.
-  let mappingIndex: ReturnType<typeof buildMappingIndex> = {
+  let mappingIndex: MappingIndex = {
     exact: new Map(),
+    owners: new Map(),
     patterns: [],
   };
   // #1136 — this catch used to be the whole story: log at warn, carry on, and
@@ -434,27 +524,35 @@ export async function extractWorkflowDependencies(
         dependencies.push({ class_type: classType, pack: null, builtin: true, installed: true, source: "object_info" });
         continue;
       }
-      // Installed custom node: prefer Manager's friendly pack name when available,
-      // otherwise use the python_module-derived directory name.
-      const mappedPack = resolveFromMappings(classType, mappingIndex);
+      // Installed custom node. #2765 — /object_info's python_module names the pack
+      // whose code is ACTUALLY LOADED, which is the strongest evidence available
+      // about ownership, and it was being overwritten by a catalogue guess. An
+      // EXACT catalogue entry may still supply the friendlier name, because that is
+      // the publisher naming its own class; a regex may not, because it is a
+      // heuristic owned by whoever published it and the loaded module is not.
+      const hit = resolveFromMappings(classType, mappingIndex);
+      const named = hit?.via === "exact" ? hit.pack : null;
       dependencies.push({
         class_type: classType,
-        pack: mappedPack ?? pack,
+        pack: named ?? pack,
         builtin: false,
         installed: true,
-        source: mappedPack ? "manager_mappings" : "object_info",
+        source: named ? "manager_mappings" : "object_info",
       });
       continue;
     }
 
-    // Not installed: only the Manager mapping can tell us the owning pack.
-    const mappedPack = resolveFromMappings(classType, mappingIndex);
+    // Not installed: only the Manager mapping can tell us the owning pack, and
+    // there is no python_module to check it against. Report WHICH kind of claim
+    // answered — a regex match is materially weaker than a publisher listing its
+    // own class name, and install_deps acts on this.
+    const hit = resolveFromMappings(classType, mappingIndex);
     dependencies.push({
       class_type: classType,
-      pack: mappedPack,
+      pack: hit?.pack ?? null,
       builtin: false,
       installed: false,
-      source: mappedPack ? "manager_mappings" : "unresolved",
+      source: hit ? (hit.via === "exact" ? "manager_mappings" : "manager_pattern") : "unresolved",
     });
   }
 

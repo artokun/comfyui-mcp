@@ -6,6 +6,11 @@ All notable changes to this project are documented here. This project adheres to
 
 ## Unreleased
 
+### MCP
+
+#### Fixed
+- **a ComfyUI-Manager catalogue regex no longer outranks the pack a node actually loaded
+
 ## [0.52.199] - 2026-09-05
 
 ### MCP
