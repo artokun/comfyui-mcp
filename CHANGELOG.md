@@ -14,6 +14,7 @@ All notable changes to this project are documented here. This project adheres to
 - the empty-toolset notice now requires POSITIVE evidence that a server connected (#2742). It skipped servers known degraded or pending and named everything else, but "not degraded" is a different fact from "connected": inspectMcpServers classifies nothing at all when the report is absent or empty, and an unrecognised status is deliberately not an alarm. So one server's tools populating the list could get another server — with no usable status evidence — announced as having CONNECTED and contributed nothing. It now reads the reported status directly. Found by the Copilot review on the PR
 - **a `hello` frame carrying no `comfyui_url` is no longer reported as a dead instance (#2742).** The one verdict with no `base` fell through to the shared warning, rendering as `ignoring hello retarget to unreachable undefined (stale tab on a dead instance?)` — asserting a target was named AND found dead, about a frame that claimed neither. Seen 17 times in one report from tabs that were merely churning.
 - **an MCP server that connects and registers NO tools is now reported (#2742).** Once this process has seen ANY namespaced MCP tool -- proof the harness lists them -- a session with NONE reports every configured server, closing the blind spot where a failure that emptied EVERY server looked identical to a harness that does not namespace.
+- **the same check now runs at every turn boundary, and can recover (#1524).** A server
 
 ## [0.52.198] - 2026-09-05
 

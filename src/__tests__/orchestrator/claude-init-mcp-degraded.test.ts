@@ -56,6 +56,11 @@ const hoisted = vi.hoisted(() => ({
   statusPolls: 0,
   /** Servers the harness was asked to reconnect, in order. */
   reconnectCalls: [] as string[],
+  /** #1524 — successive getContextUsage() readings. The LAST one repeats once
+   *  the queue drains, so a test that only cares about the pre-reconnect world
+   *  supplies one entry. null throws, modelling a harness that cannot answer. */
+  usageQueue: [] as Array<null | { mcp_tools: Array<Record<string, unknown>> }>,
+  usagePolls: 0,
 }));
 
 vi.mock("@anthropic-ai/claude-agent-sdk", () => ({
@@ -80,6 +85,12 @@ vi.mock("@anthropic-ai/claude-agent-sdk", () => ({
         if (!hoisted.statusPoll) throw new Error("no status available");
         return hoisted.statusPoll;
       },
+      getContextUsage: async () => {
+        hoisted.usagePolls += 1;
+        const next = hoisted.usageQueue.length > 1 ? hoisted.usageQueue.shift() : hoisted.usageQueue[0];
+        if (next === undefined || next === null) throw new Error("no usage available");
+        return next;
+      },
       reconnectMcpServer: async (name: string) => {
         hoisted.reconnectCalls.push(name);
       },
@@ -95,6 +106,8 @@ beforeEach(() => {
   hoisted.statusPoll = null;
   hoisted.statusPolls = 0;
   hoisted.reconnectCalls = [];
+  hoisted.usageQueue = [];
+  hoisted.usagePolls = 0;
 });
 
 const initWith = (mcp_servers?: Array<{ name: string; status: string }>) => ({
@@ -510,5 +523,164 @@ describe("a Claude session whose MCP server connected but registered nothing (#2
     const notices = noticesOf(events);
     expect(notices).toHaveLength(1);
     expect(notices[0].message).toContain("started without");
+  });
+});
+
+// #1524 MID-SESSION — the half #2742's init check cannot reach.
+//
+// Reported again on 2026-09-03, on the Claude backend, after a user interrupt and
+// several healthy runs: every `mcp__panel__*` tool vanished from the compact
+// catalog and calls failed with `No such tool available`, while panel events kept
+// arriving. Nothing said so, because the turn-end watch reads `mcpServerStatus()`
+// and that carries only `{name, status}` — the server was still `connected`.
+//
+// `getContextUsage()` answers the question the status poll cannot: its
+// `mcp_tools` is a per-server list of what is in the session's context RIGHT NOW.
+// That also makes the recovery claimable, which it was not at init — the same
+// call verifies whether the reconnect worked.
+describe("#1524 a server that keeps `connected` and stops contributing tools", () => {
+  const CONNECTED = [
+    { name: "comfyui", status: "connected" },
+    { name: "panel", status: "connected" },
+  ];
+  const tool = (server: string, name: string) => ({
+    name: `mcp__${server}__${name}`,
+    server_name: server,
+    tokens: 100,
+  });
+  /** The reported shape: comfyui present throughout, panel gone. */
+  const PANEL_GONE = { mcp_tools: [tool("comfyui", "generate_image")] };
+  const BOTH_PRESENT = {
+    mcp_tools: [tool("comfyui", "generate_image"), tool("panel", "panel_graph_outline")],
+  };
+
+  const deps = { mcpServers: { comfyui: COMFYUI_SERVER }, panelServer: PANEL_SERVER };
+
+  it("reports the empty server at the turn boundary", async () => {
+    hoisted.statusPoll = CONNECTED;
+    hoisted.usageQueue = [PANEL_GONE];
+    const events = await driveTurns(deps, initWith(CONNECTED));
+    const notices = noticesOf(events);
+    expect(notices).toHaveLength(1);
+    expect(notices[0].message).toContain("panel");
+    expect(notices[0].message).toContain("ZERO tools");
+    expect(notices[0].message).not.toContain("comfyui");
+  });
+
+  it("says NOTHING when entries exist but carry no usable server_name", async () => {
+    // A populated `mcp_tools` whose entries this code cannot attribute is a shape it
+    // does not understand -- not a session whose servers all went quiet. Concluding
+    // the latter reports every HEALTHY server as empty and spends its one reconnect.
+    //
+    // Not reachable on the pinned SDK, where `server_name: string` is required. It is
+    // reachable the moment that shape drifts, and the failure is silent to us and
+    // wrong in the direction that fabricates an outage.
+    hoisted.statusPoll = CONNECTED;
+    hoisted.usageQueue = [
+      { mcp_tools: [{ name: "mcp__comfyui__generate_image", server: "comfyui", tokens: 100 }] },
+    ];
+    const events = await driveTurns(deps, initWith(CONNECTED));
+    expect(noticesOf(events)).toHaveLength(0);
+    expect(hoisted.reconnectCalls).toHaveLength(0);
+  });
+
+  it("still reports when server_names parse but none of them is ours", async () => {
+    // The legitimate neighbour of the case above, and the reason the guard keys on
+    // "nothing parsed" rather than "our name is missing": tools exist, they are
+    // attributable, and none belongs to a configured server -- a real observation.
+    hoisted.statusPoll = CONNECTED;
+    hoisted.usageQueue = [{ mcp_tools: [tool("somethingelse", "a_tool")] }];
+    const events = await driveTurns(deps, initWith(CONNECTED));
+    const notices = noticesOf(events);
+    expect(notices).toHaveLength(1);
+    expect(notices[0].message).toContain("panel");
+    expect(notices[0].message).toContain("comfyui");
+  });
+
+  it("attempts the one reconnect the episode is owed", async () => {
+    hoisted.statusPoll = CONNECTED;
+    hoisted.usageQueue = [PANEL_GONE];
+    await driveTurns(deps, initWith(CONNECTED));
+    expect(hoisted.reconnectCalls).toContain("panel");
+  });
+
+  it("reports RECOVERY when the reconnect brings the tools back", async () => {
+    // The claim the init-time check could not make: the reading that found the
+    // emptiness is the same one that settles whether the fix worked.
+    hoisted.statusPoll = CONNECTED;
+    hoisted.usageQueue = [PANEL_GONE, BOTH_PRESENT];
+    const events = await driveTurns(deps, initWith(CONNECTED));
+    const notices = noticesOf(events);
+    expect(notices).toHaveLength(1);
+    expect(notices[0].message).toContain("the automatic reconnect brought it back");
+    expect(notices[0].message).not.toContain("ZERO tools");
+  });
+
+  it("says NOTHING while both servers are contributing", async () => {
+    // The direction that matters most: a false "your tools are gone" on a healthy
+    // session is worse than the silence this replaces.
+    hoisted.statusPoll = CONNECTED;
+    hoisted.usageQueue = [BOTH_PRESENT];
+    const events = await driveTurns(deps, initWith(CONNECTED));
+    expect(noticesOf(events)).toHaveLength(0);
+    expect(hoisted.reconnectCalls).toEqual([]);
+  });
+
+  it("stays silent when the reading carries no MCP tools and none was ever seen", async () => {
+    // Indistinguishable from an API that does not populate the field, so a first
+    // empty reading says nothing. NOT justified by "the reports all had comfyui
+    // tools" any more -- that is evidence about earlier reports, not a property of
+    // the failure, and the sixth one may not have them. The latch below is what
+    // makes the total-failure case reachable.
+    hoisted.statusPoll = CONNECTED;
+    hoisted.usageQueue = [{ mcp_tools: [] }];
+    const events = await driveTurns(deps, initWith(CONNECTED));
+    expect(noticesOf(events)).toHaveLength(0);
+  });
+
+  it("reports EVERY server once a populated reading has been seen and then empties", async () => {
+    // The blind spot this closes: a failure that empties EVERY server produced the
+    // same empty list as an API that never reports them. One populated reading
+    // settles which it is, and after that an empty list is a real observation.
+    hoisted.statusPoll = CONNECTED;
+    hoisted.usageQueue = [BOTH_PRESENT, { mcp_tools: [] }];
+    // TWO turns: the first reading latches, the second is the empty one.
+    const events = await driveTurns(deps, initWith(CONNECTED), 2);
+    const text = noticesOf(events)
+      .map((n) => n.message)
+      .join(" ");
+    expect(text).toContain("panel");
+    expect(text).toContain("comfyui");
+  });
+
+  it("stays silent when getContextUsage cannot be read", async () => {
+    hoisted.statusPoll = CONNECTED;
+    hoisted.usageQueue = [null];
+    const events = await driveTurns(deps, initWith(CONNECTED));
+    expect(noticesOf(events)).toHaveLength(0);
+  });
+
+  it("does not double-report a server that is DOWN rather than empty", async () => {
+    // It has no tools because it is not up. inspectMcpServers already says so,
+    // and two notices in different words read as two faults.
+    hoisted.statusPoll = [
+      { name: "comfyui", status: "connected" },
+      { name: "panel", status: "failed" },
+    ];
+    hoisted.usageQueue = [PANEL_GONE];
+    const events = await driveTurns(deps, initWith(CONNECTED));
+    const messages = noticesOf(events).map((n) => n.message);
+    expect(messages.filter((m) => m.includes("ZERO tools"))).toHaveLength(0);
+  });
+
+  it("does not re-narrate a server that stays empty every turn", async () => {
+    // One line per episode. A server that stays empty across a long session must
+    // not add a notice to every turn.
+    hoisted.statusPoll = CONNECTED;
+    hoisted.usageQueue = [PANEL_GONE];
+    const events = await driveTurns(deps, initWith(CONNECTED), 3);
+    expect(noticesOf(events).filter((n) => n.message.includes("ZERO tools"))).toHaveLength(1);
+    // …and the one reconnect is spent once, not once per turn.
+    expect(hoisted.reconnectCalls.filter((n) => n === "panel")).toHaveLength(1);
   });
 });

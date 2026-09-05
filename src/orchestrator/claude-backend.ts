@@ -26,6 +26,7 @@ import { loadTurnRegistry, saveTurnRegistry, tombstoneTurn } from "./turn-regist
 import {
   degradedMcpNotice,
   emptyToolsMcpNotice,
+  type ReportedMcpServer,
   inspectMcpServers,
   serversWithoutTools,
   reconnectableMcpStatus,
@@ -443,6 +444,15 @@ export class ClaudeBackend implements AgentBackend {
    *  per episode, so a server that stays down is reported once, not fought on
    *  every turn. */
   private mcpDown = new Map<string, boolean>();
+  /** #1524 — CONNECTED-but-EMPTY episodes, on their OWN map. See checkEmptyToolsets
+   *  for why sharing mcpDown would close every episode on the turn it opened. */
+  private mcpEmpty = new Map<string, boolean>();
+  private mcpEmptyReported = new Set<string>();
+  /** Has `getContextUsage()` EVER returned a populated `mcp_tools`? Until it has,
+   *  an empty list is an API that does not report them, not a session with none —
+   *  the same distinction `serversWithoutTools` draws about the `mcp__` namespace.
+   *  Latches false -> true only, so this can widen the check but never narrow it. */
+  private sawPopulatedMcpUsage = false;
 
   /** Say — in the log — that this session does not have servers it was given.
    *  Shared by the init check and the turn-end watch so both report identically. */
@@ -498,6 +508,182 @@ export class ClaudeBackend implements AgentBackend {
    * that throws, leaves the session as informed as it was before this existed
    * — silent — and never takes the turn stream down with it.
    */
+
+/**
+ * The tools each configured server has IN THE SESSION'S CONTEXT RIGHT NOW (#1524).
+ *
+ * `mcpServerStatus()` — the turn-end poll — carries only `{name, status}`, which
+ * is why the connected-but-empty check was an init-only thing when #2742 landed:
+ * mid-session there was nothing to read. `getContextUsage()` answers it directly:
+ *
+ *     mcp_tools: { name: "mcp__panel__panel_graph_outline", server_name: "panel", tokens }[]
+ *
+ * That is the session's own accounting of what the model can see, which is exactly
+ * the question — a server can be `connected` and contribute nothing, and the
+ * reporters on #1524/#2742 established that by hand with ToolSearch because
+ * nothing else would say it.
+ *
+ * Returns `null` for "cannot tell", never for "none": a harness with no
+ * `getContextUsage`, a call that throws, or a reading with NO `mcp__` entries at
+ * all. That last silence is the same deliberate blind spot #2742's init check
+ * documents — an empty list is indistinguishable from a harness that does not
+ * populate the field, and a false "your tools are gone" on a healthy session is
+ * worse than the silence it replaces. The reported signature has
+ * `mcp__comfyui__*` present throughout, so it is covered either way.
+ *
+ * Servers that are DEGRADED or PENDING are excluded: they have no tools because
+ * they are not up, `inspectMcpServers` already says so, and saying it twice in
+ * different words reads as two faults.
+ */
+private async pollEmptyToolsets(
+  q: Query,
+  names: readonly string[],
+  reported: readonly ReportedMcpServer[] | undefined,
+): Promise<string[] | null> {
+  if (typeof q.getContextUsage !== "function") return null;
+  let entries: Array<{ server_name?: unknown }> | undefined;
+  try {
+    const usage = await q.getContextUsage();
+    entries = (usage as { mcp_tools?: Array<{ server_name?: unknown }> } | undefined)?.mcp_tools;
+  } catch (err) {
+    logger.debug(`[claude-backend] getContextUsage: ${msgOf(err)}`);
+    return null;
+  }
+  if (!Array.isArray(entries)) return null;
+  if (entries.length > 0) {
+    this.sawPopulatedMcpUsage = true;
+  } else if (!this.sawPopulatedMcpUsage) {
+    // Indistinguishable from an API that does not populate mcp_tools at all, and a
+    // false "your tools are gone" every turn is worse than this silence. Once we
+    // have seen it populated ONCE, an empty list is a real observation: every
+    // configured server contributed nothing, which is precisely the total failure
+    // the #2742 reports describe and the shape the init-time check used to miss too.
+    return null;
+  }
+  const withTools = new Set<string>();
+  for (const entry of entries) {
+    if (typeof entry?.server_name === "string") withTools.add(entry.server_name);
+  }
+  if (entries.length > 0 && withTools.size === 0) {
+    // Entries EXIST but not one of them carried a usable `server_name`. That is a
+    // shape this code does not understand, not a session whose servers all went
+    // quiet -- and the difference matters, because concluding the latter reports
+    // every healthy server as empty and burns its one reconnect.
+    //
+    // Exact discriminator, not a heuristic: a single parseable `server_name` puts a
+    // name in this set, so entries-but-no-names means NONE parsed. Both neighbours
+    // stay reportable -- an EMPTY list (every server contributed nothing, the #2742
+    // signal, already gated by the latch above) and "tools exist, none of them ours"
+    // (a populated set that simply omits our names).
+    //
+    // The `typeof` check above already declines to trust the field's type; drawing a
+    // confident conclusion from its absence would spend that distrust and then
+    // ignore it. Same shape as the #1539 refusal that fired on absence of evidence.
+    return null;
+  }
+  const health = inspectMcpServers(names, reported);
+  const notUp = new Set<string>([...health.degraded.map((d) => d.name), ...health.pending]);
+  return names.filter((name) => !notUp.has(name) && !withTools.has(name));
+}
+
+/**
+ * The mid-session half of #1524: a server that is connected, was contributing
+ * tools, and stops.
+ *
+ * Same episode discipline as the status path — ONE reconnect owed per episode,
+ * one notice per episode, never re-narrated every turn — but on its own map.
+ * Reusing `mcpDown` would be a bug: its "episodes that CLOSED" sweep treats any
+ * name not in the current DEGRADED set as recovered, and an empty server is
+ * `connected`, so every empty episode would close itself on the same turn it
+ * opened and report a recovery that never happened.
+ *
+ * The recovery is claimable here in a way it was not at init: the same
+ * `getContextUsage()` call verifies it. A re-read that cannot be taken yields
+ * `null` and the episode simply stays open — never an asserted outcome.
+ */
+private async checkEmptyToolsets(
+  q: Query,
+  names: readonly string[],
+  reported: readonly ReportedMcpServer[] | undefined,
+): Promise<AgentEvent[]> {
+  const empty = await this.pollEmptyToolsets(q, names, reported);
+  if (empty === null) return [];
+  const events: AgentEvent[] = [];
+  const emptyNow = new Set(empty);
+
+  // Episodes that CLOSED — the server has tools again.
+  const backByUs: string[] = [];
+  const backOnItsOwn: string[] = [];
+  for (const [name, attemptSpent] of [...this.mcpEmpty.entries()]) {
+    if (emptyNow.has(name)) continue;
+    this.mcpEmpty.delete(name);
+    (attemptSpent ? backByUs : backOnItsOwn).push(name);
+  }
+
+  // The one reconnect each new episode is owed. `reconnectMcpServer` is the
+  // SDK's own verb and the only lever here; a harness without it leaves the
+  // episode open and reported, which is still better than silence.
+  const owed = empty.filter((name) => this.mcpEmpty.get(name) !== true);
+  let attempted = false;
+  if (owed.length > 0 && typeof q.reconnectMcpServer === "function") {
+    for (const name of owed) {
+      this.mcpEmpty.set(name, true); // spent, whatever it returns
+      attempted = true;
+      try {
+        await q.reconnectMcpServer(name);
+      } catch (err) {
+        logger.debug(`[claude-backend] reconnectMcpServer(${name}) [empty toolset]: ${msgOf(err)}`);
+      }
+    }
+  }
+
+  // VERIFY, rather than assume. This is the whole reason the mid-session check
+  // is possible at all: the reading that found the emptiness also settles
+  // whether the reconnect cleared it.
+  let stillEmpty = empty;
+  if (attempted) {
+    const after = await this.pollEmptyToolsets(q, names, reported);
+    if (after !== null) {
+      const afterSet = new Set(after);
+      for (const name of owed) {
+        if (!afterSet.has(name)) {
+          this.mcpEmpty.delete(name);
+          backByUs.push(name);
+        }
+      }
+      stillEmpty = after;
+    }
+  }
+
+  if (backByUs.length) {
+    logger.info(`[claude-backend] MCP tools returned after reconnect: ${backByUs.join(", ")}`);
+    events.push({ type: "error", sessionNotice: true, message: recoveredMcpNotice(backByUs, true) });
+  }
+  if (backOnItsOwn.length) {
+    logger.info(`[claude-backend] MCP tools returned on their own: ${backOnItsOwn.join(", ")}`);
+    events.push({ type: "error", sessionNotice: true, message: recoveredMcpNotice(backOnItsOwn, false) });
+  }
+
+  // Report only episodes not already narrated — a server that stays empty is not
+  // re-announced on every turn boundary.
+  const unreported = stillEmpty.filter((name) => !this.mcpEmptyReported.has(name));
+  for (const name of stillEmpty) {
+    this.mcpEmpty.set(name, this.mcpEmpty.get(name) === true);
+    this.mcpEmptyReported.add(name);
+  }
+  for (const name of [...this.mcpEmptyReported]) {
+    if (!stillEmpty.includes(name)) this.mcpEmptyReported.delete(name);
+  }
+  if (unreported.length) {
+    logger.error(
+      `[claude-backend] MCP server(s) ${unreported.join(", ")} are CONNECTED but contribute zero tools mid-session`,
+    );
+    events.push({ type: "error", sessionNotice: true, message: emptyToolsMcpNotice(unreported) });
+  }
+  return events;
+}
+
+
   private async checkMcpServers(q: Query): Promise<AgentEvent[]> {
     const names = Object.keys(this.mcpServersForRun() ?? {});
     if (names.length === 0) return [];
@@ -602,6 +788,13 @@ export class ClaudeBackend implements AgentBackend {
         message: unrecoveredMcpNotice(unsupported, "unsupported"),
       });
     }
+    // #1524 — the OTHER way a session loses a server's tools: it stays
+    // `connected` and simply stops contributing them. Everything above reads
+    // `mcpServerStatus()`, which carries no tool information, so that variant was
+    // invisible here and #2742 could only catch it at init. Runs LAST and reads
+    // the post-reconnect world, so a server this turn just brought back is not
+    // also reported as empty on the same pass.
+    events.push(...(await this.checkEmptyToolsets(q, names, reported)));
     return events;
   }
 
