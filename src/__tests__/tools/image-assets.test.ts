@@ -684,7 +684,9 @@ describe("guards test ABSENCE, never falsiness", () => {
 
   it('get_image action:"view"/"asset_metadata" forward an empty asset_id', async () => {
     await getImage()({ action: "view", asset_id: "" });
-    expect(viewAssetImageMock).toHaveBeenCalledWith("");
+    // #2692 added an options argument (the inline budget). The claim under test is
+    // still that the EMPTY id is forwarded rather than swallowed by a falsiness guard.
+    expect(viewAssetImageMock).toHaveBeenCalledWith("", expect.any(Object));
     await getImage()({ action: "asset_metadata", asset_id: "" });
     expect(registryGetMock).toHaveBeenCalledWith("");
   });
