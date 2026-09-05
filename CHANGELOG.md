@@ -9,6 +9,8 @@ All notable changes to this project are documented here. This project adheres to
 ### MCP
 
 #### Fixed
+
+- **`download_model` `action:"status"` does not advertise `install_comfyui action:"refresh_nodes"` when a just-landed file is on disk but not yet listed (#2876).** That action is not on `install_comfyui`. The note names `panel_refresh_nodes` only when the live panel bundle can run it; a tab behind the installed pack is told to hard-refresh first.
 - interpreter-flag recovery compares script paths by HOST rules (#2693). The corroboration folded case and rewrote backslashes on every platform, so on Linux /ComfyUI/main.py and /comfyui/main.py corroborated each other and a backslash — a legal POSIX filename character — was rewritten. Reachable: argvFidelity "exact" is set on the /proc/<pid>/cmdline path too, where the kernel NUL-separates argv, so only the ps fallback is "flattened". Now uses the module's own sameRecoveryPath, which preserves POSIX spelling and folds only on Windows. Found by the Copilot review on the PR
 - **a relaunch keeps the Python INTERPRETER flags (#2693).** `-s`, `-E`, `-I`, `-B`, `-O` and `-u`
   are consumed by CPython before `sys.argv` exists, so a relaunch rebuilt from the server's own
