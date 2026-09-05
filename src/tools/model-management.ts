@@ -32,6 +32,7 @@ import {
   type DownloadJob,
 } from "../services/download-jobs.js";
 import {
+  downloadCacheFootprint,
   observeSegmentScratchAtPath,
   observeStagedPartialAtPath,
   type StagedPartialObservation,
@@ -1155,6 +1156,109 @@ async function downloadAction(args: {
 }
 
 /** ← the retired standalone download-status tool (now action:"status"). */
+const CACHE_GB = 1024 ** 3;
+
+/**
+ * What the download cache is costing on disk, appended to action:"status" (#1477).
+ *
+ * The cache is a second, content-addressed copy of every model ever downloaded. It
+ * lives under the HOME volume while the models land wherever ComfyUI keeps them,
+ * and with COMFYUI_LRU_CACHE_SIZE_GB unset nothing ever evicts it. Both reporters
+ * found it with a disk-usage treemap — 0.24 + 2.72 GB, then 37.63 GB across 11
+ * entries on C: while the models were on D: — because no output this server
+ * produced had ever mentioned the directory. This does not decide what the limit
+ * ought to be; it stops the growth being invisible.
+ *
+ * Silent when there is nothing to report, so polling a download does not accrete a
+ * paragraph of unchanging text. The STAGED figure is deliberately included while a
+ * transfer runs: it is read from the filesystem, not from the in-memory progress
+ * row, and a 10x divergence between those two is the same report's other half.
+ */
+async function cacheFootprintNote(): Promise<string> {
+  let f;
+  try {
+    f = await downloadCacheFootprint();
+  } catch {
+    return "";
+  }
+  if (f.unreadable) {
+    // ENOENT is "no cache yet" — nothing to report, stay silent. Anything else means
+    // the directory is THERE and could not be read, and #1477's whole complaint is
+    // that nothing ever named it. Reporting no figure is honest; reporting nothing
+    // at all sends that user back to the disk-usage treemap both reporters used.
+    if (f.unreadableCode === "ENOENT") return "";
+    return (
+      `\n\n### Download cache\n\n\`${f.dir}\` could not be read (${f.unreadableCode}), so its ` +
+      `size is UNKNOWN — not zero. This is the directory downloads are staged and retained ` +
+      `in; check its permissions, or set COMFYUI_DOWNLOAD_CACHE_DIR to a volume this process ` +
+      `can read.`
+    );
+  }
+  if (
+    f.retainedBytes === 0 &&
+    f.stagedBytes === 0 &&
+    f.sidecarBytes === 0 &&
+    f.nonFileEntries === 0
+  ) {
+    return "";
+  }
+  const gb = (n: number) => (n / CACHE_GB).toFixed(2);
+  const parts: string[] = [];
+  if (f.retainedEntries > 0) {
+    const plural = f.retainedEntries === 1 ? "entry" : "entries";
+    parts.push(`${gb(f.retainedBytes)} GB retained across ${f.retainedEntries} ${plural}`);
+  }
+  if (f.stagedEntries > 0) {
+    const plural = f.stagedEntries === 1 ? "partial" : "partials";
+    parts.push(`${gb(f.stagedBytes)} GB staged in ${f.stagedEntries} resumable ${plural}`);
+  }
+  // The third bucket exists so the numbers RECONCILE against `du`. Computing it and
+  // not printing it would leave the reader with the same unexplained remainder the
+  // two-bucket version had, which is the whole complaint behind #1477.
+  if (f.sidecarEntries > 0) {
+    const plural = f.sidecarEntries === 1 ? "sidecar" : "sidecars";
+    parts.push(`${gb(f.sidecarBytes)} GB in ${f.sidecarEntries} ${plural} (.ct/.etag, never evicted)`);
+  }
+  // #1477 — the three buckets above account for every FILE, which is what lets them
+  // reconcile against `du`. A non-file entry is skipped, and skipping it silently
+  // makes that reconciliation true-unless — in exactly the situation this report
+  // exists for, a user comparing it against a treemap. Counted, never sized: `stat`
+  // on a directory reports the inode, not the bytes under it.
+  // "may", not "will": an EMPTY subdirectory contributes nothing, so the totals can
+  // still agree. Saying "will" would assert a discrepancy this code has not measured —
+  // the same overclaim the sized-vs-counted decision above avoids.
+  if (f.nonFileEntries > 0) {
+    const plural = f.nonFileEntries === 1 ? "entry" : "entries";
+    parts.push(
+      `${f.nonFileEntries} non-file ${plural} (subdirectory or symlink) NOT counted above, so these numbers may under-report what \`du\` shows`,
+    );
+  }
+  // #1477 — what deleting the cache would ACTUALLY reclaim. `materializeCacheFile`
+  // prefers a hardlink when the cache and the destination share a volume, so a
+  // retained entry is often the SAME inode as the installed model, not a second
+  // copy. Measured on a real cache: 75 of 93 entries and 381 GB of 437 GB were
+  // shared. Saying "a retained entry is a COPY ... deleting its cache file costs
+  // only [a re-download]" told those users they could reclaim ~437 GB when the
+  // true figure was ~56 GB.
+  const reclaim =
+    f.sharedEntries > 0
+      ? ` Of that, ${gb(f.sharedBytes)} GB in ${f.sharedEntries} entr${f.sharedEntries === 1 ? "y" : "ies"} ` +
+        "shares an inode with the installed model (a same-volume hardlink), so deleting those " +
+        `cache files reclaims no disk. About ${gb(Math.max(0, f.retainedBytes - f.sharedBytes))} GB is ` +
+        "held only by the cache."
+      : "";
+  // COMFYUI_DOWNLOAD_CACHE_DIR is the relocation lever whether or not eviction is
+  // on: a bounded cache on the wrong volume is exactly when you want to move it.
+  const levers =
+    (f.limitBytes > 0
+      ? `Eviction is ON at ${gb(f.limitBytes)} GB (COMFYUI_LRU_CACHE_SIZE_GB). ` +
+        "Set COMFYUI_DOWNLOAD_CACHE_DIR to stage on a different volume."
+      : "Eviction is OFF — COMFYUI_LRU_CACHE_SIZE_GB is not set to a positive number, so " +
+        "nothing here is removed automatically. Set it to bound the cache, or " +
+        "COMFYUI_DOWNLOAD_CACHE_DIR to stage on a different volume.") + reclaim;
+  return `\n\n### Download cache\n\n\`${f.dir}\` — ${parts.join(", ")}.\n${levers}`;
+}
+
 async function statusAction(args: {
   id?: string;
   tray_id?: string;
@@ -1222,7 +1326,7 @@ async function statusAction(args: {
                   // reconnect empties it while transfers keep streaming.
                   : emptyDownloadListingNote({
                       storeCreatedMs: describeRecordStore().createdMs,
-                    }),
+                    }) + (await cacheFootprintNote()),
               },
             ],
           };
@@ -1391,7 +1495,11 @@ async function statusAction(args: {
           collidingIds.length > 0
             ? `## Downloads\n\nNOTE: ${collidingIds.length} id(s) below name MORE THAN ONE download (same destination file, different source URLs). Use the \`tray_id\` shown on each row — not the id alone — with \`action:"status"\` and \`action:"cancel"\`.\n`
             : "## Downloads\n";
-        return { content: [{ type: "text", text: `${header}\n${lines.join("\n")}` }] };
+        return {
+          content: [
+            { type: "text", text: `${header}\n${lines.join("\n")}${await cacheFootprintNote()}` },
+          ],
+        };
       } catch (err) {
         return errorToToolResult(err);
       }

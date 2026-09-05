@@ -1607,6 +1607,11 @@ async function streamUrlToFile(
   callerAuth = false,
   /** Download-only fetch route. Defaults to the proxy-aware dispatcher wrapper. */
   fetchImpl: DownloadFetch = downloadFetch,
+  /** #1477 — the FINAL destination directory, when known, so a cache-volume
+   *  refusal can say the DESTINATION has room and name COMFYUI_DOWNLOAD_CACHE_DIR.
+   *  Appended deliberately: this list is positional and long, and inserting
+   *  anywhere else risks a silent re-binding at the call sites. */
+  destDir?: string,
 ): Promise<string> {
   // Fail fast if we were cancelled before any bytes moved — no request, no partial.
   if (signal?.aborted) throw new DOMException("The download was cancelled.", "AbortError");
@@ -2356,6 +2361,16 @@ async function streamUrlToFile(
     const refusal = await checkCacheVolumeSpace({
       needBytes,
       cacheDir: dirname(targetPath),
+      // #1477 — the DESTINATION volume, when it differs from the cache's. Without it
+      // the refusal can only say "the staging volume is full"; with it, it can say
+      // the destination HAS room and name COMFYUI_DOWNLOAD_CACHE_DIR, turning a
+      // fatal error into one setting. That is the reported shape exactly: a 32 GB
+      // model bound for D:, staged on a C: that could not hold it.
+      //
+      // `insufficientCacheSpaceMessage` has accepted `destDir`/`destFree` since it
+      // was written and no caller ever supplied them, so that clause was
+      // unreachable — the capability existed and was not connected.
+      destDir,
       // `resuming` is "we are APPENDING"; `partialExists` is "there are bytes on disk
       // either way". Review found these conflated, so a restart after a server ignored
       // our Range told the user nothing had been downloaded while a partial sat there.
@@ -2670,6 +2685,9 @@ async function downloadIntoCache(
   callerAuth = false,
   /** Download-only fetch route. */
   fetchImpl: DownloadFetch = downloadFetch,
+  /** #1477 — forwarded to the volume precheck so a refusal can name the
+   *  destination volume. Appended for the same positional-safety reason. */
+  destDir?: string,
 ): Promise<string> {
   // Representation-aware identity (#467): a same-URL download with different HTTP
   // auth headers OR different cloud (S3/Azure) credentials gets its OWN cache file,
@@ -3171,6 +3189,7 @@ async function downloadIntoCache(
           true,
           callerAuth,
           fetchImpl,
+          destDir, // #1477 — so the volume refusal can name the destination
         );
         await downloadCacheFs.rename(partial, target);
         await touch(target);
@@ -3492,6 +3511,168 @@ async function materializeCacheFile(
   }
 }
 
+/**
+ * A cache entry eviction would CONSIDER: a plain file, not a dot-prefixed
+ * staging partial or sidecar (#1477).
+ *
+ * One function on purpose. `evictLruIfNeeded` and `downloadCacheFootprint` each
+ * carried their own copy of this test, and the footprint's comment asserted they
+ * could not disagree — which was true only because both copies happened to be
+ * written the same way. The report exists to be reconciled against what eviction
+ * would actually free, so a future change to one copy would silently invalidate
+ * exactly the number the report is for.
+ */
+function isRetainedCacheEntry(name: string): boolean {
+  return !name.startsWith(".");
+}
+
+/** What the download cache is holding right now (#1477).
+ *
+ * Retention is the POINT of a cache, but with COMFYUI_LRU_CACHE_SIZE_GB unset the
+ * limit is 0, which evictLruIfNeeded reads as "never evict" — so the default is an
+ * unbounded second copy of every model ever downloaded, sitting on the HOME volume
+ * while the models themselves land wherever ComfyUI keeps them. Two reporters found
+ * it the same way: a disk-usage treemap (0.24 + 2.72 GB, then 37.63 GB across 11
+ * entries on C: while the models were on D:). Nothing this server printed had ever
+ * said the directory existed, which is the part that is fixable without first
+ * deciding what the limit ought to be.
+ *
+ * Counted with evictLruIfNeeded's OWN filter so the two cannot disagree about what
+ * is evictable: plain files only. Staged partials are reported separately because
+ * they are dot-prefixed, which is exactly why eviction skips them — a resumable
+ * download in progress is not retention, and reporting it as such would tell a
+ * user to delete the bytes they are waiting on.
+ *
+ * Best-effort and never throws. This decorates a status call that is about
+ * something else; an unreadable cache directory must not fail it.
+ */
+export interface DownloadCacheFootprint {
+  dir: string;
+  /** Completed entries — exactly what eviction would consider. */
+  retainedBytes: number;
+  retainedEntries: number;
+  /** Resumable staging, which eviction never touches. */
+  stagedBytes: number;
+  stagedEntries: number;
+  /**
+   * Hidden files that are NOT `.partial` — the `.<name>.ct` change-tag and `.etag`
+   * sidecars. Tiny, and eviction ignores them, but they are on the disk: without a
+   * bucket of their own the two numbers above cannot be reconciled against `du`,
+   * and reconciling them is the whole point of a footprint report (#1477).
+   */
+  sidecarBytes: number;
+  sidecarEntries: number;
+  /**
+   * Directory entries that are not regular FILES — a subdirectory, or a symlink
+   * (`Dirent.isFile()` is false for those).
+   *
+   * The three buckets above account for every file, which is what lets them
+   * reconcile against `du`. Anything that is not a file is skipped, and skipping
+   * it silently would make that reconciliation true-unless: the one scenario this
+   * report exists for is a user comparing it against a disk-usage treemap (both
+   * #1477 reporters found the problem exactly that way), and that is precisely
+   * where an unexplained remainder reads as the tool being wrong rather than as
+   * something the tool declined to measure.
+   *
+   * Counted, not sized: `stat` on a directory returns the inode size, not the
+   * bytes underneath it, so a number here would be more misleading than none.
+   * Normally 0 — the cache is flat and content-addressed.
+   */
+  nonFileEntries: number;
+  /**
+   * #1477 — bytes among `retainedBytes` whose file has MORE THAN ONE hard link,
+   * i.e. the same inode is also the model at its destination. Deleting the cache
+   * link frees NOTHING for these: the blocks stay live under the other name.
+   *
+   * Measured on a real cache: 75 of 93 entries, 381 GB of 437 GB. So "delete the
+   * cache to reclaim its size" was wrong for 87% of the bytes, and this tool said
+   * it anyway.
+   */
+  sharedBytes: number;
+  sharedEntries: number;
+  /** COMFYUI_LRU_CACHE_SIZE_GB in bytes. 0 means eviction is OFF. */
+  limitBytes: number;
+  /** The directory could not be listed at all (missing, or unreadable). */
+  unreadable: boolean;
+  /**
+   * WHY the listing failed, when it did. ENOENT means there is no cache yet and
+   * there is genuinely nothing to report. Anything else — EACCES on a directory the
+   * user pointed COMFYUI_DOWNLOAD_CACHE_DIR at, say — means the bytes ARE there and
+   * cannot be counted, which is the case where naming the directory matters MOST:
+   * #1477 exists because nothing this server printed had ever named it. Collapsing
+   * the two into one silent `unreadable` sends exactly that user away empty-handed.
+   * `undefined` when the listing succeeded.
+   */
+  unreadableCode?: string;
+}
+
+export async function downloadCacheFootprint(): Promise<DownloadCacheFootprint> {
+  const dir = cacheDir();
+  const base = {
+    dir,
+    retainedBytes: 0,
+    retainedEntries: 0,
+    stagedBytes: 0,
+    stagedEntries: 0,
+    sidecarBytes: 0,
+    sidecarEntries: 0,
+    nonFileEntries: 0,
+    sharedBytes: 0,
+    sharedEntries: 0,
+    limitBytes: cacheSizeLimitBytes(),
+  };
+  let entries;
+  try {
+    entries = await downloadCacheFs.readdir(dir, { withFileTypes: true });
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException)?.code;
+    return { ...base, unreadable: true, unreadableCode: typeof code === "string" ? code : "UNKNOWN" };
+  }
+  const out = { ...base, unreadable: false };
+  for (const entry of entries) {
+    if (!entry.isFile()) {
+      out.nonFileEntries += 1;
+      continue;
+    }
+    let size: number;
+    let links = 1;
+    try {
+      const st = await downloadCacheFs.stat(join(dir, entry.name));
+      size = st.size;
+      // #1477 — nlink > 1 means this inode is ALSO linked at the destination
+      // (materializeCacheFile prefers a hardlink on the same volume), so these
+      // bytes are not independently reclaimable.
+      links = Number.isFinite(st.nlink) && st.nlink > 0 ? st.nlink : 1;
+    } catch {
+      // A file that vanished between readdir and stat is a live eviction or a
+      // finishing download, not an error worth surfacing here.
+      continue;
+    }
+    // The SAME predicate evictLruIfNeeded applies, shared rather than restated:
+    // these two were separate copies of `!name.startsWith(".")`, so the comment
+    // claiming they could not disagree was true only by coincidence. Reconciling
+    // eviction against the footprint is the whole point of the report, so the
+    // predicate is now one function and the claim holds by construction.
+    if (isRetainedCacheEntry(entry.name)) {
+      out.retainedBytes += size;
+      out.retainedEntries += 1;
+      if (links > 1) {
+        out.sharedBytes += size;
+        out.sharedEntries += 1;
+      }
+    } else if (entry.name.endsWith(".partial")) {
+      out.stagedBytes += size;
+      out.stagedEntries += 1;
+    } else {
+      // Everything else hidden: `.<name>.ct`, `.etag`. Counted rather than dropped
+      // so retained + staged + sidecar accounts for every FILE in the directory.
+      out.sidecarBytes += size;
+      out.sidecarEntries += 1;
+    }
+  }
+  return out;
+}
+
 async function evictLruIfNeeded(): Promise<void> {
   const limit = cacheSizeLimitBytes();
   if (limit <= 0) return;
@@ -3500,7 +3681,7 @@ async function evictLruIfNeeded(): Promise<void> {
   const entries = await downloadCacheFs.readdir(dir, { withFileTypes: true });
   const files = await Promise.all(
     entries
-      .filter((entry) => entry.isFile() && !entry.name.startsWith("."))
+      .filter((entry) => entry.isFile() && isRetainedCacheEntry(entry.name))
       .map(async (entry) => {
         const path = join(dir, entry.name);
         const info = await downloadCacheFs.stat(path);
@@ -3623,6 +3804,9 @@ export async function downloadWithCache(
       options.signal,
       options.callerAuth,
       fetchImpl,
+      // #1477 — the FINAL destination's directory. Known only here (the layers below
+      // see the CACHE path), which is why it is threaded rather than derived.
+      dirname(options.targetPath),
     );
     // CANCEL GUARD (#515): a COALESCED caller (or a CACHE HIT) reaches here without
     // ever streaming — it awaited another job's shared physical download. If THIS
