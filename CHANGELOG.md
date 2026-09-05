@@ -6,6 +6,12 @@ All notable changes to this project are documented here. This project adheres to
 
 ## Unreleased
 
+### MCP
+
+#### Fixed
+- **split the relay deadline test so neither half depends on runner scheduling (#2823).** It asserted two independent things through one wall-clock window - that the deadline reaches the bridge as `timeoutMs`, and that an expired request is refused - and a deschedule before dispatch consumed the budget, so `send` was never called and the assertion read the uninitialised `timeoutMs` as 0. Propagation now uses the LARGEST budget the record validator accepts (`PANEL_IMAGE_RELAY_TIMEOUT_MS`, 8s - above it the record is rejected as malformed and never reaches the bridge at all), taken from the constant so it tracks the ceiling. Expiry is asserted with a deadline already in the past and no timer at all. 20x the previous headroom on one half and none needed on the other.
+- the panel image relay deadline test no longer spends its whole wall-clock budget on scheduling delay before the request is dispatched, which made it refuse the request as already-expired and report a deadline of 0 under full-suite concurrency (test-only)
+
 ## [0.52.199] - 2026-09-05
 
 ### MCP
