@@ -9,6 +9,8 @@ All notable changes to this project are documented here. This project adheres to
 ### MCP
 
 #### Fixed
+
+- **Connected-panel `get_image` fallback stays one `fetch_image` hop after headless `ECONNREFUSED`; it succeeds when the panel fetches `/view` via `fileURL` instead of ComfyUI `fetchApi`'s `/api` prefix (#2884).** History / system_stats keep `fetchApi` so cloud auth stays intact. Nested `fetchImage` retry and guessed origins stay refused.
 - pin the upload body on the CLOUD client too, not just the self-hosted one (#2770). Both call uploadBody(data), but the cloud path is wired independently and only the self-hosted client had the byte-slice assertions — so it could revert to new Uint8Array(data.buffer), which ignores byteOffset/length and uploads the whole 8KB pool, with nothing failing. A shared helper is not shared coverage
 - the upload body and the bridge probe's socket chunks are typed so they still compile
 
