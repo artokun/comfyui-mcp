@@ -2848,8 +2848,94 @@ function isUrlLike(p: string): boolean {
  * server's answer simply comes with an identity binding the OS reading cannot have,
  * so it is used whenever it exists.
  */
+/**
+ * Interpreter flags the SERVER's own `sys.argv` structurally cannot carry (#2693).
+ *
+ * `-s`, `-E`, `-I`, `-B`, `-O`, `-u` and friends are consumed by CPython itself and
+ * never appear in `sys.argv` — so a relaunch rebuilt from `sys.argv` silently drops
+ * them. The reporter's portable install needs `-s` (no user site-packages); losing
+ * it changes which packages the relaunched server imports.
+ *
+ * They ARE in the OS's view of the same process. Taking them from there is only
+ * sound with the identity binding `relaunchArgv` is built around, so this refuses
+ * unless the OS reading is EXACT and its script path CORROBORATES `sys.argv[0]` —
+ * the same file, from two independent sources. That re-establishes the binding the
+ * OS reading lacks on its own; without it, nothing is recovered.
+ *
+ * Only tokens BEFORE the script and beginning with `-` are taken: a bare value
+ * there is an argument to a flag this code does not model, and copying it blind is
+ * how a recovery invents a command the server never had.
+ */
+export function interpreterFlagsFromOsArgv(info: {
+  argv: readonly string[];
+  osArgv?: readonly string[];
+  osArgvExact?: boolean;
+}): string[] {
+  if (!info.osArgvExact) return [];
+  const os = info.osArgv ?? [];
+  const script = info.argv[0];
+  if (!script || os.length < 2) return [];
+  // Corroboration is HOST-AWARE, via the module's existing rule rather than a
+  // second one restated here. The original folded case and rewrote backslashes
+  // unconditionally, which is right on Windows and wrong everywhere else:
+  // `/ComfyUI/main.py` and `/comfyui/main.py` are different files on Linux, and a
+  // backslash is a legal character in a POSIX filename, so two DIFFERENT scripts
+  // could corroborate each other and splice flags from a command line that is not
+  // this process's.
+  //
+  // Not unreachable, which is what made it worth changing: `argvFidelity: "exact"`
+  // is set on the Linux `/proc/<pid>/cmdline` path too (live-interpreter.ts:371) —
+  // the kernel NUL-separates argv there, so it is exact by construction. Only the
+  // `ps` fallback is "flattened". `osArgvExact` is therefore true on Linux and this
+  // comparison really runs there.
+  const at = os.findIndex((tok, i) => i > 0 && sameRecoveryPath(tok, script));
+  if (at <= 0) return [];
+  const pre = os.slice(1, at);
+  // A BARE token before the script is a value belonging to a flag this code does not
+  // model -- `python -X utf8 -s main.py` is the obvious one, and on an ENCODING bug
+  // it is the likeliest shape to meet. Keeping the flag and dropping its value is
+  // worse than either alternative: the relaunch becomes `python -X -s main.py`,
+  // where `-X` swallows `-s`, so the flag this exists to preserve is silently lost
+  // AND `-X -s` is not a valid implementation option.
+  //
+  // We cannot tell which flags take a separate value without modelling CPython's
+  // option table, so the honest answer is to reconstruct nothing: an unmodellable
+  // command line is not a command line we may rebuild.
+  // …with ONE exception, and it is the case above: `-X` and `-W` are the only
+  // interpreter options that plausibly appear on a ComfyUI launch AND always
+  // consume the next token. Taking those as PAIRS is not a guess about CPython's
+  // option table -- it is the one part of that table with no ambiguity in it.
+  // Measured before adding this: a real Windows `python -X utf8 -s main.py`
+  // (captured from Win32_Process.CommandLine) previously reconstructed to [],
+  // so the encoding flag #2693 is ABOUT was the one flag a relaunch dropped.
+  //
+  // Everything else bare still refuses, and so does a `-X` with no value or one
+  // whose value looks like another flag: a malformed pair is not a shape we may
+  // rebuild either.
+  const TAKES_VALUE = new Set(["-X", "-W"]);
+  const kept: string[] = [];
+  for (let i = 0; i < pre.length; i++) {
+    const tok = pre[i];
+    if (!tok.startsWith("-")) return [];
+    kept.push(tok);
+    if (!TAKES_VALUE.has(tok)) continue;
+    const value = pre[i + 1];
+    if (value === undefined || value.startsWith("-")) return [];
+    kept.push(value);
+    i += 1;
+  }
+  return kept;
+}
+
 function relaunchArgv(info: ProcessInfo): string[] {
-  if (info.argv.length > 0) return info.argv;
+  if (info.argv.length > 0) {
+    // #2693 — re-attach the interpreter flags `sys.argv` cannot report. The server's
+    // answer still leads (it carries the identity binding); this only restores
+    // tokens it was never able to include, and only when the OS reading names the
+    // same script.
+    const flags = interpreterFlagsFromOsArgv(info);
+    return flags.length > 0 ? [info.argv[0]!, ...flags, ...info.argv.slice(1)] : info.argv;
+  }
   // A FLATTENED reading is not a command. It is still reported to the user, who can
   // see where the quotes belong; we cannot, and guessing would spawn arguments the
   // server never had (codex gate round 6).
@@ -6833,6 +6919,13 @@ function observedLaunch(info: ProcessInfo): {
 }
 
 export const __processControlTestHooks = {
+  /**
+   * #2693 — the WIRING, not just the helper. Mutation showed the flag recovery could
+   * be severed from `relaunchArgv` with every helper test still green: the extraction
+   * was covered and the re-attachment was not, which is the half a relaunch actually
+   * uses.
+   */
+  relaunchArgv,
   reset(): void {
     detachSupervisor();
     lastProcessInfo = null;

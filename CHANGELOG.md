@@ -6,6 +6,20 @@ All notable changes to this project are documented here. This project adheres to
 
 ## Unreleased
 
+### MCP
+
+#### Fixed
+- interpreter-flag recovery compares script paths by HOST rules (#2693). The corroboration folded case and rewrote backslashes on every platform, so on Linux /ComfyUI/main.py and /comfyui/main.py corroborated each other and a backslash — a legal POSIX filename character — was rewritten. Reachable: argvFidelity "exact" is set on the /proc/<pid>/cmdline path too, where the kernel NUL-separates argv, so only the ps fallback is "flattened". Now uses the module's own sameRecoveryPath, which preserves POSIX spelling and folds only on Windows. Found by the Copilot review on the PR
+- **a relaunch keeps the Python INTERPRETER flags (#2693).** `-s`, `-E`, `-I`, `-B`, `-O` and `-u`
+  are consumed by CPython before `sys.argv` exists, so a relaunch rebuilt from the server's own
+  `sys.argv` dropped them — the reporter's portable install needs `-s`, and losing it changes
+  which packages the relaunched server imports. They are recovered from the OS's view of the same
+  process, but only when that reading is EXACT and names the SAME script, so the identity binding
+  that makes `sys.argv` the preferred source is re-established rather than traded away. Only
+  tokens before the script that begin with `-` are taken; a bare value there is an argument to a
+  flag this code does not model.
+- **a relaunch keeps `-X utf8`, the encoding flag #2693 is actually about (#2693).** Interpreter-flag recovery refused any command line carrying a flag with a separate value, so a server started `python -X utf8 -s main.py` relaunched without it and the CP949 workaround was silently lost. `-X` and `-W` always consume the next token, so they are taken as pairs; every other bare token still reconstructs nothing rather than rebuilding a command the server never had. Measured against a real Windows `Win32_Process.CommandLine`, which is where the gap showed up — the unit tests supplied the argv they expected.
+
 ## [0.52.199] - 2026-09-05
 
 ### MCP
