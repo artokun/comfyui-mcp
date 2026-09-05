@@ -308,6 +308,110 @@ describe("panel_save_workflow acknowledges a save that landed after the budget (
     expect(calls.map((c) => c.cmd)).toContain("workflow_list");
   });
 
+  it("#2880 THE REPORTED CASE: matching late receipt on the real workflow_list shape is saved, not unknown", async () => {
+    // Live panel puts modified/persisted on the flagged-active workflows[] row,
+    // never on top-level `active`. #2078 ANDed those missing flags with the
+    // receipt, so a list that already proved the same rid completed still
+    // returned OUTCOME UNKNOWN and the caller had to read panel_list_workflows.
+    __panelToolsTestHooks.setSaveTimeoutSettleGraceMs(0);
+    const calls: Forwarded[] = [];
+    const ctx: PanelToolCtx = {
+      call: async (cmd, _timeoutMs, onDispatchedRid) => {
+        calls.push(cmd);
+        if (cmd.cmd === "workflow_save") {
+          onDispatchedRid?.("save-rid");
+          return errorResult(
+            `workflow_save did not finish within 13s. OUTCOME UNKNOWN: the save was already in flight when this budget fired.`,
+          );
+        }
+        if (cmd.cmd === "workflow_list") {
+          return jsonResult({
+            active: {
+              path: "workflows/graph.json",
+              routing_key: "wf:workflows/graph.json",
+              filename: "graph",
+            },
+            workflows: [
+              {
+                path: "workflows/graph.json",
+                routing_key: "wf:workflows/graph.json",
+                filename: "graph",
+                active: true,
+                modified: false,
+                persisted: true,
+              },
+            ],
+            late_save_receipts: [
+              {
+                rid: "save-rid",
+                cmd: "workflow_save",
+                result: { saved: true, routing_key: "wf:workflows/graph.json" },
+              },
+            ],
+          });
+        }
+        return jsonResult({ ok: true });
+      },
+      confirm: async () => "yes" as const,
+      bridge: {} as PanelToolCtx["bridge"],
+      tabId: "test-tab",
+    };
+
+    const res = await defByName("panel_save_workflow").handler({}, ctx);
+    expect(res.isError).toBeFalsy();
+    const text = textOf(res);
+    expect(text).toMatch(/"saved": true/);
+    expect(text).toMatch(/"late_ack": true/);
+    expect(text).not.toMatch(/OUTCOME UNKNOWN/);
+    expect(calls.filter((c) => c.cmd === "workflow_save")).toHaveLength(1);
+  });
+
+  it("#2880 an unmatched late receipt does not fail-open even when the canvas is clean", async () => {
+    __panelToolsTestHooks.setSaveTimeoutSettleGraceMs(0);
+    const ctx: PanelToolCtx = {
+      call: async (cmd, _timeoutMs, onDispatchedRid) => {
+        if (cmd.cmd === "workflow_save") {
+          onDispatchedRid?.("save-rid");
+          return errorResult(SAVE_TIMEOUT_2078);
+        }
+        if (cmd.cmd === "workflow_list") {
+          return jsonResult({
+            active: {
+              path: "workflows/graph.json",
+              routing_key: "wf:workflows/graph.json",
+              filename: "graph",
+            },
+            workflows: [
+              {
+                path: "workflows/graph.json",
+                routing_key: "wf:workflows/graph.json",
+                filename: "graph",
+                active: true,
+                modified: false,
+                persisted: true,
+              },
+            ],
+            late_save_receipts: [
+              {
+                rid: "other-rid",
+                cmd: "workflow_save",
+                result: { saved: true, routing_key: "wf:workflows/graph.json" },
+              },
+            ],
+          });
+        }
+        return jsonResult({ ok: true });
+      },
+      confirm: async () => "yes" as const,
+      bridge: {} as PanelToolCtx["bridge"],
+      tabId: "test-tab",
+    };
+
+    const res = await defByName("panel_save_workflow").handler({}, ctx);
+    expect(res.isError).toBe(true);
+    expect(textOf(res)).toMatch(/OUTCOME UNKNOWN/);
+  });
+
   it("#2078 THE REPORTED CASE: a list that is still dirty, then clean, is saved not unknown", async () => {
     // The 13s budget fires with modified:true. #2004 listed once, still saw
     // dirty, and returned OUTCOME UNKNOWN. The caller's next panel_list_workflows
