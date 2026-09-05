@@ -47,7 +47,7 @@ const DIR_BY_WIDGET: Record<string, string> = {
 /** DonutLoRAStack / LoRA Stacker V2 / similar: `lora_name_1`, `lora_name_2`, … */
 const NUMBERED_LORA_WIDGET = /^lora_name_\d+$/i;
 
-function directoryForWidget(widget: string, classType: string): string | undefined {
+export function directoryForWidget(widget: string, classType: string): string | undefined {
   // CLIPVisionLoader shares `clip_name` with text-encoder loaders, but its
   // object-info combo is sourced from ComfyUI's `clip_vision` directory.
   if (classType === "CLIPVisionLoader" && widget === "clip_name") return "clip_vision";
