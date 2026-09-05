@@ -168,6 +168,15 @@ interface ProcessInfo {
   isDesktopApp: boolean;
   desktopExePath?: string;
   /**
+   * #2784 — WHY this was classified Desktop-managed, in the words of the check
+   * that decided it. Three signals reach the same verdict and they are not equally
+   * strong, and the refusal that acts on it used to assert Desktop with none of
+   * them attached — so a reporter who could see the classification was wrong had
+   * nothing to check and no way to make the report reproducible. Absent when the
+   * install is not Desktop.
+   */
+  desktopEvidence?: string;
+  /**
    * The live ComfyUI process's working directory, captured at gather-time while
    * the process is still ALIVE (a known-good moment). This may come from the
    * server's own `/system_stats` report, `/proc/<pid>/cwd`, or the bounded
@@ -783,21 +792,42 @@ function isDesktopSupervisorProcess(identity: ProcessIdentity): boolean {
   );
 }
 
-function isDesktopApp(argv: string[]): boolean {
+/**
+ * The Desktop marker this argv carries, or null.
+ *
+ * #2784 — WHICH one matched is now returned, not just whether one did. These are
+ * bare substrings over the joined command line, and this function's own doc
+ * elsewhere admits it "answers yes on any mention of the Desktop install". That
+ * was cheap when the answer only chose a gentler restart route; since #814 it
+ * gates a REFUSAL, so a false positive strands the user permanently — and the
+ * refusal asserted "ComfyUI Desktop started the server" while showing an argv the
+ * reporter could see was not Desktop's, with nothing to check.
+ *
+ * Naming the marker makes that self-diagnosing: a user whose install merely lives
+ * under a folder called `Comfy-Desktop` reads "matched `comfy-desktop`" and knows
+ * in one line what happened, instead of filing a report that cannot be reproduced
+ * from the redacted path.
+ */
+function desktopArgvMarker(argv: string[]): string | null {
   const joined = argv.join(" ").toLowerCase();
-  return (
-    joined.includes("programs/comfyui/resources") ||
-    joined.includes("programs\\comfyui\\resources") ||
-    joined.includes("comfyui.app") ||
+  const markers = [
+    "programs/comfyui/resources",
+    "programs\\comfyui\\resources",
+    "comfyui.app",
     // Current branding ("Comfy Desktop\Comfy Desktop.exe", "Comfy Desktop.app")
     // and the electron-era install dir.
-    joined.includes("comfy desktop") ||
+    "comfy desktop",
     // Desktop-2 data root (`%LOCALAPPDATA%\Comfy-Desktop\…`) and the install
     // marker `.comfyui-desktop-2` when it appears on argv.
-    joined.includes("comfy-desktop") ||
-    joined.includes("comfyui-desktop-2") ||
-    joined.includes("@comfyorgcomfyui-electron")
-  );
+    "comfy-desktop",
+    "comfyui-desktop-2",
+    "@comfyorgcomfyui-electron",
+  ];
+  return markers.find((m) => joined.includes(m)) ?? null;
+}
+
+function isDesktopApp(argv: string[]): boolean {
+  return desktopArgvMarker(argv) !== null;
 }
 
 /**
@@ -905,8 +935,9 @@ function desktopExeFromAncestor(pid: number): string | undefined {
 function detectDesktopLaunch(
   pid: number,
   argv: string[],
-): { isDesktopApp: boolean; desktopExePath?: string } {
-  const fromArgv = isDesktopApp(argv);
+): { isDesktopApp: boolean; desktopExePath?: string; desktopEvidence?: string } {
+  const argvMarker = desktopArgvMarker(argv);
+  const fromArgv = argvMarker !== null;
   const fromMarkers = desktop2InstallFromArgv(argv);
   const desktop2Argv = looksLikeDesktop2Argv(argv);
   // Walking ancestors calls resolveProcessIdentity. Doing that on every gather
@@ -918,19 +949,37 @@ function detectDesktopLaunch(
   const isDesktop = fromArgv || Boolean(fromParent) || fromMarkers;
   if (!isDesktop) return { isDesktopApp: false };
 
+  // #2784 — WHY this install was classified Desktop-managed, in the words of the
+  // check that decided it. Three signals reach the same `true` and they are not
+  // equally strong: an on-disk Desktop-2 marker is a fact about the install, an
+  // ancestor Desktop binary is a fact about the process tree, and an argv
+  // substring is a name match a directory can satisfy by being called that. The
+  // refusal downstream asserted "ComfyUI Desktop started the server" with none of
+  // this attached, so a reporter who could see it was wrong had nothing to check.
+  //
+  // Ordered strongest-first, and it names only what was actually consulted — the
+  // ancestor walk is skipped entirely unless the argv already looks Desktop-2, so
+  // "no Desktop binary among the ancestors" is often a question nobody asked.
+  const desktopEvidence = fromMarkers
+    ? "a Desktop-2 install marker (.comfyui-desktop-2, or .launcher/snapshots/*.json) on a directory above the launch path"
+    : fromParent
+      ? "a ComfyUI Desktop binary among this process's ancestors"
+      : `the substring "${argvMarker}" in the server's own launch command — a NAME match, which a directory merely CALLED that also satisfies`;
+
   if (fromParent && fileExists(fromParent)) {
-    return { isDesktopApp: true, desktopExePath: fromParent };
+    return { isDesktopApp: true, desktopExePath: fromParent, desktopEvidence };
   }
   // fileExists, not `if exist` / `test -d`: POSIX findDesktopExeFromCommonPaths
   // treats a stubbed execSync success as "the .app is there".
   if (fromMarkers || fromParent || desktop2Argv) {
     const located = desktop2WindowsExeCandidates().find((p) => fileExists(p));
-    if (located) return { isDesktopApp: true, desktopExePath: located };
-    if (fromParent) return { isDesktopApp: true, desktopExePath: fromParent };
+    if (located) return { isDesktopApp: true, desktopExePath: located, desktopEvidence };
+    if (fromParent) return { isDesktopApp: true, desktopExePath: fromParent, desktopEvidence };
   }
   return {
     isDesktopApp: true,
     desktopExePath: findDesktopExePath(argv),
+    desktopEvidence,
   };
 }
 
@@ -2056,7 +2105,8 @@ function supervisorResult(info?: ProcessInfo): SupervisorResult {
     message: !policy.enabled
       ? "Auto-restart is disabled."
       : info?.isDesktopApp
-        ? "Auto-restart supervision is only supported for directly spawned Python ComfyUI processes."
+        ? "Auto-restart supervision is only supported for directly spawned Python ComfyUI processes." +
+          desktopEvidenceNote(info.desktopEvidence)
         : undefined,
   };
 }
@@ -3314,6 +3364,58 @@ function proveDesktopSelfRelaunch(
   return { ok: true };
 }
 
+
+/**
+ * The evidence clause appended to a Desktop refusal (#2784).
+ *
+ * A refusal that names no evidence is a claim the reader cannot check. The
+ * reporter here was on ComfyUI-Easy-Install with an embedded python — they could
+ * see "ComfyUI Desktop started the server" was wrong, had nothing to test it
+ * against, and filed a report whose path was redacted, so the cause could not be
+ * reproduced from it either.
+ *
+ * Says nothing when there is nothing to say: an install classified before this
+ * field existed, or a code path that did not record it, gets the message it always
+ * had rather than an empty "classified because: undefined".
+ */
+export function desktopEvidenceClause(why: string | undefined): string {
+  // Takes the FIELD, not the whole ProcessInfo: the clause depends on exactly one
+  // value, and narrowing the parameter is what lets a test call this for real
+  // instead of asserting that the source file contains the right substring.
+  if (!why) return "";
+  return (
+    `\n\nClassified as Desktop-managed by: ${why}. ` +
+    `If that is wrong for this install — say, an ordinary ComfyUI that happens to live under a ` +
+    `directory with a Desktop-like name — this refusal is wrong with it, and the launch ` +
+    `arguments below are the thing to check it against.`
+  );
+}
+
+/**
+ * The same disclosure for the surfaces that are NOT the refusal (#2784).
+ *
+ * The Desktop verdict drives three user-facing outcomes, not one: the restart
+ * refusal, the "could not determine the Desktop executable" message, and turning
+ * auto-restart supervision OFF. The refusal is the only one that carried its
+ * evidence, so the other two still asserted Desktop with nothing attached — and
+ * they are the ones a misclassified user is least able to connect back to a
+ * directory name.
+ *
+ * Separate from `desktopEvidenceClause` rather than a parameter on it because the
+ * wording has to differ: that one says "this refusal is wrong with it" and points
+ * at "the launch arguments below", neither of which is true here. Same fact, same
+ * escape hatch, sentence that fits the surface.
+ */
+export function desktopEvidenceNote(why: string | undefined): string {
+  if (!why) return "";
+  return (
+    ` Classified as Desktop-managed by: ${why}. ` +
+    `If that is wrong for this install — say, an ordinary ComfyUI that happens to live ` +
+    `under a directory with a Desktop-like name — then this limitation does not apply ` +
+    `to it, and the classification is what to fix.`
+  );
+}
+
 function assessDesktopSupervision(info: ProcessInfo): {
   ok: boolean;
   reason?: string;
@@ -3385,7 +3487,15 @@ function assessDesktopSupervision(info: ProcessInfo): {
         `ComfyUI Desktop started the server on port ${info.port} (PID ${info.pid}), but no ` +
         `Desktop app is still supervising it — its parent process is gone. A restart from here ` +
         `asks ComfyUI-Manager to stop the process and relies on that supervisor to start it ` +
-        `again, so it would be stopped and nothing would bring it back.`,
+        `again, so it would be stopped and nothing would bring it back.` +
+        // #2784 — the sentence above is a CLAIM, and a reporter on a
+        // ComfyUI-Easy-Install with an embedded python could see it was false while
+        // having nothing to check: the refusal named no evidence, so the report
+        // arrived with a redacted path and the cause could not be reproduced from
+        // it. Say which signal decided, and say plainly that this one is
+        // contestable — an argv NAME match is satisfied by a directory that merely
+        // has the name.
+        desktopEvidenceClause(info.desktopEvidence),
     };
   }
   // #1647 — the host cannot read parentage AT ALL (the FIRST link failed), and the
@@ -4078,6 +4188,7 @@ async function gatherProcessInfo(): Promise<ProcessInfo> {
   const desktopLaunch = detectDesktopLaunch(pid, identifyingArgv);
   const desktop = desktopLaunch.isDesktopApp;
   const desktopExe = desktopLaunch.desktopExePath;
+  const desktopEvidence = desktopLaunch.desktopEvidence;
   // Capture the live process cwd NOW, while the pid is guaranteed alive — the
   // `/proc/<pid>/cwd` symlink is gone the instant a later stop kills it (#535).
   //
@@ -4197,6 +4308,7 @@ async function gatherProcessInfo(): Promise<ProcessInfo> {
     observedInterpreter,
     isDesktopApp: desktop,
     desktopExePath: desktopExe,
+    desktopEvidence,
     liveCwd,
     liveEnv,
     startedAt,
@@ -4651,7 +4763,8 @@ export async function startComfyUI(anchor?: {
       // No command was ever spawned — a refusal, not a startup that went wrong.
       startup: "not-attempted",
       message: info.isDesktopApp
-        ? "Could not determine ComfyUI Desktop executable path. Please start it manually."
+        ? "Could not determine ComfyUI Desktop executable path. Please start it manually." +
+          desktopEvidenceNote(info.desktopEvidence)
         : "No command-line info captured from previous run. Start ComfyUI manually.",
       auto_restart: supervisorResult(info),
       listener_ownership: unclassifiedOwnership(),
@@ -6833,6 +6946,22 @@ function observedLaunch(info: ProcessInfo): {
 }
 
 export const __processControlTestHooks = {
+  /**
+   * #2784 — the SELECTION, not just the sentence. Three signals reach the same
+   * `true` and the refusal names which one decided; a test that only calls
+   * `desktopEvidenceClause` pins the wording and leaves the choice unpinned, so
+   * reporting the weakest signal in place of the strongest would go unnoticed --
+   * and that misdirects the reader exactly like the claim this replaced.
+   */
+  detectDesktopLaunch,
+  /**
+   * #2784 — the auto-restart surface, so its disclosure is a REAL call rather
+   * than a grep. The Desktop verdict turns supervision off as well as refusing a
+   * restart, and that message asserted Desktop with nothing attached; a source
+   * check there could not fail if the note rendered empty or the field were never
+   * populated. Reads the policy from env like production does.
+   */
+  supervisorResult,
   reset(): void {
     detachSupervisor();
     lastProcessInfo = null;
