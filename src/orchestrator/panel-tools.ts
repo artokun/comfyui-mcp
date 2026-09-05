@@ -6264,34 +6264,30 @@ function isWorkflowSaveBudgetTimeout(res: ToolResult): boolean {
  * the reporter's timeout snapshot (a previously-saved dirty workflow) and
  * must not be read as "the write landed".
  *
- * Live `workflow_list` publishes those flags on the active `open[]` row, not
- * on top-level `active` (#2880). Prefer an explicit boolean on `active` when
- * a test or older panel put it there; otherwise read the active open row.
+ * Live `workflow_list` publishes those flags on the flagged-active
+ * `workflows[]` row, not on top-level `active` (#2880). Prefer an explicit
+ * boolean on `active` when a test or older panel put it there.
  */
 function saveTimeoutFlagRecord(
   list: Record<string, unknown> | null,
 ): Record<string, unknown> | null {
-  const active = list?.active;
-  if (active && typeof active === "object" && !Array.isArray(active)) {
-    const rec = active as Record<string, unknown>;
-    if (rec.modified === true || rec.modified === false) return rec;
-  }
-  const rows = Array.isArray(list?.open)
-    ? list.open
-    : Array.isArray(list?.workflows)
-      ? list.workflows
+  const recOf = (value: unknown): Record<string, unknown> | null =>
+    value && typeof value === "object" && !Array.isArray(value)
+      ? (value as Record<string, unknown>)
+      : null;
+  const active = recOf(list?.active);
+  if (active && (active.modified === true || active.modified === false)) return active;
+  const rows = Array.isArray(list?.workflows)
+    ? list.workflows
+    : Array.isArray(list?.open)
+      ? list.open
       : null;
   if (!rows) return null;
-  const activeRow = rows.find(
-    (row) =>
-      row &&
-      typeof row === "object" &&
-      !Array.isArray(row) &&
-      (row as Record<string, unknown>).active === true,
-  );
-  return activeRow && typeof activeRow === "object" && !Array.isArray(activeRow)
-    ? (activeRow as Record<string, unknown>)
-    : null;
+  for (const row of rows) {
+    const rec = recOf(row);
+    if (rec?.active === true) return rec;
+  }
+  return null;
 }
 
 function saveLandedAfterTimeout(list: Record<string, unknown> | null): boolean {
