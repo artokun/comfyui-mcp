@@ -233,6 +233,31 @@ describe("panel-tools: panel_set_widget (empty-string clear, issue #347)", () =>
     expect(calls[0]).toMatchObject({ cmd: "graph_set_widget", value: "" });
   });
 
+  it("#2479 forwards a complete ComfyMathExpression unchanged and preserves a downstream SyntaxError", async () => {
+    const expression = "(a + b";
+    const calls: Forwarded[] = [];
+    const res = (await defByName("panel_set_widget").handler(
+      { node_id: 131, widget: "expression", value: expression },
+      {
+        call: async (cmd: Forwarded) => {
+          calls.push(cmd);
+          return {
+            isError: true,
+            content: [{ type: "text" as const, text: "SyntaxError: '(' was never closed" }],
+          };
+        },
+        modelInventoryDisclosure: async () => null,
+        tabId: "test-tab",
+      } as PanelToolCtx,
+    )) as ToolResult;
+
+    expect(calls).toEqual([
+      { cmd: "graph_set_widget", node_id: 131, widget: "expression", value: expression },
+    ]);
+    expect(res.isError).toBe(true);
+    expect(res.content[0].text).toBe("SyntaxError: '(' was never closed");
+  });
+
   it("errors (does not forward) when neither value nor clear is provided", async () => {
     const { ctx, calls } = makeFakeCtx();
     const res = await defByName("panel_set_widget").handler(

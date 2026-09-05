@@ -80,4 +80,13 @@ describe("the minimax-h3-video skill is the #1155 official-guide pilot (#1167)",
       expect(around).toMatch(/will \*\*not\*\*|Do not call it until a pack exists|cannot load/i);
     }
   });
+
+  it("separates source-video timing from H3 length and documents complete expression edits (#2479)", () => {
+    expect(SKILL).toContain("251 frames over 5 seconds");
+    expect(SKILL).toMatch(/Resample the source video in\s+time to 24 fps/);
+    expect(SKILL).toContain("ComfyMathExpression");
+    expect(SKILL).toContain("one complete, balanced expression");
+    expect(SKILL).toContain("panel_set_widget` forwards this text unchanged");
+    expect(SKILL).toContain("max(5, round(a * 24)) + (5 - (max(5, round(a * 24)) % 17)) % 17");
+  });
 });

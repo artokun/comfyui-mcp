@@ -6,6 +6,11 @@ All notable changes to this project are documented here. This project adheres to
 
 ## Unreleased
 
+### MCP
+
+#### Fixed
+- clarify MiniMax H3 source-video frame-rate conversion and complete ComfyMathExpression edits (#2479)
+
 ## [0.52.199] - 2026-09-05
 
 ### MCP

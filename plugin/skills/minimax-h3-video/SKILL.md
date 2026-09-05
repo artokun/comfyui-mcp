@@ -130,6 +130,33 @@ max(5, round(seconds * 24)) + (5 - (max(5, round(seconds * 24)) % 17)) % 17
 
 That is the `17k+5` grid. Do not invent a WAN-style `4n+1` length.
 
+### Reference-video timing and ComfyMathExpression
+
+`length` is H3's **output** frame count; it is not the number of frames returned
+by an arbitrary source-video node. H3's `CreateVideo` output is 24 fps, and the
+R2V `ref_video_*` inputs are also expected to contain frames at 24 fps. A source
+such as `Video Slice` can have a different decode rate: 251 frames over 5 seconds
+is about 50.2 fps, so passing `batch_size=251` as H3 `length` (or merely
+truncating those frames) changes the motion timing. Resample the source video in
+time to 24 fps before using it as a `ref_video_*` input, then derive H3 `length`
+from the desired duration with the formula above. For a 5-second target that
+formula yields 124 frames (about 5.17 seconds), because H3 rounds up to its
+model grid.
+
+The `ComfyMathExpression` node is a ComfyUI core node, not the unrelated
+`ComfyMath` custom-node pack. Its `expression` widget is plain text: replace it
+with one complete, balanced expression and let the linked `values.*` inputs
+provide the numbers. The template expression is:
+
+```
+max(5, round(a * 24)) + (5 - (max(5, round(a * 24)) % 17)) % 17
+```
+
+`panel_set_widget` forwards this text unchanged; it does not parse, repair, or
+incrementally edit expressions. A `SyntaxError: '(' was never closed` therefore
+means the complete string sent to ComfyUI is malformed. Read the current
+`expression` first, make one complete edit, and re-read it before queueing.
+
 ## Node graph (local T2V / I2V)
 
 From the Comfy-Org T2V subgraph (core nodes, not the Markdown notes):
