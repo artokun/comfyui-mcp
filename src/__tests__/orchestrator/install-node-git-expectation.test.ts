@@ -67,6 +67,22 @@ import {
   v4GitUrlQueueRefusal,
 } from "../../services/node-management.js";
 
+// The "unknown dialect" case must be UNDETERMINED on purpose, not because nothing
+// happened to be listening. Relying on the probe failing made this file pass on CI
+// and FAIL on any machine with ComfyUI actually running -- the probe succeeded
+// there, returned a real dialect, and the guard refused.
+const detect = vi.hoisted(() => ({ forceFailure: false }));
+vi.mock("../../services/node-management.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../../services/node-management.js")>();
+  return {
+    ...actual,
+    detectManagerApi: async (...args: Parameters<typeof actual.detectManagerApi>) => {
+      if (detect.forceFailure) throw new Error("manager dialect probe failed (test)");
+      return actual.detectManagerApi(...args);
+    },
+  };
+});
+
 vi.mock("../../comfyui/client.js", () => ({
   getObjectInfo: vi.fn(),
   backfillObjectInfo: vi.fn(),
@@ -101,9 +117,9 @@ async function dispatchInstall(
   args: Record<string, unknown>,
   dialect: "legacy" | "v2" | "v2-batch" | "unknown" = "legacy",
 ): Promise<{ sent: Record<string, unknown> | undefined; text: string; isError: boolean }> {
-  // "unknown" primes NOTHING, so detectManagerApi has to probe — and with no
-  // Manager behind it, that probe fails. That is the shape this file needs to
-  // cover: dialect UNDETERMINED, which is not the same as dialect v4.
+  // "unknown" primes NOTHING and forces the probe to FAIL, so the dialect is
+  // undetermined by construction rather than by whether a server happens to be up.
+  detect.forceFailure = dialect === "unknown";
   if (dialect === "unknown") resetManagerApiCacheForTests();
   else resetManagerApiCacheForTests(dialect);
   let sent: Record<string, unknown> | undefined;

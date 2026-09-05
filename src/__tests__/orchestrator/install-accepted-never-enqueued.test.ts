@@ -35,6 +35,7 @@ vi.mock("../../comfyui/client.js", () => ({
 }));
 
 const { buildPanelToolDefs, makePanelToolCtx } = await import("../../orchestrator/panel-tools.js");
+import { resetManagerApiCacheForTests } from "../../services/node-management.js";
 import { WorkflowTargetStore } from "../../services/workflow-target-store.js";
 import type { PanelToolCtx, ToolResult } from "../../orchestrator/panel-tools.js";
 
@@ -123,6 +124,15 @@ async function install(
 
 beforeEach(() => {
   sent = [];
+  // HERMETIC. Without this the git-URL guard calls detectManagerApi(), which
+  // PROBES the configured ComfyUI over the network. On CI nothing is listening,
+  // the probe fails, the dialect is unknown and the guard falls through -- so this
+  // file passed. On any machine with ComfyUI actually running, detection succeeds,
+  // returns the v2 dialect, and the guard refuses the install these nine cases are
+  // built on. A unit test's verdict must not depend on whether the developer
+  // happens to have the app open. Pin the legacy dialect, which is the direct
+  // `files:[url]` route these fixtures model.
+  resetManagerApiCacheForTests("legacy");
 });
 
 describe("an install the Manager accepted and dropped says so (#1129)", () => {
