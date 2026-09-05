@@ -6,7 +6,7 @@
       "chatgpt": "🟢 comfyui-mcp 에이전트 준비 완료 — {label}, 회원님의 ChatGPT 구독(직접 OAuth)으로 실행됩니다. 무엇이든 물어보세요.",
       "claude": "🟢 comfyui-mcp 에이전트 준비 완료 — {label}, 회원님의 Claude 구독으로 실행됩니다. 무엇이든 물어보세요.",
       "codex": "🟢 comfyui-mcp 에이전트 준비 완료 — {label}, 회원님의 Codex(ChatGPT) 계정으로 실행됩니다. 무엇이든 물어보세요.",
-      "copilot": "🟢 comfyui-mcp 에이전트 준비 완료 — {label}, 회원님의 GitHub Copilot 구독으로 실행됩니다 (⚠️ 실험 기능, 이용약관 위반 위험 — 직접 동의하셨습니다). 무엇이든 물어보세요.",
+      "copilot": "🟢 comfyui-mcp 에이전트 준비 완료 — {label}, 회원님의 GitHub Copilot 구독으로 실행됩니다 (⚠ 실험 기능, 이용약관 위반 위험 — 직접 동의하셨습니다). 무엇이든 물어보세요.",
       "custom": "🟢 comfyui-mcp 에이전트 준비 완료 — {label}, 회원님의 커스텀 엔드포인트({url})를 통해 실행됩니다. 무엇이든 물어보세요.",
       "gemini": "🟢 comfyui-mcp 에이전트 준비 완료 — {label}, 회원님의 Google 계정(Gemini Code Assist)으로 실행됩니다. 무엇이든 물어보세요.",
       "glm": "🟢 comfyui-mcp 에이전트 준비 완료 — {label}, 회원님의 Z.AI GLM Coding Plan으로 실행됩니다. 무엇이든 물어보세요.",

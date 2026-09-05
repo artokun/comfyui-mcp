@@ -6,7 +6,7 @@
       "chatgpt": "🟢 comfyui-mcp 代理程式已就緒 —— {label}，執行在你的 ChatGPT 訂閱上（直接 OAuth）。有什麼需要儘管說。",
       "claude": "🟢 comfyui-mcp 代理程式已就緒 —— {label}，執行在你的 Claude 訂閱上。有什麼需要儘管說。",
       "codex": "🟢 comfyui-mcp 代理程式已就緒 —— {label}，執行在你的 Codex（ChatGPT）帳號上。有什麼需要儘管說。",
-      "copilot": "🟢 comfyui-mcp 代理程式已就緒 —— {label}，執行在你的 GitHub Copilot 訂閱上（⚠️ 實驗性功能，有服務條款風險 —— 你已自行選擇啟用）。有什麼需要儘管說。",
+      "copilot": "🟢 comfyui-mcp 代理程式已就緒 —— {label}，執行在你的 GitHub Copilot 訂閱上（⚠ 實驗性功能，有服務條款風險 —— 你已自行選擇啟用）。有什麼需要儘管說。",
       "custom": "🟢 comfyui-mcp 代理程式已就緒 —— {label}，透過你的自訂端點（{url}）執行。有什麼需要儘管說。",
       "gemini": "🟢 comfyui-mcp 代理程式已就緒 —— {label}，執行在你的 Google 帳號上（Gemini Code Assist）。有什麼需要儘管說。",
       "glm": "🟢 comfyui-mcp 代理程式已就緒 —— {label}，執行在你的 Z.AI GLM Coding Plan 上。有什麼需要儘管說。",

@@ -6,7 +6,7 @@
       "chatgpt": "🟢 comfyui-mcp agent ready — {label} on your ChatGPT subscription (direct OAuth). Ask away.",
       "claude": "🟢 comfyui-mcp agent ready — {label} on your Claude subscription. Ask away.",
       "codex": "🟢 comfyui-mcp agent ready — {label} on your Codex (ChatGPT) account. Ask away.",
-      "copilot": "🟢 comfyui-mcp agent ready — {label} on your GitHub Copilot subscription (⚠️ experimental, ToS risk — you opted in). Ask away.",
+      "copilot": "🟢 comfyui-mcp agent ready — {label} on your GitHub Copilot subscription (⚠ experimental, ToS risk — you opted in). Ask away.",
       "custom": "🟢 comfyui-mcp agent ready — {label} via your custom endpoint ({url}). Ask away.",
       "gemini": "🟢 comfyui-mcp agent ready — {label} on your Google account (Gemini Code Assist). Ask away.",
       "glm": "🟢 comfyui-mcp agent ready — {label} on your Z.AI GLM Coding Plan. Ask away.",

@@ -6,7 +6,7 @@
       "chatgpt": "🟢 comfyui-mcp 智能体已就绪 —— {label}，运行在你的 ChatGPT 订阅上（直接 OAuth）。有什么需要尽管说。",
       "claude": "🟢 comfyui-mcp 智能体已就绪 —— {label}，运行在你的 Claude 订阅上。有什么需要尽管说。",
       "codex": "🟢 comfyui-mcp 智能体已就绪 —— {label}，运行在你的 Codex（ChatGPT）账号上。有什么需要尽管说。",
-      "copilot": "🟢 comfyui-mcp 智能体已就绪 —— {label}，运行在你的 GitHub Copilot 订阅上（⚠️ 实验性功能，存在服务条款风险 —— 你已自行选择启用）。有什么需要尽管说。",
+      "copilot": "🟢 comfyui-mcp 智能体已就绪 —— {label}，运行在你的 GitHub Copilot 订阅上（⚠ 实验性功能，存在服务条款风险 —— 你已自行选择启用）。有什么需要尽管说。",
       "custom": "🟢 comfyui-mcp 智能体已就绪 —— {label}，通过你的自定义端点（{url}）运行。有什么需要尽管说。",
       "gemini": "🟢 comfyui-mcp 智能体已就绪 —— {label}，运行在你的 Google 账号上（Gemini Code Assist）。有什么需要尽管说。",
       "glm": "🟢 comfyui-mcp 智能体已就绪 —— {label}，运行在你的 Z.AI GLM Coding Plan 上。有什么需要尽管说。",
