@@ -9,6 +9,8 @@ All notable changes to this project are documented here. This project adheres to
 ### MCP
 
 #### Fixed
+
+- **`panel_save_workflow` returns `saved:true` when a matching `late_save_receipts` entry proves the timed-out in-place save completed (#2880).** After the panel's 13s budget, settle used to also require `modified:false persisted:true` on top-level `active`, which live `workflow_list` does not carry (those flags are on the flagged-active `workflows[]` row). A later `panel_list_workflows` already showed the rid-matched receipt. A current panel with no matching receipt stays OUTCOME UNKNOWN so a retry does not write twice.
 - **a relaunched ComfyUI no longer dies on an emoji under a legacy Windows codepage The explicit opt-out is honoured in ANY case: Windows environment names are case-insensitive and these paths hand the helper a plain object rather than `process.env`, whose case-insensitivity does not survive a spread — so a deliberate `PythonUtf8=0` was invisible and would have been overridden by a second key differing only in case.
 
 ## [0.52.197] - 2026-09-05
