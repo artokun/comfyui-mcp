@@ -6,6 +6,21 @@ All notable changes to this project are documented here. This project adheres to
 
 ## Unreleased
 
+### MCP
+
+#### Fixed
+- pi discovery now resolves in SOURCE ORDER and readiness asks the same question as the launch (#2835). Three from review: a shim anywhere on PATH could beat an explicit COMFYUI_MCP_PI_PATH executable, because the shim pre-pass ran over every candidate before any of them was considered as an executable; a quoted PATH entry concatenated into an invalid path and a dead UNC entry could block startup on an SMB timeout; and backend-readiness still called resolvePiBin, whose name list excludes .cmd on a premise this PR overturns -- so a .cmd-only install read ABSENT though it runs, and an unresolvable extensionless shim read PRESENT though it spawns ENOENT, which is #2835's own symptom
+- the npm POSIX shim now resolves too, not just the .cmd (#2835). npm's sh shim names the interpreter and the script on one line, so the permissive pattern anchored on the first `$basedir/` and captured a path with embedded quotes; it never existed, so that branch resolved nothing at all. Measured against the real npm shims on a Windows box: 0/10 before, 10/10 after, with the .cmd branch unchanged at 10/10
+- **the pi backend works when pi was installed from npm on Windows (#2835).** `npm i -g pi`
+  writes `pi` (an extensionless bash script), `pi.cmd` and `pi.ps1`, and no `pi.exe`. Node
+  spawns the first with ENOENT and the second with EINVAL (measured), and discovery returned
+  the extensionless one — so the model probe failed and the panel connected degraded with
+  an empty model list, while `COMFYUI_MCP_PI_PATH` pointed at the `.cmd` was refused and the
+  advice named a `pi.exe` the package does not ship. npm's shim names its own entry point, so
+  it is now resolved to that script and launched as `node <script>`. NOT via `shell: true`:
+  the prompt rides argv, so a shell would make every prompt a potential command line, which is
+  what the no-shell rule exists to prevent. An unresolvable shim is still refused.
+
 ## [0.52.199] - 2026-09-05
 
 ### MCP
