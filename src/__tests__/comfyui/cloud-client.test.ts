@@ -216,6 +216,32 @@ describe("cloud-client", () => {
     expect((form.get("image") as File).name).toBe("clip.mp4");
   });
 
+  // The upload BODY, on the CLOUD twin. The self-hosted client has these two
+  // assertions; this path is wired independently and calls `uploadBody(data)` of
+  // its own, so without them it could revert to `new Uint8Array(data.buffer)` --
+  // which ignores byteOffset/length and uploads the whole 8KB pool -- and nothing
+  // would fail. A shared helper is not shared coverage.
+  it("uploadImageHttp sends the payload length, not the pool behind it", async () => {
+    const pool = Buffer.alloc(64, 0xff);
+    const payload = pool.subarray(8, 8 + 5);
+    payload.write("hello", "utf8");
+    expect(payload.byteOffset).toBeGreaterThan(0);
+
+    await uploadImageHttp("a.png", payload);
+    const form = calls.at(-1)?.init?.body as FormData;
+    expect((form.get("image") as File).size).toBe(payload.length);
+  });
+
+  it("uploadImageHttp sends the payload CONTENT, not the pool it was carved from", async () => {
+    const pool = Buffer.alloc(64, 0xff);
+    const payload = pool.subarray(8, 8 + 7);
+    payload.write("world!!", "utf8");
+
+    await uploadImageHttp("a.png", payload);
+    const form = calls.at(-1)?.init?.body as FormData;
+    expect(await (form.get("image") as File).text()).toBe("world!!");
+  });
+
   it("uploadImageHttp sends NO subfolder field for a plain filename", async () => {
     await uploadImageHttp("clip.mp4", Buffer.from("x"), "video/mp4");
     const form = calls.at(-1)?.init?.body as FormData;

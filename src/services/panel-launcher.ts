@@ -1115,7 +1115,10 @@ export function probePanelOrchestrator(
           `Sec-WebSocket-Key: ${key}\r\nSec-WebSocket-Version: 13\r\n\r\n`,
       );
     });
-    socket.on("data", (chunk) => {
+    // Annotated: with no setEncoding on this socket the chunk is always a Buffer,
+    // but @types/node 26 widens the callback to `string | Buffer` and Buffer.concat
+    // will not take the union.
+    socket.on("data", (chunk: Buffer) => {
       buffer = Buffer.concat([buffer, chunk]);
       if (!upgraded) {
         const end = buffer.indexOf("\r\n\r\n");

@@ -30,7 +30,7 @@ import {
   readResponseBodyBounded,
 } from "./bounded-response.js";
 import { bodyPrefixOf, describeStatus, readComfyJson } from "./json-guard.js";
-import { splitUploadTarget } from "./upload-target.js";
+import { splitUploadTarget, uploadBody } from "./upload-target.js";
 import { ComfyUIError, ConnectionError, describeFetchFailure } from "../utils/errors.js";
 import { logger } from "../utils/logger.js";
 import type { HistoryEntry } from "./client.js";
@@ -417,7 +417,7 @@ export async function uploadImageHttp(
   // the header above warns about.
   const { subfolder, name } = splitUploadTarget(filename);
   const formData = new FormData();
-  const blob = new Blob([data], { type: mimeType });
+  const blob = new Blob([uploadBody(data)], { type: mimeType });
   formData.append("image", blob, name);
   formData.append("type", "input");
   formData.append("overwrite", String(overwrite));

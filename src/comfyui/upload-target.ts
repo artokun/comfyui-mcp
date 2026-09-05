@@ -40,3 +40,22 @@ export function splitUploadTarget(filename: string): { subfolder: string; name: 
   }
   return { subfolder: parts.join("/"), name };
 }
+
+/**
+ * The upload body as something `new Blob([...])` accepts.
+ *
+ * `Buffer` is `Buffer<ArrayBufferLike>`, and `ArrayBufferLike` admits
+ * `SharedArrayBuffer`, which `BlobPart` excludes — so `new Blob([data])` stops
+ * compiling the moment @types/node reaches 26, even though every value we pass
+ * is fine at runtime. Node only hands back a SharedArrayBuffer-backed Buffer if
+ * you give it one, and neither upload path does.
+ *
+ * A VIEW, not a copy. These bodies are whole images and videos; `new
+ * Uint8Array(data)` would satisfy the compiler by duplicating every byte.
+ *
+ * Same twin rule as splitUploadTarget above — both upload clients call it, and
+ * cloud-client cannot import from client.ts.
+ */
+export function uploadBody(data: Buffer): Uint8Array<ArrayBuffer> {
+  return new Uint8Array(data.buffer as ArrayBuffer, data.byteOffset, data.byteLength);
+}

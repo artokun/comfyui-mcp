@@ -1919,7 +1919,7 @@ function buildUploadForm(
   subfolder: string,
 ): FormData {
   const formData = new FormData();
-  formData.append("image", new Blob([data], { type: mimeType }), name);
+  formData.append("image", new Blob([uploadBody(data)], { type: mimeType }), name);
   formData.append("type", "input");
   formData.append("overwrite", String(overwrite));
   if (subfolder) formData.append("subfolder", subfolder);
@@ -2079,5 +2079,5 @@ export async function uploadImageHttp(
  * share it (cloud-client.ts cannot import from here without a circular
  * import); re-exported so existing imports keep working.
  */
-import { splitUploadTarget } from "./upload-target.js";
+import { splitUploadTarget, uploadBody } from "./upload-target.js";
 export { splitUploadTarget };
