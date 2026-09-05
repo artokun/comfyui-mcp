@@ -9,9 +9,16 @@ All notable changes to this project are documented here. This project adheres to
 ### MCP
 
 #### Fixed
-
-- **`panel_save_workflow` returns `saved:true` when a matching `late_save_receipts` entry proves the timed-out in-place save completed (#2880).** After the panel's 13s budget, settle used to also require `modified:false persisted:true` on top-level `active`, which live `workflow_list` does not carry (those flags are on the flagged-active `workflows[]` row). A later `panel_list_workflows` already showed the rid-matched receipt. A current panel with no matching receipt stays OUTCOME UNKNOWN so a retry does not write twice.
 - the Manager-dialect guard's unit tests no longer probe the developer's real ComfyUI: two orchestrator test files passed on CI (nothing listening) and failed on any machine with ComfyUI actually running, because detection then succeeded and the git-URL guard refused the installs the fixtures are built on (test-only) A third file, late-mutation-e2e, was counted here in error: it invokes only panel_set_node_mode and never reaches the dialect probe -- it is the separate #694 load flake, and it passed in both arms of the control run.
+
+## [0.52.198] - 2026-09-05
+
+### MCP
+
+#### Fixed
+
+- **`panel_save_workflow` returns `saved:true` when a matching `late_save_receipts` entry proves the timed-out in-place save completed (#2880, #2881).** After the panel's 13s budget, settle used to also require `modified:false persisted:true` on top-level `active`, which live `workflow_list` does not carry (those flags are on the flagged-active `workflows[]` row). A later `panel_list_workflows` already showed the rid-matched receipt. A current panel with no matching receipt stays OUTCOME UNKNOWN so a retry does not write twice.
+
 
 ## [0.52.197] - 2026-09-05
 
