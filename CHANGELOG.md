@@ -6,6 +6,12 @@ All notable changes to this project are documented here. This project adheres to
 
 ## Unreleased
 
+### MCP
+
+#### Fixed
+
+- **`panel_set_widget` writes after `panel_load_workflow` without a manual `panel_set_workflow_target({mode:"current"})` rebind (#2886).** A successful load left leftover subgraph identity and a stale subgraph registry, so `graph_get_subgraph` could not classify a live H3 container or an ordinary root SaveVideo and refused before dispatch. Load now marks that mapping stale, and a mapping-unknown miss retries the subgraph read once after the walk; still unverifiable stays fail-closed.
+
 ## [0.52.199] - 2026-09-05
 
 ### MCP
@@ -13,7 +19,6 @@ All notable changes to this project are documented here. This project adheres to
 #### Fixed
 
 - **Connected-panel `get_image` fallback stays one `fetch_image` hop after headless `ECONNREFUSED`; it succeeds when the panel fetches `/view` via `fileURL` instead of ComfyUI `fetchApi`'s `/api` prefix (#2884, #2885).** History / system_stats keep `fetchApi` so cloud auth stays intact. Nested `fetchImage` retry and guessed origins stay refused.
-
 
 ## [0.52.198] - 2026-09-05
 

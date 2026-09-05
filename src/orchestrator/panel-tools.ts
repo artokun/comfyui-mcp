@@ -7451,12 +7451,21 @@ function forgetStaleSubgraphIdentity(ctx: PanelToolCtx): void {
 }
 
 /** Tabs whose promoted-container mapping is unverified after a queue-busy
- * mutation refusal. `graph_get_subgraph` can stay indeterminate for ordinary
- * root nodes until something walks the live graph (#2730). */
+ * mutation refusal or a canvas-replacing load. `graph_get_subgraph` can stay
+ * indeterminate for ordinary root nodes and live subgraphs until something
+ * walks the live graph (#2730, #2886). */
 const staleSubgraphMappingTabs = new Set<string>();
 
 function noteStaleSubgraphMapping(tabId: string): void {
   if (tabId) staleSubgraphMappingTabs.add(tabId);
+}
+
+/** A successful `graph_load` replaced the canvas. Drop leftover subgraph
+ * identity and force one mapping refresh before the next promoted write so
+ * `panel_set_widget` does not stay refused until a manual current-target rebind. */
+function noteCanvasReplacedForPromotedWrites(ctx: PanelToolCtx): void {
+  forgetStaleSubgraphIdentity(ctx);
+  noteStaleSubgraphMapping(ctx.tabId);
 }
 
 export function __resetStaleSubgraphMappingForTest(): void {
@@ -8152,6 +8161,10 @@ function classifyPromotedSubgraphReadError(res: ToolResult): PromotedSubgraphRea
     return "transient";
   }
   return "permanent";
+}
+
+function isStaleSubgraphMappingRead(res: ToolResult): boolean {
+  return /subgraph mapping is not loaded/i.test(textOfToolResult(res));
 }
 
 /**
@@ -9183,7 +9196,12 @@ async function preparePromotedWidgetWrite(
       // ordinary root node. Refresh the mapping once and re-probe. Still
       // unverifiable → refuse. Do not spend the transient subgraph re-read on
       // a permanent application error.
-      if (!mappingRefreshed && rootGraphIdentity !== null) {
+      // #2886 — a live subgraph container has the same stale-registry miss
+      // after graph_load. Re-probing only the ordinary fast path left those
+      // writes refused; retry graph_get_subgraph once the mapping walk ran.
+      // Do not replay other permanent application errors.
+      const mappingUnknown = isStaleSubgraphMappingRead(sub);
+      if (!mappingRefreshed && (rootGraphIdentity !== null || mappingUnknown)) {
         const refreshError = await refreshSubgraphMapping();
         if (refreshError) return refreshError;
         targetProbe = await readPromotedTargetScope(
@@ -9204,13 +9222,64 @@ async function preparePromotedWidgetWrite(
           if (driftAfterMapping) return ordinaryBindingRefusal(widget, driftAfterMapping);
           return ordinaryWritePlanFromScope(widget, targetScope, tabBefore, identityBefore);
         }
+        if (mappingUnknown) {
+          sub = await ctx.call(
+            { cmd: "graph_get_subgraph", node_id: nodeId },
+            undefined,
+            undefined,
+            undefined,
+            PROMOTED_PREFLIGHT_READ_OPTIONS,
+          );
+        }
       }
-      return promotedSubgraphReadRefusal(
-        widget,
-        sub,
-        "graph_get_subgraph could not determine whether the addressed node is a promoted container",
-      );
-    }
+      if (sub.isError) {
+        if (classifyPromotedSubgraphReadError(sub) === "definitive-ordinary") {
+          const driftAfterMappingRead = panelBindingDriftReason(
+            ctx,
+            "after the subgraph mapping refresh",
+            hasIdentityApi,
+            identityBefore,
+            tabBefore,
+          );
+          if (driftAfterMappingRead) return promotedWriteRefusal(widget, driftAfterMappingRead);
+          if (targetScope?.activeView === "subgraph" && targetScope.node === "ordinary") {
+            if (!targetScope.nodeIdentity) return null;
+            const expectedNodeType = definitiveNonPromotedNodeType(sub);
+            if (!sameDefinitiveOrdinaryNodeType(expectedNodeType, targetScope.nodeType)) {
+              return promotedWriteRefusal(
+                widget,
+                "the ordinary node type changed between the scope and subgraph reads",
+              );
+            }
+            if (ctx.tabExpectedNodeTypeFenceCapability?.() !== true) {
+              return promotedPanelBuildRefusal(
+                ctx,
+                nodeId,
+                widget,
+                "does not advertise the atomic ordinary-node write fence",
+                "enforces_expected_node_type_at_write",
+              );
+            }
+            if (ctx.tabExpectedNodeIdentityFenceCapability?.() !== true) {
+              return promotedPanelBuildRefusal(
+                ctx,
+                nodeId,
+                widget,
+                "does not advertise the atomic ordinary-node identity write fence",
+                "enforces_expected_node_identity_at_write",
+              );
+            }
+            return ordinaryWritePlanFromScope(widget, targetScope, tabBefore, identityBefore);
+          }
+          return null;
+        }
+        return promotedSubgraphReadRefusal(
+          widget,
+          sub,
+          "graph_get_subgraph could not determine whether the addressed node is a promoted container",
+        );
+      }
+    } else {
     // A binding/subgraph registration transition can make the first read
     // indeterminate even though the same live container is readable immediately
     // afterward. Refresh once, then keep the existing fail-closed classification
@@ -9299,6 +9368,7 @@ async function preparePromotedWidgetWrite(
       );
     }
     sub = refreshedSub;
+    }
   }
   let payload = parseToolResultJson(sub);
   if (!payload || !promotedEnvelopeCarriesEvidence(payload)) {
@@ -21755,6 +21825,11 @@ export function buildPanelToolDefs(): PanelToolDef[] {
           // `format:"api"`. That field is present only on this branch, which makes it the
           // signal rather than an inference.
           const reply = parseToolResultJson(loaded);
+          // #2886 — a successful load replaces the canvas. UI-format keeps the
+          // instance uuid, so the fence is still valid, but leftover subgraph
+          // identity and the subgraph registry still describe the PREVIOUS graph.
+          // Mark mapping stale here; do not re-derive from whatever is active now.
+          if (reply?.loaded === true) noteCanvasReplacedForPromotedWrites(ctx);
           const remintedInstance = reply?.loaded === true && reply?.format === "api";
           if (!remintedInstance) return loaded;
           // #1478 — ADOPT the instance this load just proved, rather than warning about it.
