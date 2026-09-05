@@ -9,6 +9,8 @@ All notable changes to this project are documented here. This project adheres to
 ### MCP
 
 #### Fixed
+
+- **`panel_save_workflow` returns `saved:true` when a matching `late_save_receipts` entry proves the timed-out in-place save completed (#2880).** After the panel's 13s budget, settle used to also require `modified:false persisted:true` on top-level `active`, which live `workflow_list` does not carry (those flags are on the flagged-active `workflows[]` row). A later `panel_list_workflows` already showed the rid-matched receipt. A current panel with no matching receipt stays OUTCOME UNKNOWN so a retry does not write twice.
 - **the ready banner no longer REQUESTS the emoji font the comfyui-mcp-panel#2023 crash correlates with (comfyui-mcp-panel#2023).** comfyui-mcp-panel#2210 removed `U+FE0F` from nine panel strings because the selector does not merely permit emoji presentation, it requests it, pinning the glyph to `seguiemj.ttf` — the file KB5120998 replaced two days before the crash cluster. The orchestrator renders on the same canvas (`{ type: "say" }` → agent bubble) through the same font stack, so a panel-only sweep left `banner.ready.copilot` requesting that font on every Copilot-backend session: the identical `U+26A0 U+FE0F` sequence sat in the source fallback and in all twelve catalogs. The selector goes; the glyph stays — pinned in both directions, so deleting the warning sign cannot pass either. Does not repair comfyui-mcp-panel#2023 (the null-deref is upstream); same class of mitigation as comfyui-mcp-panel#2210
 
 ## [0.52.197] - 2026-09-05
