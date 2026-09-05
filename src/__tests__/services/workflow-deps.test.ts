@@ -186,11 +186,15 @@ describe("extractWorkflowDependencies", () => {
     expect(byType.KSampler).toMatchObject({ builtin: true, pack: null, installed: true });
     expect(byType.CLIPTextEncode).toMatchObject({ builtin: true, installed: true });
 
-    // installed custom node -> resolved to Manager title, installed=true
+    // #2765 — installed custom node -> named by the pack directory /object_info
+    // actually imported it from, NOT by the Manager catalogue's title. The
+    // catalogue here agrees about the owner, so this asserts the PRECEDENCE:
+    // ground truth from the live server outranks a catalogue match.
     expect(byType.ImpactSomething).toMatchObject({
       builtin: false,
       installed: true,
-      pack: "ComfyUI-Impact-Pack",
+      pack: "comfyui-impact-pack",
+      source: "object_info",
     });
 
     // missing custom node -> resolved via mappings, installed=false
@@ -201,7 +205,7 @@ describe("extractWorkflowDependencies", () => {
       source: "manager_mappings",
     });
 
-    expect(result.requiredPacks).toEqual(["ComfyUI-Impact-Pack", "Remote-Only-Pack"]);
+    expect(result.requiredPacks).toEqual(["Remote-Only-Pack", "comfyui-impact-pack"]);
     expect(result.missingPacks).toEqual(["Remote-Only-Pack"]);
     expect(result.unresolved).toEqual([]);
   });
@@ -406,7 +410,7 @@ describe("installWorkflowDependencies", () => {
     expect(order).toEqual(["reset", "queue", "start"]);
 
     expect(result.installed).toEqual(["Remote-Only-Pack"]);
-    expect(result.alreadyInstalled).toEqual(["ComfyUI-Impact-Pack"]);
+    expect(result.alreadyInstalled).toEqual(["comfyui-impact-pack"]);
     expect(result.queue).toMatchObject({ is_processing: true });
   });
 
@@ -422,7 +426,7 @@ describe("installWorkflowDependencies", () => {
     expect(deps.queueInstall).not.toHaveBeenCalled();
     expect(deps.startQueue).not.toHaveBeenCalled();
     expect(result.installed).toEqual([]);
-    expect(result.alreadyInstalled).toEqual(["ComfyUI-Impact-Pack"]);
+    expect(result.alreadyInstalled).toEqual(["comfyui-impact-pack"]);
   });
 
   it("reports packs missing from the Manager list as unresolved (not already-installed)", async () => {
@@ -432,7 +436,7 @@ describe("installWorkflowDependencies", () => {
     expect(result.unresolved).toContain("Remote-Only-Pack");
     // A missing pack that could not be resolved must NOT leak into alreadyInstalled.
     expect(result.alreadyInstalled).not.toContain("Remote-Only-Pack");
-    expect(result.alreadyInstalled).toEqual(["ComfyUI-Impact-Pack"]);
+    expect(result.alreadyInstalled).toEqual(["comfyui-impact-pack"]);
     expect(deps.queueInstall).not.toHaveBeenCalled();
   });
 });

@@ -981,7 +981,23 @@ async function extractDepsAction(input: string | Record<string, unknown>): Promi
   lines.push(`## Workflow dependencies (${result.classTypes.length} node type(s))`, "");
 
   if (result.requiredPacks.length === 0) {
-    lines.push("All node types are core/built-in ComfyUI nodes. No custom node packs required.");
+    // #2765 — "all built-in" is a claim about every node in the graph, so it may
+    // only be made when nothing was left unattributed. A workflow whose custom
+    // nodes were ALL ambiguous produces zero requiredPacks, and this line used to
+    // announce it as needing nothing — the reassuring reading, printed above the
+    // warning that contradicts it.
+    // Counted from the dependencies themselves, not from the two summary lists:
+    // an INSTALLED custom node whose /object_info carries no python_module and
+    // which Manager cannot name is in neither list, and it was making this line
+    // claim the graph was all built-in while such a node sat in it (codex gate
+    // round 3).
+    const unattributed = result.dependencies.filter((d) => !d.builtin && !d.pack).length;
+    lines.push(
+      unattributed === 0
+        ? "All node types are core/built-in ComfyUI nodes. No custom node packs required."
+        : `No custom node pack could be attributed to ${unattributed} of these node type(s) — ` +
+          `see below. The rest are core/built-in ComfyUI nodes.`,
+    );
   } else {
     lines.push(`### Required custom node packs (${result.requiredPacks.length})`);
     for (const pack of result.requiredPacks) {
@@ -1019,15 +1035,39 @@ async function extractDepsAction(input: string | Record<string, unknown>): Promi
     );
   }
 
+  // #2765 — rendered separately from `unresolved`, whose sentence above ("neither
+  // installed nor known to ComfyUI-Manager") is false for these: the catalogue
+  // knows them by SEVERAL owners. Naming one used to be an arbitrary pick of
+  // whichever entry enumerated first, which is how four unrelated node classes
+  // came back owned by one unrelated repository.
+  if (result.ambiguous.length > 0) {
+    lines.push(
+      `### Ambiguous ownership (${result.ambiguous.length})`,
+      "The ComfyUI-Manager catalogue attributes each of these class_types to MORE THAN ONE " +
+        "repository, so the owning pack cannot be determined and is deliberately not guessed. " +
+        'They are excluded from the missing-pack list and `list_packs (action:"install_deps")` ' +
+        "will not install them — installing the wrong candidate means running unrelated " +
+        "third-party code.",
+      ...result.ambiguous.map(
+        (a) =>
+          `- \`${a.class_type}\` — ${a.installed ? "already present, owner undetermined" : "NOT installed"}` +
+          ` — claimed by: ${a.candidates.join(", ")}`,
+      ),
+      "",
+    );
+  }
+
   lines.push("### Per-node mapping");
   for (const dep of result.dependencies) {
     const where = dep.builtin
       ? "built-in"
       : dep.pack
         ? `${dep.pack} (${dep.installed ? "installed" : "missing"})`
-        : dep.installed
-          ? "installed, pack unknown"
-          : "UNRESOLVED";
+        : dep.source === "ambiguous"
+          ? `AMBIGUOUS — ${(dep.candidates ?? []).length} claimants, not guessed`
+          : dep.installed
+            ? "installed, pack unknown"
+            : "UNRESOLVED";
     lines.push(`- \`${dep.class_type}\` → ${where}`);
   }
 
@@ -1050,7 +1090,17 @@ async function installDepsAction(input: string | Record<string, unknown>): Promi
       "",
     );
   } else {
-    lines.push("## No packs needed installation", "");
+    // #2765 — same contradiction one layer down: an install whose every custom
+    // node was ambiguous queues nothing, and "no packs needed" is the opposite
+    // of what happened. Nothing was installed BECAUSE we could not tell what to
+    // install.
+    const blocked = result.ambiguous.length + result.unresolved.length;
+    lines.push(
+      blocked === 0
+        ? "## No packs needed installation"
+        : `## Nothing installed — ${blocked} item(s) could not be resolved to a pack`,
+      "",
+    );
   }
 
   if (result.alreadyInstalled.length > 0) {
@@ -1075,6 +1125,41 @@ async function installDepsAction(input: string | Record<string, unknown>): Promi
       `### Could not resolve (${result.unresolved.length})`,
       "Not found in ComfyUI-Manager — install manually:",
       ...result.unresolved.map((p) => `- ${p}`),
+      "",
+    );
+  }
+
+  // #2765 — say what was deliberately NOT installed. Silence here reads as
+  // "everything needed was handled", which is the reading that let a preflight
+  // report an unrelated pack as the missing dependency.
+  // #2765 — split by whether the node is actually MISSING. An ambiguous node can
+  // already be present (its /object_info entry just carries no python_module), and
+  // telling that reader to go install a pack is wrong: nothing needs installing,
+  // we simply cannot name the owner (codex gate round 4).
+  const ambiguousMissing = result.ambiguous.filter((a) => !a.installed);
+  const ambiguousPresent = result.ambiguous.filter((a) => a.installed);
+  if (ambiguousMissing.length > 0) {
+    lines.push(
+      `### Not installed — ambiguous ownership (${ambiguousMissing.length})`,
+      "ComfyUI-Manager attributes each of these class_types to MORE THAN ONE repository. " +
+        "Installing a guess would run unrelated third-party code, so nothing was queued " +
+        "for them. Choose the right one and install it by name:",
+      ...ambiguousMissing.map(
+        (a) => `- \`${a.class_type}\` — claimed by: ${a.candidates.join(", ")}`,
+      ),
+      "",
+    );
+  }
+  if (ambiguousPresent.length > 0) {
+    lines.push(
+      `### Already present, owner unknown (${ambiguousPresent.length})`,
+      "These class_types are ALREADY AVAILABLE on the connected ComfyUI — nothing to " +
+        "install. The catalogue attributes each to more than one repository and " +
+        "`/object_info` does not say which one it loaded from, so the owning pack is " +
+        "reported as undetermined rather than guessed:",
+      ...ambiguousPresent.map(
+        (a) => `- \`${a.class_type}\` — claimed by: ${a.candidates.join(", ")}`,
+      ),
       "",
     );
   }
