@@ -9,9 +9,16 @@ All notable changes to this project are documented here. This project adheres to
 ### MCP
 
 #### Fixed
-
-- **`panel_save_workflow` returns `saved:true` when a matching `late_save_receipts` entry proves the timed-out in-place save completed (#2880).** After the panel's 13s budget, settle used to also require `modified:false persisted:true` on top-level `active`, which live `workflow_list` does not carry (those flags are on the flagged-active `workflows[]` row). A later `panel_list_workflows` already showed the rid-matched receipt. A current panel with no matching receipt stays OUTCOME UNKNOWN so a retry does not write twice.
 - panel_load_workflow path: loads API/prompt graphs (including graph.api.json) onto the canvas instead of refusing them as non-UI (panel#2011)
+
+## [0.52.198] - 2026-09-05
+
+### MCP
+
+#### Fixed
+
+- **`panel_save_workflow` returns `saved:true` when a matching `late_save_receipts` entry proves the timed-out in-place save completed (#2880, #2881).** After the panel's 13s budget, settle used to also require `modified:false persisted:true` on top-level `active`, which live `workflow_list` does not carry (those flags are on the flagged-active `workflows[]` row). A later `panel_list_workflows` already showed the rid-matched receipt. A current panel with no matching receipt stays OUTCOME UNKNOWN so a retry does not write twice.
+
 
 ## [0.52.197] - 2026-09-05
 
