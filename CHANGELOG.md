@@ -56,6 +56,21 @@ All notable changes to this project are documented here. This project adheres to
 - panel_save_subgraph accepts overwrite:true so a user-blueprint name collision can replace in place instead of being rejected as an unrecognized key (#2865, #2866)
 
 
+#### Changed
+- **PROBE, not a fix: two panel live-canvas tools opt out of tool-search deferral (panel#291).** This does not claim panel#291 is resolved — deferral alone cannot explain an empty deferred catalog, and the reported setup has not been re-run. It removes the deferral variable so the NEXT report can distinguish "deferred and unfound" from "never registered".
+  The SDK defers in-process MCP tool schemas by default once tool search is enabled, and
+  `alwaysLoad` exists because "the tools must be present when the turn-1 prompt is built".
+  The reported Claude-backend failure has every `panel_*` tool absent while the SPAWNED
+  `comfyui` server works, and in-process-vs-spawned is the one relevant difference between
+  them. NOT asserted as the cause — deferral would still leave the tools findable via
+  ToolSearch, and the report says they are not — this removes the variable so the next
+  report distinguishes "deferred and unfound" from "never registered".
+  Applied PER TOOL (`panel_graph_outline`, `panel_canvas`) rather than server-wide: the
+  server-wide option opts out all 96 panel tools, whose descriptions alone run to ~77k
+  characters, and one tool provably in the turn-1 prompt answers the question. The tools
+  are read back over a real MCP transport and the count is asserted, so restoring the
+  server-wide flag fails the suite rather than silently enlarging every prompt.
+
 ## [0.52.193] - 2026-09-04
 
 ### MCP

@@ -29518,6 +29518,38 @@ CHECKED FOR YOU: the graph read this message prescribes was just run, and it ` +
 }
 
 /**
+ * panel#291 — the tools that carry the deferral opt-out (see the `tool()` call in
+ * `createPanelMcpServer`). Deliberately two, not all 96: the probe asks whether
+ * `panel_*` tools are DEFERRED or NEVER REGISTERED, and one tool that is provably
+ * in the turn-1 prompt settles it. A second is kept so a single-tool anomaly does
+ * not read as a negative result.
+ *
+ * `panel_graph_outline` is the canonical read entry point for the live-graph
+ * surface the report is about; `panel_canvas` is the cheapest panel tool whose
+ * presence is still meaningful. Together ~1.4k characters of description against
+ * ~77k for the full set.
+ *
+ * INVALIDATES AN ASSUMPTION IN `mcp-session-health.ts` (#2742/#2774). Its
+ * empty-toolset check reads the init message's `tools: string[]`, and its comment
+ * states "nothing in this repo sets `alwaysLoad` or enables tool search, so every
+ * server is treated alike". This is the first `alwaysLoad` in the repo, so that
+ * sentence stops being true the moment both land.
+ *
+ * No behaviour changes today: `alwaysLoad` only opts OUT of deferral, and deferral
+ * happens only when tool search is enabled, which nothing does. But that check's
+ * documented hazard is precisely a deferral-aware one — a deferred tool is absent
+ * from `tools`, and its per-process latch can make an all-deferred session read as
+ * EVERY server contributing zero. If tool search is ever turned on with this in
+ * place, the panel server would report these two and pass, while a fully-deferred
+ * stdio server would report zero and be flagged: the one server #2742 is about
+ * becomes the one whose emptiness that check can no longer see.
+ */
+const PROBE_ALWAYS_LOAD: ReadonlySet<string> = new Set([
+  "panel_graph_outline",
+  "panel_canvas",
+]);
+
+/**
  * Build the per-tab live-graph MCP server for the Claude (in-process Agent SDK)
  * backend. `tabId` binds every command to the panel tab this agent serves.
  *
@@ -29599,6 +29631,25 @@ export function createPanelMcpServer(
       d.schema,
       async (args: Record<string, unknown>) =>
         toolActionPolicyError(d.name, args, policy) ?? (await d.handler(args, ctx)),
+      // panel#291 — opt these two OUT of tool-search deferral.
+      //
+      // The SDK defers MCP tool schemas by default once tool search is on
+      // ("Default: tools are deferred when tool search is enabled", on
+      // `CreateSdkMcpServerOptions.alwaysLoad`), and the transport configs say why
+      // it matters: the flag exists "since the tools must be present when the
+      // turn-1 prompt is built". Per-tool `tool({ alwaysLoad })` is documented as
+      // OR'd with the server-wide option, so this is the same opt-out, scoped.
+      //
+      // The reported failure is a Claude session where every `panel_*` tool is
+      // absent from BOTH the declared list and the deferred catalog, while the
+      // spawned `comfyui` stdio server is fine — the two differ precisely in being
+      // deferred in-process vs. spawned. Deferral alone does not explain an empty
+      // catalog, so this is not asserted as the cause. It removes the deferral
+      // variable, so the next report distinguishes "deferred and unfound" from
+      // "never registered".
+      //
+      // Two tools answer that, so the whole set is not conscripted for a probe.
+      PROBE_ALWAYS_LOAD.has(d.name) ? { alwaysLoad: true } : undefined,
     );
     // #754 — strict() so an unrecognized arg key is a loud validation error,
     // not a silent drop. tool()'s TS signature requires a bare ZodRawShape
@@ -29617,6 +29668,11 @@ export function createPanelMcpServer(
     name: "comfyui-panel",
     version: "1.0.0",
     tools,
+    // panel#291 — the deferral opt-out is deliberately NOT set server-wide here.
+    // `CreateSdkMcpServerOptions.alwaysLoad` would pull all 96 panel tool schemas
+    // into every turn-1 prompt (~77k characters of description alone, before
+    // schema fields) to answer a single yes/no question. The per-tool form is
+    // applied to PROBE_ALWAYS_LOAD instead — see the `tool()` call above.
   }) as McpSdkServerConfigWithInstance & { rebindTab?: (newTabId: string) => void };
   // Re-point this server's bound tab after a panel tab-id migration (#568 Defect
   // 1). ctx.tabId is read LIVE by every handler (and by call/confirm), so updating
