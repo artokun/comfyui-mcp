@@ -61,6 +61,9 @@ import {
   redactUrlForLogs,
   type DownloadAuth,
 } from "./download-auth.js";
+import { compareSemver } from "./self-update.js";
+import { getUiBridge, minPanelVersionForCmd, SEMVER_RE } from "./ui-bridge.js";
+import { verifiedPanelDiskVersion } from "./panel-workspace.js";
 
 export const MODEL_SUBDIRS = [
   "checkpoints",
@@ -2539,6 +2542,72 @@ export async function verifyLandedModel(
  * same tests as the wording; a branch chosen upstream and passed in as a boolean
  * would be exactly the untested wiring this repo keeps getting caught by.
  */
+
+function parseablePanelVersion(raw: string | undefined): string | undefined {
+  const trimmed = raw?.trim();
+  return trimmed && SEMVER_RE.test(trimmed) ? trimmed : undefined;
+}
+
+/**
+ * Lowest parseable advertised hello version among connected panel tabs, plus
+ * the on-disk pack version when that can be confirmed. Used only to word a
+ * followable refresh — never to invent a listing.
+ */
+function observeLivePanelBundle(): {
+  liveVersion?: string;
+  installedVersion?: string;
+} {
+  let liveVersion: string | undefined;
+  try {
+    for (const raw of getUiBridge()?.advertisedPanelVersions() ?? []) {
+      const version = parseablePanelVersion(raw);
+      if (!version) continue;
+      if (!liveVersion || compareSemver(version, liveVersion) < 0) liveVersion = version;
+    }
+  // unknown-ok: a missing or throwing bridge is an unobserved bundle, not a listing.
+  } catch {
+    liveVersion = undefined;
+  }
+  return { liveVersion, installedVersion: parseablePanelVersion(verifiedPanelDiskVersion()) };
+}
+
+/**
+ * How to refresh loader options after a download is on disk but not listed (#2876).
+ *
+ * `install_comfyui` has no `refresh_nodes` action. `panel_refresh_nodes` is named
+ * only when the live tab is on a bundle that can run it. A tab behind the
+ * installed pack is told to hard-refresh first.
+ */
+export function staleListingRefreshRemedy(
+  bundle: { liveVersion?: string; installedVersion?: string } = {},
+): string {
+  const live = parseablePanelVersion(bundle.liveVersion);
+  const installed = parseablePanelVersion(bundle.installedVersion);
+  const refreshMin = minPanelVersionForCmd("refresh_nodes");
+  const recheck = "then re-check with list_local_models";
+
+  if (live && installed && compareSemver(live, installed) < 0) {
+    return (
+      `Hard-refresh the ComfyUI browser tab first (Ctrl+Shift+R) — this tab is running ` +
+      `panel ${live} while the installed pack is ${installed}, so the live bundle cannot ` +
+      `execute panel_refresh_nodes yet. After the tab loads the installed pack, call ` +
+      `panel_refresh_nodes, or restart ComfyUI, ${recheck}.`
+    );
+  }
+
+  if (live && SEMVER_RE.test(refreshMin) && compareSemver(live, refreshMin) >= 0) {
+    return (
+      `Refresh the node/model definitions — call panel_refresh_nodes — or restart ` +
+      `ComfyUI, ${recheck}.`
+    );
+  }
+
+  return (
+    `Refresh the node/model definitions — hard-refresh the ComfyUI browser tab ` +
+    `(Ctrl+Shift+R), or restart ComfyUI — ${recheck}.`
+  );
+}
+
 export function notVisibleVerdict(args: {
   verifiedPath: string;
   liveModelsDir: string | undefined;
@@ -2561,8 +2630,17 @@ export function notVisibleVerdict(args: {
    *  install (#369). Omitted ⇒ NOT named, because an unstated provenance is an
    *  unknown one. */
   liveModelsDirNamedByServer?: boolean;
+  /**
+   * Live vs installed panel versions for the refresh wording (#2876). When
+   * omitted, observed from the connected tab hello and the on-disk pack.
+   * Pass `{}` in tests to pin the unknown-bundle branch.
+   */
+  panelBundle?: { liveVersion?: string; installedVersion?: string };
 }): { liveVisible: "not-visible"; note: string } {
   const { verifiedPath, liveModelsDir, wanted, category, baseUrl } = args;
+  const refreshRemedy = staleListingRefreshRemedy(
+    "panelBundle" in args ? (args.panelBundle ?? {}) : observeLivePanelBundle(),
+  );
   const insideLexically = liveModelsDir !== undefined && isUnderRoot(verifiedPath, liveModelsDir);
   const rootIsServerNamed = args.liveModelsDirNamedByServer === true;
   // Containment ALONE is not readership. It counts only when the root it is
@@ -2592,8 +2670,7 @@ export function notVisibleVerdict(args: {
         `scans, which is #369 and is how multi-GB downloads get reported as landed and are ` +
         `never seen again.\n\n` +
         `Do not move it on the strength of this message alone, and do not treat it as placed ` +
-        `either. SEPARATE THE TWO: refresh the node/model definitions — install_comfyui ` +
-        `(action:"refresh_nodes"), or the panel's refresh — then re-check with list_local_models. ` +
+        `either. SEPARATE THE TWO: ${refreshRemedy} ` +
         `If it STILL does not appear, it is case 2: list_local_models (action:"list_paths") ` +
         `reports the roots the running server actually reads — move the file into the one for ` +
         `"${category}". To make future downloads verifiable, point COMFYUI_PATH at the install ` +
@@ -2619,9 +2696,7 @@ export function notVisibleVerdict(args: {
             `outside that directory is the layout working as intended, not a misplacement. `) +
         `That server does not list "${wanted}" under "${category}" YET, which almost always ` +
         `means its cached loader options have not been re-read since the write (ComfyUI ` +
-        `invalidates them on the directory's mtime). Do NOT move the file. Refresh the ` +
-        `node/model definitions — install_comfyui (action:"refresh_nodes"), or the panel's ` +
-        `refresh — or restart ComfyUI, then check list_local_models again.`
+        `invalidates them on the directory's mtime). Do NOT move the file. ${refreshRemedy}`
       : `The file IS on disk at ${verifiedPath}, but the connected ComfyUI ` +
         `(${baseUrl}) does NOT list "${wanted}" under "${category}" — it will not be ` +
         `usable in a workflow from there.` +

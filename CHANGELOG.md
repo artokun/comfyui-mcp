@@ -9,6 +9,8 @@ All notable changes to this project are documented here. This project adheres to
 ### MCP
 
 #### Fixed
+
+- **`download_model` `action:"status"` does not advertise `install_comfyui action:"refresh_nodes"` when a just-landed file is on disk but not yet listed (#2876).** That action is not on `install_comfyui`. The note names `panel_refresh_nodes` only when the live panel bundle can run it; a tab behind the installed pack is told to hard-refresh first.
 - list_local_models recovers remote inventory from panel object_info when fetch_comfyui_read rejects models/<category> as outside the panel allowlist (#2511)
 
 ## [0.52.196] - 2026-09-04
