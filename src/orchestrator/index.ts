@@ -188,6 +188,7 @@ import {
 } from "../deferred-panel-tools.js";
 import {
   createPanelMcpServer,
+  panelSurfaceFullyWithheld,
   makePanelToolCtx,
   resolvePinTarget,
   secretSavedReply,
@@ -526,7 +527,57 @@ export function inheritedMcpRetraction(backend: string): string {
   return backendInheritsUserMcpServers(backend) ? "" : NO_INHERITED_MCP_OVERRIDE;
 }
 
-export function panelToolsRetraction(backend: string, panelToolsAvailable: boolean): string {
+/**
+ * Appended when the operator's tool-surface policy withholds the ENTIRE `panel_*`
+ * surface -- on EVERY backend, including claude.
+ *
+ * `panelToolsRetraction` below covers a failed loopback bind and excludes claude for a
+ * reason that is true of THAT failure: claude drives the canvas through its own
+ * in-process server, so a bind failure takes nothing from it. The policy is a second,
+ * independent way to lose the same tools, and it reaches BOTH registration paths --
+ * `createPanelMcpServer` (claude) and `registerPanelTools` (the HTTP lane) filter
+ * through the same `resolveToolSurfacePolicy()`. So the claude exclusion, correct on
+ * its own terms, leaves the claude lane with no retraction under a policy that empties
+ * its panel surface completely.
+ *
+ * That configuration is not exotic: docs/configuration.mdx recommends
+ * `COMFYUI_MCP_TOOL_PRESET=safe` verbatim for a hosted deployment, and both presets
+ * deny `panel_*` by glob.
+ *
+ * Scoped like NO_PANEL_TOOLS_OVERRIDE, with one difference: a failed bind cannot say
+ * WHY, while a policy can -- the operator set a variable, and naming it is the
+ * difference between a dead end and a one-line fix. It still declines to speak for the
+ * headless server, which the same policy filters SEPARATELY and may well have left
+ * intact.
+ */
+const PANEL_TOOLS_WITHHELD_BY_POLICY_OVERRIDE = `
+
+=== CAPABILITY CORRECTION — READ THIS, IT SUPERSEDES THE ABOVE ===
+The live-canvas tools are NOT available in this session. This orchestrator is running under a tool-surface policy that withholds the whole panel_* surface, so no panel_* tool (panel_graph_outline, panel_query_graph, panel_add_node, panel_connect, panel_set_widget, panel_run, panel_save_workflow, …) exists in your runtime this run. Disregard every instruction above about reading or editing the user's open canvas: you cannot see it, cannot change it, and must never claim to, pretend to, or narrate doing so. Do not search for these tools — they were never registered, so they are absent from the deferred tool catalog too, and looking again will not find them.
+That is ALL this tells you. The headless comfyui server is filtered SEPARATELY by the same policy and may still have tools — go by the tool list you were actually given rather than assuming either way. If get_workflow is there, its file-based list/get/analyze/query actions are your way to work on a saved workflow; if it is not, say so plainly instead of guessing.
+This cannot change during the session — the tool set was fixed when it started. If the user asks for work on the graph in front of them, tell them the live-canvas tools are withheld by this deployment's tool-surface configuration (COMFYUI_MCP_TOOL_PRESET, or COMFYUI_MCP_TOOL_ALLOW/COMFYUI_MCP_TOOL_DENY), which an operator can change and you cannot.`;
+
+/**
+ * The policy retraction as a decision, pure so it is testable on its own.
+ *
+ * Deliberately NOT keyed on backend: unlike a loopback bind, the policy governs every
+ * lane. A backend check here would reintroduce exactly the gap this closes.
+ */
+export function panelPolicyRetraction(panelSurfaceWithheld: boolean): string {
+  return panelSurfaceWithheld ? PANEL_TOOLS_WITHHELD_BY_POLICY_OVERRIDE : "";
+}
+
+export function panelToolsRetraction(
+  backend: string,
+  panelToolsAvailable: boolean,
+  // When a policy has withheld the whole surface, PANEL_TOOLS_WITHHELD_BY_POLICY_OVERRIDE
+  // already retracts the same capability AND names a cause the operator can act on. Both
+  // firing hands the agent two different explanations for one absence, and this one tells
+  // the user to restart -- which cannot restore a tool the policy withholds. The policy is
+  // the binding constraint either way, so it wins.
+  panelSurfaceWithheldByPolicy = false,
+): string {
+  if (panelSurfaceWithheldByPolicy) return "";
   if (panelToolsAvailable) return "";
   // pi has no MCP client at all; PI_CAPABILITY_OVERRIDE already retracts strictly
   // more than this would, and stacking a second, narrower retraction on top would
@@ -2218,7 +2269,14 @@ export async function runPanelOrchestrator(): Promise<void> {
   // Grok tab it's Claude. Rebuild the block per-tab-backend: same env facts, but
   // the backend label recomputed from the tab's actual backend id. Falls back to
   // the shared append when the env probe produced nothing (envCaps undefined).
-  const systemAppendForBackend = (bId: string): string => {
+  // Computed ONCE: the policy is env-derived and fixed for the process lifetime, and
+  // buildPanelToolDefs() walks ~96 defs. Applied by WRAPPING rather than by appending at
+  // each return below -- three returns, and the whole defect class this belongs to is
+  // "fixed one of two paths" (see the tool-surface-filter wiring tests). A wrapper cannot
+  // miss one.
+  const panelSurfaceWithheld = panelSurfaceFullyWithheld();
+  const panelPolicySuffix = panelPolicyRetraction(panelSurfaceWithheld);
+  const systemAppendForBackendBase = (bId: string): string => {
     if (!envCaps) return panelSystemAppend;
     const { backend, otherBackendAvailable } = resolveBackends(bId);
     // Already the default's label → reuse the shared string (no rebuild).
@@ -2230,6 +2288,11 @@ export async function runPanelOrchestrator(): Promise<void> {
       { ...envCaps, backend, otherBackendAvailable },
     );
   };
+  // Every return above is a capability CLAIM about the panel surface; the retraction is
+  // a property of the RUN, not of the backend, so it is applied here once rather than
+  // inside the branches.
+  const systemAppendForBackend = (bId: string): string =>
+    systemAppendForBackendBase(bId) + panelPolicySuffix;
 
   // Build it before any agent could spawn. Guarded so a probe stall can't block
   // orchestrator startup beyond the probes' own (short) timeouts.
@@ -2476,7 +2539,7 @@ export async function runPanelOrchestrator(): Promise<void> {
     // undefined for it, so it never reaches here) is the only one that does (#2311).
     const sysAppend =
       systemAppendForBackend(backend) +
-      panelToolsRetraction(backend, panelMcpHttp !== null) +
+      panelToolsRetraction(backend, panelMcpHttp !== null, panelSurfaceWithheld) +
       inheritedMcpRetraction(backend);
     try {
     if (backend === "codex") {

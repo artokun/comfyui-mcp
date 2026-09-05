@@ -594,9 +594,15 @@ describe("the wiring that makes the above reachable in production", () => {
     // One expression, thirteen construction sites downstream of it. If it is
     // dropped, `inheritedMcpRetraction` keeps passing its own tests and reaches
     // nobody.
+    //
+    // `panelToolsRetraction`'s own argument list is matched loosely on purpose. This
+    // test exists to pin that `inheritedMcpRetraction` REACHES this expression, and
+    // over-pinning a sibling's signature makes it fail for reasons that have nothing
+    // to do with what it guards -- which is exactly what happened when that function
+    // gained a third argument. The composition and its ORDER are still asserted.
     const src = read("../../orchestrator/index.ts");
     expect(src).toMatch(
-      /const sysAppend =\s*systemAppendForBackend\(backend\) \+\s*panelToolsRetraction\(backend, panelMcpHttp !== null\) \+\s*inheritedMcpRetraction\(backend\);/,
+      /const sysAppend =\s*systemAppendForBackend\(backend\) \+\s*panelToolsRetraction\([^)]*\) \+\s*inheritedMcpRetraction\(backend\);/,
     );
   });
 });
