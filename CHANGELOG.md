@@ -9,6 +9,8 @@ All notable changes to this project are documented here. This project adheres to
 ### MCP
 
 #### Fixed
+
+- **Connected-panel `get_image` fallback stays one `fetch_image` hop after headless `ECONNREFUSED`; it succeeds when the panel fetches `/view` via `fileURL` instead of ComfyUI `fetchApi`'s `/api` prefix (#2884).** History / system_stats keep `fetchApi` so cloud auth stays intact. Nested `fetchImage` retry and guessed origins stay refused.
 - pi discovery now resolves in SOURCE ORDER and readiness asks the same question as the launch (#2835). Three from review: a shim anywhere on PATH could beat an explicit COMFYUI_MCP_PI_PATH executable, because the shim pre-pass ran over every candidate before any of them was considered as an executable; a quoted PATH entry concatenated into an invalid path and a dead UNC entry could block startup on an SMB timeout; and backend-readiness still called resolvePiBin, whose name list excludes .cmd on a premise this PR overturns -- so a .cmd-only install read ABSENT though it runs, and an unresolvable extensionless shim read PRESENT though it spawns ENOENT, which is #2835's own symptom
 - the npm POSIX shim now resolves too, not just the .cmd (#2835). npm's sh shim names the interpreter and the script on one line, so the permissive pattern anchored on the first `$basedir/` and captured a path with embedded quotes; it never existed, so that branch resolved nothing at all. Measured against the real npm shims on a Windows box: 0/10 before, 10/10 after, with the .cmd branch unchanged at 10/10
 - **the pi backend works when pi was installed from npm on Windows (#2835).** `npm i -g pi`
