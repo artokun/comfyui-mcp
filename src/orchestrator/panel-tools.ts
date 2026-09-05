@@ -28,6 +28,7 @@ import { createHash, randomUUID } from "node:crypto";
 // #873 — the operator's tool-surface policy also governs the panel surface.
 import {
   resolveToolSurfacePolicy,
+  type ToolSurfacePolicy,
   toolActionPolicyError,
   toolAllowed,
 } from "../tools/tool-surface-filter.js";
@@ -29481,6 +29482,45 @@ CHECKED FOR YOU: the graph read this message prescribes was just run, and it ` +
   // #694: every MUTATING panel tool (RETRY_TOKEN_CMD_BY_TOOL) accepts the explicit
   // retry token in its schema and forwards it, untouched, on its command frames.
   return defs.map((d) => (d.name in RETRY_TOKEN_CMD_BY_TOOL ? withRetryToken(d) : d));
+}
+
+/**
+ * Whether the configured tool-surface policy withholds the ENTIRE `panel_*` surface.
+ *
+ * Both presets deny `panel_*` by glob (`PANEL_SURFACE = ["panel_*"]`), and an allow
+ * list naming no panel tool does the same, so a perfectly ordinary configuration --
+ * `COMFYUI_MCP_TOOL_PRESET=safe`, which docs/configuration.mdx recommends verbatim for
+ * a hosted deployment -- leaves BOTH registration paths below registering zero panel
+ * tools. The server still connects; it just has nothing on it.
+ *
+ * The prompt has to know, because `PANEL_SYSTEM_APPEND` tells the agent it can see and
+ * edit the user's canvas through those tools. This is #804's shape -- a capability we
+ * cannot deliver, asserted as available -- and it clears the same bar
+ * `NO_PANEL_TOOLS_OVERRIDE` sets for itself: we OBSERVED it. The policy is our own
+ * env-derived value and the def list is our own, so saying so is a claim we are
+ * entitled to make, unlike a client-side block that never reaches us.
+ *
+ * Pure and exported so the decision is testable without booting an orchestrator, the
+ * way `panelToolsRetraction` is.
+ *
+ * Returns false when the policy is inactive, and false when even ONE panel tool
+ * survives -- a partial withholding is a deliberately configured surface, not a
+ * capability claim we should retract wholesale.
+ */
+export function panelSurfaceFullyWithheld(
+  policy: ToolSurfacePolicy = resolveToolSurfacePolicy(),
+  // Injectable ONLY so the empty-list guard below is reachable from a test. An
+  // unreachable guard is an untested guard, and this one protects the direction
+  // that actually matters.
+  toolNames: readonly string[] = buildPanelToolDefs().map((d) => d.name),
+): boolean {
+  if (!policy.active) return false;
+  const defs = toolNames;
+  // An empty def list would make `every()` vacuously true and retract the capability
+  // claim on a build that actually has the tools. That is the one direction this must
+  // not fail in, so it is checked rather than assumed.
+  if (defs.length === 0) return false;
+  return defs.every((name) => !toolAllowed(name, policy));
 }
 
 /**
