@@ -9,9 +9,16 @@ All notable changes to this project are documented here. This project adheres to
 ### MCP
 
 #### Fixed
-
-- **`download_model` `action:"status"` does not advertise `install_comfyui action:"refresh_nodes"` when a just-landed file is on disk but not yet listed (#2876).** That action is not on `install_comfyui`. The note names `panel_refresh_nodes` only when the live panel bundle can run it; a tab behind the installed pack is told to hard-refresh first.
 - **the agent is no longer told it can edit the canvas when the tool-surface policy has withheld every `panel_*` tool (comfyui-mcp-panel#291).** Both presets deny that surface by glob, and `docs/configuration.mdx` recommends `COMFYUI_MCP_TOOL_PRESET=safe` verbatim for a hosted deployment, so an ordinary configuration leaves both registration paths registering zero panel tools while `PANEL_SYSTEM_APPEND` still promises them — the agent then hunts for `panel_graph_outline` and finds only headless tools, which is what that report describes. The orchestrator already retracted this claim for pi and for a failed loopback bind; `panelToolsRetraction` excludes the claude lane, correctly, because a bind failure takes nothing from an in-process server — but the policy is a second and independent way to lose the same tools and it reaches both lanes. Applied by WRAPPING `systemAppendForBackend` rather than at each return, since "fixed one of two paths" is this defect's own family. It names the variables an operator can change, declines to speak for the headless server the same policy filters separately, and tells the agent not to keep searching — the tools were never registered, so they are absent from the deferred catalog too. And it SUPPRESSES the loopback-bind retraction when it fires: both would otherwise hand the agent two different causes for one absence, and the bind text tells the user to restart, which cannot restore a tool a policy withholds. One policy read feeds the prompt suffix and the suppression, so the two cannot disagree
+
+## [0.52.197] - 2026-09-05
+
+### MCP
+
+#### Fixed
+
+- **`download_model` `action:"status"` does not advertise `install_comfyui action:"refresh_nodes"` when a just-landed file is on disk but not yet listed (#2876, #2877).** That action is not on `install_comfyui`. The note names `panel_refresh_nodes` only when the live panel bundle can run it; a tab behind the installed pack is told to hard-refresh first.
+
 
 ## [0.52.196] - 2026-09-04
 
