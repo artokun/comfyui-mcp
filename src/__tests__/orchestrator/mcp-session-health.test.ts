@@ -23,9 +23,12 @@
 // gone" on a healthy session is worse than the silence it replaces, so every
 // ambiguity resolves to saying nothing.
 
-import { describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it } from "vitest";
 import {
   degradedMcpNotice,
+  emptyToolsMcpNotice,
+  resetMcpToolNamespacingLatchForTests,
+  serversWithoutTools,
   inspectMcpServers,
   reconnectableMcpStatus,
   recoveredMcpNotice,
@@ -79,6 +82,7 @@ describe("inspectMcpServers — what the session reports vs what it was given", 
   it("treats an unrecognized status as connected", () => {
     // The status vocabulary belongs to the CLI and can grow. A new value must
     // not become an alarm here; only the ones that DO mean unusable are alarms.
+
     expect(
       inspectMcpServers(CONFIGURED, [
         { name: "comfyui", status: "connected" },
@@ -334,5 +338,167 @@ describe("reportedFromCodexMcpListing — live runtimeStatus, not cached tools (
     expect(reportedFromCodexMcpListing([{ name: "panel" }])).toEqual([
       { name: "panel", status: "connected" },
     ]);
+  });
+});
+
+// #2742 — the variant `inspectMcpServers` cannot see. Five reports across
+// 0.52.174-0.52.178: `panel=connected` every session, zero panel_* tools reaching
+// the model, no notice. The init message carries the tool list; the emptiness was
+// always there to read.
+describe("a server that connected and contributed NO tools (#2742)", () => {
+  const CONNECTED = [
+    { name: "comfyui", status: "connected" },
+    { name: "panel", status: "connected" },
+  ];
+
+  it("names the empty server", () => {
+    expect(
+      serversWithoutTools(["comfyui", "panel"], CONNECTED, [
+        "Read",
+        "mcp__comfyui__generate_image",
+      ]),
+    ).toEqual(["panel"]);
+  });
+
+  // #2742 — the notice asserts a server CONNECTED and contributed nothing, so a
+  // server may only be named on POSITIVE evidence of connection. "Not degraded" is a
+  // different fact: inspectMcpServers classifies nothing at all when the report is
+  // absent or empty, and an unrecognised status is deliberately not an alarm — so a
+  // server with no usable status evidence used to be named on the strength of
+  // ANOTHER server's tools populating the list.
+  it("will not name a server the report says nothing about", () => {
+    expect(
+      serversWithoutTools(["comfyui", "panel"], undefined, [
+        "mcp__comfyui__generate_image",
+      ]),
+    ).toEqual([]);
+    expect(
+      serversWithoutTools(["comfyui", "panel"], [], ["mcp__comfyui__generate_image"]),
+    ).toEqual([]);
+  });
+
+  it("will not name a server whose status it does not recognise", () => {
+    // Not an alarm (inspectMcpServers leaves it out of degraded/pending, by design)
+    // and not proof of health either — so it is not eligible for this notice.
+    expect(
+      serversWithoutTools(
+        ["comfyui", "panel"],
+        [
+          { name: "comfyui", status: "connected" },
+          { name: "panel", status: "some-future-status" },
+        ],
+        ["mcp__comfyui__generate_image"],
+      ),
+    ).toEqual([]);
+  });
+
+  it("still names it once the report SAYS connected", () => {
+    // The control for the two above: same inputs, status now positively connected.
+    expect(
+      serversWithoutTools(["comfyui", "panel"], CONNECTED, [
+        "mcp__comfyui__generate_image",
+      ]),
+    ).toEqual(["panel"]);
+  });
+
+  it("says nothing when every configured server contributed at least one tool", () => {
+    expect(
+      serversWithoutTools(["comfyui", "panel"], CONNECTED, [
+        "mcp__comfyui__generate_image",
+        "mcp__panel__panel_graph_outline",
+      ]),
+    ).toEqual([]);
+  });
+
+  it("is not fooled by a server whose name is a PREFIX of another's", () => {
+    // `mcp__panel_extra__x` must not satisfy `panel`, or a live server could mask
+    // an empty one whose name it happens to begin with.
+    expect(
+      serversWithoutTools(["panel"], [{ name: "panel", status: "connected" }], [
+        "mcp__panel_extra__x",
+      ]),
+    ).toEqual(["panel"]);
+  });
+
+  // The latch is PROCESS state, so every case starts from "this harness has never
+  // been seen listing an mcp__ tool". Without this the first case that latches it
+  // silently changes the meaning of every case after it.
+  beforeEach(() => resetMcpToolNamespacingLatchForTests());
+
+  it("stays silent when the harness has never listed an MCP tool", () => {
+    // Indistinguishable from a harness that simply does not put MCP tools in this
+    // list, and a false "your tools are gone" on every healthy session is worse
+    // than the blind spot.
+    expect(serversWithoutTools(["comfyui", "panel"], CONNECTED, ["Read", "Bash"])).toEqual([]);
+  });
+
+  it("reports EVERY empty server once the harness has been seen listing MCP tools", () => {
+    // The blind spot this closes: a session where NO server contributes anything
+    // looked identical to a harness that does not namespace. One namespaced tool,
+    // ever, settles which it is -- and the newest #2742 report may sit exactly
+    // here, since it describes zero panel tools without saying comfyui survived.
+    expect(
+      serversWithoutTools(["comfyui", "panel"], CONNECTED, ["mcp__comfyui__queue", "Read"]),
+    ).toEqual(["panel"]);
+    // Now the harness is known to namespace, so an EMPTY namespaced set is real.
+    expect(serversWithoutTools(["comfyui", "panel"], CONNECTED, ["Read", "Bash"])).toEqual([
+      "comfyui",
+      "panel",
+    ]);
+  });
+
+  it("stays silent with no tool list, or an empty one", () => {
+    expect(serversWithoutTools(["panel"], CONNECTED, undefined)).toEqual([]);
+    expect(serversWithoutTools(["panel"], CONNECTED, [])).toEqual([]);
+  });
+
+  it("does not double-report a server that is already degraded or pending", () => {
+    // It has no tools because it is not up. inspectMcpServers already says so, and
+    // two notices in different words read as two faults.
+    expect(
+      serversWithoutTools(
+        ["comfyui", "panel"],
+        [
+          { name: "comfyui", status: "connected" },
+          { name: "panel", status: "failed" },
+        ],
+        ["mcp__comfyui__generate_image"],
+      ),
+    ).toEqual([]);
+    expect(
+      serversWithoutTools(
+        ["comfyui", "panel"],
+        [
+          { name: "comfyui", status: "connected" },
+          { name: "panel", status: "pending" },
+        ],
+        ["mcp__comfyui__generate_image"],
+      ),
+    ).toEqual([]);
+  });
+});
+
+describe("the connected-but-empty notice (#2742)", () => {
+  it("is empty for an empty list", () => {
+    expect(emptyToolsMcpNotice([])).toBe("");
+  });
+
+  it("does NOT describe it as a session that started without the server", () => {
+    // degradedMcpNotice's wording would send the reader hunting a connection
+    // failure that did not happen — the distinction the whole report turns on.
+    const msg = emptyToolsMcpNotice(["panel"]);
+    expect(msg).not.toContain("started without");
+    expect(msg).toContain("connected");
+    expect(msg).toContain("ZERO tools");
+  });
+
+  it("names the recovery that works and the one that does not", () => {
+    const msg = emptyToolsMcpNotice(["panel"]);
+    expect(msg).toContain("Disconnect");
+    expect(msg).toContain("orchestrator process");
+  });
+
+  it("does not claim to know why", () => {
+    expect(emptyToolsMcpNotice(["panel"])).toContain("observation only");
   });
 });
