@@ -204,10 +204,17 @@ graph. The replaced graph is captured as an undo point (double-Esc / `/revert`).
   read **server-side** and loaded onto the canvas — so the (large) graph never shuttles
   through the conversation. These are local-GPU / free.
 </ParamField>
+<ParamField path="path" type="string">
+  Path to a workflow `.json` on disk — absolute, or a name from `get_workflow` (`action: "list"`).
+  UI/litegraph (a `nodes` array) **and** API/prompt format (numeric keys with `class_type`,
+  including files named `graph.api.json`) both load. Read server-side so the graph never
+  shuttles through chat.
+</ParamField>
 <ParamField path="graph" type="object | string">
-  A UI/litegraph workflow graph (a `nodes` array; **not** API/prompt format) to load
-  instead of a pack. For an ad-hoc graph that may use API nodes, check the runtime first
-  (`list_packs` with `action: "check_runtime"`) and ask before spending paid credits.
+  A workflow graph (object or JSON string) to load instead of a pack/path. UI/litegraph
+  (a `nodes` array) or API/prompt format both load. For an ad-hoc graph that may use paid
+  API nodes, check the runtime first (`list_packs` with `action: "check_runtime"`) and ask
+  before spending credits.
 </ParamField>
 
 ## See also

@@ -156,12 +156,44 @@ describe("panel_load_workflow: userdata fallback for a custom --user-directory (
     expect(text).toMatch(/a name exactly as shown by get_workflow/);
   });
 
-  it("surfaces an honest error (no graph_load) when the userdata file is not a UI workflow", async () => {
-    // API/prompt format (numeric keys) — not a litegraph UI workflow.
-    fetchApi.mockResolvedValue({ ok: true, status: 200, text: async () => JSON.stringify({ "1": { class_type: "KSampler" } }) });
+  it("#2011 loads an API/prompt userdata file via graph_load instead of refusing it as non-UI", async () => {
+    const api = { "1": { class_type: "KSampler", inputs: { seed: 1 } } };
+    fetchApi.mockResolvedValue({ ok: true, status: 200, text: async () => JSON.stringify(api) });
 
     const { ctx, calls } = makeCtx();
-    const res = await loadWorkflow().handler({ path: "api-format.json" }, ctx);
+    const res = await loadWorkflow().handler({ path: "graph.api.json" }, ctx);
+
+    expect(res.isError).toBeUndefined();
+    expect(calls.filter((c) => c.cmd === "graph_load")).toHaveLength(1);
+    expect(graphLoadCall(calls).graph).toMatchObject(api);
+  });
+
+  it("#2011 loads an API graph whose node ids are NOT digits", async () => {
+    // The detection used to require EVERY key to match /^\d+$/, on the stated
+    // grounds that it was "the same test the panel uses". It is not: the panel's
+    // graph_load treats anything without a `nodes` array as API. ComfyUI ids are
+    // not guaranteed to be digits — subgraph and newer exports carry string ids —
+    // so that condition refused graphs the panel loads happily, and the caller got
+    // a refusal naming the wrong reason.
+    const api = {
+      "9c1f4e2a-3b77-4f10-9c2e-6f0a1b2c3d4e": { class_type: "KSampler", inputs: { seed: 1 } },
+      "node:sampler": { class_type: "VAEDecode", inputs: {} },
+    };
+    fetchApi.mockResolvedValue({ ok: true, status: 200, text: async () => JSON.stringify(api) });
+
+    const { ctx, calls } = makeCtx();
+    const res = await loadWorkflow().handler({ path: "uuid.api.json" }, ctx);
+
+    expect(res.isError).toBeUndefined();
+    expect(calls.filter((c) => c.cmd === "graph_load")).toHaveLength(1);
+    expect(graphLoadCall(calls).graph).toMatchObject(api);
+  });
+
+  it("surfaces an honest error (no graph_load) when the userdata file is neither UI nor API", async () => {
+    fetchApi.mockResolvedValue({ ok: true, status: 200, text: async () => JSON.stringify({ foo: 1 }) });
+
+    const { ctx, calls } = makeCtx();
+    const res = await loadWorkflow().handler({ path: "not-a-workflow.json" }, ctx);
 
     expect(res.isError).toBe(true);
     expect(calls).toHaveLength(0);

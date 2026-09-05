@@ -1508,16 +1508,45 @@ describe("panel-tools: panel_load_workflow path (server-side disk read)", () => 
     expect(calls).toHaveLength(0);
   });
 
-  it("rejects a .json that is not a UI workflow (no nodes array)", async () => {
+  it("#2011 loads an API/prompt graph.api.json via graph_load instead of refusing it as non-UI", async () => {
     const dir = mkdtempSync(join(tmpdir(), "wf-load-"));
-    const file = join(dir, "api-format.json");
-    // API/prompt format (numeric keys) — NOT a UI workflow.
-    writeFileSync(file, JSON.stringify({ "1": { class_type: "KSampler" } }), "utf8");
+    const file = join(dir, "graph.api.json");
+    const api = { "1": { class_type: "KSampler", inputs: { seed: 1 } } };
+    writeFileSync(file, JSON.stringify(api), "utf8");
+
+    const { ctx, calls } = makeFakeCtx();
+    const res = await defByName("panel_load_workflow").handler({ path: file }, ctx);
+    expect(res.isError).toBeUndefined();
+    const loads = calls.filter((c) => c.cmd === "graph_load");
+    expect(loads).toHaveLength(1);
+    expect(loads[0].graph).toMatchObject(api);
+  });
+
+  it("#2011 unwraps a {prompt: api-map} file to the map graph_load already imports", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "wf-load-"));
+    const file = join(dir, "graph.api.json");
+    const api = { "3": { class_type: "CheckpointLoaderSimple", inputs: { ckpt_name: "x.safetensors" } } };
+    writeFileSync(file, JSON.stringify({ prompt: api }), "utf8");
+
+    const { ctx, calls } = makeFakeCtx();
+    const res = await defByName("panel_load_workflow").handler({ path: file }, ctx);
+    expect(res.isError).toBeUndefined();
+    const loads = calls.filter((c) => c.cmd === "graph_load");
+    expect(loads).toHaveLength(1);
+    expect(loads[0].graph).toMatchObject(api);
+  });
+
+  it("rejects a .json that is neither UI nor API/prompt", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "wf-load-"));
+    const file = join(dir, "not-a-workflow.json");
+    writeFileSync(file, JSON.stringify({ foo: 1 }), "utf8");
 
     const { ctx, calls } = makeFakeCtx();
     const res = await defByName("panel_load_workflow").handler({ path: file }, ctx);
     expect(res.isError).toBe(true);
     expect(calls).toHaveLength(0);
+    expect(JSON.stringify(res)).toMatch(/not a UI workflow/i);
+    expect(JSON.stringify(res)).toMatch(/not API\/prompt format/i);
   });
 
   it("rejects a non-.json path", async () => {

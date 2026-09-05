@@ -1,9 +1,10 @@
 // panel#775 — a pack shipping API/prompt format reached three tools unvalidated.
 //
 // packs/ltx23-distill-3stage/workflow.json is API format (numeric keys →
-// {class_type, inputs}, no nodes[]). panel_load_workflow refused it correctly;
-// panel_strip_workflow crashed on ".map of undefined"; panel_flatten_workflow
-// (apply:true) reported SUCCESS and loaded a 0-node graph.
+// {class_type, inputs}, no nodes[]). panel_load_workflow now imports that shape
+// via graph_load (panel#775 / panel#2011); panel_strip_workflow used to crash
+// on ".map of undefined"; panel_flatten_workflow(apply:true) reported SUCCESS
+// and loaded a 0-node graph. Strip / flatten / slice still require UI.
 
 import { describe, expect, it, vi } from "vitest";
 import { buildPanelToolDefs } from "../../orchestrator/panel-tools.js";
