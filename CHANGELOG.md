@@ -10,7 +10,7 @@ All notable changes to this project are documented here. This project adheres to
 
 #### Fixed
 
-- **Connected-panel `get_image` / `get_system_stats` fallback stays one `fetch_image` / `fetch_comfyui_read` hop after headless `ECONNREFUSED`; it succeeds when the panel fetches `/view` via `fileURL` and API reads via `apiURL` instead of ComfyUI `fetchApi`'s `/api` prefix (#2884).** Nested `fetchImage` retry and guessed origins stay refused.
+- **Connected-panel `get_image` fallback stays one `fetch_image` hop after headless `ECONNREFUSED`; it succeeds when the panel fetches `/view` via `fileURL` instead of ComfyUI `fetchApi`'s `/api` prefix (#2884).** History / system_stats keep `fetchApi` so cloud auth stays intact. Nested `fetchImage` retry and guessed origins stay refused.
 
 ## [0.52.198] - 2026-09-05
 
