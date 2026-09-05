@@ -6264,11 +6264,36 @@ function isWorkflowSaveBudgetTimeout(res: ToolResult): boolean {
  * proves the in-flight save marked the canvas clean. persisted:true alone is
  * the reporter's timeout snapshot (a previously-saved dirty workflow) and
  * must not be read as "the write landed".
+ *
+ * Live `workflow_list` publishes those flags on the flagged-active
+ * `workflows[]` row, not on top-level `active` (#2880). Prefer an explicit
+ * boolean on `active` when a test or older panel put it there.
  */
+function saveTimeoutFlagRecord(
+  list: Record<string, unknown> | null,
+): Record<string, unknown> | null {
+  const recOf = (value: unknown): Record<string, unknown> | null =>
+    value && typeof value === "object" && !Array.isArray(value)
+      ? (value as Record<string, unknown>)
+      : null;
+  const active = recOf(list?.active);
+  if (active && (active.modified === true || active.modified === false)) return active;
+  const rows = Array.isArray(list?.workflows)
+    ? list.workflows
+    : Array.isArray(list?.open)
+      ? list.open
+      : null;
+  if (!rows) return null;
+  for (const row of rows) {
+    const rec = recOf(row);
+    if (rec?.active === true) return rec;
+  }
+  return null;
+}
+
 function saveLandedAfterTimeout(list: Record<string, unknown> | null): boolean {
-  const active = list?.active;
-  if (!active || typeof active !== "object" || Array.isArray(active)) return false;
-  const rec = active as Record<string, unknown>;
+  const rec = saveTimeoutFlagRecord(list);
+  if (!rec) return false;
   return rec.modified === false && rec.persisted === true;
 }
 
@@ -6278,6 +6303,9 @@ function saveLandedAfterTimeout(list: Record<string, unknown> | null): boolean {
  * rid, so only that receipt can bridge the identity change. If the receipt field
  * is absent or does not match, the outcome remains unknown rather than crediting
  * a clean workflow that may belong to a tab the user switched to.
+ *
+ * #2880 — a current panel's matching receipt is the save's own eventual success.
+ * Do not also require flags on `active`: that object does not carry them.
  */
 function saveProbeMatchesLateReceipt(
   saveRid: string | undefined,
@@ -6332,12 +6360,17 @@ function saveAckAfterTimeout(list: Record<string, unknown> | null): ToolResult {
 }
 
 /**
- * #2004 / #2078 — the panel's 13s budget fired while userdata PUT was still
- * running. A list that shows modified:false persisted:true is the save
- * completing. One snapshot is not enough: the timeout-time canvas is still
- * dirty, and the PUT can land between that read and the caller's next list.
- * Keep reading until the grace, then stay outcome-unknown. persisted:true
- * alone is the timeout-time snapshot of a previously-saved dirty tab, not proof.
+ * #2004 / #2078 / #2880 — the panel's 13s budget fired while userdata PUT was
+ * still running. A current panel publishes the save's eventual success under
+ * that command's rid in `late_save_receipts`; matching that receipt (and the
+ * active identity) is saved, not unknown. Older panels omit the field: then a
+ * list that shows modified:false persisted:true is the save completing. One
+ * snapshot is not enough: the timeout-time canvas is still dirty, and the PUT
+ * can land between that read and the caller's next list. Keep reading until
+ * the grace, then stay outcome-unknown. persisted:true alone is the
+ * timeout-time snapshot of a previously-saved dirty tab, not proof. A current
+ * panel with an empty receipt list stays unknown even if some other canvas is
+ * clean — that is a tab switch, not this save.
  */
 async function settleWorkflowSaveTimeout(
   res: ToolResult,
@@ -6350,10 +6383,11 @@ async function settleWorkflowSaveTimeout(
     try {
       const listRes = await ctx.call({ cmd: "workflow_list" }, 6000);
       const list = parseToolResultJson(listRes);
-      if (
-        saveLandedAfterTimeout(list) &&
-        saveProbeMatchesLateReceipt(saveRid, list)
-      ) {
+      if (saveProbeMatchesLateReceipt(saveRid, list)) {
+        return saveAckAfterTimeout(list);
+      }
+      // Older panel: no receipt field. Flags on the active row are the only probe.
+      if (!Array.isArray(list?.late_save_receipts) && saveLandedAfterTimeout(list)) {
         return saveAckAfterTimeout(list);
       }
     } catch {
