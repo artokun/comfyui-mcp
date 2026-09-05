@@ -9,9 +9,16 @@ All notable changes to this project are documented here. This project adheres to
 ### MCP
 
 #### Fixed
-
-- **`download_model` `action:"status"` does not advertise `install_comfyui action:"refresh_nodes"` when a just-landed file is on disk but not yet listed (#2876).** That action is not on `install_comfyui`. The note names `panel_refresh_nodes` only when the live panel bundle can run it; a tab behind the installed pack is told to hard-refresh first.
 - **the ready banner no longer REQUESTS the emoji font the comfyui-mcp-panel#2023 crash correlates with (comfyui-mcp-panel#2023).** comfyui-mcp-panel#2210 removed `U+FE0F` from nine panel strings because the selector does not merely permit emoji presentation, it requests it, pinning the glyph to `seguiemj.ttf` — the file KB5120998 replaced two days before the crash cluster. The orchestrator renders on the same canvas (`{ type: "say" }` → agent bubble) through the same font stack, so a panel-only sweep left `banner.ready.copilot` requesting that font on every Copilot-backend session: the identical `U+26A0 U+FE0F` sequence sat in the source fallback and in all twelve catalogs. The selector goes; the glyph stays — pinned in both directions, so deleting the warning sign cannot pass either. Does not repair comfyui-mcp-panel#2023 (the null-deref is upstream); same class of mitigation as comfyui-mcp-panel#2210
+
+## [0.52.197] - 2026-09-05
+
+### MCP
+
+#### Fixed
+
+- **`download_model` `action:"status"` does not advertise `install_comfyui action:"refresh_nodes"` when a just-landed file is on disk but not yet listed (#2876, #2877).** That action is not on `install_comfyui`. The note names `panel_refresh_nodes` only when the live panel bundle can run it; a tab behind the installed pack is told to hard-refresh first.
+
 
 ## [0.52.196] - 2026-09-04
 
