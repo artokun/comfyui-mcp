@@ -244,7 +244,15 @@ export async function ensureConnected(): Promise<Client> {
 /** True when a decoded /system_stats body has the recognizable ComfyUI shape (a
  *  `system` object and/or a `devices` array). A bare 2xx carrying an API
  *  gateway's own JSON envelope is NOT ComfyUI and must not be handed on as
- *  stats — the same predicate the panel's reboot certification uses. */
+ *  stats.
+ *
+ *  This comment used to say the panel-side reboot certification uses the same
+ *  predicate. It does not — panel#2221. Every panel /system_stats consumer takes
+ *  the body as-is; the two that exist read defensively (`data?.devices?.[0]`, and
+ *  an unknown platform falling back to POSIX), so they fail safe rather than
+ *  certifying the document. The claim is recorded here because a false provenance
+ *  is worse than none: someone syncing the two sides looks for the counterpart,
+ *  finds nothing, and either duplicates it or assumes the panel already guards. */
 function looksLikeSystemStats(body: unknown): boolean {
   if (!body || typeof body !== "object") return false;
   const b = body as { system?: unknown; devices?: unknown };
