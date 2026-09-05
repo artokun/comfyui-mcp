@@ -5464,6 +5464,19 @@ export class UiBridge {
     }));
   }
 
+  /**
+   * Parseable panel versions THIS connection advertised in its own hello.
+   * Inherited reconnect values are omitted — those are not the live bundle.
+   */
+  advertisedPanelVersions(): string[] {
+    const versions: string[] = [];
+    for (const conn of this.conns.values()) {
+      const version = connPanelVersionReading(conn).version;
+      if (version) versions.push(version);
+    }
+    return versions;
+  }
+
   /** True once a real CANVAS-OWNING panel tab has connected during this bridge's
    *  lifetime. When a later state has zero tabs, this distinguishes "the pack is
    *  installed and a tab merely dropped" (typically a ComfyUI restart or a browser-tab

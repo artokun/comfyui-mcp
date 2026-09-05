@@ -15,9 +15,20 @@
 // listing, refresh. Outside ⇒ genuinely misplaced, move.
 
 import { describe, expect, it } from "vitest";
-import { isUnderRoot, notVisibleVerdict } from "../../services/model-resolver.js";
+import {
+  isUnderRoot,
+  notVisibleVerdict,
+  staleListingRefreshRemedy,
+} from "../../services/model-resolver.js";
 
-const BASE = { wanted: "example.safetensors", category: "loras", baseUrl: "http://127.0.0.1:8188" };
+const BASE = {
+  wanted: "example.safetensors",
+  category: "loras",
+  baseUrl: "http://127.0.0.1:8188",
+  // Pin the unknown-bundle branch so a live panel on this machine cannot
+  // rewrite the refresh sentence (#2876).
+  panelBundle: {},
+};
 
 describe("a file inside the server's own models root is not called misplaced", () => {
   // The reporter's exact shape: one path, spelled two ways.
@@ -44,7 +55,8 @@ describe("a file inside the server's own models root is not called misplaced", (
 
   it("names the actual cause and a remedy that can be followed", () => {
     expect(reported.note).toMatch(/cached loader options/);
-    expect(reported.note).toMatch(/refresh_nodes/);
+    expect(reported.note).not.toMatch(/install_comfyui \(action:"refresh_nodes"\)/);
+    expect(reported.note).toMatch(/hard-refresh the ComfyUI browser tab \(Ctrl\+Shift\+R\)/);
   });
 
   it("still reports not-visible — the verdict did not weaken", () => {
@@ -145,7 +157,7 @@ describe("a root the server never NAMED cannot vouch for the placement (#369)", 
   it("states BOTH candidate causes and the check that separates them", () => {
     expect(unvouched.note).toMatch(/STALE LISTING/);
     expect(unvouched.note).toMatch(/DIFFERENT INSTALL/);
-    expect(unvouched.note).toMatch(/refresh_nodes/);
+    expect(unvouched.note).not.toMatch(/install_comfyui \(action:"refresh_nodes"\)/);
     expect(unvouched.note).toMatch(/list_paths/);
   });
 
@@ -189,6 +201,71 @@ describe("a root the server never NAMED cannot vouch for the placement (#369)", 
     expect(outside.note).not.toMatch(/models directory that server reads/);
     // …but it still names the root, because that is where the bytes are.
     expect(outside.note).toMatch(/\/opt\/guessed\/models/);
+  });
+});
+
+describe("stale-listing refresh names a tool the live bundle can run (#2876)", () => {
+  const FAKE_INSTALL_ACTION = 'install_comfyui (action:"refresh_nodes")';
+  const BASE_VERDICT = {
+    ...BASE,
+    verifiedPath: "C:\\ComfyUI\\models\\loras\\example.safetensors",
+    liveModelsDir: "C:/ComfyUI/models",
+    liveModelsDirNamedByServer: true,
+  };
+
+  it("never advertises install_comfyui action:\"refresh_nodes\" — that action is not declared", () => {
+    expect(staleListingRefreshRemedy({})).not.toContain(FAKE_INSTALL_ACTION);
+    expect(staleListingRefreshRemedy({ liveVersion: "0.15.174", installedVersion: "0.15.174" })).not.toContain(
+      FAKE_INSTALL_ACTION,
+    );
+    expect(staleListingRefreshRemedy({ liveVersion: "0.15.173", installedVersion: "0.15.174" })).not.toContain(
+      FAKE_INSTALL_ACTION,
+    );
+    expect(notVisibleVerdict({ ...BASE_VERDICT, panelBundle: {} }).note).not.toContain(FAKE_INSTALL_ACTION);
+  });
+
+  it("names panel_refresh_nodes when the live tab can execute it", () => {
+    const note = staleListingRefreshRemedy({
+      liveVersion: "0.15.174",
+      installedVersion: "0.15.174",
+    });
+    expect(note).toMatch(/call panel_refresh_nodes/);
+    expect(note).not.toMatch(/Hard-refresh the ComfyUI browser tab first/);
+    const wired = notVisibleVerdict({
+      ...BASE_VERDICT,
+      panelBundle: { liveVersion: "0.15.174", installedVersion: "0.15.174" },
+    });
+    expect(wired.note).toMatch(/call panel_refresh_nodes/);
+    expect(wired.note).not.toContain(FAKE_INSTALL_ACTION);
+  });
+
+  it("the reporter's stale tab is told to hard-refresh first, not to call panel_refresh_nodes now", () => {
+    // tab 0.15.173, installed 0.15.174 — panel_refresh_nodes was blocked on the live bundle.
+    const note = staleListingRefreshRemedy({
+      liveVersion: "0.15.173",
+      installedVersion: "0.15.174",
+    });
+    expect(note).toMatch(/Hard-refresh the ComfyUI browser tab first \(Ctrl\+Shift\+R\)/);
+    expect(note).toMatch(/0\.15\.173/);
+    expect(note).toMatch(/0\.15\.174/);
+    const firstCall = note.search(/call panel_refresh_nodes/);
+    const hardRefresh = note.search(/Hard-refresh the ComfyUI browser tab first/);
+    expect(hardRefresh).toBeGreaterThanOrEqual(0);
+    expect(firstCall).toBeGreaterThan(hardRefresh);
+    const wired = notVisibleVerdict({
+      ...BASE_VERDICT,
+      panelBundle: { liveVersion: "0.15.173", installedVersion: "0.15.174" },
+    });
+    expect(wired.note).toMatch(/Hard-refresh the ComfyUI browser tab first \(Ctrl\+Shift\+R\)/);
+    expect(wired.note).not.toContain(FAKE_INSTALL_ACTION);
+  });
+
+  it("does not name panel_refresh_nodes when the live bundle is unknown or too old", () => {
+    expect(staleListingRefreshRemedy({})).not.toMatch(/call panel_refresh_nodes/);
+    expect(staleListingRefreshRemedy({ liveVersion: "0.11.20", installedVersion: "0.11.20" })).not.toMatch(
+      /call panel_refresh_nodes/,
+    );
+    expect(staleListingRefreshRemedy({})).toMatch(/hard-refresh the ComfyUI browser tab \(Ctrl\+Shift\+R\)/);
   });
 });
 

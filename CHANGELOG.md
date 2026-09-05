@@ -9,6 +9,8 @@ All notable changes to this project are documented here. This project adheres to
 ### MCP
 
 #### Fixed
+
+- **`download_model` `action:"status"` does not advertise `install_comfyui action:"refresh_nodes"` when a just-landed file is on disk but not yet listed (#2876).** That action is not on `install_comfyui`. The note names `panel_refresh_nodes` only when the live panel bundle can run it; a tab behind the installed pack is told to hard-refresh first.
 - the Manager-dialect guard's unit tests no longer probe the developer's real ComfyUI: two orchestrator test files passed on CI (nothing listening) and failed on any machine with ComfyUI actually running, because detection then succeeded and the git-URL guard refused the installs the fixtures are built on (test-only) A third file, late-mutation-e2e, was counted here in error: it invokes only panel_set_node_mode and never reaches the dialect probe -- it is the separate #694 load flake, and it passed in both arms of the control run.
 
 ## [0.52.196] - 2026-09-04
