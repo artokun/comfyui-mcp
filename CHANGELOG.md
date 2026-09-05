@@ -9,9 +9,16 @@ All notable changes to this project are documented here. This project adheres to
 ### MCP
 
 #### Fixed
-
-- **`download_model` `action:"status"` does not advertise `install_comfyui action:"refresh_nodes"` when a just-landed file is on disk but not yet listed (#2876).** That action is not on `install_comfyui`. The note names `panel_refresh_nodes` only when the live panel bundle can run it; a tab behind the installed pack is told to hard-refresh first.
 - **a relaunched ComfyUI no longer dies on an emoji under a legacy Windows codepage The explicit opt-out is honoured in ANY case: Windows environment names are case-insensitive and these paths hand the helper a plain object rather than `process.env`, whose case-insensitivity does not survive a spread — so a deliberate `PythonUtf8=0` was invisible and would have been overridden by a second key differing only in case.
+
+## [0.52.197] - 2026-09-05
+
+### MCP
+
+#### Fixed
+
+- **`download_model` `action:"status"` does not advertise `install_comfyui action:"refresh_nodes"` when a just-landed file is on disk but not yet listed (#2876, #2877).** That action is not on `install_comfyui`. The note names `panel_refresh_nodes` only when the live panel bundle can run it; a tab behind the installed pack is told to hard-refresh first.
+
 
 ## [0.52.196] - 2026-09-04
 
