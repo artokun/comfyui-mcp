@@ -11,6 +11,7 @@ All notable changes to this project are documented here. This project adheres to
 #### Fixed
 
 - **`panel_set_widget` writes after `panel_load_workflow` without a manual `panel_set_workflow_target({mode:"current"})` rebind (#2886).** A successful load left leftover subgraph identity and a stale subgraph registry, so `graph_get_subgraph` could not classify a live H3 container or an ordinary root SaveVideo and refused before dispatch. Load now marks that mapping stale, and a mapping-unknown miss retries the subgraph read once after the walk; still unverifiable stays fail-closed.
+- **`panel_unpack_subgraph` does not accept a success that could not prove restored links landed on the named dynamic slots.** LiteGraph rewires unpack by slot index; after a MiniMax-style autogrow rebuild that can put an IMAGE on `ref_videos`. A current panel reseats by identity and rolls back if the slot is not unique; an older panel that only counts surviving wires is noted rather than trusted. (#2887)
 
 ## [0.52.199] - 2026-09-05
 
