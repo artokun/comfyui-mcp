@@ -11,6 +11,7 @@ All notable changes to this project are documented here. This project adheres to
 #### Fixed
 
 - **`panel_set_widget` writes after `panel_load_workflow` without a manual `panel_set_workflow_target({mode:"current"})` rebind (#2886).** A successful load left leftover subgraph identity and a stale subgraph registry, so `graph_get_subgraph` could not classify a live H3 container or an ordinary root SaveVideo and refused before dispatch. Load now marks that mapping stale, and a mapping-unknown miss retries the subgraph read once after the walk; still unverifiable stays fail-closed.
+- **Codex sidebar picker keeps `gpt-6-astra` when the account catalog also lists GPT-5.6 (#2889).** `listModels()` dropped any id that did not start with `gpt-5.6` as soon as one 5.6 entry existed, so Astra vanished even when Codex config selected it. The picker now prefers a catalog `deprecated`/`upgrade` signal when present, otherwise keeps `gpt-5.6*` and `gpt-6-astra`; older CLIs with no current family still get the full catalog.
 
 ## [0.52.199] - 2026-09-05
 
