@@ -535,19 +535,64 @@ const CODEX_EFFORT_LEVELS = ["none", "minimal", "low", "medium", "high", "xhigh"
 // model family. The panel picker degrades gracefully on an empty list. Each entry
 // advertises the Codex effort scale so the panel enables the reasoning-effort
 // dropdown for these models (the backend applies effort to every turn anyway).
-// GPT-5.6 family ONLY (product decision 2026-07-20): older GPT-5.x are
-// deprecated — the live catalog is filtered to the 5.6 family and these
-// fallbacks match it. Per-variant effort ceilings from the live model/list.
+// The live picker prefers the catalog's deprecated/upgrade signal when present;
+// otherwise it keeps gpt-5.6* and gpt-6-astra. These static ids match the 5.6
+// family plus a pre-5.6 escape hatch — older CLIs cannot run Astra or 5.6.
 const CODEX_FALLBACK_MODELS: ModelChoice[] = [
   { id: "gpt-5.6-sol", label: "GPT-5.6 Sol", supportsEffort: true, supportedEffortLevels: ["low", "medium", "high", "xhigh", "max", "ultra"] },
   { id: "gpt-5.6-terra", label: "GPT-5.6 Terra", supportsEffort: true, supportedEffortLevels: ["low", "medium", "high", "xhigh", "max", "ultra"] },
   { id: "gpt-5.6-luna", label: "GPT-5.6 Luna", supportsEffort: true, supportedEffortLevels: ["low", "medium", "high", "xhigh", "max"] },
   // This static list only surfaces when model/list is UNAVAILABLE — i.e. an
   // older CLI resolved from PATH (bundled-install failure), which cannot run
-  // any 5.6 model. Keep one runnable pre-5.6 escape hatch there (codex
+  // any 5.6 / Astra model. Keep one runnable pre-5.6 escape hatch there (codex
   // review); accounts on the pinned bundled CLI never see this list.
   { id: "gpt-5.5", label: "GPT-5.5 (legacy CLI fallback)", supportsEffort: true, supportedEffortLevels: ["none", "minimal", "low", "medium", "high", "xhigh"] },
 ];
+
+/** App-server `model/list` row. `upgrade` / `deprecated` are the catalog's
+ *  current-vs-legacy signal when the CLI populates them. */
+type CodexModelListEntry = {
+  id?: string;
+  model?: string;
+  displayName?: string;
+  description?: string;
+  hidden?: boolean;
+  deprecated?: boolean;
+  upgrade?: string | { id?: string; model?: string } | null;
+  upgradeInfo?: { model?: string } | null;
+  supportedReasoningEfforts?: Array<{ reasoningEffort?: string }>;
+};
+
+function codexCatalogModelId(m: CodexModelListEntry): string | undefined {
+  const id = m.id ?? m.model;
+  return id || undefined;
+}
+
+function codexCatalogRowDeprecated(m: CodexModelListEntry): boolean {
+  if (m.deprecated === true) return true;
+  const upgrade = m.upgrade;
+  if (typeof upgrade === "string") return upgrade.length > 0;
+  if (upgrade && (upgrade.id || upgrade.model)) return true;
+  return Boolean(m.upgradeInfo?.model);
+}
+
+function isCodexHardcodedCurrentFamily(id: string): boolean {
+  return id.startsWith("gpt-5.6") || id === "gpt-6-astra";
+}
+
+/** Picker subset of the account catalog. Prefer a server-provided
+ *  deprecated/upgrade signal when any visible row carries one; otherwise keep
+ *  gpt-5.6* and gpt-6-astra. An account with no current-family entry keeps the
+ *  full catalog so an older plan/CLI is never bricked. */
+function filterCodexPickerEntries(visible: CodexModelListEntry[]): CodexModelListEntry[] {
+  const hasDeprecationSignal = visible.some(codexCatalogRowDeprecated);
+  const fam = visible.filter((m) => {
+    const id = codexCatalogModelId(m);
+    if (!id) return false;
+    return hasDeprecationSignal ? !codexCatalogRowDeprecated(m) : isCodexHardcodedCurrentFamily(id);
+  });
+  return fam.length ? fam : visible;
+}
 
 /** Does this id look like an OpenAI/Codex model (vs. a Claude panel model)? Used
  *  to ignore the Claude panel model PanelAgent unconditionally passes as
@@ -2667,32 +2712,26 @@ export class CodexBackend implements AgentBackend {
       await this.prepare();
       const client = this.client;
       if (client) {
-        const res = await client.request<{
-          data?: Array<{
-            id?: string;
-            model?: string;
-            displayName?: string;
-            description?: string;
-            hidden?: boolean;
-            supportedReasoningEfforts?: Array<{ reasoningEffort?: string }>;
-          }>;
-        }>("model/list", {});
-        const live = (res?.data ?? [])
-          .filter((m) => (m.id || m.model) && m.hidden !== true)
-          .map((m): ModelChoice => {
-            const efforts = (m.supportedReasoningEfforts ?? [])
-              .map((e) => e.reasoningEffort)
-              .filter((e): e is string => typeof e === "string" && (CODEX_EFFORT_LEVELS as readonly string[]).includes(e));
-            return {
-              id: (m.id ?? m.model) as string,
-              ...(m.displayName ? { label: m.displayName } : {}),
-              // Every Codex ModelChoice MUST advertise effort support so the
-              // panel enables the reasoning dropdown (the backend applies
-              // effort to every turn regardless). Prefer the model's own list.
-              supportsEffort: true,
-              supportedEffortLevels: efforts.length ? efforts : [...CODEX_EFFORT_LEVELS],
-            };
+        const res = await client.request<{ data?: CodexModelListEntry[] }>("model/list", {});
+        const visible: CodexModelListEntry[] = [];
+        const live: ModelChoice[] = [];
+        for (const m of res?.data ?? []) {
+          const id = codexCatalogModelId(m);
+          if (!id || m.hidden === true) continue;
+          visible.push(m);
+          const efforts = (m.supportedReasoningEfforts ?? [])
+            .map((e) => e.reasoningEffort)
+            .filter((e): e is string => typeof e === "string" && (CODEX_EFFORT_LEVELS as readonly string[]).includes(e));
+          live.push({
+            id,
+            ...(m.displayName ? { label: m.displayName } : {}),
+            // Every Codex ModelChoice MUST advertise effort support so the
+            // panel enables the reasoning dropdown (the backend applies
+            // effort to every turn regardless). Prefer the model's own list.
+            supportsEffort: true,
+            supportedEffortLevels: efforts.length ? efforts : [...CODEX_EFFORT_LEVELS],
           });
+        }
         if (live.length) {
           // liveCatalog keeps the FULL account catalog: it answers "can this
           // account run model X" for resolveTurnModel's clamp. The PICKER gets
@@ -2700,13 +2739,16 @@ export class CodexBackend implements AgentBackend {
           // picks must not force-switch an existing pin/resume that the
           // account can still legally run (codex review on this branch).
           this.liveCatalog = live;
-          // GPT-5.6-only policy: hide deprecated 5.x/codex ids from the picker
-          // when the account has the 5.6 family. Accounts WITHOUT any 5.6
-          // model keep their full catalog (never brick an older plan).
-          const fam = live.filter((m) => m.id.startsWith("gpt-5.6"));
+          // Hide deprecated 5.x/codex ids from the picker when a current
+          // family is available (catalog deprecated/upgrade signal, else
+          // gpt-5.6* + gpt-6-astra). Accounts without that family keep their
+          // full catalog (never brick an older plan).
+          const picker = filterCodexPickerEntries(visible);
+          const pickerIds = new Set(picker.map((m) => codexCatalogModelId(m)).filter((id): id is string => !!id));
+          const fam = live.filter((m) => pickerIds.has(m.id));
           if (fam.length && fam.length < live.length) {
             logger.debug(
-              `[codex-backend] hiding ${live.length - fam.length} deprecated pre-5.6 model(s) from the picker`,
+              `[codex-backend] hiding ${live.length - fam.length} deprecated model(s) from the picker`,
             );
           }
           return fam.length ? fam : live;
