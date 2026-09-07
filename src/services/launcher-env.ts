@@ -770,3 +770,78 @@ export function resolveLaunchEnvironment(
     },
   };
 }
+
+/**
+ * Force UTF-8 on a relaunched Python whose stdio WE own (#2693).
+ *
+ * When this process relaunches ComfyUI it points the child's stdout and stderr at
+ * a LOG FILE (#1259), not at the user's console. Python chooses its stdout
+ * encoding from the locale when it is not writing to a terminal, so on a Windows
+ * install whose ANSI codepage is not UTF-8 the child comes up encoding to that
+ * legacy codepage — and the first custom node that prints an emoji kills startup:
+ *
+ *     UnicodeEncodeError: 'cp949' codec can't encode character '\U0001f389'
+ *
+ * (rgthree-comfy's banner, on a Korean Windows install. It is not an unusual
+ * node, and a party popper is not an unusual thing to print.)
+ *
+ * This is OUR bug, not the node's and not the user's: their own console launch of
+ * the same command works. We changed where the bytes go, so the encoding on that
+ * destination is ours to choose, and a legacy codepage is the wrong choice for a
+ * file we then read back as text.
+ *
+ * SCOPE, deliberately narrow:
+ *  - Windows only. That is where the report is, and where a non-UTF-8 ANSI
+ *    codepage is the default rather than an opt-in. The same reasoning covers a
+ *    POSIX box running under `LANG=C`, but nothing has reported one and widening
+ *    this without a case to check against is how a fix acquires a second bug.
+ *  - An EXPLICIT value always wins. A user who set PYTHONIOENCODING to something
+ *    else means it, and overriding their choice to fix an encoding problem would
+ *    be its own encoding problem.
+ *  - Returns the input UNCHANGED when there is nothing to add, so a launch that
+ *    was already fine keeps its exact previous behaviour — including inheriting
+ *    (undefined) rather than being handed a materialised copy.
+ */
+export function withUtf8StdioEnv(
+  env: NodeJS.ProcessEnv | undefined,
+  opts: { platform?: NodeJS.Platform; baseEnv?: NodeJS.ProcessEnv } = {},
+): NodeJS.ProcessEnv | undefined {
+  const platform = opts.platform ?? process.platform;
+  if (platform !== "win32") return env;
+  // `env: undefined` means "inherit this process's environment", so the values
+  // already in force are the base ones — that is what the child would have got.
+  const effective = env ?? opts.baseEnv ?? process.env;
+  // Windows environment names are CASE-INSENSITIVE, and `effective` is often a
+  // plain object rather than `process.env`. Node's `process.env` is a proxy that
+  // honours that (`process.env.PYTHONUTF8` reads a var set as `PythonUtf8`), but a
+  // SPREAD of it is an ordinary object and loses it — measured, not assumed:
+  //
+  //   PythonUtf8=0 node -e '...'
+  //     process.env.PYTHONUTF8        -> "0"
+  //     ({...process.env}).PYTHONUTF8 -> undefined     (key present as PythonUtf8)
+  //
+  // A case-sensitive read here would therefore miss a user's explicit opt-out on
+  // exactly the paths that materialise an env (the Stability Matrix
+  // reconstruction, or any caller passing one), and add a SECOND key differing
+  // only in case. That is the opposite of this function's stated rule, in a
+  // function that only ever runs on Windows.
+  const keyOf = (name: string): string | undefined => {
+    const wanted = name.toLowerCase();
+    return Object.keys(effective).find((k) => k.toLowerCase() === wanted);
+  };
+  const set = (name: string) => {
+    const key = keyOf(name);
+    const v = key === undefined ? undefined : effective[key];
+    return typeof v === "string" && v.trim() !== "";
+  };
+  if (set("PYTHONUTF8") && set("PYTHONIOENCODING")) return env;
+  const out: NodeJS.ProcessEnv = { ...effective };
+  // Write through the EXISTING key when one is present but empty, so a blank
+  // `PythonUtf8=` is filled in rather than shadowed by a second spelling.
+  const assign = (name: string, value: string) => {
+    out[keyOf(name) ?? name] = value;
+  };
+  if (!set("PYTHONUTF8")) assign("PYTHONUTF8", "1");
+  if (!set("PYTHONIOENCODING")) assign("PYTHONIOENCODING", "utf-8");
+  return out;
+}

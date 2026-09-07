@@ -278,6 +278,40 @@ function spawnOptions(): { cwd?: string; env?: NodeJS.ProcessEnv } {
   return mockSpawn.mock.calls[0][2] as { cwd?: string; env?: NodeJS.ProcessEnv };
 }
 
+/**
+ * #2693 — these assertions are about LAUNCHER reconstruction, not about encoding.
+ *
+ * The relaunch now adds PYTHONUTF8/PYTHONIOENCODING on Windows, because it points
+ * the child's stdout at a log file and Python would otherwise encode to the
+ * locale codepage. That makes `env` DEFINED on Windows where it used to be
+ * `undefined`, so `toBeUndefined()` here was a platform-dependent assertion
+ * waiting to fail on the windows-latest leg only.
+ *
+ * These say what the tests actually mean — "no launcher environment was
+ * reconstructed" — by looking at the DELTA against the environment the launch
+ * would otherwise have used. Deliberately NOT a second copy of the encoding rule:
+ * it asserts that nothing OTHER than those two keys moved, so it cannot pass by
+ * agreeing with a broken implementation of the rule it is not testing. The rule
+ * itself is pinned against literals in relaunch-utf8-stdio.test.ts.
+ */
+const ENCODING_KEYS = new Set(["PYTHONUTF8", "PYTHONIOENCODING"]);
+
+function launchEnvDelta(base?: NodeJS.ProcessEnv): Record<string, string | undefined> {
+  const env = spawnOptions().env;
+  const from = base ?? process.env;
+  const out: Record<string, string | undefined> = {};
+  if (!env) return out; // inherited verbatim — nothing was added
+  for (const [k, v] of Object.entries(env)) if (from[k] !== v) out[k] = v;
+  for (const k of Object.keys(from)) if (!(k in env)) out[k] = undefined;
+  return out;
+}
+
+/** The launch used `base` (or inherited) and reconstructed nothing on top of it. */
+function expectNoLauncherEnvAdditions(base?: NodeJS.ProcessEnv): void {
+  const delta = launchEnvDelta(base);
+  expect(Object.keys(delta).filter((k) => !ENCODING_KEYS.has(k))).toEqual([]);
+}
+
 beforeEach(() => {
   vi.useRealTimers();
   vi.clearAllMocks();
@@ -623,7 +657,7 @@ describe("restart_comfyui — Stability Matrix launcher environment (#776)", () 
     expect(result.started).toBe(true);
     expect(result.launch_env?.source).toBe("inherited");
     expect(result.launch_env?.reproducible).toBe(true);
-    expect(spawnOptions().env).toBeUndefined();
+    expectNoLauncherEnvAdditions();
 
     killSpy.mockRestore();
   });
@@ -1211,7 +1245,7 @@ describe("restart_comfyui — irreproducible launcher environments (#776)", () =
     expect(started.started).toBe(true);
     expect(mockSpawn).toHaveBeenCalledTimes(1);
     // Best available environment = ours (never a fabricated launcher one).
-    expect(spawnOptions().env).toBeUndefined();
+    expectNoLauncherEnvAdditions();
     expect(started.launch_env?.reproducible).toBe(false);
     expect(started.launch_env?.launcher).toBe("Pinokio");
     expect(started.message).toMatch(/WARNING/);
@@ -1249,7 +1283,7 @@ describe("restart_comfyui — irreproducible launcher environments (#776)", () =
     expect(result.stopped).toBe(true);
     expect(result.started).toBe(true);
     // Spawned with the LIVE environment verbatim — not the orchestrator's.
-    expect(spawnOptions().env).toEqual(LIVE_ENV);
+    expectNoLauncherEnvAdditions(LIVE_ENV);
     expect(result.launch_env?.source).toBe("live-process");
 
     killSpy.mockRestore();
@@ -1889,7 +1923,7 @@ describe("restart_comfyui — plain installs are unchanged (#776)", () => {
     expect(result.stopped).toBe(true);
     expect(result.started).toBe(true);
     // No env override: `spawn` inherits process.env, exactly as before #776.
-    expect(spawnOptions().env).toBeUndefined();
+    expectNoLauncherEnvAdditions();
     expect(result.launch_env?.source).toBe("inherited");
 
     killSpy.mockRestore();
