@@ -111,6 +111,145 @@ export function inspectMcpServers(
   return { degraded, pending };
 }
 
+
+/**
+ * Configured servers that CONNECTED and contributed no tools (#2742).
+ *
+ * The #1524 comparison above asks whether a server is present and what its status
+ * is. That is blind to the variant five reporters hit on 0.52.174 through
+ * 0.52.178: `panel=connected` in every session, panel_* absent from both the
+ * direct declarations and the deferred catalog, no notice, no down-episode, no
+ * reconnect. Status `connected` was being read as proof of a usable toolset, and
+ * it is not — a server can connect and register nothing.
+ *
+ * The cost of that blindness is the whole report: "every signal the product
+ * surfaces said the panel was connected", and one reporter reinstalled twice
+ * chasing it.
+ *
+ * The init message carries `tools: string[]`, and an MCP tool appears there
+ * namespaced as `mcp__<server>__<tool>`. So a configured server with no entry
+ * under its own prefix contributed nothing.
+ *
+ * THREE SILENCES, each the same "a false alarm is worse than this silence" rule
+ * the rest of this module follows:
+ *
+ *  - No tool list, or an empty one, says nothing about our servers.
+ *  - A tool list containing NO `mcp__` name at all is a harness that does not
+ *    list MCP tools here, not a session with none — UNLESS this process has
+ *    already seen a namespaced MCP tool, which proves the harness does list them.
+ *    Reporting every configured server without that proof would fire on healthy
+ *    sessions on any harness shaped that way.
+ *
+ *    This started as an accepted blind spot, justified by `mcp__comfyui__*` being
+ *    present throughout ("headless mcp__comfyui__* tools remained available" in
+ *    three of the five reports). Self-review found that justification is evidence
+ *    about EARLIER reports, not a property of the failure: a sixth report
+ *    (2026-09-03, on 0.52.183) describes zero panel tools without saying whether
+ *    comfyui tools survived, so it may sit squarely inside the blind spot — the
+ *    fix would not fire on the case it was written for. The latch below closes it
+ *    without inventing a false alarm: a harness that never namespaces never
+ *    latches, so it is never reported on.
+ *  - A server that is degraded or still pending is not reported here. It has no
+ *    tools because it is not up; `inspectMcpServers` already says so, and saying
+ *    it twice in different words would read as two faults.
+ */
+/**
+ * Latched once per process: has ANY session listed a `mcp__*` tool? Until it has,
+ * an absent namespace is an unknown harness, not an empty server. It only ever
+ * moves false -> true, so the detection can widen but never narrow.
+ *
+ * HAZARD IF TOOL SEARCH IS EVER ENABLED. The SDK defers MCP tool schemas behind
+ * tool search by default ("tools are deferred when tool search is enabled", the
+ * `alwaysLoad` docs on every MCP server config type), and a deferred tool is not in
+ * the init message's `tools`. Today nothing in this repo sets `alwaysLoad` or
+ * enables tool search, so every server is treated alike and the list is populated.
+ *
+ * If that changes, the failure direction depends entirely on this latch:
+ *  - never latched -> no `mcp__` names -> silence. The check goes inert, which is
+ *    the safe direction and is what the first test pins.
+ *  - already latched by an earlier non-deferred session in the SAME process -> an
+ *    all-deferred session reads as EVERY server contributing zero tools, and the
+ *    notice fires on a healthy session. That is the exact false positive this
+ *    module exists to avoid.
+ *
+ * So the latch must become per-session, or deferral-aware, BEFORE tool search is
+ * turned on. Being process state is only correct while every session in the process
+ * shares one deferral mode.
+ */
+let harnessListsNamespacedMcpTools = false;
+
+/** Test seam — the latch is process state, so suites must not leak into each other. */
+export function resetMcpToolNamespacingLatchForTests(): void {
+  harnessListsNamespacedMcpTools = false;
+}
+
+export function serversWithoutTools(
+  configured: readonly string[],
+  reported: readonly ReportedMcpServer[] | undefined,
+  tools: readonly string[] | undefined,
+): string[] {
+  if (!Array.isArray(tools) || tools.length === 0) return [];
+  const namespaced = tools.filter((t) => typeof t === "string" && t.startsWith("mcp__"));
+  // One namespaced tool, ever, is proof this harness lists them here. After that,
+  // an EMPTY namespaced set is a real observation rather than an unknown harness.
+  if (namespaced.length > 0) harnessListsNamespacedMcpTools = true;
+  else if (!harnessListsNamespacedMcpTools) return [];
+  const health = inspectMcpServers(configured, reported);
+  // #2742 — the notice says a server CONNECTED and contributed nothing, so a server
+  // may only appear here if the report SAYS it connected. "Not in notUp" is a
+  // different fact: with `reported` absent or empty nothing is classified at all,
+  // and an unrecognised status classifies as neither -- so a server with no status
+  // evidence used to be announced as connected-but-empty on the strength of ANOTHER
+  // server's tools populating the list.
+  // POSITIVE evidence, read here rather than added to McpSessionHealth: every other
+  // caller of that type asks "what is wrong", and widening it for one caller that
+  // asks "what is proven right" would churn six expectations for no gain.
+  //
+  // An unrecognised status is deliberately NOT an alarm (its own test says so) --
+  // but it is not proof of health either, and this notice needs the second thing.
+  const isConnected = new Set<string>(
+    (Array.isArray(reported) ? reported : [])
+      .filter((e) => e && String(e.status ?? "").trim().toLowerCase() === "connected")
+      .map((e) => e.name),
+  );
+  const empty: string[] = [];
+  for (const name of configured) {
+    if (!isConnected.has(name)) continue;
+    const prefix = `mcp__${name}__`;
+    if (!namespaced.some((t) => t.startsWith(prefix))) empty.push(name);
+  }
+  return empty;
+}
+
+/**
+ * The line the user sees for a connected-but-empty server (#2742).
+ *
+ * Deliberately NOT `degradedMcpNotice`'s wording: that one says the session
+ * "started without" the server, which is false here and would send the reader
+ * looking for a connection failure that did not happen. The distinction is the
+ * entire point of the report.
+ *
+ * It also names the recovery that actually worked for the reporters, and the one
+ * that did not: Disconnect → Connect keeps the same orchestrator process, so the
+ * server is not re-registered; stopping the process is what re-runs it. Two
+ * reporters established that by hand.
+ */
+export function emptyToolsMcpNotice(names: readonly string[]): string {
+  if (names.length === 0) return "";
+  const named = names.map((n) => `\`${n}\``).join(", ");
+  const plural = names.length > 1 ? "servers" : "server";
+  const their = names.length > 1 ? "their" : "its";
+  return (
+    `This session's MCP ${plural} ${named} reported \`connected\` but contributed ZERO tools, ` +
+    `so ${their} tools are not available to the agent even though every status signal says the ` +
+    `${plural} ${names.length > 1 ? "are" : "is"} healthy. Anything that needs them will fail or ` +
+    `be worked around silently. This is not a connection failure and reconnecting the panel tab ` +
+    `does not clear it: Disconnect → Connect keeps the same orchestrator process, which is where ` +
+    `the registration lives. Stopping and restarting the orchestrator process re-runs it. ` +
+    `Why the registration comes up empty is open on #2742; this reports the observation only.`
+  );
+}
+
 /**
  * One row of Codex app-server `mcpServerStatus/list` (`McpServerStatus` in
  * app-server-protocol v2, camelCase on the wire).

@@ -3,6 +3,8 @@ import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { judgeHelloRetarget, canonComfyuiTargetUrl, comfyuiOriginKey } from "../../services/hello-retarget.js";
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 
 // #756 (local ComfyUI misclassified as remote after a restart) + the #303
 // zombie-tab guard + the codex-gate trust model: hello.comfyui_url is
@@ -322,5 +324,41 @@ describe("canonComfyuiTargetUrl", () => {
   it("strips trailing slashes and tolerates unparseable input", () => {
     expect(canonComfyuiTargetUrl("http://127.0.0.1:8188///")).toBe("http://127.0.0.1:8188");
     expect(canonComfyuiTargetUrl("not a url//")).toBe("not a url");
+  });
+});
+
+describe("#2742 a hello that names NO url is not reported as a dead instance", () => {
+  // The verdict layer already returns `not-a-url` with no `base` (asserted above).
+  // The defect was one layer up: index.ts logged every non-applying verdict with the
+  // same sentence, so this one rendered as
+  //
+  //   ignoring hello retarget to unreachable undefined (stale tab on a dead instance?)
+  //
+  // which asserts a target was named AND that it was found dead, about a frame that
+  // claimed neither. The reporter saw it 17 times from tabs that were merely churning.
+  //
+  // Pinned as source because the handler is a closure inside the orchestrator's
+  // connection wiring and cannot be driven from a unit test.
+  const src = readFileSync(
+    fileURLToPath(new URL("../../orchestrator/index.ts", import.meta.url)),
+    "utf8",
+  );
+
+  it("returns before the shared warning, rather than falling into it", () => {
+    const guard = src.indexOf('verdict.reason === "not-a-url"');
+    const warn = src.indexOf("ignoring hello retarget to unreachable");
+    expect(guard).toBeGreaterThan(-1);
+    expect(warn).toBeGreaterThan(-1);
+    expect(guard).toBeLessThan(warn);
+    // And it must actually leave — a log without a return still reaches the warning.
+    expect(src.slice(guard, warn)).toContain("return;");
+  });
+
+  it("says only what is true: no url was carried", () => {
+    const guard = src.indexOf('verdict.reason === "not-a-url"');
+    const block = src.slice(guard, guard + 400);
+    expect(block).toContain("no usable comfyui_url");
+    expect(block).not.toContain("stale tab");
+    expect(block).not.toContain("unreachable");
   });
 });

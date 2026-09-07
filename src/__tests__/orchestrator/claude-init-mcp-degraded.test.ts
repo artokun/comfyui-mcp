@@ -436,3 +436,79 @@ describe("a forked resume uses THIS run's MCP set, not the session-recorded one 
     expect(hoisted.lastForkSession).toBeUndefined();
   });
 });
+
+// #2742, WIRING — same argument as the block above, for the variant that passes
+// the status check. A helper-only suite would pass with the call site deleted, and
+// the call site is the whole point: `serversWithoutTools` reads `message.tools`,
+// which nothing in `route()` had ever looked at.
+describe("a Claude session whose MCP server connected but registered nothing (#2742)", () => {
+  const withTools = (
+    mcp_servers: Array<{ name: string; status: string }>,
+    tools: string[],
+  ) => ({ ...initWith(mcp_servers), tools });
+
+  it("reports the panel server that connected and contributed zero tools", async () => {
+    const events = await drive(
+      { mcpServers: { comfyui: COMFYUI_SERVER }, panelServer: PANEL_SERVER },
+      withTools(
+        [
+          { name: "comfyui", status: "connected" },
+          { name: "panel", status: "connected" },
+        ],
+        // The reporters' exact shape: comfyui tools present throughout, panel_*
+        // absent from every surface.
+        ["Read", "Bash", "mcp__comfyui__generate_image", "mcp__comfyui__get_history"],
+      ),
+    );
+    const notices = noticesOf(events);
+    expect(notices).toHaveLength(1);
+    expect(notices[0].message).toContain("panel");
+    expect(notices[0].message).toContain("ZERO tools");
+    // Not the degraded wording — the server did not fail to connect.
+    expect(notices[0].message).not.toContain("started without");
+  });
+
+  it("says nothing when both servers contributed tools", async () => {
+    const events = await drive(
+      { mcpServers: { comfyui: COMFYUI_SERVER }, panelServer: PANEL_SERVER },
+      withTools(
+        [
+          { name: "comfyui", status: "connected" },
+          { name: "panel", status: "connected" },
+        ],
+        ["mcp__comfyui__generate_image", "mcp__panel__panel_graph_outline"],
+      ),
+    );
+    expect(noticesOf(events)).toHaveLength(0);
+  });
+
+  it("stays silent on an init message that carries no tool list at all", async () => {
+    // Every existing #1524 fixture is this shape. A new alarm on them would be a
+    // false positive on healthy sessions, which is the one outcome worse than the
+    // silence this replaces.
+    const events = await drive(
+      { mcpServers: { comfyui: COMFYUI_SERVER }, panelServer: PANEL_SERVER },
+      initWith([
+        { name: "comfyui", status: "connected" },
+        { name: "panel", status: "connected" },
+      ]),
+    );
+    expect(noticesOf(events)).toHaveLength(0);
+  });
+
+  it("reports the connection failure ONCE, not twice, when the server also failed", async () => {
+    const events = await drive(
+      { mcpServers: { comfyui: COMFYUI_SERVER }, panelServer: PANEL_SERVER },
+      withTools(
+        [
+          { name: "comfyui", status: "connected" },
+          { name: "panel", status: "failed" },
+        ],
+        ["mcp__comfyui__generate_image"],
+      ),
+    );
+    const notices = noticesOf(events);
+    expect(notices).toHaveLength(1);
+    expect(notices[0].message).toContain("started without");
+  });
+});
