@@ -463,6 +463,7 @@ describe("actions call the same services with the same arguments", () => {
       requiredPacks: ["impact-pack"],
       missingPacks: ["impact-pack"],
       unresolved: [],
+      ambiguous: [],
       dependencies: [{ class_type: "ImpactNode", pack: "impact-pack", installed: false }],
     });
     const workflow = { "1": { class_type: "ImpactNode", inputs: {} } };
@@ -481,6 +482,7 @@ describe("actions call the same services with the same arguments", () => {
       requiredPacks: [],
       missingPacks: [],
       unresolved: [],
+      ambiguous: [],
       dependencies: [],
     });
     await handler()({ action: "extract_deps", workflow: '{"1":{"class_type":"KSampler"}}' });
@@ -495,6 +497,7 @@ describe("actions call the same services with the same arguments", () => {
       installed: ["impact-pack"],
       alreadyInstalled: [],
       unresolved: [],
+      ambiguous: [],
       queue: { total_count: 1, done_count: 0, in_progress_count: 1, is_processing: true },
     });
     const workflow = { "1": { class_type: "ImpactNode", inputs: {} } };
@@ -502,6 +505,155 @@ describe("actions call the same services with the same arguments", () => {
     expect(mocks.installWorkflowDependencies).toHaveBeenCalledWith(workflow, { deps: "sentinel" });
     expect(text(res)).toContain("## Queued 1 node pack(s) for install");
     expect(text(res)).toContain("### Manager queue status");
+  });
+
+  // #2765 — the resolver refusing to name an owner only helps if the RENDERED
+  // reply says so. Silence reads as "nothing else is needed", which is the
+  // reading that let an approval-gated preflight point at an unrelated repo.
+  it('action:"extract_deps" renders ambiguous ownership with every claimant, naming no owner', async () => {
+    mocks.extractWorkflowDependencies.mockResolvedValueOnce({
+      classTypes: ["Krea2EditGroundedEncode"],
+      requiredPacks: [],
+      missingPacks: [],
+      unresolved: [],
+      ambiguous: [
+        {
+          class_type: "Krea2EditGroundedEncode",
+          candidates: ["Anomalous_Model_Browser", "comfyui-krea2edit"],
+        },
+      ],
+      dependencies: [
+        {
+          class_type: "Krea2EditGroundedEncode",
+          pack: null,
+          builtin: false,
+          installed: false,
+          source: "ambiguous",
+          candidates: ["Anomalous_Model_Browser", "comfyui-krea2edit"],
+        },
+      ],
+    });
+    const res = await handler()({
+      action: "extract_deps",
+      workflow: { "1": { class_type: "Krea2EditGroundedEncode", inputs: {} } },
+    });
+    const out = text(res);
+    expect(out).toContain("### Ambiguous ownership (1)");
+    expect(out).toContain("claimed by: Anomalous_Model_Browser, comfyui-krea2edit");
+    expect(out).toContain("will not install them");
+    // codex gate P1 — an ambiguous-only workflow has zero requiredPacks, and the
+    // summary used to open by declaring the graph all-built-in. That is the
+    // reassuring reading, printed ABOVE the warning that contradicts it.
+    expect(out).not.toContain("All node types are core/built-in");
+    expect(out).toContain("No custom node pack could be attributed to 1");
+    // The per-node line must not present one claimant as the answer.
+    expect(out).toContain("`Krea2EditGroundedEncode` → AMBIGUOUS");
+    // And it must NOT be laundered through the missing-pack remediation path.
+    expect(out).not.toContain("### Missing packs");
+  });
+
+  // codex gate round 3, P1 — an INSTALLED custom node whose /object_info carries
+  // no python_module and which Manager cannot name lands in neither the
+  // `ambiguous` nor the `unresolved` list, so a summary counted off those two
+  // lists called the graph all-built-in while such a node sat in it.
+  it('action:"extract_deps" does not call a graph all-built-in when a node has no attributable pack', async () => {
+    mocks.extractWorkflowDependencies.mockResolvedValueOnce({
+      classTypes: ["MysteryNode"],
+      requiredPacks: [],
+      missingPacks: [],
+      unresolved: [],
+      ambiguous: [],
+      dependencies: [
+        {
+          class_type: "MysteryNode",
+          pack: null,
+          builtin: false,
+          installed: true,
+          source: "unresolved",
+        },
+      ],
+    });
+    const out = text(
+      await handler()({
+        action: "extract_deps",
+        workflow: { "1": { class_type: "MysteryNode", inputs: {} } },
+      }),
+    );
+    expect(out).not.toContain("All node types are core/built-in");
+    expect(out).toContain("No custom node pack could be attributed to 1");
+  });
+
+  // codex gate round 3, P1 — same contradiction on the install path for an
+  // unresolved-only run: nothing was installed BECAUSE nothing could be resolved.
+  it('action:"install_deps" does not say "no packs needed" when packs went unresolved', async () => {
+    mocks.installWorkflowDependencies.mockResolvedValueOnce({
+      installed: [],
+      alreadyInstalled: [],
+      unresolved: ["Some-Pack"],
+      ambiguous: [],
+    });
+    const out = text(
+      await handler()({
+        action: "install_deps",
+        workflow: { "1": { class_type: "SomeNode", inputs: {} } },
+      }),
+    );
+    expect(out).not.toContain("No packs needed installation");
+    expect(out).toContain("Nothing installed — 1 item(s) could not be resolved to a pack");
+  });
+
+  // codex gate round 4, P1 — an ambiguous node that is ALREADY PRESENT was filed
+  // under "Not installed" and the reader told to go install it. Nothing needed
+  // installing; we just could not name the owner.
+  it('action:"install_deps" does not tell the user to install a node already present', async () => {
+    mocks.installWorkflowDependencies.mockResolvedValueOnce({
+      installed: [],
+      alreadyInstalled: [],
+      unresolved: [],
+      ambiguous: [
+        {
+          class_type: "PresentNode",
+          candidates: ["https://github.com/first/p", "https://github.com/second/p"],
+          installed: true,
+        },
+      ],
+    });
+    const out = text(
+      await handler()({
+        action: "install_deps",
+        workflow: { "1": { class_type: "PresentNode", inputs: {} } },
+      }),
+    );
+    expect(out).toContain("### Already present, owner unknown (1)");
+    expect(out).toContain("ALREADY AVAILABLE");
+    expect(out).not.toContain("### Not installed — ambiguous ownership");
+    // The candidates must still be the repositories, so a reader can identify them.
+    expect(out).toContain("https://github.com/first/p, https://github.com/second/p");
+  });
+
+  it('action:"install_deps" reports what it deliberately did NOT install', async () => {
+    mocks.installWorkflowDependencies.mockResolvedValueOnce({
+      installed: [],
+      alreadyInstalled: [],
+      unresolved: [],
+      ambiguous: [
+        {
+          class_type: "Krea2EditGroundedEncode",
+          candidates: ["Anomalous_Model_Browser", "comfyui-krea2edit"],
+        },
+      ],
+    });
+    const res = await handler()({
+      action: "install_deps",
+      workflow: { "1": { class_type: "Krea2EditGroundedEncode", inputs: {} } },
+    });
+    const out = text(res);
+    expect(out).toContain("### Not installed — ambiguous ownership (1)");
+    expect(out).toContain("claimed by: Anomalous_Model_Browser, comfyui-krea2edit");
+    // Nothing was installed BECAUSE we could not tell what to install — the
+    // opposite of "no packs needed".
+    expect(out).not.toContain("No packs needed installation");
+    expect(out).toContain("Nothing installed — 1 item(s) could not be resolved to a pack");
   });
 
   it('action:"generate_skill" forwards source + refresh and keeps structuredContent', async () => {
@@ -573,6 +725,7 @@ describe("only action:\"install_deps\" can reach the install service", () => {
       requiredPacks: [],
       missingPacks: [],
       unresolved: [],
+      ambiguous: [],
       dependencies: [],
     });
     mocks.generateSkillCached.mockResolvedValue({
