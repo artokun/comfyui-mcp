@@ -56,9 +56,9 @@
 
 import { spawn, spawnSync, type ChildProcessByStdio } from "node:child_process";
 import type { Readable } from "node:stream";
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { logger } from "../utils/logger.js";
 import { errorText, promptText } from "./error-text.js";
 import { looksLikeAuthFailure, providerAuthRemedy, qualifySlashCommands } from "./cli-remedy.js";
@@ -118,6 +118,146 @@ function killProcessTree(pid: number | undefined): void {
  * the bare name as a last resort, or null when clearly absent. We never spawn
  * through a shell — the prompt is user data.
  */
+/** How to launch pi: a command plus any argv that must precede the caller's own. */
+export interface PiLaunch {
+  command: string;
+  prefixArgs: string[];
+}
+
+/**
+ * Resolve an npm shim to the script it runs, so it can be launched WITHOUT a shell.
+ *
+ * #2835 — installing pi from npm gives `pi` (an extensionless bash script),
+ * `pi.cmd` and `pi.ps1`, and no `pi.exe`. On Windows both of the first two are
+ * unspawnable by Node, measured:
+ *
+ *     spawn(<extensionless shim>) -> ENOENT
+ *     spawn(<.cmd>)               -> EINVAL
+ *
+ * The obvious repair is `shell: true`, and it is the wrong one: the prompt reaches
+ * these spawns as an argv element, so routing it through cmd.exe would make every
+ * prompt a potential command line. That is exactly what this module refuses to do,
+ * and the refusal is right.
+ *
+ * npm's shim names its real entry point, so there is a third option that keeps the
+ * no-shell rule intact:
+ *
+ *     "%_prog%"  "%dp0%\\node_modules\\pi\\bin\\pi.js" %*
+ *
+ * Extract that path and spawn `node <script>` directly. The objection was never the
+ * file extension; it was the shell.
+ *
+ * Returns null unless the extracted target actually exists on disk — a shim we
+ * cannot resolve stays unusable rather than becoming a guess.
+ */
+export function resolveNpmShimTarget(shimPath: string): string | null {
+  let text: string;
+  try {
+    text = readFileSync(shimPath, "utf8");
+  } catch {
+    return null;
+  }
+  // The $basedir class excludes quote and space ON PURPOSE. npm's sh shim names
+  // the interpreter and the script on ONE line -- exec "$basedir/node"
+  // "$basedir/node_modules/pi/bin/pi.js" "$@" -- so a permissive `.+?` anchors on
+  // the FIRST $basedir/ and swallows `node"  "$basedir/...` into the capture. That
+  // path never exists, so existsSync turned it into null and this branch resolved
+  // NOTHING: measured 0/10 against the real npm shims on a Windows box, 10/10 with
+  // the class below, and the .cmd branch stays 10/10 either way.
+  // `%dp0%` is the shim's own directory. Accept either separator: npm writes
+  // backslashes on Windows, and the .ps1/sh variants use forward slashes.
+  const m = /%dp0%[\\/](.+?[.](?:js|mjs|cjs))/i.exec(text) ?? /[$]basedir[/]([^"\'\s]+?[.](?:js|mjs|cjs))/i.exec(text);
+  if (!m) return null;
+  const rel = m[1].split(String.fromCharCode(92)).join("/");
+  const target = join(dirname(shimPath), rel);
+  try {
+    return existsSync(target) ? target : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * #2835 — PATH entries as Windows actually writes them. A quoted entry
+ * (`"C:\Program Files\nodejs"`) concatenates into an invalid path, and a dead
+ * UNC entry makes the synchronous read below block for an SMB timeout during
+ * backend startup. `src/services/self-update.ts` already strips wrapping quotes
+ * and skips UNC before its own sync probes; same treatment here.
+ */
+function windowsPathDirs(): string[] {
+  const out: string[] = [];
+  for (const raw of (process.env.PATH || "").split(";")) {
+    const dir = raw.trim().replace(/^"(.*)"$/, "$1").trim();
+    if (!dir) continue;
+    if (dir.startsWith(String.fromCharCode(92, 92))) continue; // UNC — may hang
+    out.push(dir);
+  }
+  return out;
+}
+
+/**
+ * One candidate, classified: a runnable executable launches as itself, a
+ * resolvable npm shim launches as `node <script>`, anything else is null. Kept
+ * separate so BOTH the launch path and readiness ask the same question.
+ */
+function launchFromWindowsCandidate(candidate: string): PiLaunch | null {
+  const script = resolveNpmShimTarget(candidate);
+  if (script) return { command: process.execPath, prefixArgs: [script] };
+  // A .cmd/.bat that named no resolvable script stays unspawnable: Node cannot
+  // run one shell-lessly and we never spawn through a shell (the prompt is user
+  // data). An extensionless file is a POSIX script, never runnable on Windows.
+  if (/[.](cmd|bat)$/i.test(candidate)) return null;
+  if (!/[.][a-z0-9]+$/i.test(candidate)) return null;
+  return existsSync(candidate) ? { command: candidate, prefixArgs: [] } : null;
+}
+
+/**
+ * What to actually spawn for `pi`, including the npm-shim case (#2835).
+ *
+ * A real executable launches as itself. A resolvable npm shim launches as
+ * `node <script>`. Anything else is null, exactly as before.
+ */
+export function resolvePiLaunch(home: string = homedir()): PiLaunch | null {
+  const isWin = process.platform === "win32";
+  const override = process.env.COMFYUI_MCP_PI_PATH?.trim();
+
+  // On Windows the npm shim comes FIRST, before any PATH result is trusted.
+  // `resolvePiBin` scans for ["pi.exe", "pi"], and `existsSync` happily matches the
+  // EXTENSIONLESS bash script npm writes beside the .cmd — which is not executable
+  // on Windows at all and spawns ENOENT. That is #2835's first symptom, and taking
+  // the PATH answer first would reproduce it here.
+  if (isWin) {
+    // Resolve IN SOURCE ORDER. An earlier revision collected every candidate and
+    // ran the shim pre-pass over all of them, which let a shim anywhere on PATH
+    // beat an explicit COMFYUI_MCP_PI_PATH executable: the override is not a shim,
+    // resolveNpmShimTarget returns null for it, and the loop walked on to PATH.
+    // An override exists precisely to win, so it is decided on its own first.
+    if (override) {
+      const viaOverride = launchFromWindowsCandidate(override) ?? launchFromWindowsCandidate(override + ".cmd");
+      if (viaOverride) return viaOverride;
+    }
+    for (const dir of windowsPathDirs()) {
+      const found =
+        launchFromWindowsCandidate(join(dir, "pi.exe")) ??
+        launchFromWindowsCandidate(join(dir, "pi.cmd")) ??
+        launchFromWindowsCandidate(join(dir, "pi"));
+      if (found) return found;
+    }
+    // Fall THROUGH, do not return null: resolvePiBin also probes the well-known
+    // install locations (%LOCALAPPDATA%/pi/bin/pi.exe, ~/.local/bin/pi.exe) that
+    // are not on PATH. Returning here dropped those and broke 26 existing tests.
+  }
+
+  const direct = resolvePiBin(home);
+  if (!direct) return null;
+  // A .cmd/.bat that survived to here named no script we could find, so it stays
+  // unspawnable — unchanged from before this existed.
+  if (/[.](cmd|bat)$/i.test(direct)) return null;
+  // Likewise an extensionless file on Windows: executable on POSIX, never here.
+  if (isWin && !/[.][a-z0-9]+$/i.test(direct)) return null;
+  return { command: direct, prefixArgs: [] };
+}
+
 export function resolvePiBin(home: string = homedir()): string | null {
   const override = process.env.COMFYUI_MCP_PI_PATH?.trim();
   if (override) {
@@ -258,7 +398,7 @@ export class PiBackend implements AgentBackend {
   private deps: PiBackendDeps;
   private model: string | undefined;
   private provider: string | undefined;
-  private bin: string | null | undefined; // undefined = not yet resolved
+  private launch: PiLaunch | null | undefined; // undefined = not yet resolved
   /** The in-flight per-turn child (interrupt/close kill its tree). */
   private child: PiChild | null = null;
   private interrupted = false;
@@ -281,9 +421,9 @@ export class PiBackend implements AgentBackend {
     this.provider = deps.provider;
   }
 
-  private resolveBin(): string {
-    if (this.bin === undefined) this.bin = resolvePiBin();
-    if (!this.bin) {
+  private resolveBin(): PiLaunch {
+    if (this.launch === undefined) this.launch = resolvePiLaunch();
+    if (!this.launch) {
       throw new Error(
         "pi CLI (`pi`) not found. Install it from https://pi.dev " +
           "(macOS/Linux: `curl -fsSL https://pi.dev/install.sh | sh`), configure a provider " +
@@ -291,7 +431,7 @@ export class PiBackend implements AgentBackend {
           "also point COMFYUI_MCP_PI_PATH at the executable.",
       );
     }
-    return this.bin;
+    return this.launch;
   }
 
   /** One-time preflight: resolve the executable so a missing install fails fast
@@ -417,7 +557,12 @@ export class PiBackend implements AgentBackend {
 
     // Windows caps the whole command line at ~32K, and the prompt rides argv.
     if (process.platform === "win32") {
-      const cmdLen = bin.length + args.reduce((n, a) => n + a.length + 3, 0);
+      // Counts the launch PREFIX too: an npm-shim install runs as
+      // `node <script>` (#2835), and that script path is part of the same
+      // ~32K command line the prompt has to fit inside.
+      const cmdLen =
+        bin.command.length +
+        [...bin.prefixArgs, ...args].reduce((n, a) => n + a.length + 3, 0);
       if (cmdLen > 30_000) {
         this.turnActive = false;
         yield {
@@ -512,7 +657,7 @@ export class PiBackend implements AgentBackend {
 
     let child: PiChild;
     try {
-      child = spawn(bin, args, {
+      child = spawn(bin.command, [...bin.prefixArgs, ...args], {
         cwd,
         env: buildAgentSpawnEnv(), // strip ComfyUI tool secrets; pi's own provider keys pass through
         stdio: ["ignore", "pipe", "pipe"],
@@ -718,7 +863,7 @@ export class PiBackend implements AgentBackend {
       let err = "";
       let child: PiChild;
       try {
-        child = spawn(bin, ["--list-models"], {
+        child = spawn(bin.command, [...bin.prefixArgs, "--list-models"], {
           cwd: this.deps.cwd ?? process.cwd(),
           env: buildAgentSpawnEnv(),
           stdio: ["ignore", "pipe", "pipe"],
