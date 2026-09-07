@@ -620,6 +620,44 @@ function ok(value: unknown): ToolResult {
   };
 }
 
+/**
+ * #2887 — litegraph unpacks by slot INDEX. After a MiniMax-style autogrow rebuild
+ * the same index can be a different named child, so a count of surviving wires is
+ * not proof they landed on ref_images rather than ref_videos. A current panel
+ * reseats by identity and sets `external_links_identity_ok: true`. `false` is a
+ * success that must not be accepted. A missing flag on a verified unpack is an
+ * older panel that cannot prove identity — noted, not trusted as a scramble-free
+ * graph.
+ */
+function refuseUnpackIdentityFailure(res: ToolResult): ToolResult {
+  if (res.isError) return res;
+  const parsed = parseToolResultJson(res);
+  const unpacked = parsed?.unpacked;
+  if (!unpacked || typeof unpacked !== "object" || Array.isArray(unpacked)) return res;
+  const payload = unpacked as Record<string, unknown>;
+  if (payload.external_links_identity_ok === false) {
+    return fail(
+      "panel_unpack_subgraph restored links but could not prove they landed on the named " +
+        "dynamic slots (including ref_images / ref_videos children). The graph was not " +
+        "accepted as unpacked. Upgrade the sidebar panel and retry, or unpack on the canvas " +
+        "and re-wire by name. (comfyui-mcp#2887)",
+    );
+  }
+  if (
+    typeof payload.external_links_verified === "number" &&
+    payload.external_links_verified > 0 &&
+    payload.external_links_identity_ok !== true
+  ) {
+    return appendReplyNote(
+      res,
+      "Note: this panel did not prove restored unpack links by named dynamic-slot identity. " +
+        "A MiniMax-style autogrow node can still have IMAGE land on ref_videos after unpack (#2887). " +
+        "Upgrade the sidebar panel so unpack reseats by name and refuses a scramble.",
+    );
+  }
+  return res;
+}
+
 function fail(err: unknown): ToolResult {
   const msg = err instanceof Error ? err.message : String(err);
   return { content: [{ type: "text", text: `Error: ${msg}` }], isError: true };
@@ -26824,9 +26862,12 @@ CHECKED FOR YOU: the graph read this message prescribes was just run, and it ` +
     ),
     def(
       "panel_unpack_subgraph",
-      "EXPAND / DISSOLVE a subgraph node on the user's open graph — inline its interior nodes back into the PARENT graph, rewire all external links to those now-inlined nodes, and remove the subgraph wrapper. This is the frontend's \"Unpack Subgraph\" (litegraph LGraph.unpackSubgraph) and the exact INVERSE of panel_create_subgraph. Use it to flatten a stage that was over-nested, or to edit interior nodes directly at the parent level. The interior nodes reappear on the parent canvas with their connections preserved. Undoable with Ctrl+Z.",
+      "EXPAND / DISSOLVE a subgraph node on the user's open graph — inline its interior nodes back into the PARENT graph, rewire all external links to those now-inlined nodes, and remove the subgraph wrapper. This is the frontend's \"Unpack Subgraph\" (litegraph LGraph.unpackSubgraph) and the exact INVERSE of panel_create_subgraph. Use it to flatten a stage that was over-nested, or to edit interior nodes directly at the parent level. The interior nodes reappear on the parent canvas with their connections preserved. Undoable with Ctrl+Z. Restored links are proven by named slot identity (including dynamic children like ref_images.ref_image_0); a scramble onto the wrong child is a refusal, not a success.",
       { node_id: nodeId().describe("Subgraph node id to unpack/dissolve (is_subgraph=true, from panel_graph_outline / panel_query_graph).") },
-      async (args: A, ctx) => ctx.call({ cmd: "graph_unpack_subgraph", node_id: args.node_id }, 15000),
+      async (args: A, ctx) =>
+        refuseUnpackIdentityFailure(
+          await ctx.call({ cmd: "graph_unpack_subgraph", node_id: args.node_id }, 15000),
+        ),
     ),
     def(
       "panel_search_nodes",
