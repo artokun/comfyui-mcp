@@ -276,10 +276,6 @@ New tools that give every backend the same expertise and a cost guardrail:
 | `panel_load_workflow` | (panel tool) Load a full workflow onto the live canvas in one shot — by bundled `pack` name (read server-side, never shuttled through chat) or by graph JSON |
 | `panel_strip_workflow` / `panel_slice_workflow` | (panel tools) De-virtualize a tangled graph (Get/Set buses, Reroutes, subgraphs, bypass → real connections) or carve one rgthree-toggled pipeline out of a monolith — by `pack`, server-side `path`, or inline graph; for understanding/rebuilding expert workflows without hand-tracing |
 
-See the design doc, [design/agent-backend-injection.md](design/agent-backend-injection.md),
-for the port, the capability matrix, and the per-provider "clink" points, and the
-[panel docs](https://comfyui-mcp.artokun.io/docs/panel) for the full sidebar UX.
-
 ---
 
 ## MCP Tools
