@@ -41,3 +41,8 @@ bad params).
 - Scrub secrets before anything leaves the machine, every time.
 - Never claim a fix you did not verify.
 - Never touch the user's workflow data without asking.
+
+## Sources
+
+- **Official:** ComfyUI agent tools documentation (https://docs.comfy.org/agent-tools) and Comfy MCP (https://comfy.org/mcp/).
+- **Empirical:** none. Archive policy, not reverse-engineered from a vendor graph.
