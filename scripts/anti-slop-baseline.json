@@ -625,11 +625,10 @@
       "no-chained-type-assertions": 3
     },
     "src/__tests__/tools/report-issue-version.test.ts": {
-      "no-chained-type-assertions": 2,
-      "no-unknown-returns": 2
+      "no-chained-type-assertions": 2
     },
     "src/__tests__/tools/report-issue.test.ts": {
-      "no-chained-type-assertions": 17
+      "no-chained-type-assertions": 14
     },
     "src/__tests__/tools/retired-redirect.test.ts": {
       "no-chained-type-assertions": 6

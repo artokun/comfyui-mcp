@@ -135,102 +135,30 @@ describe("normalizeReportedVersion (#846)", () => {
 // P2) — and a normalizer nobody calls protects nothing. This drives the real
 // registered handler and inspects the bytes that leave for the triage worker.
 
-describe("report_issue actually normalizes before sending (#846 wiring)", () => {
-  it("sends the extracted version to the worker, not the sentence it came in", async () => {
+describe("report_issue is ARCHIVED — the version helpers stay, the wiring sends nothing", () => {
+  it("registers a handler that returns the archived notice and never reaches the worker", async () => {
     const { registerReportIssueTools } = await import("../../tools/report-issue.js");
-
-    let handler: ((args: Record<string, unknown>) => Promise<unknown>) | undefined;
+    let handler: ((args: Record<string, unknown>) => Promise<{ content: { text?: string }[] }>) | undefined;
     const fakeServer = {
-      tool: (name: string, _desc: string, _schema: unknown, fn: typeof handler) => {
-        if (name === "report_issue") handler = fn;
+      tool: (_name: string, _desc: string, _schema: unknown, h: typeof handler) => {
+        handler = h;
       },
     } as unknown as Parameters<typeof registerReportIssueTools>[0];
     registerReportIssueTools(fakeServer);
-    expect(handler).toBeTypeOf("function");
-
-    const bodies: string[] = [];
+    const calls: unknown[] = [];
     const realFetch = globalThis.fetch;
-    globalThis.fetch = (async (_url: string, init?: RequestInit) => {
-      if (typeof init?.body === "string") bodies.push(init.body);
-      // A terminal ack: filed, nothing to poll.
-      return new Response(
-        JSON.stringify({ status: "done", url: "https://example.invalid/issues/1", job_id: "j1" }),
-        { status: 200, headers: { "content-type": "application/json" } },
-      );
+    globalThis.fetch = (async (...a: unknown[]) => {
+      calls.push(a);
+      throw new Error("must not be reached");
     }) as typeof fetch;
-
     try {
-      await handler!({
-        title: "t",
-        body: "b",
-        repo: "artokun/comfyui-mcp",
-        mcp_version: ENV_LINE,
-        panel_version: ENV_LINE,
-      });
+      const out = await handler!({ title: "t", body: "b", mcp_version: "the env line says mcp=0.52.1 panel=0.15.2" });
+      const json = JSON.parse(out.content[0]?.text ?? "{}") as Record<string, unknown>;
+      expect(json.archived).toBe(true);
+      expect(json.filed).toBe(false);
+      expect(calls).toHaveLength(0);
     } finally {
       globalThis.fetch = realFetch;
     }
-
-    expect(bodies.length).toBeGreaterThan(0);
-    const sent = JSON.parse(bodies[0]) as { reporter_versions?: { mcp?: string; panel?: string } };
-    expect(sent.reporter_versions?.mcp).toBe("0.48.18");
-    expect(sent.reporter_versions?.panel).toBe("0.11.38");
-    // The failure this pins: the raw sentence forwarded verbatim, which the
-    // worker cannot version-match — it just silently stops advising upgrades.
-    expect(sent.reporter_versions?.mcp).not.toContain("ENVIRONMENT");
-  });
-});
-
-// The wiring test above SUPPLIES mcp_version, so it never reaches the fallback —
-// swapping the load-time snapshot back for a fresh disk read left it green
-// (codex gate P2). This omits the field, which is the only way in.
-
-describe("the OMITTED-version fallback reports what is RUNNING, not what is installed (#846)", () => {
-  it("keeps reporting the load-time version after the package on disk changes underneath", async () => {
-    vi.resetModules();
-    const onDisk = { version: "0.49.8" };
-    vi.doMock("../../services/self-update.js", () => ({
-      detectInstallMode: () => ({ currentVersion: onDisk.version }),
-    }));
-
-    // Loaded WHILE disk says 0.49.8 — this stands in for process start.
-    const mod = await import("../../tools/report-issue.js");
-
-    // Now the user runs an in-place update. The process keeps running the old
-    // code; only the files changed.
-    onDisk.version = "0.49.99";
-
-    let handler: ((args: Record<string, unknown>) => Promise<unknown>) | undefined;
-    mod.registerReportIssueTools({
-      tool: (name: string, _d: string, _s: unknown, fn: typeof handler) => {
-        if (name === "report_issue") handler = fn;
-      },
-    } as never);
-
-    const bodies: string[] = [];
-    const realFetch = globalThis.fetch;
-    globalThis.fetch = (async (_u: string, init?: RequestInit) => {
-      if (typeof init?.body === "string") bodies.push(init.body);
-      return new Response(JSON.stringify({ status: "done", url: "https://e.invalid/1" }), {
-        status: 200,
-        headers: { "content-type": "application/json" },
-      });
-    }) as typeof fetch;
-
-    try {
-      // No mcp_version — the fallback is the whole point.
-      await handler!({ title: "t", body: "b", repo: "artokun/comfyui-mcp" });
-    } finally {
-      globalThis.fetch = realFetch;
-      vi.doUnmock("../../services/self-update.js");
-      vi.resetModules();
-    }
-
-    const sent = JSON.parse(bodies[0]) as { reporter_versions?: { mcp?: string } };
-    // Filing under the INSTALLED version is #846: the worker version-matches the
-    // report against the fix history, so a report stamped with a version the user
-    // is not running silently stops the upgrade advice that usually resolves it.
-    expect(sent.reporter_versions?.mcp).toBe("0.49.8");
-    expect(sent.reporter_versions?.mcp).not.toBe("0.49.99");
   });
 });
