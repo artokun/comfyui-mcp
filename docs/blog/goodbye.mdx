@@ -1,0 +1,68 @@
+---
+title: "Goodbye, and thanks — comfyui-mcp is archived"
+description: "comfyui-mcp and the Agent Panel are no longer maintained. ComfyUI now ships official agent and MCP tooling. What happens to npm, the registry node, and your forks."
+keywords:
+  - comfyui-mcp archived
+  - ComfyUI MCP
+  - Comfy MCP
+  - Comfy Agent
+  - project sunset
+---
+
+_by [artokun](https://github.com/artokun) · September 9, 2026 · project · goodbye_
+
+This is the last post. **comfyui-mcp and the ComfyUI Agent Panel are archived.**
+No new features, no bug fixes, no dependency updates. Issues and pull requests
+are closed.
+
+## Why
+
+ComfyUI now ships its own agent and MCP tooling — **Comfy Agent** and **Comfy
+MCP** — built and supported by the Comfy-Org team. It sits inside the product,
+with a level of integration a community project can't match from the outside, and
+it is where the effort belongs. Comfy wanted to do their own thing, and that is the
+right call for ComfyUI users.
+
+That also settles the other half of the question. Keeping a project like this
+alive is support work — triaging reports, chasing regressions in someone else's
+release cycle, keeping up with a frontend that moves every week — and open source
+is a thankless place to do it. It made sense while there was nothing else. With an
+official tool in the box, it doesn't.
+
+## Use the official tooling
+
+- [Comfy Agent](https://comfy.org/agent) — the agent that lives inside ComfyUI
+- [Agent tools documentation](https://docs.comfy.org/agent-tools)
+- [Comfy MCP](https://comfy.org/mcp/)
+- [Comfy-Org/comfy-mcp on GitHub](https://github.com/Comfy-Org/comfy-mcp)
+
+If you came here looking for an MCP server or an AI agent for ComfyUI, start
+there.
+
+## Fork it, remix it
+
+The code stays public as a reference, MIT-licensed. If some part of it is useful
+to you — the tool surface, the installer packs, the skills, the panel — **fork it
+and make it yours.** I'd genuinely like to see what people build out of the
+pieces. Nothing here needs my permission, and nothing here is coming back to me as
+a pull request, so don't wait on that.
+
+## What happens to the npm package and the registry node
+
+- **npm (`comfyui-mcp`)** stays published, **unmaintained**. It will keep working
+  for as long as ComfyUI keeps the surfaces it depends on. As ComfyUI grows and
+  changes, it will eventually just stop working — that is expected, and it will
+  not be fixed. When it does, I'll unpublish it.
+- **The Comfy Registry node (`comfyui-agent-panel`)** follows the same path: it
+  stays listed until it breaks, and then the submission comes down.
+- **`report_issue` and the report-bug skill** in the final release are stubs. They
+  file nothing and point you at the official tooling instead.
+
+## Custom work
+
+Looking for a ComfyUI or generative-AI integration expert? I take on custom solutions — reach me by email at **art.longbottom.jr@gmail.com** or on [LinkedIn](https://www.linkedin.com/in/alongbottom/).
+
+## Thanks
+
+To everyone who used it, starred it, forked it, filed a report, or sent a patch:
+thank you. It was fun. It was a good run. 🚀

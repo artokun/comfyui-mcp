@@ -229,30 +229,30 @@ Inspect and manage ComfyUI workspaces (local installs). Driven by the `action` p
 
 ## report_issue
 
-File or triage a GitHub issue for a bug/problem you hit (ComfyUI, a workflow, a model, custom nodes, or comfyui-mcp/its panel). For OUR repos (artokun/comfyui-mcp, artokun/comfyui-mcp-panel) it sends the report to the AI triage worker, which searches existing OPEN and CLOSED issues, version-matches, and either files a new issue, adds context to an existing one, or — if the problem was already FIXED in a newer version than the user runs — answers with the fixing PR + fixed-in version and a recommendation to upgrade (no new issue). It returns that triage result plus an instant check of whether the user is on the latest versions. TIMING: this call BLOCKS while the triage runs — typically a few minutes — and that wait is normal, not a hang. It always returns eventually (every request is time-capped and the poll budget is bounded); on a failing network the caps make that wait longer, but never indefinite. Do not abort a slow call just to retry it: once the worker has accepted the report it keeps triaging on its own — filing, deduping into an existing issue, advising an upgrade, or (rarely) reporting that it could not file — so a blind retry can double-file. If triage outlasts the polling budget the call still returns, with pending:true (and a job_id when the worker gave one — an accepted submit whose acknowledgement was unreadable returns pending without it). If the worker is unreachable it falls back to a prefilled GitHub 'new issue' URL. For third-party repos it returns a prefilled URL to SHARE (it does not auto-file). ALWAYS pass mcp_version and panel_version from the known environment (the env line in your context, e.g. 'mcp=… panel=…') so the worker can tell the user if simply upgrading fixes it — the single most common resolution. Surface the worker's agent_message / upgrade advice to the user.
+ARCHIVED — this project is no longer maintained and its issue trackers are closed. This tool files NOTHING and contacts no service: it returns a notice pointing at ComfyUI's official agent and MCP tooling (Comfy Agent / Comfy MCP, by Comfy-Org). Kept registered only so older prompts and skills that call it get a clear answer instead of an unknown-tool error.
 
 ### Parameters
 
 <ParamField path="title" type="string" required>
-  Short, specific issue title.
+  Ignored — retained for compatibility with callers that still pass it.
 </ParamField>
 <ParamField path="body" type="string" required>
-  Issue body: what happened, steps to reproduce, the exact error text, and environment (GPU/VRAM, ComfyUI version, ComfyUI FRONTEND version, OS) if known. The FRONTEND version is a SEPARATE package from ComfyUI and they move independently — get_system_stats (action:"health") prints both, and for any panel/UI bug it is often the deciding variable. Scrub secrets first.
+  Ignored — retained for compatibility with callers that still pass it.
 </ParamField>
 <ParamField path="repo" type="string">
-  owner/repo (default 'artokun/comfyui-mcp'; use 'artokun/comfyui-mcp-panel' for the sidebar panel).
+  Ignored.
 </ParamField>
 <ParamField path="labels" type="string[]">
-  Optional GitHub label names to prefill.
+  Ignored.
 </ParamField>
 <ParamField path="mcp_version" type="string">
-  The running comfyui-mcp version (from the env line in your context). Auto-detected if omitted.
+  Ignored.
 </ParamField>
 <ParamField path="panel_version" type="string">
-  The running comfyui-mcp-panel (sidebar) version, from the env line in your context, if known.
+  Ignored.
 </ParamField>
 <ParamField path="no_file" type="boolean">
-  Force the prefilled-URL path even for our repos (skip the Worker). Rarely needed.
+  Ignored.
 </ParamField>
 
 ### Example

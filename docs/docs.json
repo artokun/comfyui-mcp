@@ -114,6 +114,7 @@
                 "group": "Blog",
                 "pages": [
                   "blog/index",
+                  "blog/goodbye",
                   "blog/comfy-kitchen",
                   "blog/from-report-to-release",
                   "blog/micro-apps",

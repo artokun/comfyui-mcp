@@ -22,49 +22,19 @@ const SKILL = readFileSync(
   "utf8",
 );
 
-describe("#779 reports must ask for the FRONTEND version", () => {
-  it("the report_issue tool asks for it in the body description", () => {
-    expect(TOOL).toMatch(/ComfyUI FRONTEND version/);
+describe("report_issue is ARCHIVED — its description no longer asks for anything", () => {
+  // #779 pinned that the description asked for the ComfyUI FRONTEND version, because a
+  // report without it could not be triaged. There is no triage any more: the project is
+  // archived and the tool files nothing, so the description must say THAT, and must not
+  // send the agent off collecting versions for a report that will never be read.
+  it("says it is archived and files nothing", () => {
+    expect(TOOL).toMatch(/ARCHIVED/);
+    expect(TOOL).toMatch(/files NOTHING/);
   });
-
-  it("…and says WHY, because 'another version field' reads as optional", () => {
-    // The failure mode is not that people refuse; it is that they reasonably
-    // think "ComfyUI version" already covers it. It does not.
-    expect(TOOL).toMatch(/SEPARATE package from ComfyUI/);
-    expect(TOOL).toMatch(/move independently/);
+  it("points at the official tooling instead", () => {
+    expect(TOOL).toMatch(/Comfy MCP/);
   });
-
-  it("…and names where to GET it", () => {
-    // An ask with no source is an ask that gets skipped. This is the tool that
-    // prints both versions on one line.
-    // The TS source escapes the inner quotes, so the raw file holds a backslash
-    // before each one. Strip backslashes and assert on the sentence a reader
-    // actually sees — writing the escape into the regex tests the escaping
-    // rather than the instruction, and two attempts at it collapsed to a pattern
-    // that matched nothing.
-    const readable = TOOL.split("\\").join("");
-    expect(readable).toContain('get_system_stats (action:"health")');
-  });
-
-  it("the report-bug skill asks for it too", () => {
-    // Two independent paths tell an agent what to collect. Fixing one and
-    // leaving the other is how the field keeps going missing.
-    expect(SKILL).toMatch(/ComfyUI FRONTEND version/);
-    expect(SKILL).toMatch(/get_system_stats \(action:"health"\)/);
-  });
-
-  it("the skill carries the evidence, not just the instruction", () => {
-    // A rule with its story attached survives editing; a bare "also include X"
-    // gets trimmed by the next person tightening the doc.
-    expect(SKILL).toMatch(/779/);
-    expect(SKILL).toMatch(/1\.50\.3/);
-    expect(SKILL).toMatch(/1\.47\.12/);
-  });
-
-  it("neither place asks ONLY for the ComfyUI version any more", () => {
-    // The exact string that shipped for months, which is what produced a report
-    // missing the deciding variable.
-    expect(TOOL).not.toMatch(/\(GPU\/VRAM, ComfyUI version, OS\)/);
-    expect(SKILL).not.toMatch(/^OS \/ ComfyUI version \/ GPU\+VRAM/m);
+  it("no longer instructs the agent to gather the FRONTEND version", () => {
+    expect(TOOL).not.toMatch(/ComfyUI FRONTEND version/);
   });
 });
