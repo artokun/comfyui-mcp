@@ -1218,25 +1218,11 @@ export const DEAD_NAMES: readonly DeadName[] = [
     name: "get_comfyui_settings",
     since: "0.50.0",
     replacement: 'get_defaults (action:"get_ui")',
-    allowedIn: [
-      {
-        path: "design/comfyui-settings-tools.md",
-        context: "The read tool shipped as `get_comfyui_settings`",
-        why: "The dated design spec for the PR that BUILT these two tools. Its superseded banner records the name each tool shipped under and maps it to today's action — the same mapping-away-from-the-name shape as the docs/using-tools.mdx migration table, never an instruction to call it. The banner's two mentions are on separate lines so each is a single occurrence bound to its own context.",
-      },
-    ],
   },
   {
     name: "set_comfyui_setting",
     since: "0.50.0",
     replacement: 'get_defaults (action:"set_ui")',
-    allowedIn: [
-      {
-        path: "design/comfyui-settings-tools.md",
-        context: "The write tool shipped as `set_comfyui_setting`",
-        why: "Second line of the same superseded banner — see the get_comfyui_settings entry above.",
-      },
-    ],
   },
   // 0.50.0 slice 9: the nine knowledge tools — bundled skills, installer packs,
   // the connected server's workflow templates, and the two workflow-readiness
