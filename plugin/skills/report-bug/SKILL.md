@@ -17,6 +17,7 @@ When the user hits a defect in comfyui-mcp or the panel:
 1. Say plainly that this project is archived and will not receive fixes.
 2. Point them at ComfyUI's **official** agent and MCP tooling, built and supported by
    the Comfy-Org team:
+   - Comfy Agent: https://comfy.org/agent
    - Agent tools documentation: https://docs.comfy.org/agent-tools
    - Comfy MCP: https://comfy.org/mcp/
    - Source: https://github.com/Comfy-Org/comfy-mcp

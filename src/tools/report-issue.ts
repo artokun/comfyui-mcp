@@ -552,6 +552,7 @@ export function registerReportIssueTools(server: McpServer): void {
         filed: false,
         repo: normalizeRepo(args.repo),
         official: {
+          comfy_agent: "https://comfy.org/agent",
           docs: "https://docs.comfy.org/agent-tools",
           comfy_mcp: "https://comfy.org/mcp/",
           repo: "https://github.com/Comfy-Org/comfy-mcp",
