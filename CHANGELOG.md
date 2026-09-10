@@ -6,10 +6,16 @@ All notable changes to this project are documented here. This project adheres to
 
 ## Unreleased
 
+## [0.52.203] - 2026-09-09
+
 ### MCP
 
 #### Changed
 - **This project is archived.** ComfyUI now ships official agent and MCP tooling (Comfy Agent and Comfy MCP, by Comfy-Org) — https://docs.comfy.org/agent-tools. `report_issue` is now a stub that files nothing and contacts no service, returning a notice that points at the official tooling; the `report-bug` skill says the same. The docs homepage carries the notice in every language. Issues and pull requests are closed.
+- remove clutter — .beads, .codex, infra/cloudflare, benchmarks + arena, design/, ROADMAP.md (#2926)
+- final release — archive notice, report_issue stub, docs homepage in every language (#2925)
+- archive notice — this project is no longer maintained (#2923)
+
 
 ## [0.52.202] - 2026-09-07
 
