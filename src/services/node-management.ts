@@ -2753,6 +2753,23 @@ function runGitCheckout(
       timeout: GIT_CLONE_TIMEOUT,
       env: nonInteractiveGitEnv(),
     });
+    // #2919 — a bare branch name that exists only as a remote-tracking ref
+    // (refs/remotes/origin/<name>) triggers git's DWIM branch-creation, which
+    // conflicts with --detach. Canonicalize to the fully-qualified remote ref
+    // path so DWIM never triggers. Locally-present branches/tags keep the bare
+    // name; genuinely missing refs keep it too and fail with the normal error.
+    if (
+      !(opts.refFromVersion === true && isGitHeadChannel(ref)) &&
+      !checkoutRef.startsWith("refs/")
+    ) {
+      const localExists =
+        gitShowRefExists(nodeDir, `refs/heads/${checkoutRef}`, comfyuiBase) ||
+        gitShowRefExists(nodeDir, `refs/tags/${checkoutRef}`, comfyuiBase);
+      if (!localExists) {
+        const remoteRef = gitRemoteRefFor(nodeDir, checkoutRef, comfyuiBase);
+        if (remoteRef) checkoutRef = remoteRef;
+      }
+    }
     // `--end-of-options` is not a portable `git checkout` argument.
     // checkoutRef has already passed validateGitRef(), which rejects leading
     // dashes and control/whitespace characters before it reaches argv.
@@ -2763,6 +2780,7 @@ function runGitCheckout(
       env: nonInteractiveGitEnv(),
     });
   } catch (err) {
+    if (err instanceof GitRefProbeError) throw err;
     const e = err as NodeJS.ErrnoException & { stdout?: Buffer | string; stderr?: Buffer | string };
     throw new NodeManagementError(
       `Failed to check out git ref "${checkoutRef}" for custom node "${baseUrl}": ${e.message}`,

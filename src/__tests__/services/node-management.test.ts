@@ -2059,6 +2059,48 @@ describe("node-management service", () => {
       ]);
     });
 
+    it("#2919 detaches to the canonical remote ref for a remote-only explicit branch", async () => {
+      stubFetch({ installedBody: {} });
+      let cloned = false;
+      mockedExists.mockImplementation((p: unknown) => {
+        const s = String(p);
+        if (s.includes("requirements.txt") || s.includes("install.py")) {
+          return false;
+        }
+        if (s.includes(".venv") || s.includes("cm-cli.py")) return false;
+        if (s.includes(NODE_DIR_UTILS)) return cloned;
+        return false;
+      });
+      const missingGitRef = () =>
+        Object.assign(new Error("fatal: 'refs/heads/main' - not a valid ref"), {
+          status: 1,
+        });
+      mockedExec.mockImplementation(((bin: string, args: string[]) => {
+        if (bin === "git" && args[0] === "clone") cloned = true;
+        if (bin === "git" && args[2] === "show-ref") throw missingGitRef();
+        if (bin === "git" && args[2] === "for-each-ref")
+          return "refs/remotes/origin/main\n";
+        return "";
+      }) as never);
+
+      const res = await installCustomNode({
+        id: "https://github.com/teskor-hub/comfyui-teskors-utils",
+        ref: "main",
+      });
+
+      expect(res.mechanism).toBe("git-clone");
+      const checkoutCall = mockedExec.mock.calls.find(
+        (c) => c[0] === "git" && (c[1] as string[])[2] === "checkout",
+      );
+      expect(checkoutCall?.[1]).toEqual([
+        "-C",
+        NODE_DIR_UTILS,
+        "checkout",
+        "--detach",
+        "refs/remotes/origin/main",
+      ]);
+    });
+
     it("cleans up a clone when the version-derived nightly probe is unknown", async () => {
       stubFetch({ installedBody: {} });
       let cloned = false;
@@ -2433,7 +2475,7 @@ describe("node-management service", () => {
       });
 
       expect(res.mechanism).toBe("comfy-cli");
-      expect(mockedExec).toHaveBeenCalledTimes(3);
+      expect(mockedExec).toHaveBeenCalledTimes(4);
       expect(mockedExec.mock.calls[0][1]).toEqual([
         "--json",
         "--workspace",
@@ -2455,15 +2497,26 @@ describe("node-management service", () => {
         "--all",
         "--tags",
       ]);
+      // #2919 — explicit ref is probed before detach; locally-present refs
+      // keep the bare name.
       expect(mockedExec.mock.calls[2][0]).toBe("git");
       expect(mockedExec.mock.calls[2][1]).toEqual([
+        "-C",
+        BAR_DIR,
+        "show-ref",
+        "--verify",
+        "--quiet",
+        "refs/heads/abc123",
+      ]);
+      expect(mockedExec.mock.calls[3][0]).toBe("git");
+      expect(mockedExec.mock.calls[3][1]).toEqual([
         "-C",
         BAR_DIR,
         "checkout",
         "--detach",
         "abc123",
       ]);
-      expect(mockedExec.mock.calls[2][1]).not.toContain("--end-of-options");
+      expect(mockedExec.mock.calls[3][1]).not.toContain("--end-of-options");
     });
 
     it("does not use a SAVED DEFAULT workspace for cm-cli when COMFYUI_PATH is unset", async () => {
@@ -2509,7 +2562,10 @@ describe("node-management service", () => {
       expect(res.mechanism).toBe("comfy-cli");
       expect(mockedExec.mock.calls[0][1]).toContain("/split/data");
       expect(mockedExec.mock.calls[0][1]).not.toContain("/split/code");
-      expect(mockedExec.mock.calls[2][1]).toEqual([
+      const splitCheckout = mockedExec.mock.calls.find(
+        (c) => c[0] === "git" && (c[1] as string[])[2] === "checkout",
+      );
+      expect(splitCheckout?.[1]).toEqual([
         "-C",
         resolve("/split/data", "custom_nodes", "bar"),
         "checkout",
