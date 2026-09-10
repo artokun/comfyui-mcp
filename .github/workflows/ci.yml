@@ -60,8 +60,6 @@ jobs:
       # the #796 gate: a new `x as unknown as Foo` or `(): unknown` fails here, a
       # paid-down count must be recorded, and a waiver lives at the site with a
       # reason. Already part of `npm run lint`; the dedicated step keeps the
-      # ratchets listed together and makes a failure attributable at a glance.
-      - run: npm run check:anti-slop
 
       # docs/design/tool-vocabulary.json is what comfyui-mcp-panel VENDORS to
       # validate its callTool("…") string literals. If the vocabulary changes here

@@ -467,14 +467,15 @@ describe("train_doctor actions call the same services with the same arguments", 
     expect(mocks.buildTrainerImage).not.toHaveBeenCalled();
   });
 
-  it('action:"build_image" forwards aiToolkitRef to the builder', async () => {
+  it('action:"build_image" refuses cleanly now that docker/trainer no longer ships', async () => {
+    // The trainer Dockerfile left the repo with the archive declutter. The action
+    // must say so with the existing no_dockerfile refusal, and never start a build.
     mocks.dockerAvailable.mockResolvedValueOnce(true);
-    mocks.buildTrainerImage.mockResolvedValueOnce({ ok: true, command: "x", data: { image: "trainer:test" } });
     const res = await handler("train_doctor")({ action: "build_image", aiToolkitRef: "deadbeef" });
-    expect(mocks.buildTrainerImage).toHaveBeenCalledWith(
-      expect.objectContaining({ aiToolkitRef: "deadbeef" }),
-    );
-    expect(JSON.parse(text(res)).ok).toBe(true);
+    const out = JSON.parse(text(res));
+    expect(out.ok).toBe(false);
+    expect(out.error?.code).toBe("no_dockerfile");
+    expect(mocks.buildTrainerImage).not.toHaveBeenCalled();
   });
 });
 
