@@ -315,6 +315,38 @@ describe("searchNodePacks", () => {
     expect(rgCallsSpy[0].args[rgCallsSpy[0].args.indexOf("--regexp") + 1]).toBe("hit");
   });
 
+  it("#2921: a match found inside a pack is returned root-relative so read can open it", () => {
+    const pack = join(customNodes, "Pack");
+    mkdirSync(pack, { recursive: true });
+    writeFileSync(join(pack, "nodes.py"), "class FooNode:\n    pass\n");
+    const { deps } = makeDeps(); // builtin engine
+    const res = searchNodePacks({ query: "FooNode", path: "Pack" }, deps);
+    expect(res.matches.length).toBe(1);
+    // Root-relative (custom_nodes/), NOT pack-relative — this is what read expects.
+    expect(res.matches[0].file).toBe("Pack/nodes.py");
+    // The exact round trip from the issue: the returned path must be readable.
+    const read = readNodeFile({ path: res.matches[0].file }, deps);
+    expect(read.content).toContain("FooNode");
+  });
+
+  it("#2921: ripgrep matches inside a pack are returned root-relative", () => {
+    const pack = join(customNodes, "Pack");
+    mkdirSync(pack, { recursive: true });
+    writeFileSync(join(pack, "nodes.py"), "hit here\n");
+    const rgCallsSpy: { args: string[]; cwd: string }[] = [];
+    const { deps } = makeDeps({
+      hasRipgrep: () => true,
+      runRipgrep: (args, opts) => {
+        rgCallsSpy.push({ args, cwd: opts.cwd });
+        return { status: 0, stdout: "nodes.py:3:hit here\n", stderr: "" };
+      },
+    });
+    const res = searchNodePacks({ query: "hit", path: "Pack" }, deps);
+    expect(res.engine).toBe("ripgrep");
+    expect(res.matches).toEqual([{ file: "Pack/nodes.py", line: 3, text: "hit here" }]);
+    expect(rgCallsSpy[0].cwd).toBe(realpathSync(pack));
+  });
+
   // #809 (codex gate) — BOTH directions of the truncation lie, run for real rather than
   // asserted against the source text.
   //
