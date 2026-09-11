@@ -596,7 +596,7 @@ describe("the wiring that makes the above reachable in production", () => {
     // nobody.
     const src = read("../../orchestrator/index.ts");
     expect(src).toMatch(
-      /const sysAppend =\s*systemAppendForBackend\(backend\) \+\s*panelToolsRetraction\(backend, panelMcpHttp !== null\) \+\s*inheritedMcpRetraction\(backend\);/,
+      /const sysAppend =\s*systemAppendForBackend\(backend\) \+\s*\(backend === "dsh" \? dshCapabilityNote\(panelMcpHttp !== null\) :\s*panelToolsRetraction\(backend, panelMcpHttp !== null\) \+ inheritedMcpRetraction\(backend\)\);/,
     );
   });
 });

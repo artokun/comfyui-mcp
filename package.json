@@ -62,6 +62,7 @@
     "check:blog-structure": "node scripts/check-blog-structure.mjs"
   },
   "dependencies": {
+    "@agentclientprotocol/sdk": "1.4.0",
     "@comfyorg/sdk": "^0.1.7",
     "@modelcontextprotocol/sdk": "~1.30.0",
     "@stable-canvas/comfyui-client": "^1.5.9",

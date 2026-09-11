@@ -248,6 +248,7 @@ import { resolveOpenAiKeyCredentials } from "../services/code-provider-auth.js";
 import { CopilotBackend, COPILOT_DEFAULT_MODEL } from "./copilot-backend.js";
 import { SYSTEM as MODEL_CARD_SYSTEM } from "./ai-proposer.js";
 import { resolvePrompt, registerPrompt, onPromptsChanged } from "../services/prompt-overrides.js";
+import { DSH_PROMPT_ID, DSH_PANEL_PERSONA, buildDshSystemAppend, assertDshAppendBudget, panelToolMode, dshCapabilityNote } from "./dsh-prompt.js";
 import {
   allBackendReadiness,
   discoverBackendAvailability,
@@ -268,6 +269,7 @@ import type { ToolMode } from "../transport/cli.js";
 import { dedupeAudioRefs, splitAudioAttachments } from "./audio-attachment.js";
 import { startPanelConsoleHttpServer, type PanelConsoleHttpServer } from "./panel-console-http.js";
 import type { AgentBackend, BackendId } from "./agent-backend.js";
+import { DshBackend } from "./dsh-backend.js";
 import { readComfyuiCrashLog, formatCrashNote } from "../services/crash-log.js";
 import { QueueMonitor } from "../services/queue-monitor.js";
 import { formatQueueNote } from "./queue-note.js";
@@ -1548,10 +1550,16 @@ export async function runPanelOrchestrator(): Promise<void> {
   // Build an agent_status frame from a usage snapshot — used both live (per
   // assistant response) and to re-push the last value when a tab reconnects.
   function pushStatus(tabId: string, status: UsageStatus): void {
+    const contextPct = typeof status.contextPct === "number" && Number.isFinite(status.contextPct)
+      ? status.contextPct
+      : typeof status.used === "number" && Number.isFinite(status.used) && status.used >= 0 &&
+        typeof status.contextWindow === "number" && Number.isFinite(status.contextWindow) && status.contextWindow > 0
+        ? Math.min(1, status.used / status.contextWindow) : undefined;
     bridge.push(
       {
         type: "agent_status",
-        ...(typeof status.contextPct === "number" ? { context_pct: status.contextPct } : {}),
+        ...(status.sessionId ? { session_id: status.sessionId } : {}),
+        ...(contextPct !== undefined ? { context_pct: contextPct } : {}),
         ...(typeof status.used === "number" ? { used: status.used } : {}),
         ...(typeof status.contextWindow === "number" ? { context_window: status.contextWindow } : {}),
         ...(status.model ? { model: status.model } : {}),
@@ -1751,6 +1759,7 @@ export async function runPanelOrchestrator(): Promise<void> {
   // `backendId`/`codexModel`/`geminiModel` above are the DEFAULT + per-provider
   // model config; the process is no longer pinned to one.
   const KNOWN_BACKENDS = new Set([
+    "dsh",
     "claude",
     "codex",
     "chatgpt",
@@ -2219,6 +2228,10 @@ export async function runPanelOrchestrator(): Promise<void> {
   // the backend label recomputed from the tab's actual backend id. Falls back to
   // the shared append when the env probe produced nothing (envCaps undefined).
   const systemAppendForBackend = (bId: string): string => {
+    if (bId === "dsh") {
+      const labels = resolveBackends(bId);
+      return buildDshSystemAppend(envCaps ? { ...envCaps, ...labels } : undefined);
+    }
     if (!envCaps) return panelSystemAppend;
     const { backend, otherBackendAvailable } = resolveBackends(bId);
     // Already the default's label → reuse the shared string (no rebuild).
@@ -2240,6 +2253,7 @@ export async function runPanelOrchestrator(): Promise<void> {
   // The persona is live-applied here; the other prompts are read fresh at each
   // session/turn, so they take effect on the next spawn without an explicit push.
   registerPrompt("panel.persona", "Panel agent persona (all backends)", PANEL_SYSTEM_APPEND, "Injected into every backend; applies live to running agents.");
+  registerPrompt(DSH_PROMPT_ID, "DSH panel instructions", DSH_PANEL_PERSONA, "DSH only; next new session. Existing history is not rewritten. Maximum total append: 8 KiB.");
   registerPrompt("backend.ollama", "Ollama / OpenRouter base prompt", OLLAMA_SYSTEM_PROMPT, "Applies on the next local/OpenRouter session.");
   registerPrompt("proposer.modelCard", "Model Explorer “Ask AI” curator", MODEL_CARD_SYSTEM, "Applies to the next Ask-AI proposal.");
   onPromptsChanged(() => { void refreshEnvCapabilities(); });
@@ -2350,6 +2364,7 @@ export async function runPanelOrchestrator(): Promise<void> {
   // tools don't saturate the backend's tool budget and make codex silently drop
   // the panel_* HTTP-MCP tools (overridable via COMFYUI_MCP_TOOL_MODE=full).
   const httpLaneComfyToolMode = resolveHttpLaneComfyToolMode();
+  const dshUsageByKey = new Map<string, UsageStatus>();
   // WHICH LLM IS DRIVING THIS AGENT — pointed at the file the orchestrator
   // republishes on every turn dispatch (see the onTurn handler). report_issue
   // reads it in the subprocess and stamps the model into the issue body, so a
@@ -2476,9 +2491,21 @@ export async function runPanelOrchestrator(): Promise<void> {
     // undefined for it, so it never reaches here) is the only one that does (#2311).
     const sysAppend =
       systemAppendForBackend(backend) +
-      panelToolsRetraction(backend, panelMcpHttp !== null) +
-      inheritedMcpRetraction(backend);
+      (backend === "dsh" ? dshCapabilityNote(panelMcpHttp !== null) :
+        panelToolsRetraction(backend, panelMcpHttp !== null) + inheritedMcpRetraction(backend));
     try {
+    if (backend === "dsh") {
+      return new DshBackend({
+        cwd:comfyuiPath??process.cwd(),comfyuiUrl,systemAppend:assertDshAppendBudget(sysAppend),
+        mcpServers:makeHttpBackendMcpServers(key,panelToolMode(backend,httpLaneComfyToolMode)),blind:()=>anyTabBlind(),
+        send:(command,timeoutMs)=>bridge.send(command as Parameters<typeof bridge.send>[0],{tabId:key,timeoutMs}),
+        status: status => {
+          dshUsageByKey.set(key, status);
+          for (const tab of conversationDeliveryTabs(key, "agent_status")) pushStatus(tab, status);
+        },
+        models:(list,current)=>{for(const tab of conversationDeliveryTabs(key,'models'))pushModelsFrame(bridge,tab,list.map(m=>({value:m.id,displayName:m.label??m.id,supportsEffort:m.supportsEffort,supportedEffortLevels:m.supportedEffortLevels})),current,'dsh');},
+      });
+    }
     if (backend === "codex") {
       return new CodexBackend({
         cwd: comfyuiPath ?? process.cwd(),
@@ -2656,7 +2683,7 @@ export async function runPanelOrchestrator(): Promise<void> {
     if (!pb) {
       try {
       const simpleKeyReg = simpleKeyProvider(backend);
-      pb = simpleKeyReg
+      pb = backend === "dsh" ? new DshBackend({cwd:comfyuiPath??process.cwd(),catalogProbe:true}) : simpleKeyReg
         ? makeOpenAiKeyBackend(simpleKeyReg)
         : backend === "codex"
           ? new CodexBackend({ cwd: comfyuiPath ?? process.cwd(), model: codexModel })
@@ -3843,6 +3870,7 @@ export async function runPanelOrchestrator(): Promise<void> {
   // model for claude; the env override (or account default = the list's own
   // current) for codex/gemini.
   function currentModelFor(backend: string): string | undefined {
+    if (backend === "dsh") return (getProbeBackend("dsh") as DshBackend|null)?.currentModel();
     if (backend === "codex") return codexModel;
     if (backend === "gemini") return geminiModel;
     if (backend === "antigravity") return antigravityModel;
@@ -4533,7 +4561,8 @@ export async function runPanelOrchestrator(): Promise<void> {
       // Seed the honest host indicator: tell this tab where renders run now.
       bridge.push({ type: "comfyui_target", url: getComfyUIBaseUrl(), is_local: isTargetingLocalOrLan() }, panelTab);
       // Re-push the last usage so the context meter isn't blank after a reload.
-      const lastStatus = manager.lastStatusFor(key);
+      const dshStatus = dshUsageByKey.get(key);
+      const lastStatus = dshStatus?.sessionId === sessionStore.get(key) ? dshStatus : manager.lastStatusFor(key);
       if (lastStatus) pushStatus(panelTab, lastStatus);
       const now = Date.now();
       if (now - (lastAckAt.get(panelTab) ?? 0) < ACK_DEBOUNCE_MS) return;
@@ -5453,7 +5482,7 @@ export async function runPanelOrchestrator(): Promise<void> {
       // cannot hook in-process — a promise we can't enforce must say so out
       // loud, exactly like the old-orchestrator ack warning. API/local lanes
       // (ollama/glm/kimi/…) carry only our tool surface, so they get no scare.
-      const CLI_NATIVE_TOOL_BACKENDS = new Set(["codex", "gemini", "grok", "qwen", "antigravity", "pi", "copilot"]);
+      const CLI_NATIVE_TOOL_BACKENDS = new Set(["dsh", "codex", "gemini", "grok", "qwen", "antigravity", "pi", "copilot"]);
       const tabBackend = backendForTab(tabId);
       if (changed && nextBlind && CLI_NATIVE_TOOL_BACKENDS.has(tabBackend)) {
         bridge.push(
@@ -5735,6 +5764,7 @@ export async function runPanelOrchestrator(): Promise<void> {
     if (event.type === "new_session" && event.tab_id) {
       const tabId = event.tab_id;
       const key = agentKeyFor(tabId);
+      dshUsageByKey.delete(key);
       // reset() is synchronous (map cleared now), so no concurrent send() can
       // spawn an agent before we report the cleared session.
       const { durableCleared } = manager.reset(key);

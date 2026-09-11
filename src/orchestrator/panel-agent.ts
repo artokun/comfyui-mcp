@@ -23,6 +23,7 @@ import type {
   McpSdkServerConfigWithInstance,
 } from "@anthropic-ai/claude-agent-sdk";
 import { logger } from "../utils/logger.js";
+import { turnErrorMessage as dshErrorMessage } from "./dsh-errors.js";
 import {
   boundedDownloadError,
   COMPLETION_DISAGREEMENT_NOTE,
@@ -221,6 +222,8 @@ export function isEffort(v: unknown): v is Effort {
 
 /** A turn-usage snapshot pushed to the panel for the context/usage meter. */
 export interface UsageStatus {
+  /** Present for ACP backends, so delayed usage cannot repaint another session. */
+  sessionId?: string;
   /** Fraction of the context window in use after the turn (0..1), if known. */
   contextPct?: number;
   /** Approximate tokens occupying the context window after the turn. */
@@ -239,7 +242,7 @@ export interface UsageStatus {
  *  authoritative `say` (carrying the same id) replaces the streamed preview. */
 export interface StreamDelta {
   /** "think" = extended-thinking text, "text" = reply text, "end" = message done. */
-  phase: "think" | "text" | "end";
+  phase: "think" | "text" | "end" | "think_end" | "process";
   /** SDK message id grouping all deltas of one assistant message. */
   id: string;
   /** The incremental text chunk (absent for phase "end"). */
@@ -1915,6 +1918,11 @@ export class PanelAgent {
         }
       } catch (err) {
         if (this.closed) break;
+        if (this.backend.id === "dsh") {
+          this.takeInFlight();
+          this.busy = false;
+          this.deps.onSay(this.tabId, dshErrorMessage(err));
+        } else {
         const emsg = msgOf(err);
         logger.error(`[panel-agent ${this.short()}] stream error: ${emsg}`);
         // A resume whose target session is unavailable — e.g. the orchestrator was
@@ -1968,6 +1976,7 @@ export class PanelAgent {
           );
         }
       }
+        }
       // Session ended (cleanly or via error) — disarm any armed watchdog AND the
       // interrupt-release fallback so a stale timer from the dead session can't fire
       // into the restarted one (the restart resets the gate counters to 0, so a
@@ -1988,6 +1997,11 @@ export class PanelAgent {
       // must never count toward the settle bound.
       this.releaseEventTokens(strandedTokens, { carried: strandedWereReceived });
       if (this.closed) break;
+      if (this.backend.id === "dsh") {
+        this.busy = false;
+        this.deps.onTurn?.(this.tabId, "done");
+        return;
+      }
       // Session ended on its own — bound rapid failure loops so a persistently
       // broken SDK doesn't spin forever or black-hole each message.
       // A recoverable resume-miss (handled above by dropping the dead session) must
@@ -2260,6 +2274,15 @@ export class PanelAgent {
         if (!this.deps.onStream) break;
         if (this.streamMsgId) this.deps.onStream(this.tabId, { phase: "end", id: this.streamMsgId });
         this.streamMsgId = null;
+        break;
+      }
+      case "dsh_thought_end": {
+        this.deps.onStream?.(this.tabId, { phase: "think_end", id: ev.id });
+        if (this.streamMsgId === ev.id) this.streamMsgId = null;
+        break;
+      }
+      case "dsh_process": {
+        this.deps.onStream?.(this.tabId, { phase: "process", id: ev.id });
         break;
       }
       case "assistant": {
