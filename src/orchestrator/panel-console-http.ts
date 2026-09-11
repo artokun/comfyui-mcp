@@ -40,6 +40,7 @@ import { logger } from "../utils/logger.js";
 // The simple api-key providers (glm/kimi/moonshot) are spliced in from the
 // openai-provider-registry so a new one appears here by adding a registry entry.
 const KNOWN_BACKENDS: string[] = [
+  "dsh",
   "claude",
   "codex",
   "chatgpt",

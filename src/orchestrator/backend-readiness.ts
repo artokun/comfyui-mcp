@@ -16,6 +16,7 @@ import { join } from "node:path";
 import { readOAuthStatus } from "../services/code-provider-auth.js";
 import { resolveAgyBin } from "./antigravity-backend.js";
 import { resolvePiLaunch } from "./pi-backend.js";
+import { discoverDsh } from "./dsh-discovery.js";
 // pi's credential detection is large enough (pi's whole env map + auth.json /
 // models.json / Vertex-ADC parsing) to live in its own module; re-exported below
 // so existing importers of `piCredentialPresent` are unaffected.
@@ -303,6 +304,13 @@ export function backendReadiness(
   const b = (backend || "").toLowerCase();
   const home = opts?.home ?? homedir();
   const nowMs = opts?.now ?? Date.now();
+  if (b === "dsh") {
+    try {
+      const cli = discoverDsh({home}) !== null;
+      // Authentication belongs to DSH and is verified by its runtime probe.
+      return {backend:"dsh",cli,auth:null,ready:cli};
+    } catch { return {backend:"dsh",cli:false,auth:null,ready:false}; }
+  }
   if (b === "claude") {
     return { backend: "claude", cli: true, auth: true, ready: true };
   }

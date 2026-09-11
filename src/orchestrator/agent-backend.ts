@@ -11,6 +11,7 @@ import type { ImageRef } from "./panel-agent.js";
 import type { AudioRef } from "./audio-attachment.js";
 
 export type BackendId =
+  | "dsh"
   | "claude"
   | "codex"
   | "chatgpt"
@@ -140,12 +141,16 @@ export type AgentEvent = (
   | { type: "stream_start"; id: string | null }
   /** The streamed message finished (close the live preview bubble). */
   | { type: "stream_end" }
+  /** Finish a thought-only DSH segment without creating an empty reply. */
+  | { type: "dsh_thought_end"; id: string }
+  /** Mark a committed pre-tool message as intermediate execution text. */
+  | { type: "dsh_process"; id: string }
   /** Live extended-thinking token count, for a "thinking… (N)" indicator. */
   | { type: "thinking"; tokens: number }
-  /** A turn-ending assistant message; `uuid` (when present) is the rewind anchor.
+  /** A committed assistant message, including pre-tool progress; `uuid` is the rewind anchor.
    *  `id` matches the streamed preview; `usage` is that response's prompt usage. */
   | { type: "assistant"; text: string; uuid?: string; id?: string; usage?: AssistantUsage }
-  | { type: "tool_call"; name: string; phase: "start" | "end"; detail?: unknown }
+  | { type: "tool_call"; name: string; phase: "start" | "end"; detail?: unknown; callId?:string; elapsedMs?:number; ok?:boolean }
   /** A turn completed. `contextWindow`/`costUsd`/`subtype` are provider extras. */
   | {
       type: "result";
