@@ -7059,6 +7059,12 @@ export interface InstallModelParams {
    * listing (in-progress files are hidden there, so "listed" = landed).
    */
   trayCategory?: string;
+  /**
+   * ComfyUI-Manager model `base` family (e.g. "SD1.5", "SDXL"). The legacy Manager
+   * UI's whitelist checker reads `item['base']` unconditionally, so a task that
+   * omits it fails with `KeyError: 'base'` before the download is attempted.
+   */
+  base?: string;
 }
 
 // Remote (Manager-dispatched) downloads run server-side: the queue reports
@@ -7155,6 +7161,9 @@ export async function installModelViaManager(
     filename: params.filename,
     type: params.type,
     save_path,
+    // Legacy Manager UI (check_whitelist_for_model) reads item['base'] unconditionally;
+    // omitting it 500s the queued task before the download is attempted (#2922).
+    ...(params.base && params.base.trim().length > 0 ? { base: params.base.trim() } : {}),
   };
   // One pinned target for the whole operation — the dispatch, its self-heal
   // retry/drain, AND the landing watcher (the file lands on the server the task
