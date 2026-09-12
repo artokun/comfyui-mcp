@@ -4126,6 +4126,8 @@ async function downloadModelViaManagerRemote(
       save_path: managerSavePath,
       // Panel tray: watch OUR canonical category for the file to land (#143).
       trayCategory: modelType,
+      // #2922 — the legacy Manager whitelist checker reads item['base'] unconditionally.
+      base: /sdxl/i.test(resolvedFilename) ? "SDXL" : "SD1.5",
     });
   } catch (err) {
     // #1374 — the ONLY failure entitled to the route explanation: Manager was contacted
