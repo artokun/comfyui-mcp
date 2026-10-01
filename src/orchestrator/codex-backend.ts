@@ -1424,10 +1424,9 @@ export class CodexBackend implements AgentBackend {
     // CLAUDE panel model (e.g. claude-opus-5), which is NOT a valid Codex model.
     // The Codex model configured at construction (deps.model, from
     // COMFYUI_MCP_CODEX_MODEL) must win. Only honor opts.model if it actually looks
-    // like a Codex model (so a future Codex-aware picker can still switch live);
+    // belong to the account catalog (legacy name checks only if unavailable);
     // otherwise ignore it and keep the configured Codex model (or the account
     // default when neither is set — model:null lets the app-server choose).
-    if (opts.model && isCodexModel(opts.model)) this.model = opts.model;
     // Capture the RAW panel effort; each turn maps+snaps it against the model
     // it actually runs (toCodexEffort with the model's supported list — the
     // catalog isn't loaded yet here, and max/ultra are only valid on models
@@ -1444,6 +1443,11 @@ export class CodexBackend implements AgentBackend {
     // this, resolveTurnModel() has nothing to clamp against and defers to the
     // ~/.codex config default, which can be unrunnable (see resolveTurnModel).
     if (!this.liveCatalog) await this.listModels().catch(() => {});
+    // Catalog membership is authoritative even when a future model does not
+    // use one of the legacy name prefixes. Ignore another provider's default.
+    if (opts.model && (this.liveCatalog
+      ? this.liveCatalog.some((m) => m.id === opts.model)
+      : isCodexModel(opts.model))) this.model = opts.model;
     let threadModel: string | undefined;
     if (resumeId) {
       // thread/resume continues an existing conversation by id.

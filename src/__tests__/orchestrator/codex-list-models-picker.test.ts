@@ -111,6 +111,31 @@ describe("CodexBackend.listModels picker (#2889)", () => {
     expect(ids).toEqual(["gpt-5.6-sol", "gpt-5.5"]);
   });
 
+  it("uses catalog effort choices without inventing another model's levels", async () => {
+    const backend = backendWithList([{ id: "gpt-6-astra", supportedReasoningEfforts: [
+      { reasoningEffort: "low" }, { reasoningEffort: "ultra" },
+    ] }]);
+    expect(await backend.listModels()).toEqual([expect.objectContaining({
+      id: "gpt-6-astra", supportedEffortLevels: ["low", "ultra"],
+    })]);
+  });
+
+  it("forwards a selected future catalog ID without a legacy prefix", async () => {
+    const backend = backendWithList([{ id: "future-account-model" }]);
+    let requestedModel: unknown;
+    Object.assign(backend, {
+      prepare: async () => {},
+      client: { request: async (method: string, args: { model?: unknown }) => {
+        if (method === "model/list") return { data: [{ id: "future-account-model" }] };
+        if (method === "thread/start") { requestedModel = args.model; throw new Error("stop after model dispatch"); }
+        throw new Error(method);
+      } },
+    });
+    const stream = backend.run({ model: "future-account-model", cwd: "/tmp", systemAppend: "" });
+    await expect(stream.next()).rejects.toThrow("stop after model dispatch");
+    expect(requestedModel).toBe("future-account-model");
+  });
+
   it("falls back to the static family when model/list is unavailable", async () => {
     const backend = backendWithList("throw");
     const ids = (await backend.listModels()).map((m) => m.id);
