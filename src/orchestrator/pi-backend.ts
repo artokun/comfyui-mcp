@@ -6,8 +6,8 @@
 // gets real streaming deltas, per-tool progress, and a RESUMABLE session id, a
 // step up from the plain-text antigravity adapter it is otherwise modeled on.
 //
-//   turn N=1 (fresh)   pi --mode json [--model m] [--provider p] "<prompt>"
-//   turn N>1 / resume  pi --session <id> --mode json ... "<prompt>"
+//   turn N=1 (fresh)   pi --mode json [--model m] [--provider p] < prompt.txt
+//   turn N>1 / resume  pi --session <id> --mode json ... < prompt.txt
 //   interrupt()        kill the in-flight child process tree
 //   listModels()       parse `pi --list-models` (padded text table)
 //
@@ -45,8 +45,6 @@
 //
 // LIMITS (flagged honestly):
 //   - No ComfyUI MCP tools (see above).
-//   - The prompt rides argv, so it is visible in the OS process list for the
-//     child's lifetime and is capped at ~32K chars on Windows (preflighted).
 //   - No documented image-input path for headless mode → vision=false (image
 //     refs are already named in the turn text as a fallback).
 //   - `pi --list-models` prints pi's built-in provider CATALOG (not gated on
@@ -55,7 +53,7 @@
 //     an actionable provider/credential error.
 
 import { spawn, spawnSync, type ChildProcessByStdio } from "node:child_process";
-import type { Readable } from "node:stream";
+import type { Readable, Writable } from "node:stream";
 import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
@@ -73,9 +71,8 @@ import {
   stampTurn,
 } from "./agent-backend.js";
 
-/** The per-turn child: stdin ignored (pi takes the prompt via argv), stdout +
- *  stderr piped. */
-type PiChild = ChildProcessByStdio<null, Readable, Readable>;
+/** The per-turn child: prompt on stdin; stdout and stderr carry CLI events. */
+type PiChild = ChildProcessByStdio<Writable, Readable, Readable>;
 
 function msgOf(err: unknown): string {
   return errorText(err);
@@ -541,9 +538,8 @@ export class PiBackend implements AgentBackend {
       ...(resuming ? ["--session", this.piSessionId as string] : []),
       "--mode",
       "json",
-      ...(this.provider ? ["--provider", this.provider] : []),
+      ...(this.provider && !(this.model ?? "").includes("/") ? ["--provider", this.provider] : []),
       ...(this.model ? ["--model", this.model] : []),
-      text,
     ];
 
     // A Stop can land while this turn is still starting up — see the antigravity
@@ -555,26 +551,8 @@ export class PiBackend implements AgentBackend {
       this.idleInterruptExpiry = null;
     }
 
-    // Windows caps the whole command line at ~32K, and the prompt rides argv.
-    if (process.platform === "win32") {
-      // Counts the launch PREFIX too: an npm-shim install runs as
-      // `node <script>` (#2835), and that script path is part of the same
-      // ~32K command line the prompt has to fit inside.
-      const cmdLen =
-        bin.command.length +
-        [...bin.prefixArgs, ...args].reduce((n, a) => n + a.length + 3, 0);
-      if (cmdLen > 30_000) {
-        this.turnActive = false;
-        yield {
-          type: "error",
-          message:
-            `This message is too large for the pi CLI (${cmdLen} chars; Windows caps a command line at ~32K, and pi takes the prompt as an argument). ` +
-            "Send a shorter message, or start a fresh chat to drop replayed context.",
-        };
-        yield { type: "result", ok: false, subtype: "error" };
-        return;
-      }
-    }
+    // Pi's documented piped-input path avoids the OS argv limit and keeps
+    // conversation text out of process listings.
 
     const queue: AgentEvent[] = [];
     let wake: (() => void) | null = null;
@@ -615,7 +593,11 @@ export class PiBackend implements AgentBackend {
         if (!delta) return;
         const kind = typeof ame?.type === "string" ? ame.type : "";
         const thinking = /think|reason/i.test(kind);
-        if (!thinking) assistantText += delta;
+        // Pi also streams tool arguments. Only text/thinking deltas belong in
+        // the assistant stream; tool_execution events render calls separately.
+        const isText = kind === "" || /^text/i.test(kind);
+        if (!isText && !thinking) return;
+        if (isText) assistantText += delta;
         if (!streamOpen) {
           streamOpen = true;
           push({ type: "stream_start", id: null });
@@ -660,7 +642,7 @@ export class PiBackend implements AgentBackend {
       child = spawn(bin.command, [...bin.prefixArgs, ...args], {
         cwd,
         env: buildAgentSpawnEnv(), // strip ComfyUI tool secrets; pi's own provider keys pass through
-        stdio: ["ignore", "pipe", "pipe"],
+        stdio: ["pipe", "pipe", "pipe"],
         windowsHide: true,
         detached: process.platform !== "win32",
       }) as PiChild;
@@ -786,6 +768,11 @@ export class PiBackend implements AgentBackend {
     });
     child.on("close", (code) => settle(code));
 
+    // A broken input pipe means the child exited; the listeners above report
+    // that failure. Pi reads to EOF, so close stdin after handing over the text.
+    child.stdin.on("error", () => {});
+    child.stdin.end(text);
+
     // An interrupt can arrive while spawn() is in flight — honor it now (after the
     // exit/close/error listeners are attached, so the kill's events are observed).
     if (this.interrupted) killProcessTree(child.pid);
@@ -861,14 +848,14 @@ export class PiBackend implements AgentBackend {
     return await new Promise<ModelChoice[]>((resolve, reject) => {
       let out = "";
       let err = "";
-      let child: PiChild;
+      let child: ChildProcessByStdio<null, Readable, Readable>;
       try {
         child = spawn(bin.command, [...bin.prefixArgs, "--list-models"], {
           cwd: this.deps.cwd ?? process.cwd(),
           env: buildAgentSpawnEnv(),
           stdio: ["ignore", "pipe", "pipe"],
           windowsHide: true,
-        }) as PiChild;
+        });
       } catch (e) {
         reject(new Error(`Could not run \`pi --list-models\`: ${msgOf(e)}`));
         return;

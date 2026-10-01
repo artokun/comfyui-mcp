@@ -9,7 +9,7 @@
 import { readdirSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { homedir, platform } from "node:os";
-import { execSync } from "node:child_process";
+import { spawnSync } from "node:child_process";
 
 // Read stdin (tool result JSON) — but we only care if it succeeded
 let input = "";
@@ -68,11 +68,17 @@ process.stdin.on("end", () => {
 
     const os = platform();
     if (os === "win32") {
-      execSync(`start "" "${newest.path}"`, { shell: true, stdio: "ignore" });
+      // Keep the filename out of command syntax, including cmd.exe's parser.
+      const powershell = join(process.env.SystemRoot || "C:\\Windows", "System32", "WindowsPowerShell", "v1.0", "powershell.exe");
+      spawnSync(powershell, ["-NoProfile", "-NonInteractive", "-Command", "Start-Process -FilePath $env:COMFYUI_MCP_OPEN_IMAGE"], {
+        stdio: "ignore",
+        shell: false,
+        env: { ...process.env, COMFYUI_MCP_OPEN_IMAGE: newest.path },
+      });
     } else if (os === "darwin") {
-      execSync(`open "${newest.path}"`, { stdio: "ignore" });
+      spawnSync("open", [newest.path], { shell: false, stdio: "ignore" });
     } else {
-      execSync(`xdg-open "${newest.path}"`, { stdio: "ignore" });
+      spawnSync("xdg-open", [newest.path], { shell: false, stdio: "ignore" });
     }
   } catch {
     // Silent failure — don't interrupt the user's workflow

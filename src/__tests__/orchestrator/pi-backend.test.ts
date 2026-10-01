@@ -4,7 +4,7 @@
 // returns an in-process fake child whose scripted stdout/stderr/exit behavior is
 // set per test. This exercises the real PiBackend end-to-end: executable
 // resolution (env override), spawn argv shaping (--mode json / --session /
-// --model / --provider / positional prompt), the JSON-lines → delta → assistant →
+// --model / --provider / stdin prompt), the JSON-lines → delta → assistant →
 // result event mapping, session-id capture + resume, the terminal-result
 // invariant on failures, interrupt, tool-secret scoping, and `pi --list-models`
 // parsing.
@@ -36,7 +36,10 @@ vi.mock("node:child_process", async (importOriginal) => {
     const stderr = new PassThrough();
     proc.stdout = stdout;
     proc.stderr = stderr;
-    proc.stdin = null;
+    const stdin = new PassThrough();
+    proc.stdin = stdin;
+    proc.stdinText = "";
+    stdin.on("data", (chunk) => { proc.stdinText = String(proc.stdinText) + chunk.toString(); });
     proc.kill = () => {
       if (proc.exitCode === null) {
         proc.exitCode = 1;
@@ -344,12 +347,12 @@ describe("PiBackend turns", () => {
     expect(t1.args).toContain("--mode");
     expect(t1.args[t1.args.indexOf("--mode") + 1]).toBe("json");
     expect(t1.args[t1.args.indexOf("--model") + 1]).toBe("openai/gpt-4o");
-    expect(t1.args[t1.args.length - 1]).toContain("PERSONA");
-    expect(t1.args[t1.args.length - 1]).toContain("hi");
+    expect(hoisted.procs[0]!.stdinText).toContain("PERSONA");
+    expect(hoisted.procs[0]!.stdinText).toContain("hi");
     // Turn 2: resumes the captured session id, no persona.
     const t2 = hoisted.spawns[1]!;
     expect(t2.args[t2.args.indexOf("--session") + 1]).toBe("sess-abc");
-    expect(t2.args[t2.args.length - 1]).toBe("again");
+    expect(hoisted.procs[1]!.stdinText).toBe("again");
   });
 
   it("emits per-tool events from tool_execution_* lines", async () => {
@@ -375,7 +378,7 @@ describe("PiBackend turns", () => {
     await collect(backend.run({ resume: "sess-existing", channel: channelOf([{ text: "back" }]) }));
     const t1 = hoisted.spawns[0]!;
     expect(t1.args[t1.args.indexOf("--session") + 1]).toBe("sess-existing");
-    expect(t1.args[t1.args.length - 1]).toBe("back"); // no persona preamble
+    expect(hoisted.procs[0]!.stdinText).toBe("back"); // no persona preamble
   });
 
   it("re-asserts the capabilityNote on EVERY turn — fresh AND resume (P0a-resume)", async () => {
@@ -389,8 +392,8 @@ describe("PiBackend turns", () => {
     );
     const fresh = new PiBackend({ cwd: workDir, systemAppend: "PERSONA", capabilityNote: NOTE });
     await collect(fresh.run({ channel: channelOf([{ text: "one" }, { text: "two" }]) }));
-    const f1 = hoisted.spawns[0]!.args.at(-1)!;
-    const f2 = hoisted.spawns[1]!.args.at(-1)!;
+    const f1 = String(hoisted.procs[0]!.stdinText);
+    const f2 = String(hoisted.procs[1]!.stdinText);
     expect(f1).toContain("PERSONA");
     expect(f1).toContain(NOTE);
     expect(f2).not.toContain("PERSONA"); // heavy preamble suppressed after turn 1
@@ -400,7 +403,7 @@ describe("PiBackend turns", () => {
     hoisted.script.push({ stdout: [header("s2"), delta("c"), END], exit: 0 });
     const resumed = new PiBackend({ cwd: workDir, systemAppend: "PERSONA", capabilityNote: NOTE });
     await collect(resumed.run({ resume: "s-old", channel: channelOf([{ text: "back" }]) }));
-    const r1 = hoisted.spawns[2]!.args.at(-1)!;
+    const r1 = String(hoisted.procs[2]!.stdinText);
     expect(r1).not.toContain("PERSONA");
     expect(r1).toContain(NOTE);
   });
@@ -415,6 +418,26 @@ describe("PiBackend turns", () => {
     await collect(backend.run({ resume: "s", channel: channelOf([{ text: "q2" }]) }));
     const t2 = hoisted.spawns[1]!;
     expect(t2.args[t2.args.indexOf("--model") + 1]).toBe("anthropic/claude-sonnet-4");
+  });
+
+  it("lets a selected model's provider override the configured default", async () => {
+    hoisted.script.push({ stdout: [header("s"), delta("ok"), END], exit: 0 });
+    const backend = new PiBackend({ cwd: workDir, provider: "google" });
+    await collect(backend.run({ model: "openai/gpt-4o", channel: channelOf([{ text: "q" }]) }));
+    expect(hoisted.spawns[0]!.args).toEqual(["--mode", "json", "--model", "openai/gpt-4o"]);
+  });
+
+  it("keeps tool argument deltas out of the assistant reply", async () => {
+    const toolDelta = JSON.stringify({ type: "message_update", assistantMessageEvent: {
+      type: "toolcall_delta", delta: '{"command":"private argument"}',
+    } }) + "\n";
+    hoisted.script.push({ stdout: [header("s"), delta("Hello "), toolDelta, delta("world"), END], exit: 0 });
+    const backend = new PiBackend({ cwd: workDir });
+    const events = await collect(backend.run({ channel: channelOf([{ text: "q" }]) }));
+    expect(events.filter((e) => e.type === "assistant")).toEqual([
+      expect.objectContaining({ text: "Hello world" }),
+    ]);
+    expect(events.filter((e) => e.type === "assistant_delta").map((e) => (e as { text: string }).text).join("")).toBe("Hello world");
   });
 
   it("passes --provider when configured", async () => {
@@ -516,8 +539,8 @@ describe("PiBackend turns", () => {
     expect(hoisted.spawns.length).toBe(2);
     expect(hoisted.spawns[0]!.args[hoisted.spawns[0]!.args.indexOf("--session") + 1]).toBe("dead-id");
     expect(hoisted.spawns[1]!.args).not.toContain("--session");
-    expect(hoisted.spawns[1]!.args.at(-1)).toContain("PERSONA");
-    expect(hoisted.spawns[1]!.args.at(-1)).toContain("hi");
+    expect(hoisted.procs[1]!.stdinText).toContain("PERSONA");
+    expect(hoisted.procs[1]!.stdinText).toContain("hi");
     // The fresh session's id replaced the dead one, so the NEXT turn resumes it.
     expect(events.some((e) => e.type === "session" && (e as { sessionId: string }).sessionId === "fresh-id")).toBe(true);
   });
@@ -648,13 +671,23 @@ describe("PiBackend turns", () => {
     expect(hoisted.killed).toContain(hoisted.procs[0]!.pid);
   });
 
-  it("rejects an over-32K prompt on Windows with a legible error", async () => {
-    if (process.platform !== "win32") return;
-    const backend = new PiBackend({ cwd: workDir });
-    const events = await collect(backend.run({ channel: channelOf([{ text: "x".repeat(31_000) }]) }));
-    expect(hoisted.spawns).toHaveLength(0);
-    const err = events.find((e) => e.type === "error") as { message: string };
-    expect(err.message).toMatch(/too large/i);
+  it.each(["linux", "win32"] as const)("delivers long prompts on stdin on %s", async (os) => {
+    const descriptor = Object.getOwnPropertyDescriptor(process, "platform")!;
+    Object.defineProperty(process, "platform", { value: os });
+    try {
+      const text = "private prompt $(do not execute) ".repeat(2000);
+      const backend = new PiBackend({ cwd: workDir });
+      const events = await collect(backend.run({ channel: channelOf([{ text }]) }));
+      expect(hoisted.spawns).toHaveLength(1);
+      expect(hoisted.spawns[0]!.args).toEqual(["--mode", "json"]);
+      expect(hoisted.spawns[0]!.opts.stdio).toEqual(["pipe", "pipe", "pipe"]);
+      expect(hoisted.procs[0]!.stdinText).toBe(text);
+      expect((hoisted.procs[0]!.stdin as { writableEnded: boolean }).writableEnded).toBe(true);
+      expect(events.filter((e) => e.type === "error")).toHaveLength(0);
+      expect(events.at(-1)).toMatchObject({ type: "result", ok: true });
+    } finally {
+      Object.defineProperty(process, "platform", descriptor);
+    }
   });
 
   it("prepare() fails fast with install guidance when pi is missing", async () => {

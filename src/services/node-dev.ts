@@ -815,11 +815,10 @@ function resolveSearchDir(
   path: string | undefined,
   deps: NodeDevDeps,
   resolvedBase?: string,
-): string {
+): JailResult {
   const p = (path ?? ".").trim();
-  if (p === "." || p === "") return customNodesRoot(resolvedBase);
-  const { abs } = resolveInJail(p, deps, resolvedBase);
-  return abs;
+  if (p === "." || p === "") return { abs: customNodesRoot(resolvedBase), rel: "" };
+  return resolveInJail(p, deps, resolvedBase);
 }
 
 export function searchNodePacks(
@@ -833,15 +832,22 @@ export function searchNodePacks(
     Math.max(1, options.maxResults ?? SEARCH_DEFAULT_RESULTS),
     SEARCH_MAX_RESULTS,
   );
-  const searchDir = resolveSearchDir(options.path, deps, resolvedBase);
+  const { abs: searchDir, rel: searchPrefix } = resolveSearchDir(options.path, deps, resolvedBase);
   if (!deps.isDirectory(searchDir)) {
     throw new NodeDevError(`Search path does not exist under custom_nodes/.`);
   }
+  // #2921: match paths are reported relative to custom_nodes/ (the base root that
+  // read/write/list_files resolve against) so a search result can be fed straight to
+  // action:"read". searchDir is only the WALK root; when it is a subdirectory such as a
+  // pack folder, prefix every reported path with that subdirectory.
+  // The jail resolver compares canonical paths. Recomputing this offset from
+  // the configured (possibly symlinked) root would invent an escaping path.
+  const relPrefix = searchPrefix.split(/[\\/]/).join("/");
 
   if (deps.hasRipgrep()) {
-    return searchWithRipgrep(query, searchDir, cap, options, deps);
+    return searchWithRipgrep(query, searchDir, cap, options, deps, relPrefix);
   }
-  return searchBuiltin(query, searchDir, cap, options, deps);
+  return searchBuiltin(query, searchDir, cap, options, deps, relPrefix);
 }
 
 function searchWithRipgrep(
@@ -850,6 +856,7 @@ function searchWithRipgrep(
   cap: number,
   options: SearchOptions,
   deps: NodeDevDeps,
+  relPrefix: string,
 ): SearchResult {
   const args = [
     "--line-number",
@@ -902,7 +909,7 @@ function searchWithRipgrep(
       break;
     }
     matches.push({
-      file: m[1],
+      file: relPrefix ? `${relPrefix}/${m[1]}` : m[1],
       line: Number(m[2]),
       text: clipMatchLine(m[3]),
     });
@@ -927,6 +934,7 @@ function searchBuiltin(
   cap: number,
   options: SearchOptions,
   deps: NodeDevDeps,
+  relPrefix: string,
 ): SearchResult {
   const re = new RegExp(query, options.caseSensitive ? "" : "i");
   const globMatcher = options.glob ? globToRegExp(options.glob) : null;
@@ -989,7 +997,7 @@ function searchBuiltin(
             return;
           }
           matches.push({
-            file: rel,
+            file: relPrefix ? `${relPrefix}/${rel}` : rel,
             line: i + 1,
             text: clipMatchLine(lines[i]),
           });

@@ -6247,6 +6247,9 @@ describe("UiBridge (late ask_user answer buffer — #486)", () => {
       const sock = await connectPanel(key, "wf", identity);
       await waitFor(() => expect(bridge.tabs().some((t) => t.tab_id === key)).toBe(true));
       const before = bridge.tabIncarnation(key);
+      const writeIdentity = bridge.tabConnectionIncarnationIdentity(key);
+      expect(writeIdentity).toMatchObject({ generation: expect.any(Number), incarnationId: before });
+      if (!identity.tabSessionId) expect(bridge.tabConnectionIdentity(key)).toBeUndefined();
 
       // Re-register on the SAME socket, with no disconnect in between.
       sock.send(
@@ -6264,6 +6267,8 @@ describe("UiBridge (late ask_user answer buffer — #486)", () => {
       );
       // Same connection, same incarnation — and therefore not a takeover.
       expect(bridge.tabIncarnation(key)).toBe(before);
+      expect(bridge.tabConnectionIncarnationIdentity(key)?.incarnationId).toBe(writeIdentity?.incarnationId);
+      expect(bridge.tabConnectionIncarnationIdentity(key)?.generation).toBeGreaterThan(writeIdentity!.generation);
       expect(takenOver).toEqual([]);
       sock.close();
       await vacant(key);
@@ -6280,11 +6285,17 @@ describe("UiBridge (late ask_user answer buffer — #486)", () => {
     bridge.setTabGoneListener((tabId) => gone.push(tabId), { graceMs: NEVER });
     const anonA = await connectPanel("wf:anon", "wf"); // no tab_session_id
     await waitFor(() => expect(bridge.tabs().some((t) => t.tab_id === "wf:anon")).toBe(true));
+    expect(bridge.tabConnectionIdentity("wf:anon")).toBeUndefined();
+    const writeA = bridge.tabConnectionIncarnationIdentity("wf:anon");
+    expect(writeA).toMatchObject({ generation: expect.any(Number), incarnationId: expect.stringMatching(/^anon:/) });
     anonA.close();
     await vacant("wf:anon");
+    expect(bridge.tabConnectionIncarnationIdentity("wf:anon")).toBeUndefined();
 
     const anonB = await connectPanel("wf:anon", "wf"); // also anonymous
     await waitFor(() => expect(bridge.tabs().some((t) => t.tab_id === "wf:anon")).toBe(true));
+    expect(bridge.tabConnectionIncarnationIdentity("wf:anon")?.incarnationId).not.toBe(writeA?.incarnationId);
+    expect(bridge.tabConnectionIdentity("wf:anon")).toBeUndefined();
     anonB.close();
     await vacant("wf:anon");
     expect(gone).toEqual([]);
