@@ -654,7 +654,6 @@ export class PiBackend implements AgentBackend {
     }
     this.child = child;
 
-
     // LIVENESS heartbeat: a pi turn may run long tool calls with quiet stretches.
     const heartbeat = setInterval(() => {
       try {
