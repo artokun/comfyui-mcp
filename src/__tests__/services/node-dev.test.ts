@@ -347,6 +347,29 @@ describe("searchNodePacks", () => {
     expect(rgCallsSpy[0].cwd).toBe(realpathSync(pack));
   });
 
+  it.each([
+    ["builtin", undefined], ["builtin", "Pack"],
+    ["ripgrep", undefined], ["ripgrep", "Pack"],
+  ] as const)("search/read round trip through a symlinked install (%s, %s)", (engine, path) => {
+    const pack = join(customNodes, "Pack");
+    mkdirSync(pack, { recursive: true });
+    writeFileSync(join(pack, "nodes.py"), "class AliasNode:\n    pass\n");
+    const alias = join(workspace, "install-alias");
+    symlinkSync(workspace, alias, IS_WIN ? "junction" : "dir");
+    config.comfyuiPath = alias;
+    const { deps } = makeDeps({
+      hasRipgrep: () => engine === "ripgrep",
+      runRipgrep: () => ({
+        status: 0,
+        stdout: `${path ? "nodes.py" : "Pack/nodes.py"}:1:class AliasNode:\n`,
+        stderr: "",
+      }),
+    });
+    const found = searchNodePacks({ query: "AliasNode", path }, deps);
+    expect(found.matches[0].file).toBe("Pack/nodes.py");
+    expect(readNodeFile({ path: found.matches[0].file }, deps).content).toContain("AliasNode");
+  });
+
   // #809 (codex gate) — BOTH directions of the truncation lie, run for real rather than
   // asserted against the source text.
   //

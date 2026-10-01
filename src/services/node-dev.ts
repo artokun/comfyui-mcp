@@ -815,11 +815,10 @@ function resolveSearchDir(
   path: string | undefined,
   deps: NodeDevDeps,
   resolvedBase?: string,
-): string {
+): JailResult {
   const p = (path ?? ".").trim();
-  if (p === "." || p === "") return customNodesRoot(resolvedBase);
-  const { abs } = resolveInJail(p, deps, resolvedBase);
-  return abs;
+  if (p === "." || p === "") return { abs: customNodesRoot(resolvedBase), rel: "" };
+  return resolveInJail(p, deps, resolvedBase);
 }
 
 export function searchNodePacks(
@@ -833,7 +832,7 @@ export function searchNodePacks(
     Math.max(1, options.maxResults ?? SEARCH_DEFAULT_RESULTS),
     SEARCH_MAX_RESULTS,
   );
-  const searchDir = resolveSearchDir(options.path, deps, resolvedBase);
+  const { abs: searchDir, rel: searchPrefix } = resolveSearchDir(options.path, deps, resolvedBase);
   if (!deps.isDirectory(searchDir)) {
     throw new NodeDevError(`Search path does not exist under custom_nodes/.`);
   }
@@ -841,8 +840,9 @@ export function searchNodePacks(
   // read/write/list_files resolve against) so a search result can be fed straight to
   // action:"read". searchDir is only the WALK root; when it is a subdirectory such as a
   // pack folder, prefix every reported path with that subdirectory.
-  const baseRoot = customNodesRoot(resolvedBase);
-  const relPrefix = relative(baseRoot, searchDir).split(/[\\/]/).join("/");
+  // The jail resolver compares canonical paths. Recomputing this offset from
+  // the configured (possibly symlinked) root would invent an escaping path.
+  const relPrefix = searchPrefix.split(/[\\/]/).join("/");
 
   if (deps.hasRipgrep()) {
     return searchWithRipgrep(query, searchDir, cap, options, deps, relPrefix);
