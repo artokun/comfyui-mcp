@@ -6,6 +6,24 @@ All notable changes to this project are documented here. This project adheres to
 
 ## Unreleased
 
+## [0.52.204] - 2026-10-01
+
+### MCP
+
+#### Changed
+- Resume limited maintenance for the local Agent Panel and provider choice. The October 9 shutdown commitment is withdrawn; support will be reassessed when Comfy's official local panel becomes publicly available. Automatic reporting remains disabled even with worker configuration present.
+
+#### Fixed
+- resume limited maintenance and repair model continuity
+
+#### Changed
+- remove docker/ and the anti-slop lint tooling (#2928)
+
+
+- The Codex model picker follows visible account-catalog entries instead of a GPT-family allowlist; Astra and future catalog models remain selectable with their advertised effort choices.
+- New chat preserves provider-owned model and effort choices without copying settings to another provider.
+- Subgraph unpack responses distinguish current-panel named-slot verification from older-panel compatibility warnings.
+
 ## [0.52.203] - 2026-09-09
 
 ### MCP
