@@ -96,6 +96,7 @@ function bridge(opts: {
    * ordinary-node scope probe has produced its result, before the caller can
    * take the fast path. `"gone"` drops a previously usable fingerprint. */
   scopeProbeIdentityChange?: "tab" | "connection" | "gone";
+  restartIdentityUnavailable?: boolean;
   /** #2551: the panel answers graph reads, but tab_session_id is never published
    * so panelConnectionIdentity stays unusable both before and after the probe. */
   unusableConnectionIdentity?: boolean;
@@ -620,7 +621,11 @@ function bridge(opts: {
     tabs: () => [{ tab_id: TAB, title: "wf", connected_at: 0 }],
     resolveActiveTabId: () => TAB,
     tabCanMutateGraph: () => true,
-    tabConnectionIdentity: () => connectionIdentity,
+    tabConnectionIdentity: () => opts.restartIdentityUnavailable ? undefined : connectionIdentity,
+    tabConnectionIncarnationIdentity: () => connectionIdentity && ({
+      generation: connectionIdentity.generation,
+      incarnationId: `incarnation:${connectionIdentity.tabSessionId}`,
+    }),
     promotedScopeFor: () =>
       !inSubgraph && opts.preEntryScopeRead
         ? opts.preEntryScopeRead
@@ -1748,6 +1753,23 @@ describe("panel_set_widget ordinary-node scope probe fence (#2401)", () => {
     ]);
     expect(writesApplied).toBe(0);
     expect(mutations).toBe(0);
+  });
+});
+
+describe("panel widget writes on anonymous live connections", () => {
+  it.each([undefined, "connection", "gone"] as const)("fences a promoted write across %s", async (drift) => {
+    const { isError, mutations } = await setWidget(
+      { node_id: 78, widget: "width", value: 1920 },
+      {
+        firstWrite: "ok",
+        restartIdentityUnavailable: true,
+        scopeProbeIdentityChange: drift,
+        promotedDetail: { nodes: [{ id: 78, type: "SubgraphNode", is_subgraph: true }] },
+        subgraph: SUBGRAPH,
+      },
+    );
+    expect(isError).toBe(drift !== undefined);
+    expect(mutations).toBe(drift === undefined ? 1 : 0);
   });
 });
 

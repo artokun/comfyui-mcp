@@ -4295,6 +4295,20 @@ export class UiBridge {
     }
   }
 
+  /** The current socket's identity for write fences. Anonymous HTTP panels have
+   * a bridge-minted incarnation, but cannot prove a browser tab across restart. */
+  tabConnectionIncarnationIdentity(
+    tabId: string,
+  ): { generation: number; incarnationId: string } | undefined {
+    try {
+      const conn = this.resolveTarget(tabId);
+      if (conn.sock.readyState !== WebSocket.OPEN || !conn.incarnationId) return undefined;
+      return { generation: conn.helloGeneration, incarnationId: conn.incarnationId };
+    } catch {
+      return undefined;
+    }
+  }
+
   /** Whether THIS connected panel enforces graph_set_widget's optional
    * expected promoted owner/workflow witness at the actual mutation boundary
    * (#2314). */

@@ -8062,6 +8062,25 @@ type PromotedWriteBinding = {
   nodeIdentity?: string;
 };
 
+/** Write fences need the current connection, while restart readiness needs a
+ * browser-tab proof. Normalize the opaque incarnation into the existing private
+ * witness shape; this helper is never used to certify a post-restart tab. Keep
+ * the older context API as a fallback for receivers that lack the new API. */
+function panelWriteConnectionIdentity(
+  ctx: PanelToolCtx,
+): { generation: number; tabSessionId: string } | undefined {
+  if (typeof ctx.panelConnectionIncarnationIdentity === "function") {
+    const identity = ctx.panelConnectionIncarnationIdentity();
+    return identity && { generation: identity.generation, tabSessionId: identity.incarnationId };
+  }
+  return ctx.panelConnectionIdentity?.();
+}
+
+function hasPanelWriteConnectionIdentity(ctx: PanelToolCtx): boolean {
+  return typeof ctx.panelConnectionIncarnationIdentity === "function" ||
+    typeof ctx.panelConnectionIdentity === "function";
+}
+
 type PromotedWritePlan = {
   kind: "promoted-write";
   outerNodeId: number | string;
@@ -8529,7 +8548,7 @@ function currentPromotedBindingError(
   if (ctx.tabId !== binding.tabId) return "the panel tab was rebound";
   let current: { generation: number; tabSessionId: string } | undefined;
   try {
-    current = ctx.panelConnectionIdentity?.();
+    current = panelWriteConnectionIdentity(ctx);
   } catch {
     return "the panel connection identity became unreadable";
   }
@@ -8571,8 +8590,8 @@ function currentPromotedNodeIdentityFenceError(
 }
 
 function capturePromotedWriteBinding(ctx: PanelToolCtx): PromotedWriteBinding | null {
-  if (typeof ctx.panelConnectionIdentity !== "function") return null;
-  const identity = ctx.panelConnectionIdentity();
+  if (!hasPanelWriteConnectionIdentity(ctx)) return null;
+  const identity = panelWriteConnectionIdentity(ctx);
   if (!isUsablePanelConnectionIdentity(identity)) return null;
   let nodeIdentityFenceAdvertised = false;
   if (typeof ctx.tabExpectedNodeIdentityFenceCapability === "function") {
@@ -8963,7 +8982,7 @@ function panelBindingDriftReason(
   if (!hasIdentityApi) return `the receiver identity was unavailable ${where}`;
   let identityAfter: { generation: number; tabSessionId: string } | undefined;
   try {
-    identityAfter = ctx.panelConnectionIdentity?.();
+    identityAfter = panelWriteConnectionIdentity(ctx);
   } catch {
     return `the panel connection identity became unreadable ${where}`;
   }
@@ -9038,12 +9057,12 @@ function currentOrdinaryWriteFenceError(
 ): string | null {
   if (ctx.tabId !== plan.binding.tabId) return "the panel tab was rebound";
 
-  if (typeof ctx.panelConnectionIdentity !== "function") {
+  if (!hasPanelWriteConnectionIdentity(ctx)) {
     return "the panel connection identity became unavailable";
   }
   let currentIdentity: { generation: number; tabSessionId: string } | undefined;
   try {
-    currentIdentity = ctx.panelConnectionIdentity();
+    currentIdentity = panelWriteConnectionIdentity(ctx);
   } catch {
     return "the panel connection identity became unreadable";
   }
@@ -9133,11 +9152,11 @@ async function preparePromotedWidgetWrite(
   }
 
   const tabBefore = ctx.tabId;
-  const hasIdentityApi = typeof ctx.panelConnectionIdentity === "function";
+  const hasIdentityApi = hasPanelWriteConnectionIdentity(ctx);
   let identityBefore: { generation: number; tabSessionId: string } | undefined;
   if (hasIdentityApi) {
     try {
-      identityBefore = ctx.panelConnectionIdentity?.();
+      identityBefore = panelWriteConnectionIdentity(ctx);
     } catch {
       return promotedWriteRefusal(widget, "the panel connection identity could not be read");
     }
@@ -9511,7 +9530,7 @@ async function preparePromotedWidgetWrite(
 
   let identityAfter: { generation: number; tabSessionId: string } | undefined;
   try {
-    identityAfter = ctx.panelConnectionIdentity?.();
+    identityAfter = panelWriteConnectionIdentity(ctx);
   } catch {
     return promotedWriteRefusal(widget, "the panel connection identity became unreadable while the mapping was read");
   }
@@ -10011,7 +10030,7 @@ async function refuseDaSiWaStackWrite(
   const tabBefore = ctx.tabId;
   let identityBefore: { generation: number; tabSessionId: string } | undefined;
   try {
-    identityBefore = ctx.panelConnectionIdentity?.();
+    identityBefore = panelWriteConnectionIdentity(ctx);
   } catch {
     return daSiWaIdentityRefusal("the bound browser-tab identity was unreadable");
   }
@@ -10037,7 +10056,7 @@ async function refuseDaSiWaStackWrite(
   }
   let identityAfter: { generation: number; tabSessionId: string } | undefined;
   try {
-    identityAfter = ctx.panelConnectionIdentity?.();
+    identityAfter = panelWriteConnectionIdentity(ctx);
   } catch {
     return daSiWaIdentityRefusal("the panel-tab identity became unreadable after the probe");
   }
@@ -10085,7 +10104,7 @@ async function verifyDaSiWaStackWriteFence(
   const tabBefore = ctx.tabId;
   let identityBefore: { generation: number; tabSessionId: string } | undefined;
   try {
-    identityBefore = ctx.panelConnectionIdentity?.();
+    identityBefore = panelWriteConnectionIdentity(ctx);
   } catch {
     return daSiWaIdentityRefusal("the bound browser-tab identity was unreadable before dispatch");
   }
@@ -10111,7 +10130,7 @@ async function verifyDaSiWaStackWriteFence(
 
   let identityAfter: { generation: number; tabSessionId: string } | undefined;
   try {
-    identityAfter = ctx.panelConnectionIdentity?.();
+    identityAfter = panelWriteConnectionIdentity(ctx);
   } catch {
     return daSiWaIdentityRefusal("the panel-tab identity became unreadable before dispatch");
   }
@@ -17067,6 +17086,9 @@ export interface PanelToolCtx {
    * separate from the workflow-derived routing tab id, which another browser
    * tab may reuse for the same saved workflow. */
   panelConnectionIdentity?: () => { generation: number; tabSessionId: string } | undefined;
+  /** Current socket proof, including bridge-minted anonymous HTTP incarnations.
+   * It does not establish browser-tab continuity after a restart. */
+  panelConnectionIncarnationIdentity?: () => { generation: number; incarnationId: string } | undefined;
   /**
    * Wait for a panel hello that is strictly newer than `before`, from the SAME
    * browser-tab session that received the restart dispatch. This is distinct
@@ -18700,6 +18722,9 @@ export function makePanelToolCtx(
   ctx.ensureReachable = ensureReachable;
   ctx.awaitReachable = awaitReachable;
   ctx.panelConnectionIdentity = panelConnectionIdentity;
+  if (typeof bridge.tabConnectionIncarnationIdentity === "function") {
+    ctx.panelConnectionIncarnationIdentity = () => bridge.tabConnectionIncarnationIdentity(ctx.tabId);
+  }
   ctx.awaitPostRestartReachable = awaitPostRestartReachable;
   ctx.tabCanMutateGraph = () => bridge.tabCanMutateGraph(ctx.tabId);
   ctx.tabExpectedNodeTypeFenceCapability = () =>
@@ -22908,7 +22933,7 @@ export function buildPanelToolDefs(): PanelToolDef[] {
         }
 
         let recoveryBinding: PromotedWriteBinding | null = null;
-        if (typeof ctx.panelConnectionIdentity === "function") {
+        if (hasPanelWriteConnectionIdentity(ctx)) {
           try {
             recoveryBinding = capturePromotedWriteBinding(ctx);
           } catch {
