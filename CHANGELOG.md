@@ -15,7 +15,7 @@ All notable changes to this project are documented here. This project adheres to
 - Preserve the already-landed removal of Docker and anti-slop lint infrastructure (#2928).
 
 #### Fixed
-- The Codex model picker follows visible account-catalog entries instead of a GPT-family allowlist. Astra and future catalog models remain selectable and reach model dispatch with their advertised effort choices.
+- The Codex model picker follows visible account-catalog entries instead of a GPT-family allowlist. Astra and future catalog models remain selectable and reach model dispatch with their advertised effort choices (#2960).
 - New chat preserves provider-owned model and effort choices without copying settings to another provider.
 - Subgraph unpack responses distinguish current-panel named-slot verification from older-panel compatibility warnings.
 
