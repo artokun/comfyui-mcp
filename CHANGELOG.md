@@ -13,6 +13,7 @@ All notable changes to this project are documented here. This project adheres to
 #### Fixed
 - Open generated images without interpreting filenames as commands. Adapted from azureknight63's security-hardening fork, with a fixed Windows launcher that passes filenames as data.
 - Pi receives prompts over stdin, avoiding Windows command-line limits and process-list exposure. Provider-qualified model choices override the configured default provider, and tool argument deltas stay out of assistant prose. Adapted from kalandiliris's work in Lindemellis/comfyui-mcp.
+- Node-pack searches inside a pack return paths relative to custom_nodes/, so the selected match can be read or edited without targeting the wrong file. Imported from wangzhengzhuo05/comfyui-mcp.
 - Widget writes use the live socket's identity on anonymous HTTP/LAN panels while retaining graph, node, capability, and reconnect fences. Restart readiness still requires browser-tab continuity. Adapted from ethanfel/comfyui-mcp.
 
 ## [0.52.204] - 2026-10-01
