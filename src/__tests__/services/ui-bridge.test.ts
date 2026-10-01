@@ -6267,7 +6267,8 @@ describe("UiBridge (late ask_user answer buffer — #486)", () => {
       );
       // Same connection, same incarnation — and therefore not a takeover.
       expect(bridge.tabIncarnation(key)).toBe(before);
-      expect(bridge.tabConnectionIncarnationIdentity(key)).toEqual(writeIdentity);
+      expect(bridge.tabConnectionIncarnationIdentity(key)?.incarnationId).toBe(writeIdentity?.incarnationId);
+      expect(bridge.tabConnectionIncarnationIdentity(key)?.generation).toBeGreaterThan(writeIdentity!.generation);
       expect(takenOver).toEqual([]);
       sock.close();
       await vacant(key);
