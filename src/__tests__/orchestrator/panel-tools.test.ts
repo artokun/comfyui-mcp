@@ -1427,6 +1427,74 @@ describe("panel-tools: subgraph I/O (expose rails + unpack)", () => {
     await defByName("panel_unpack_subgraph").handler({ node_id: 42 }, ctx);
     expect(calls[0]).toMatchObject({ cmd: "graph_unpack_subgraph", node_id: 42 });
   });
+
+  it("panel_unpack_subgraph refuses a success that could not prove named-slot identity (#2887)", async () => {
+    const { ctx } = makeFakeCtx();
+    ctx.call = async () => ({
+      content: [
+        {
+          type: "text",
+          text: JSON.stringify({
+            unpacked: {
+              node_id: 42,
+              external_links_verified: 3,
+              external_links_identity_ok: false,
+            },
+          }),
+        },
+      ],
+    });
+    const res = await defByName("panel_unpack_subgraph").handler({ node_id: 42 }, ctx);
+    expect(res.isError).toBe(true);
+    expect(res.content[0]).toMatchObject({
+      type: "text",
+      text: expect.stringMatching(/named dynamic slots/),
+    });
+  });
+
+  it("panel_unpack_subgraph notes an older panel that only counted surviving wires (#2887)", async () => {
+    const { ctx } = makeFakeCtx();
+    ctx.call = async () => ({
+      content: [
+        {
+          type: "text",
+          text: JSON.stringify({
+            unpacked: { node_id: 42, external_links_verified: 3 },
+          }),
+        },
+      ],
+    });
+    const res = await defByName("panel_unpack_subgraph").handler({ node_id: 42 }, ctx);
+    expect(res.isError).toBeFalsy();
+    expect(res.content.map((c) => (c.type === "text" ? c.text : "")).join("\n")).toMatch(
+      /named dynamic-slot identity/,
+    );
+  });
+
+  it("panel_unpack_subgraph keeps a current-panel identity_ok success unchanged (#2887)", async () => {
+    const { ctx } = makeFakeCtx();
+    ctx.call = async () => ({
+      content: [
+        {
+          type: "text",
+          text: JSON.stringify({
+            unpacked: {
+              node_id: 42,
+              external_links_verified: 3,
+              external_links_identity_ok: true,
+            },
+          }),
+        },
+      ],
+    });
+    const res = await defByName("panel_unpack_subgraph").handler({ node_id: 42 }, ctx);
+    expect(res.isError).toBeFalsy();
+    expect(res.content).toHaveLength(1);
+    expect(res.content[0]).toMatchObject({
+      type: "text",
+      text: expect.stringContaining("external_links_identity_ok"),
+    });
+  });
 });
 
 describe("panel-tools: panel_configure_app_mode (#1709)", () => {

@@ -22,17 +22,17 @@ const SKILL = readFileSync(
   "utf8",
 );
 
-describe("report_issue is ARCHIVED — its description no longer asks for anything", () => {
+describe("report_issue is DISABLED — its description no longer asks for anything", () => {
   // #779 pinned that the description asked for the ComfyUI FRONTEND version, because a
   // report without it could not be triaged. There is no triage any more: the project is
   // archived and the tool files nothing, so the description must say THAT, and must not
   // send the agent off collecting versions for a report that will never be read.
-  it("says it is archived and files nothing", () => {
-    expect(TOOL).toMatch(/ARCHIVED/);
+  it("says reporting is disabled and files nothing", () => {
+    expect(TOOL).toMatch(/DISABLED/);
     expect(TOOL).toMatch(/files NOTHING/);
   });
-  it("points at the official tooling instead", () => {
-    expect(TOOL).toMatch(/Comfy MCP/);
+  it("does not route a disabled report through another tool", () => {
+    expect(SKILL).toMatch(/submit the report through another tool/);
   });
   it("no longer instructs the agent to gather the FRONTEND version", () => {
     expect(TOOL).not.toMatch(/ComfyUI FRONTEND version/);
