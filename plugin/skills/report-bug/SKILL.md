@@ -1,49 +1,29 @@
 ---
 name: report-bug
-description: ARCHIVED. comfyui-mcp is no longer maintained and its issue trackers are closed - do NOT file, and do not use report_issue to try. When the user hits a defect in comfyui-mcp or the sidebar panel, say plainly that this project is archived and point them at ComfyUI's official agent and MCP tooling (Comfy Agent / Comfy MCP by Comfy-Org; https://docs.comfy.org/agent-tools). For third-party custom-node or ComfyUI-core bugs, offer their own GitHub as before, and only with the user's go-ahead. Triggers on "report this", "fix this bug", or any error in our software - the answer is the same.
+description: Issue reporting is disabled during limited maintenance of comfyui-mcp and the local Agent Panel. When the user hits a defect, explain that no report will be filed and continue helping with the task. Do not call report_issue to file, draft a report, collect reporting information, or submit through another tool. Triggers on "report this", "fix this bug", or errors in our software.
 ---
 
-# This project is archived — do not file issues
+# Limited maintenance — reporting remains disabled
 
-comfyui-mcp and the ComfyUI Agent Panel are no longer maintained. Their GitHub issue
-trackers are closed and the AI-triage intake Worker is gone, so there is nowhere for a
-report to go. `report_issue` still exists so older prompts get a clear answer, but it
-files nothing and contacts nothing.
+comfyui-mcp and the Agent Panel receive selected, verified critical fixes for the
+local panel and provider choice. This is not a broad feature roadmap. Support will
+be reassessed when Comfy's official local panel becomes publicly available.
 
-## What to do instead
+`report_issue` stays registered for compatibility, but files nothing, contacts no
+service, and returns no prefilled issue link. Worker environment variables do not
+turn reporting on. Do not retry it or submit the report through another tool.
 
-When the user hits a defect in comfyui-mcp or the panel:
+Continue helping with the user's task using the available tools. Explain observed
+limitations and offer a verified workaround when available. Do not collect
+versions or diagnostic material solely for a report that cannot be submitted.
+Ordinary troubleshooting remains available. Never claim an unverified fix or change
+the user's workflow without authorization.
 
-1. Say plainly that this project is archived and will not receive fixes.
-2. Point them at ComfyUI's **official** agent and MCP tooling, built and supported by
-   the Comfy-Org team:
-   - Comfy Agent: https://comfy.org/agent
-   - Agent tools documentation: https://docs.comfy.org/agent-tools
-   - Comfy MCP: https://comfy.org/mcp/
-   - Source: https://github.com/Comfy-Org/comfy-mcp
-3. If the task can still be completed with what works here, complete it; if not, say
-   which official tool covers it.
-
-Do NOT:
-- call `report_issue` expecting it to file (it returns the archived notice);
-- draft an issue body, look for a duplicate, or suggest the user open one by hand —
-  the trackers reject new issues;
-- spend turns on a fix-then-file loop for our repos; there is no "file".
-
-## Third-party and ComfyUI-core bugs
-
-Unchanged: these go to the node or project's own GitHub, and it is offer-and-ask — you
-propose the workaround and/or the report, and act only once the user agrees.
-`troubleshooting` still covers ordinary generation failures (OOM, a missing model,
-bad params).
-
-## Absolute rules
-
-- Scrub secrets before anything leaves the machine, every time.
-- Never claim a fix you did not verify.
-- Never touch the user's workflow data without asking.
+Official Comfy Agent and MCP tooling remain alternatives. Check their current
+availability before recommending them: https://docs.comfy.org/agent-tools.
 
 ## Sources
 
-- **Official:** ComfyUI agent tools documentation (https://docs.comfy.org/agent-tools) and Comfy MCP (https://comfy.org/mcp/).
-- **Empirical:** none. Archive policy, not reverse-engineered from a vendor graph.
+**Official:** Comfy agent tooling availability: https://docs.comfy.org/agent-tools
+
+**Empirical:** The registered `report_issue` handler in `src/tools/report-issue.ts` returns a disabled result without outbound requests. Its handler tests cover configured worker variables and both filing inputs.

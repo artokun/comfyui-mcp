@@ -249,10 +249,8 @@ describe("submitAndPoll — async triage contract", () => {
   });
 });
 
-describe("report_issue tool (registered handler) — ARCHIVED", () => {
-  // The project is no longer maintained and its trackers are closed. The tool stays
-  // registered so older prompts get an answer, but it must file nothing, contact
-  // nothing, and hand out no prefilled link to a tracker that refuses new issues.
+describe("report_issue tool (registered handler) — DISABLED", () => {
+  // Maintenance and reporting have separate lifetimes. The tool must stay offline.
   const fetchCalls: unknown[] = [];
   beforeEach(() => {
     fetchCalls.length = 0;
@@ -261,24 +259,41 @@ describe("report_issue tool (registered handler) — ARCHIVED", () => {
       throw new Error("must not be reached");
     });
   });
-  afterEach(() => vi.unstubAllGlobals());
+  afterEach(() => { vi.unstubAllGlobals(); vi.unstubAllEnvs(); });
 
-  it("our repo → archived notice, nothing filed, NO network", async () => {
+  it("our repo → disabled-reporting notice, nothing filed, NO network", async () => {
     const { json } = await callTool({ title: "t", body: "b", repo: "artokun/comfyui-mcp", mcp_version: "0.52.0" });
-    expect(json.archived).toBe(true);
+    expect(json.archived).toBe(false);
+    expect(json.reporting_enabled).toBe(false);
     expect(json.filed).toBe(false);
     expect(json.url).toBeUndefined();
-    expect(String(json.note)).toMatch(/no longer maintained/);
-    expect(String(json.note)).toMatch(/docs\.comfy\.org\/agent-tools/);
+    expect(String(json.note)).toMatch(/limited maintenance/);
+    expect(String(json.note)).toMatch(/reporting remains disabled/);
     expect(fetchCalls).toHaveLength(0);
   });
 
-  it("third-party repo → the same archived notice, no prefilled URL", async () => {
+  it("third-party repo → the same disabled-reporting notice, no prefilled URL", async () => {
     const { json } = await callTool({ title: "t", body: "b", repo: "someone/their-node" });
-    expect(json.archived).toBe(true);
+    expect(json.archived).toBe(false);
+    expect(json.reporting_enabled).toBe(false);
     expect(json.filed).toBe(false);
     expect(json.repo).toBe("someone/their-node");
     expect(json.url).toBeUndefined();
+    expect(fetchCalls).toHaveLength(0);
+  });
+
+  it("stays offline when former worker environment variables are configured", async () => {
+    vi.stubEnv("COMFYUI_MCP_REPORT_WORKER_URL", "https://must-not-contact.invalid");
+    vi.stubEnv("COMFYUI_MCP_REPORT_CLIENT_KEY", "test-only");
+    vi.stubEnv("COMFYUI_MCP_ISSUE_WORKER_URL", "https://must-not-contact.invalid");
+    vi.stubEnv("COMFYUI_MCP_ISSUE_CLIENT_KEY", "test-only");
+    for (const repo of ["artokun/comfyui-mcp", "artokun/comfyui-mcp-panel", "other/repo"]) {
+      for (const no_file of [true, false]) {
+        const { json } = await callTool({ title: "t", body: "b", repo, no_file });
+        expect(json).toMatchObject({ filed: false, archived: false, reporting_enabled: false });
+        expect(json.url).toBeUndefined();
+      }
+    }
     expect(fetchCalls).toHaveLength(0);
   });
 

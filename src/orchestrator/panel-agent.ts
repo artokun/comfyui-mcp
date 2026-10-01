@@ -2661,10 +2661,11 @@ export class PanelAgentManager {
   /** Per-key model/effort OVERRIDE set by the picker (set_options). Keyed by the
    *  COMPOSITE agent key `tabId::backend`, so a model/effort chosen for one
    *  provider NEVER bleeds into another: a Codex "gpt-5.5" pick must not become the
-   *  Claude spawn's model (which errors "model gpt-5.5 may not exist"). A provider
-   *  switch calls reset(oldKey), which drops that key's override, so the new
-   *  backend falls back to its OWN default. A same-provider reconnect reuses the
-   *  same key, so the user's pick persists. */
+   *  Claude spawn's model (which errors "model gpt-5.5 may not exist"). The
+   *  composite key is what guarantees that, on its own — the new backend reads a
+   *  different key, so there is nothing of the old provider's to inherit. A
+   *  same-provider reconnect reuses the same key, so the user's pick persists, and
+   *  #2759 is what it cost when reset() contradicted that by deleting the entry. */
   private modelByKey = new Map<string, string>();
   private effortByKey = new Map<string, Effort | undefined>();
 
@@ -3943,26 +3944,46 @@ export class PanelAgentManager {
    *  means this process starts fresh but an orchestrator restart could resume
    *  the cleared conversation, which the caller must disclose rather than
    *  report a clean New chat (codex confirming-gate P1: false-success). */
-  reset(tabId: string): { durableCleared: boolean } {
+  /** `agentKey`, NOT a tab id: callers pass `agentKeyFor(tabId)`, which is
+   *  `<shared scope>::<backend>`. Naming it `tabId` invited a future caller to
+   *  hand over a real tab id, at which point every map operation in here would
+   *  silently miss — and this repo's standing invariant is that sessions are
+   *  orchestrator-scoped and never keyed on tab_id. */
+  reset(agentKey: string): { durableCleared: boolean } {
     // Unbind through the SHARED teardown seam (#468) — it is what guarantees a
     // run completion parked in held mail is handed back rather than discarded.
-    const agent = this.unbindAgent(tabId, { dropHeldMail: true, reason: "reset" });
-    this.pendingResume.delete(tabId);
+    const agent = this.unbindAgent(agentKey, { dropHeldMail: true, reason: "reset" });
+    this.pendingResume.delete(agentKey);
     // Forget the durable session too — a NEW chat must start fresh, so the disk
     // fallback in send() can't resurrect the conversation the user just cleared.
     // (resume_session calls reset() then setResume() with the chosen id, so the
     // historical session is re-armed right after and re-persisted on next onSession.)
-    const durableCleared = this.opts.sessionStore ? this.opts.sessionStore.clear(tabId) : true;
-    this.pendingEffortRestart.delete(tabId); // a reset supersedes any deferred restart
-    this.pendingMcpRestart.delete(tabId);
-    this.pendingForkOnRestart.delete(tabId);
-    this.pendingRetargetFrom.delete(tabId); // #1429 — nothing queued, nothing to classify
-    // Drop this key's picker override so a provider switch (which reset()s the old
-    // key) can't carry the old provider's model/effort into the new backend's spawn.
-    this.modelByKey.delete(tabId);
-    this.effortByKey.delete(tabId);
+    const durableCleared = this.opts.sessionStore ? this.opts.sessionStore.clear(agentKey) : true;
+    this.pendingEffortRestart.delete(agentKey); // a reset supersedes any deferred restart
+    this.pendingMcpRestart.delete(agentKey);
+    this.pendingForkOnRestart.delete(agentKey);
+    this.pendingRetargetFrom.delete(agentKey); // #1429 — nothing queued, nothing to classify
+    // #2759 — the picker override SURVIVES a reset. It used to be dropped here, on
+    // the rationale that a provider switch reset()s the old key and would otherwise
+    // carry the old provider's model into the new backend's spawn. That rationale
+    // does not hold, twice over: this map is keyed by the composite agent key,
+    // whose last segment IS the backend (agentKeyFor in index.ts), so the new
+    // provider reads a different key and structurally cannot inherit the old
+    // provider's pick; and the only two callers of reset() are
+    // `new_session` and `resume_session`, neither of which is a provider switch.
+    // What the delete actually did was clobber the SAME-provider case — the one the
+    // key doc above promises persists — so a New chat silently spawned on the global
+    // default while the picker went on showing the user's choice. A subscription user
+    // picked Sonnet and burned Opus limits with no signal anywhere.
+    //
+    // A New chat is a CONVERSATION boundary. The model belongs to the PROVIDER, for
+    // the shared session — `agentKeyFor` ignores the tab except to look up its
+    // backend, so one pick is shared by every tab on that provider. Said precisely
+    // because 'belongs to the tab' would invite adding a tab dimension to the key,
+    // which would split the override per tab and undo the shared-session invariant.
+    // Either way it is not a conversation boundary's to reset.
     if (agent) {
-      logger.info(`[panel-orchestrator] tab ${tabId.slice(0, 8)} reset — new session next message`);
+      logger.info(`[panel-orchestrator] tab ${agentKey.slice(0, 8)} reset — new session next message`);
       void agent.stop();
     }
     return { durableCleared };

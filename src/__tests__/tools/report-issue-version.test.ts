@@ -135,8 +135,8 @@ describe("normalizeReportedVersion (#846)", () => {
 // P2) — and a normalizer nobody calls protects nothing. This drives the real
 // registered handler and inspects the bytes that leave for the triage worker.
 
-describe("report_issue is ARCHIVED — the version helpers stay, the wiring sends nothing", () => {
-  it("registers a handler that returns the archived notice and never reaches the worker", async () => {
+describe("report_issue is DISABLED — the version helpers stay, the wiring sends nothing", () => {
+  it("registers a handler that returns the disabled-reporting notice and never reaches the worker", async () => {
     const { registerReportIssueTools } = await import("../../tools/report-issue.js");
     let handler: ((args: Record<string, unknown>) => Promise<{ content: { text?: string }[] }>) | undefined;
     const fakeServer = {
@@ -154,7 +154,8 @@ describe("report_issue is ARCHIVED — the version helpers stay, the wiring send
     try {
       const out = await handler!({ title: "t", body: "b", mcp_version: "the env line says mcp=0.52.1 panel=0.15.2" });
       const json = JSON.parse(out.content[0]?.text ?? "{}") as Record<string, unknown>;
-      expect(json.archived).toBe(true);
+      expect(json.archived).toBe(false);
+    expect(json.reporting_enabled).toBe(false);
       expect(json.filed).toBe(false);
       expect(calls).toHaveLength(0);
     } finally {

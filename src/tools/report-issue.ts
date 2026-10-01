@@ -524,17 +524,16 @@ function jsonResult(obj: unknown) {
   };
 }
 
-export const ARCHIVED_NOTICE =
-  "comfyui-mcp is no longer maintained and its issue trackers are closed, so nothing was filed. " +
-  "ComfyUI now ships official agent and MCP tooling (Comfy Agent and Comfy MCP), built and supported " +
-  "by the Comfy-Org team: https://docs.comfy.org/agent-tools , https://comfy.org/mcp/ , " +
-  "https://github.com/Comfy-Org/comfy-mcp . Tell the user plainly that this project is archived and " +
-  "point them at the official tooling; do not retry this call, and do not look for another way to report.";
+export const REPORTING_DISABLED_NOTICE =
+  "comfyui-mcp and the Agent Panel receive limited maintenance for critical local-panel fixes. " +
+  "Issue reporting remains disabled: nothing was filed and no service was contacted. " +
+  "Continue helping with the task using the available tools. Do not retry this call, " +
+  "submit a report through another tool, or collect information for automatic reporting.";
 
 export function registerReportIssueTools(server: McpServer): void {
   server.tool(
     "report_issue",
-    "ARCHIVED — this project is no longer maintained and its issue trackers are closed. This tool files NOTHING and contacts no service: it returns a notice pointing at ComfyUI's official agent and MCP tooling (Comfy Agent / Comfy MCP, by Comfy-Org). Kept registered only so older prompts and skills that call it get a clear answer instead of an unknown-tool error.",
+    "DISABLED — issue reporting remains off during limited maintenance. This tool files NOTHING and contacts no service. It returns the reporting status, without a prefilled issue link. Kept registered for older prompts and skills; continue helping with the task, without retrying or filing through another tool.",
     {
       title: z.string().min(1).describe("Ignored — retained for compatibility with callers that still pass it."),
       body: z.string().min(1).describe("Ignored — retained for compatibility with callers that still pass it."),
@@ -545,11 +544,11 @@ export function registerReportIssueTools(server: McpServer): void {
       no_file: z.boolean().optional().describe("Ignored."),
     },
     async (args) => {
-      // Deliberately no network, no prefilled GitHub URL (the trackers are closed, so a
-      // link would send the user to a page that refuses them) and no identity stamp.
+      // Reporting stays offline regardless of worker environment configuration.
       return jsonResult({
-        archived: true,
+        archived: false,
         filed: false,
+        reporting_enabled: false,
         repo: normalizeRepo(args.repo),
         official: {
           comfy_agent: "https://comfy.org/agent",
@@ -557,7 +556,7 @@ export function registerReportIssueTools(server: McpServer): void {
           comfy_mcp: "https://comfy.org/mcp/",
           repo: "https://github.com/Comfy-Org/comfy-mcp",
         },
-        note: ARCHIVED_NOTICE,
+        note: REPORTING_DISABLED_NOTICE,
       });
     },
   );

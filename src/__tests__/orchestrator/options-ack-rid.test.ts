@@ -149,13 +149,22 @@ describe("PanelAgentManager.modelOverrideFor (models frame `current`)", () => {
     expect(manager.modelOverrideFor("tab-a::codex")).toBeUndefined();
   });
 
-  it("reset() drops the override (new chat / provider switch semantics)", async () => {
+  it("reset() KEEPS the override — a New chat is not a provider switch (#2759)", async () => {
+    // This assertion was the other way round, under the title "new chat / provider
+    // switch semantics", and that conflation is the whole bug: the two cases were
+    // pinned as one and only the provider half was true. reset()'s only callers are
+    // `new_session` and `resume_session`, and neither changes provider. Dropping the
+    // pick there spawned the global default while the picker still showed the user's
+    // choice, so a subscription user burned Opus limits believing they were on Sonnet.
+    //
+    // Provider isolation is unaffected and is not this line's to defend — the test
+    // above proves it comes from the composite key, whose last segment is the backend.
     const manager = makeManager();
     await manager.setOptions("tab-r::claude", { model: "sonnet" });
     expect(manager.modelOverrideFor("tab-r::claude")).toBe("sonnet");
 
     manager.reset("tab-r::claude");
-    expect(manager.modelOverrideFor("tab-r::claude")).toBeUndefined();
+    expect(manager.modelOverrideFor("tab-r::claude")).toBe("sonnet");
   });
 
   it("rebindAgent (live agent) carries the override to the migrated key", async () => {
