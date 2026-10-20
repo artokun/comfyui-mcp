@@ -15,7 +15,7 @@ beforeEach(() => {
   catalogStatus = 200;
   requests = [];
   vi.stubEnv("MINIMAX_API_KEY", "fixture-minimax-key");
-  vi.stubEnv("COMFYUI_MCP_MINIMAX_MODEL", "");
+  vi.stubEnv("COMFYUI_MCP_MINIMAX_MODEL", undefined);
   vi.stubEnv("COMFYUI_MCP_MINIMAX_BASE_URL", "");
   vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = String(input);
