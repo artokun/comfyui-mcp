@@ -10,6 +10,7 @@ All notable changes to this project are documented here. This project adheres to
 
 #### Fixed
 - pi readiness no longer reports "no usable provider credential" when `~/.pi/agent/models.json` or `auth.json` starts with a UTF-8 BOM (PowerShell's default on Windows); the leading BOM is stripped exactly as pi does. (#2995)
+- The pi backend no longer tells the model it has "NO ComfyUI tools" when the user's own pi carries an MCP bridge (the `pi-mcp-adapter` package, or pi 0.99+'s built-in MCP) configured with servers; the per-turn capability note now says any ComfyUI/MCP tools come from that bridge and to go by the tool list actually given. A stock pi keeps the hard retraction. (#2996)
 
 ## [0.52.206] - 2026-10-14
 
