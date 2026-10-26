@@ -118,13 +118,16 @@ export function isMcpAdapterPackageSource(source: string): boolean {
   // npm:<name>[@<version|tag>] — the name must be exactly pi-mcp-adapter.
   const npm = /^npm:(?:@[^/@]+\/)?([^@/]+)(?:@.+)?$/.exec(s);
   if (npm) return npm[1] === "pi-mcp-adapter";
-  // git / URL / local path: the final path segment (sans .git) names the package.
+  // git / URL / local path: the final path segment names the package, minus a
+  // `.git` suffix and minus a git ref — `git:github.com/nicobailon/pi-mcp-adapter@v1`
+  // is the documented pinned form (packages.md), and pi identifies a git package
+  // by its URL without the ref.
   const last = s
     .replace(/[?#].*$/, "")
     .replace(/[\\/]+$/, "")
     .split(/[\\/]/)
     .pop();
-  return (last ?? "").replace(/\.git$/, "") === "pi-mcp-adapter";
+  return (last ?? "").replace(/@[^@]*$/, "").replace(/\.git$/, "") === "pi-mcp-adapter";
 }
 
 /**
@@ -171,14 +174,16 @@ export function detectPiMcpBridge(
   const adapterInstalled = packageSources(settings).some(isMcpAdapterPackageSource);
   if (adapterInstalled) {
     // Every user-global file the adapter reads (configuration.md "File Layout"),
-    // in its precedence order. Pi's own mcp.json is included because the adapter
-    // reads it on pi 0.99+ — and on older pi it is the file the reporter's setup
-    // used, which the adapter of that era read as well.
+    // in its precedence order: the shared files, pi's own mcp.json (read by the
+    // adapter on pi 0.99+, and the file the reporter's older setup used), and the
+    // adapter-owned mcp-adapter.json, which carries its own `mcpServers` map and
+    // is the file older adapters told users to rename mcp.json to.
     const files = [
       join(home, ".config", "mcp", "mcp.json"),
       join(home, ".agents", "mcp.json"),
       join(home, ".agents", "mcp", "mcp.json"),
       join(agentDir, "mcp.json"),
+      join(agentDir, "mcp-adapter.json"),
     ];
     const servers = new Set<string>();
     for (const file of files) {

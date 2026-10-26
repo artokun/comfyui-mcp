@@ -97,6 +97,15 @@ describe("detectPiMcpBridge", () => {
     });
   });
 
+  it("reads the adapter-owned ~/.pi/agent/mcp-adapter.json, which carries its own mcpServers (gate P1)", () => {
+    write(".pi/agent/settings.json", ADAPTER_SETTINGS);
+    write(
+      ".pi/agent/mcp-adapter.json",
+      JSON.stringify({ settings: {}, mcpServers: { comfyui: { command: "node" } } }),
+    );
+    expect(detectPiMcpBridge(home, env)).toEqual({ kind: "pi-mcp-adapter", servers: ["comfyui"] });
+  });
+
   it("accepts the object form of a package entry", () => {
     write(
       ".pi/agent/settings.json",
@@ -190,6 +199,8 @@ describe("isMcpAdapterPackageSource", () => {
     "npm:pi-mcp-adapter@2.24.0",
     "npm:pi-mcp-adapter@latest",
     "git:github.com/nicobailon/pi-mcp-adapter",
+    "git:github.com/nicobailon/pi-mcp-adapter@v1",
+    "git:github.com/nicobailon/pi-mcp-adapter@abc1234",
     "https://github.com/nicobailon/pi-mcp-adapter.git",
     "/home/u/src/pi-mcp-adapter",
     "C:\\Users\\u\\src\\pi-mcp-adapter\\",
@@ -203,6 +214,7 @@ describe("isMcpAdapterPackageSource", () => {
     "npm:@scope/pi-mcp-adapter-fork@1.0.0",
     "npm:pi-tools",
     "git:github.com/nicobailon/pi-mcp-adapter-docs",
+    "git:github.com/nicobailon/pi-mcp-adapter-docs@v1",
     "/home/u/pi-mcp-adapter/examples",
   ])("rejects %s", (src) => {
     expect(isMcpAdapterPackageSource(src)).toBe(false);
