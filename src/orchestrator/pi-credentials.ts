@@ -10,8 +10,9 @@
 //
 //   packages/ai/src/env-api-keys.ts          — `envMap` + the anthropic/copilot specials
 //   packages/ai/src/auth/types.ts            — ApiKeyCredential / OAuthCredential shapes
-//   packages/coding-agent/src/core/auth-storage.ts — auth.json is plain JSON.parse
-//   packages/coding-agent/src/core/model-config.ts — models.json is JSONC + `{providers:{…}}`
+//   packages/coding-agent/src/core/auth-storage.ts — auth.json is stripBom + plain JSON.parse
+//   packages/coding-agent/src/core/model-config.ts — models.json is stripBom + JSONC + `{providers:{…}}`
+//   packages/coding-agent/src/utils/text.ts  — stripBom (leading U+FEFF only)
 //   packages/coding-agent/src/utils/json.ts  — the exact stripJsonComments behaviour
 //   packages/ai/src/providers/google-vertex.ts — Vertex ADC (creds path + project + location)
 //
@@ -328,9 +329,19 @@ export function authRecordUsable(
   return false;
 }
 
+/**
+ * Read a pi config file the way pi does: decoded as UTF-8 with a leading byte
+ * order mark REMOVED. pi passes every config read through `stripBom`
+ * (packages/coding-agent/src/utils/text.ts — used by both auth-storage.ts and
+ * model-config.ts since pi #8337), so a BOM'd file is perfectly valid FOR PI.
+ * `JSON.parse` throws on U+FEFF, and on Windows a BOM is what PowerShell's
+ * `Out-File` / `>` writes by default — without this strip a hand-edited
+ * models.json or auth.json false-REDs a working install (#2995).
+ */
 function readFileOrNull(file: string): string | null {
   try {
-    return readFileSync(file, "utf8");
+    const raw = readFileSync(file, "utf8");
+    return raw.charCodeAt(0) === 0xfeff ? raw.slice(1) : raw;
   } catch {
     return null;
   }
@@ -338,9 +349,10 @@ function readFileOrNull(file: string): string | null {
 
 /**
  * Parse ~/.pi/agent/auth.json and report whether ANY provider record is usable.
- * Plain `JSON.parse` — pi reads this file with JSON.parse (auth-storage.ts), NOT
- * the JSONC path it uses for models.json, so a commented auth.json is broken for
- * pi and must not green here. Never throws.
+ * Plain `JSON.parse` (after the BOM strip in readFileOrNull) — pi reads this
+ * file with `JSON.parse(stripBom(…))` (auth-storage.ts), NOT the JSONC path it
+ * uses for models.json, so a commented auth.json is broken for pi and must not
+ * green here. Never throws.
  */
 export function piAuthJsonUsable(
   file: string,

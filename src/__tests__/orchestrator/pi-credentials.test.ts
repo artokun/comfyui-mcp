@@ -147,6 +147,18 @@ describe("auth.json records", () => {
     expect(authRecordUsable({ type: "oauth", access: "at", expires: now + 3600_000 }, bareEnv(), now)).toBe(true);
   });
 
+  it("a UTF-8 BOM on auth.json is VALID — pi's auth-storage strips it too (#2995)", () => {
+    // pi reads auth.json with JSON.parse(stripBom(…)) since pi #8337, so a
+    // PowerShell-written auth.json authenticates fine and must not read as RED.
+    const file = writePiFile(
+      tmp,
+      "auth.json",
+      "﻿" + JSON.stringify({ openai: { type: "api_key", key: "sk" } }),
+    );
+    expect(piAuthJsonUsable(file, bareEnv())).toBe(true);
+    expect(piCredentialPresent(tmp, bareEnv())).toBe(true);
+  });
+
   it("a KEYLESS google-vertex record resolves through ADC (pi's /login writes one)", () => {
     const keyFile = join(tmp, "sa.json");
     writeFileSync(keyFile, "{}");
@@ -522,6 +534,30 @@ describe("models.json", () => {
     );
     expect(piModelsJsonUsable(modelsPath(), bareEnv())).toBe(true);
     expect(piCredentialPresent(tmp, bareEnv())).toBe(true);
+  });
+
+  it("a UTF-8 BOM is VALID — pi strips it too (#2995)", () => {
+    // PowerShell's Out-File / `>` write a BOM by default on Windows, and pi's
+    // model-config.ts runs stripBom() before its JSONC pass. JSON.parse throws
+    // on U+FEFF, which false-REDed a working install as "no usable credential".
+    writePiFile(
+      tmp,
+      "models.json",
+      '﻿{"providers":{"sglang":{"baseUrl":"http://127.0.0.1:30000/v1","apiKey":"local"}}}',
+    );
+    expect(piModelsJsonUsable(modelsPath(), bareEnv())).toBe(true);
+    // …and the readiness entry point reaches it (auth.json is `{}`, as reported).
+    writePiFile(tmp, "auth.json", "{}");
+    expect(piCredentialPresent(tmp, bareEnv())).toBe(true);
+  });
+
+  it("only a LEADING BOM is stripped — one elsewhere is still a parse error for pi", () => {
+    writePiFile(
+      tmp,
+      "models.json",
+      '{"providers":{"gw":{"baseUrl":"http://x/v1",﻿"apiKey":"sk-a"}}}',
+    );
+    expect(piModelsJsonUsable(modelsPath(), bareEnv())).toBe(false);
   });
 
   it("a `//` sequence inside a STRING is not treated as a comment", () => {

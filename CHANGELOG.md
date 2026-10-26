@@ -6,6 +6,11 @@ All notable changes to this project are documented here. This project adheres to
 
 ## Unreleased
 
+### MCP
+
+#### Fixed
+- pi readiness no longer reports "no usable provider credential" when `~/.pi/agent/models.json` or `auth.json` starts with a UTF-8 BOM (PowerShell's default on Windows); the leading BOM is stripped exactly as pi does. (#2995)
+
 ## [0.52.206] - 2026-10-14
 
 ### MCP
