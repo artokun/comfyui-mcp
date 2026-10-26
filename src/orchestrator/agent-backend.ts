@@ -418,16 +418,19 @@ export const ANTIGRAVITY_CAPABILITIES: AgentCapabilities = {
  *  exposes a DOCUMENTED machine-readable JSON-lines event stream (`--mode json`)
  *  with real text deltas, per-tool events, and a resumable session id — so this
  *  is a spawn-per-turn adapter that parses that stream. inProcessMcp is false and
- *  there is NO config-MCP path either: pi has no MCP client at all (its tools are
- *  built-ins + TS extensions), so a pi turn does NOT get the ComfyUI panel_* /
- *  comfyui tools — a real limitation surfaced in the ready banner. vision=false
- *  (no documented headless image input). Models come from `pi --list-models`. */
+ *  there is NO config-MCP path from US either: we cannot declare our servers to a
+ *  pi spawn, so a pi turn does NOT get the ComfyUI panel_* / comfyui tools from
+ *  the panel — a real limitation surfaced in the ready banner. (pi itself CAN
+ *  have an MCP client — pi-mcp-adapter, or pi 0.99+'s built-in MCP — and the
+ *  user may have wired our servers into it; pi-mcp-bridge.ts detects that and
+ *  the capability note says so, #2996.) vision=false (no documented headless
+ *  image input). Models come from `pi --list-models`. */
 export const PI_CAPABILITIES: AgentCapabilities = {
   persistentChannel: true, // spawn-per-turn, continuity via `pi --session <id>`
   streamingDeltas: true, // `--mode json` text_delta events
   interruptMidTurn: true, // kill the in-flight child tree; next turn continues
   forkAtAnchor: false, // whole-session resume only (no per-turn anchor wired)
-  inProcessMcp: false, // pi has no MCP client at all (built-in tools + extensions)
+  inProcessMcp: false, // we hand pi no servers; its OWN MCP bridge, if any, is the user's (#2996)
   modelEnumeration: true, // `pi --list-models`
   slashCommands: false,
   hooks: false,
