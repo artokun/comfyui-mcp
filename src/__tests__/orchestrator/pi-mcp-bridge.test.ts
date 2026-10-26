@@ -14,7 +14,13 @@
 // consulting the detector rather than the constant.
 
 import { describe, expect, it, beforeEach, afterEach } from "vitest";
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync, readFileSync } from "node:fs";
+import {
+  mkdtempSync,
+  mkdirSync,
+  writeFileSync,
+  rmSync,
+  readFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -44,7 +50,9 @@ function write(rel: string, body: string): void {
   writeFileSync(file, body);
 }
 
-const ADAPTER_SETTINGS = JSON.stringify({ packages: ["npm:pi-mcp-adapter@2.24.0"] });
+const ADAPTER_SETTINGS = JSON.stringify({
+  packages: ["npm:pi-mcp-adapter@2.24.0"],
+});
 const COMFY_SERVERS = JSON.stringify({
   mcpServers: {
     comfyui: { command: "node", args: ["C:/x/comfyui-mcp/dist/index.js"] },
@@ -82,15 +90,23 @@ describe("detectPiMcpBridge", () => {
     write(".pi/agent/settings.json", ADAPTER_SETTINGS);
     write(
       ".pi/agent/mcp.json",
-      JSON.stringify({ mcpServers: { comfyui: { command: "node", enabled: false } } }),
+      JSON.stringify({
+        mcpServers: { comfyui: { command: "node", enabled: false } },
+      }),
     );
     expect(detectPiMcpBridge(home, env)).toBeNull();
   });
 
   it("reads the adapter's shared user-global files too (~/.config/mcp/mcp.json, ~/.agents)", () => {
     write(".pi/agent/settings.json", ADAPTER_SETTINGS);
-    write(".config/mcp/mcp.json", JSON.stringify({ mcpServers: { comfyui: { command: "x" } } }));
-    write(".agents/mcp.json", JSON.stringify({ mcpServers: { panel: { url: "http://h" } } }));
+    write(
+      ".config/mcp/mcp.json",
+      JSON.stringify({ mcpServers: { comfyui: { command: "x" } } }),
+    );
+    write(
+      ".agents/mcp.json",
+      JSON.stringify({ mcpServers: { panel: { url: "http://h" } } }),
+    );
     expect(detectPiMcpBridge(home, env)).toEqual({
       kind: "pi-mcp-adapter",
       servers: ["comfyui", "panel"],
@@ -101,22 +117,72 @@ describe("detectPiMcpBridge", () => {
     write(".pi/agent/settings.json", ADAPTER_SETTINGS);
     write(
       ".pi/agent/mcp-adapter.json",
-      JSON.stringify({ settings: {}, mcpServers: { comfyui: { command: "node" } } }),
+      JSON.stringify({
+        settings: {},
+        mcpServers: { comfyui: { command: "node" } },
+      }),
     );
-    expect(detectPiMcpBridge(home, env)).toEqual({ kind: "pi-mcp-adapter", servers: ["comfyui"] });
+    expect(detectPiMcpBridge(home, env)).toEqual({
+      kind: "pi-mcp-adapter",
+      servers: ["comfyui"],
+    });
+  });
+
+  it("reads project-scoped files in the spawn cwd for the adapter (.mcp.json, .pi/mcp.json) (gate P1)", () => {
+    write(".pi/agent/settings.json", ADAPTER_SETTINGS);
+    const cwd = join(home, "ComfyUI");
+    mkdirSync(join(cwd, ".pi"), { recursive: true });
+    writeFileSync(
+      join(cwd, ".mcp.json"),
+      JSON.stringify({ mcpServers: { comfyui: { command: "node" } } }),
+    );
+    writeFileSync(
+      join(cwd, ".pi", "mcp.json"),
+      JSON.stringify({ mcpServers: { panel: { url: "http://h" } } }),
+    );
+    expect(detectPiMcpBridge(home, env)).toBeNull(); // no cwd → user-global only
+    expect(detectPiMcpBridge(home, env, cwd)).toEqual({
+      kind: "pi-mcp-adapter",
+      servers: ["comfyui", "panel"],
+    });
+  });
+
+  it("reads the project .pi/mcp.json for the built-in too, but not .mcp.json (the built-in does not read it)", () => {
+    const cwd = join(home, "ComfyUI");
+    mkdirSync(join(cwd, ".pi"), { recursive: true });
+    writeFileSync(
+      join(cwd, ".mcp.json"),
+      JSON.stringify({ mcpServers: { shared: { command: "node" } } }),
+    );
+    expect(detectPiMcpBridge(home, env, cwd)).toBeNull();
+    writeFileSync(
+      join(cwd, ".pi", "mcp.json"),
+      JSON.stringify({ mcpServers: { comfyui: { command: "node" } } }),
+    );
+    expect(detectPiMcpBridge(home, env, cwd)).toEqual({
+      kind: "builtin",
+      servers: ["comfyui"],
+    });
   });
 
   it("accepts the object form of a package entry", () => {
     write(
       ".pi/agent/settings.json",
-      JSON.stringify({ packages: [{ source: "npm:pi-mcp-adapter", extensions: ["index.ts"] }] }),
+      JSON.stringify({
+        packages: [{ source: "npm:pi-mcp-adapter", extensions: ["index.ts"] }],
+      }),
     );
     write(".pi/agent/mcp.json", COMFY_SERVERS);
     expect(detectPiMcpBridge(home, env)?.kind).toBe("pi-mcp-adapter");
   });
 
   it("does not mistake another package for the adapter", () => {
-    write(".pi/agent/settings.json", JSON.stringify({ packages: ["npm:pi-tools", "npm:@x/pi-mcp-adapter-ui"] }));
+    write(
+      ".pi/agent/settings.json",
+      JSON.stringify({
+        packages: ["npm:pi-tools", "npm:@x/pi-mcp-adapter-ui"],
+      }),
+    );
     write(".config/mcp/mcp.json", COMFY_SERVERS);
     // No adapter → only pi's own mcp.json counts, and it is absent.
     expect(detectPiMcpBridge(home, env)).toBeNull();
@@ -139,7 +205,10 @@ describe("detectPiMcpBridge", () => {
   });
 
   it("is null when the built-in is disabled with -builtin:mcp and no adapter is installed", () => {
-    write(".pi/agent/settings.json", JSON.stringify({ extensions: ["-builtin:mcp"] }));
+    write(
+      ".pi/agent/settings.json",
+      JSON.stringify({ extensions: ["-builtin:mcp"] }),
+    );
     write(".pi/agent/mcp.json", COMFY_SERVERS);
     expect(detectPiMcpBridge(home, env)).toBeNull();
   });
@@ -147,7 +216,10 @@ describe("detectPiMcpBridge", () => {
   it("still reports the adapter when it disabled the built-in for itself (its documented install step)", () => {
     write(
       ".pi/agent/settings.json",
-      JSON.stringify({ packages: ["npm:pi-mcp-adapter"], extensions: ["-builtin:mcp"] }),
+      JSON.stringify({
+        packages: ["npm:pi-mcp-adapter"],
+        extensions: ["-builtin:mcp"],
+      }),
     );
     write(".pi/agent/mcp.json", COMFY_SERVERS);
     expect(detectPiMcpBridge(home, env)?.kind).toBe("pi-mcp-adapter");
@@ -164,9 +236,13 @@ describe("detectPiMcpBridge", () => {
     write(".pi/agent/settings.json", "\uFEFF" + ADAPTER_SETTINGS);
     write(
       ".pi/agent/mcp.json",
-      "\uFEFF// servers\n" + JSON.stringify({ mcpServers: { comfyui: { command: "x" } } }),
+      "\uFEFF// servers\n" +
+        JSON.stringify({ mcpServers: { comfyui: { command: "x" } } }),
     );
-    expect(detectPiMcpBridge(home, env)).toEqual({ kind: "pi-mcp-adapter", servers: ["comfyui"] });
+    expect(detectPiMcpBridge(home, env)).toEqual({
+      kind: "pi-mcp-adapter",
+      servers: ["comfyui"],
+    });
   });
 
   it("treats a malformed or non-object file as absent, never throws", () => {
@@ -175,7 +251,10 @@ describe("detectPiMcpBridge", () => {
     expect(detectPiMcpBridge(home, env)).toBeNull();
     write(".pi/agent/mcp.json", JSON.stringify({ mcpServers: ["comfyui"] }));
     expect(detectPiMcpBridge(home, env)).toBeNull();
-    write(".pi/agent/mcp.json", JSON.stringify([{ mcpServers: { comfyui: {} } }]));
+    write(
+      ".pi/agent/mcp.json",
+      JSON.stringify([{ mcpServers: { comfyui: {} } }]),
+    );
     expect(detectPiMcpBridge(home, env)).toBeNull();
     write(".pi/agent/settings.json", "null");
     write(".pi/agent/mcp.json", COMFY_SERVERS);
@@ -188,8 +267,12 @@ describe("detectPiMcpBridge", () => {
     mkdirSync(alt, { recursive: true });
     writeFileSync(join(alt, "settings.json"), ADAPTER_SETTINGS);
     writeFileSync(join(alt, "mcp.json"), COMFY_SERVERS);
-    expect(detectPiMcpBridge(home, { PI_CODING_AGENT_DIR: alt })?.kind).toBe("pi-mcp-adapter");
-    expect(detectPiMcpBridge(home, { PI_CODING_AGENT_DIR: "elsewhere" })).toBeNull();
+    expect(detectPiMcpBridge(home, { PI_CODING_AGENT_DIR: alt })?.kind).toBe(
+      "pi-mcp-adapter",
+    );
+    expect(
+      detectPiMcpBridge(home, { PI_CODING_AGENT_DIR: "elsewhere" }),
+    ).toBeNull();
   });
 });
 
@@ -225,7 +308,12 @@ describe("enabledMcpServerNames", () => {
   it("keeps object entries that are not enabled:false, in file order", () => {
     expect(
       enabledMcpServerNames({
-        mcpServers: { a: {}, b: { enabled: false }, c: "nope", d: { enabled: true } },
+        mcpServers: {
+          a: {},
+          b: { enabled: false },
+          c: "nope",
+          d: { enabled: true },
+        },
       }),
     ).toEqual(["a", "d"]);
     expect(enabledMcpServerNames(null)).toEqual([]);
@@ -242,14 +330,21 @@ describe("piCapabilityNote", () => {
     const note = piCapabilityNote(null);
     expect(note).toContain("NO ComfyUI tools");
     expect(note).toContain("NONE of them exist in your runtime");
-    expect(note).toContain("switch to the Claude, Codex, Gemini, or Antigravity backend");
+    expect(note).toContain(
+      "switch to the Claude, Codex, Gemini, or Antigravity backend",
+    );
   });
 
   it("drops the NONE assertion when a bridge is present and names the user's bridge instead", () => {
-    const note = piCapabilityNote({ kind: "pi-mcp-adapter", servers: ["comfyui", "comfyui-panel"] });
+    const note = piCapabilityNote({
+      kind: "pi-mcp-adapter",
+      servers: ["comfyui", "comfyui-panel"],
+    });
     expect(note).not.toContain("NONE of them exist");
     expect(note).not.toContain("has NO ComfyUI tools");
-    expect(note).not.toContain("switch to the Claude, Codex, Gemini, or Antigravity backend");
+    expect(note).not.toContain(
+      "switch to the Claude, Codex, Gemini, or Antigravity backend",
+    );
     expect(note).toContain("pi-mcp-adapter");
     expect(note).toContain("proxy tool named `mcp`");
     expect(note).toContain("`directTools`");
@@ -275,7 +370,9 @@ describe("piCapabilityNote", () => {
       expect(note).toContain("say plainly that no ComfyUI tool is reachable");
       expect(note).not.toMatch(/panel_\w+ (is|are) available/);
       // And it never tells the model to deny the user's own setup.
-      expect(note).toContain("do not tell the user pi cannot have ComfyUI tools");
+      expect(note).toContain(
+        "do not tell the user pi cannot have ComfyUI tools",
+      );
     }
   });
 });
@@ -288,10 +385,16 @@ describe("makeBackend's pi branch consults the detector (call-site pin)", () => 
   // the `backend === "pi"` branch must pass piCapabilityNote(detectPiMcpBridge())
   // and must not pass PI_CAPABILITY_OVERRIDE directly any more.
   const src = readFileSync(
-    join(dirname(fileURLToPath(import.meta.url)), "../../orchestrator/index.ts"),
+    join(
+      dirname(fileURLToPath(import.meta.url)),
+      "../../orchestrator/index.ts",
+    ),
     "utf8",
   );
-  const piBranch = /if \(backend === "pi"\) \{([\s\S]*?)return new PiBackend\(\{([\s\S]*?)\}\);/.exec(src);
+  const piBranch =
+    /if \(backend === "pi"\) \{([\s\S]*?)return new PiBackend\(\{([\s\S]*?)\}\);/.exec(
+      src,
+    );
 
   it("finds the one turn-driving pi construction site (the model-probe site carries no note)", () => {
     expect(piBranch).not.toBeNull();
@@ -302,7 +405,10 @@ describe("makeBackend's pi branch consults the detector (call-site pin)", () => 
 
   it("passes the detector's verdict through piCapabilityNote, not the raw constant", () => {
     const branch = (piBranch?.[1] ?? "") + (piBranch?.[2] ?? "");
-    expect(branch).toContain("detectPiMcpBridge()");
+    // cwd threaded in: the bridge's project files live where pi is spawned.
+    expect(branch).toMatch(
+      /detectPiMcpBridge\(undefined, undefined, comfyuiPath \?\? process\.cwd\(\)\)/,
+    );
     expect(branch).toMatch(/capabilityNote:\s*piCapabilityNote\(/);
     expect(branch).not.toMatch(/capabilityNote:\s*PI_CAPABILITY_OVERRIDE/);
   });

@@ -2595,7 +2595,7 @@ export async function runPanelOrchestrator(): Promise<void> {
       // asserting NONE to a user who wired one up made the model refuse their
       // canvas work. Detected once per backend construction, i.e. per connect:
       // the tool set pi loads is fixed per spawn, but a reconnect re-reads disk.
-      const piBridge = detectPiMcpBridge();
+      const piBridge = detectPiMcpBridge(undefined, undefined, comfyuiPath ?? process.cwd());
       if (piBridge) {
         logger.info(
           `[pi] MCP bridge detected (${piBridge.kind}; servers: ${piBridge.servers.join(", ")}) — using the bridge-aware capability note`,

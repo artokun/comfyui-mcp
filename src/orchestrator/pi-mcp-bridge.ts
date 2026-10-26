@@ -100,7 +100,8 @@ function packageSources(settings: Record<string, unknown> | null): string[] {
   const out: string[] = [];
   for (const entry of packages) {
     if (typeof entry === "string") out.push(entry);
-    else if (isPlainObject(entry) && typeof entry.source === "string") out.push(entry.source);
+    else if (isPlainObject(entry) && typeof entry.source === "string")
+      out.push(entry.source);
   }
   return out;
 }
@@ -127,7 +128,10 @@ export function isMcpAdapterPackageSource(source: string): boolean {
     .replace(/[\\/]+$/, "")
     .split(/[\\/]/)
     .pop();
-  return (last ?? "").replace(/@[^@]*$/, "").replace(/\.git$/, "") === "pi-mcp-adapter";
+  return (
+    (last ?? "").replace(/@[^@]*$/, "").replace(/\.git$/, "") ===
+    "pi-mcp-adapter"
+  );
 }
 
 /**
@@ -136,7 +140,9 @@ export function isMcpAdapterPackageSource(source: string): boolean {
  * object-valued entry counts. A non-object value, or a non-object map, yields
  * nothing — a malformed file is not a bridge.
  */
-export function enabledMcpServerNames(config: Record<string, unknown> | null): string[] {
+export function enabledMcpServerNames(
+  config: Record<string, unknown> | null,
+): string[] {
   const servers = config?.mcpServers;
   if (!isPlainObject(servers)) return [];
   const out: string[] = [];
@@ -149,18 +155,31 @@ export function enabledMcpServerNames(config: Record<string, unknown> | null): s
 }
 
 /**
- * Detect an MCP bridge in this pi install. `home` and `procEnv` are injectable so
- * the tests never read the developer's real ~/.pi; production passes nothing.
+ * Detect an MCP bridge in this pi install. `home`, `procEnv` and `cwd` are
+ * injectable so the tests never read the developer's real ~/.pi; production
+ * passes the cwd pi is spawned in (the ComfyUI install) and nothing else.
  *
- * Only USER-GLOBAL config is consulted. Project-scoped files (`.mcp.json`,
- * `.pi/mcp.json`, project settings) need project trust and, for the adapter, a
- * per-session approval prompt that a headless `--mode json` turn cannot answer —
- * so a server found there cannot be assumed live, and reading it would green a
- * bridge pi may never start. The user-global files need no such gate.
+ * User-global config decides WHICH bridge (an adapter package is a settings.json
+ * fact; built-in MCP is on unless disabled there). Servers are then read from the
+ * user-global files that bridge reads AND from the project-scoped ones in `cwd`
+ * (`.pi/mcp.json` for both; `.mcp.json` for the adapter). Project servers load
+ * only after pi's project trust, and under the adapter only after a per-session
+ * approval a headless turn may not be able to give — so one found there is a
+ * weaker signal. It still counts, deliberately: the note this verdict selects
+ * asserts no tool exists and defers to the real tool list, so an over-detected
+ * bridge costs nothing, while an under-detected one is the reported bug. (Codex
+ * gate round 2 made this case; the previous draft read user-global files only.)
+ *
+ * NOT read: servers a pi PACKAGE declares in its own manifest (`pi.mcp`). Those
+ * live inside pi's package store, whose layout is not documented in the sources
+ * this module cites, and a miss there leaves today's behaviour in place rather
+ * than introducing a new one. A user in that position can add the server to any
+ * file above to be recognised.
  */
 export function detectPiMcpBridge(
   home: string = homedir(),
   procEnv: NodeJS.ProcessEnv = process.env,
+  cwd: string | null = null,
 ): PiMcpBridge | null {
   const agentDir = piAgentDir(home, procEnv);
   // A relative PI_CODING_AGENT_DIR resolves against pi's own cwd, which we cannot
@@ -171,7 +190,9 @@ export function detectPiMcpBridge(
   const settings = readJsonObject(join(agentDir, "settings.json"));
   const piMcpJson = readJsonObject(join(agentDir, "mcp.json"));
 
-  const adapterInstalled = packageSources(settings).some(isMcpAdapterPackageSource);
+  const adapterInstalled = packageSources(settings).some(
+    isMcpAdapterPackageSource,
+  );
   if (adapterInstalled) {
     // Every user-global file the adapter reads (configuration.md "File Layout"),
     // in its precedence order: the shared files, pi's own mcp.json (read by the
@@ -184,10 +205,18 @@ export function detectPiMcpBridge(
       join(home, ".agents", "mcp", "mcp.json"),
       join(agentDir, "mcp.json"),
       join(agentDir, "mcp-adapter.json"),
+      ...(cwd
+        ? [
+            join(cwd, ".mcp.json"),
+            join(cwd, ".pi", "mcp.json"),
+            join(cwd, ".pi", "mcp-adapter.json"),
+          ]
+        : []),
     ];
     const servers = new Set<string>();
     for (const file of files) {
-      for (const name of enabledMcpServerNames(readJsonObject(file))) servers.add(name);
+      for (const name of enabledMcpServerNames(readJsonObject(file)))
+        servers.add(name);
     }
     if (servers.size) return { kind: "pi-mcp-adapter", servers: [...servers] };
     return null;
@@ -202,7 +231,15 @@ export function detectPiMcpBridge(
   const builtinDisabled =
     Array.isArray(extensions) && extensions.some((e) => e === "-builtin:mcp");
   if (builtinDisabled) return null;
-  const servers = enabledMcpServerNames(piMcpJson);
-  if (servers.length) return { kind: "builtin", servers: [...new Set(servers)] };
+  const servers = new Set<string>(enabledMcpServerNames(piMcpJson));
+  // Pi's own project file (mcp.md: read after project trust; a same-named entry
+  // replaces the user-level one as a whole, which does not change the set of
+  // names unless it disables one — handled by enabledMcpServerNames per file).
+  if (cwd)
+    for (const name of enabledMcpServerNames(
+      readJsonObject(join(cwd, ".pi", "mcp.json")),
+    ))
+      servers.add(name);
+  if (servers.size) return { kind: "builtin", servers: [...servers] };
   return null;
 }
