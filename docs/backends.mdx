@@ -93,6 +93,12 @@ placeholder follows the active backend ("Ask Claude…" / "Ask Ollama…").
   `https://api.atlascloud.ai/v1` endpoint. Override the model with
   `COMFYUI_MCP_ATLASCLOUD_MODEL` or the base URL with
   `COMFYUI_MCP_ATLASCLOUD_BASE_URL`.
+- **Cheaper Inference** — set `CHEAPER_INFERENCE_API_KEY` from
+  [cheaperinference.com](https://cheaperinference.com). The default model is
+  `gpt-5.4-mini` over the OpenAI-compatible
+  `https://api.cheaperinference.com/v1` endpoint. Override the model with
+  `COMFYUI_MCP_CHEAPER_INFERENCE_MODEL` or the base URL with
+  `COMFYUI_MCP_CHEAPER_INFERENCE_BASE_URL`.
 - **Copilot (experimental)** — sign in from the panel's experimental provider
   row. Off by default; enable experimental backends in Settings first.
 - **Ollama (local)** — no sign-in. Install Ollama and pull a tool-calling
@@ -192,7 +198,7 @@ because a silently dropped attachment is worse than a refused one:
     Ollama tag is mutable: `ollama pull` can replace the weights under the same
     name, and a cached verdict could outlive the model it described.
 - **LM Studio / llama.cpp / OpenRouter / GLM / Kimi / Moonshot / MiniMax /
-  Atlas Cloud / Copilot / custom OpenAI-compatible endpoints — attempted, NOT
+  Atlas Cloud / Cheaper Inference / Copilot / custom OpenAI-compatible endpoints — attempted, NOT
   capability-checked.** These all speak `/v1/chat/completions`,
   which has no capability endpoint to ask, so audio is sent as an `input_audio`
   content part and you are told, on that turn, that the delivery is

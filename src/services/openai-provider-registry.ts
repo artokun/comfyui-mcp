@@ -30,7 +30,7 @@
 import { processLocale, trFor } from "../i18n/index.js";
 
 /** The simple OpenAI-compatible API-key providers, by id. */
-export type OpenAiKeyProviderId = "glm" | "kimi" | "moonshot" | "minimax" | "atlascloud";
+export type OpenAiKeyProviderId = "glm" | "kimi" | "moonshot" | "minimax" | "atlascloud" | "cheaperinference";
 
 export interface OpenAiKeyProvider {
   /** Panel backend id (a member of orchestrator BackendId). */
@@ -187,6 +187,25 @@ export const OPENAI_KEY_PROVIDERS: OpenAiKeyProvider[] = [
       ),
     degradedMessage:
       "⚠️ The background agent isn't responding — Atlas Cloud couldn't start. Set ATLASCLOUD_API_KEY, then Disconnect → Connect to retry.",
+    simpleKeyAuth: true,
+  },
+  {
+    id: "cheaperinference",
+    slotLabel: "Cheaper Inference",
+    slotHelp: "Cheaper Inference OpenAI-compatible LLM API",
+    envKeys: ["CHEAPER_INFERENCE_API_KEY"],
+    modelEnv: "COMFYUI_MCP_CHEAPER_INFERENCE_MODEL",
+    defaultModel: process.env.COMFYUI_MCP_CHEAPER_INFERENCE_MODEL?.trim() || "gpt-5.4-mini",
+    ackFallbackLabel: "Cheaper Inference",
+    readyMessage: (agentLabel, locale) =>
+      trFor(
+        locale || processLocale(),
+        "banner.ready.cheaperinference",
+        "🟢 comfyui-mcp agent ready — {label} via Cheaper Inference. Ask away.",
+        { label: agentLabel },
+      ),
+    degradedMessage:
+      "⚠️ The background agent isn't responding — Cheaper Inference couldn't start. Set CHEAPER_INFERENCE_API_KEY, then Disconnect → Connect to retry.",
     simpleKeyAuth: true,
   },
 ];
