@@ -540,7 +540,7 @@ export interface RecommendedModel {
 }
 export const RECOMMENDED_OPENROUTER_MODELS: readonly RecommendedModel[] = [
   { id: "xiaomi/mimo-v2.5", label: "MiMo v2.5 (1M · SOTA · open)", context1m: true },
-  { id: "minimax/minimax-m3.1-flash:free", label: "MiniMax M3.1 Flash (1M · free)", context1m: true },
+  { id: "minimax/minimax-m3.1-flash", label: "MiniMax M3.1 Flash (1M · open)", context1m: true },
   { id: "minimax/minimax-m3", label: "MiniMax M3 (1M · SOTA · open)", context1m: true },
   { id: "moonshotai/kimi-k2.5", label: "Kimi K2.5 (SOTA · open)" },
   { id: "z-ai/glm-5.1", label: "GLM 5.1 (SOTA · open)" },
@@ -2920,7 +2920,7 @@ export class OllamaBackend implements AgentBackend {
         return nativeModels.some((m) => m.id === id);
       }
       if (openRouter && /^minimax\/(?:minimax-(?:m\d|01)|text-01|vl-01)/i.test(id)) {
-        return id === "minimax/minimax-m3.1-flash:free" || id === "minimax/minimax-m3";
+        return id === "minimax/minimax-m3.1-flash" || id === "minimax/minimax-m3";
       }
       return true;
     };

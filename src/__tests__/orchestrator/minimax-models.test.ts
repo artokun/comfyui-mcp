@@ -5,7 +5,7 @@ import { resolveOpenAiKeyCredentials } from "../../services/code-provider-auth.j
 import type { NeutralTurn } from "../../orchestrator/agent-backend.js";
 
 const FLASH = "MiniMax-M3.1-Flash";
-const OR_FLASH = "minimax/minimax-m3.1-flash:free";
+const OR_FLASH = "minimax/minimax-m3.1-flash";
 let catalog: string[];
 let catalogStatus: number;
 let requests: Array<{ url: string; headers: Headers; body: Record<string, unknown> }>;
