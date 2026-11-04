@@ -8,6 +8,7 @@ import {
   resolveMoonshotCredentials,
   resolveMiniMaxCredentials,
   resolveAtlasCloudCredentials,
+  resolveCheaperInferenceCredentials,
   resolveOpenAICodexOAuth,
   __testing,
 } from "../../services/code-provider-auth.js";
@@ -101,6 +102,30 @@ describe("resolveAtlasCloudCredentials", () => {
 
   it("throws when ATLASCLOUD_API_KEY is not set", () => {
     expect(() => resolveAtlasCloudCredentials()).toThrow(/ATLASCLOUD_API_KEY/);
+  });
+});
+
+describe("resolveCheaperInferenceCredentials", () => {
+  afterEach(() => {
+    delete process.env.CHEAPER_INFERENCE_API_KEY;
+    delete process.env.COMFYUI_MCP_CHEAPER_INFERENCE_BASE_URL;
+  });
+
+  it("reads CHEAPER_INFERENCE_API_KEY and default base URL", () => {
+    process.env.CHEAPER_INFERENCE_API_KEY = "ci-test-key";
+    const creds = resolveCheaperInferenceCredentials();
+    expect(creds.apiKey).toBe("ci-test-key");
+    expect(creds.baseUrl).toBe(__testing.CHEAPER_INFERENCE_DEFAULT_BASE);
+  });
+
+  it("honors a base URL override (trailing slash stripped)", () => {
+    process.env.CHEAPER_INFERENCE_API_KEY = "ci-test-key";
+    process.env.COMFYUI_MCP_CHEAPER_INFERENCE_BASE_URL = "https://ci.example/v1/";
+    expect(resolveCheaperInferenceCredentials().baseUrl).toBe("https://ci.example/v1");
+  });
+
+  it("throws when CHEAPER_INFERENCE_API_KEY is not set", () => {
+    expect(() => resolveCheaperInferenceCredentials()).toThrow(/CHEAPER_INFERENCE_API_KEY/);
   });
 });
 

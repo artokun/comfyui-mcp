@@ -272,6 +272,18 @@ describe("backendReadiness", () => {
     else process.env.ATLASCLOUD_API_KEY = real;
   });
 
+  it("cheaperinference: ready when CHEAPER_INFERENCE_API_KEY is set", () => {
+    const real = process.env.CHEAPER_INFERENCE_API_KEY;
+    delete process.env.CHEAPER_INFERENCE_API_KEY;
+    expect(backendReadiness("cheaperinference", { home: tmp }).ready).toBe(false);
+    process.env.CHEAPER_INFERENCE_API_KEY = "ci-test-key";
+    const r = backendReadiness("cheaperinference", { home: tmp });
+    expect(r.auth).toBe(true);
+    expect(r.ready).toBe(true);
+    if (real === undefined) delete process.env.CHEAPER_INFERENCE_API_KEY;
+    else process.env.CHEAPER_INFERENCE_API_KEY = real;
+  });
+
   it("unknown backend is never ready", () => {
     expect(backendReadiness("bogus").ready).toBe(false);
   });

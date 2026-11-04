@@ -74,6 +74,12 @@ describe("panel-secrets credential slots (canonical .env)", () => {
     expect(process.env.ATLASCLOUD_API_KEY).toBe("atlascloud-abc123");
   });
 
+  it("the cheaperinference slot writes CHEAPER_INFERENCE_API_KEY", async () => {
+    const m = await import("../../services/panel-secrets.js");
+    m.setPanelSecret("cheaperinference", "cheaperinference-abc123");
+    expect(process.env.CHEAPER_INFERENCE_API_KEY).toBe("cheaperinference-abc123");
+  });
+
   it("rejects an unknown slot", async () => {
     const m = await import("../../services/panel-secrets.js");
     expect(() => m.setPanelSecret("not-a-slot", "x")).toThrow(/unknown credential slot/i);
