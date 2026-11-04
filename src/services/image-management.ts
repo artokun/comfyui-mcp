@@ -831,10 +831,15 @@ function viewTooLargeForMedia(
   subfolder: string,
   maxBytes: number,
   localPath: string | undefined,
+  servedUrl: string | undefined,
 ): ComfyUIError {
+  // Prefer the URL that actually answered (fetchImage records it on the
+  // error): the configured target can be reassigned between the request and
+  // this message, and the download route must name the server holding the file.
   const viewUrl =
+    servedUrl ??
     `${getComfyUIBaseUrl().replace(/\/+$/, "")}/view?` +
-    new URLSearchParams({ filename, type, subfolder }).toString();
+      new URLSearchParams({ filename, type, subfolder }).toString();
   return new ComfyUIError(
     `ComfyUI /view response for "${filename}" exceeds the ${maxBytes / 1024 ** 2} MB safety limit, ` +
       `so it was NOT downloaded or saved — get_image holds a fetched file in memory and will not hold one ` +
@@ -1217,12 +1222,19 @@ export async function getOutputImage(
         // Stills get the preview-aware wording (#2785). Anything else — a VHS
         // .mp4, audio, a mesh — gets remedies that actually apply to it (#3002).
         if (IMAGE_EXTENSIONS.has(ext)) throw viewTooLargeForPreview(filename, maxBytes);
+        const servedUrl =
+          typeof error.details === "object" &&
+          error.details !== null &&
+          typeof (error.details as { url?: unknown }).url === "string"
+            ? (error.details as { url: string }).url
+            : undefined;
         throw viewTooLargeForMedia(
           filename,
           type,
           subfolder,
           maxBytes,
           await resolveLocalViewPath(filename, type, subfolder),
+          servedUrl,
         );
       } else {
         throw error;

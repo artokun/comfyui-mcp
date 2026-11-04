@@ -60,6 +60,30 @@ describe("fetchImage — body read cut short by the fetch ceiling (#3002)", () =
     expect(comfyErr.message).not.toBe("The operation was aborted due to timeout");
   });
 
+  it("records the URL that actually answered on a VIEW_TOO_LARGE refusal", async () => {
+    const requested: string[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        requested.push(String(input));
+        const res = new Response(Uint8Array.from([0, 0, 0, 32]), {
+          status: 200,
+          headers: { "content-type": "video/mp4", "content-length": String(33 * 1024 * 1024) },
+        });
+        Object.defineProperty(res, "url", { value: String(input) });
+        return res;
+      }),
+    );
+
+    const err = await fetchImage("face_00005-audio.mp4", "output", "clips").catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(ComfyUIError);
+    const comfyErr = err as ComfyUIError;
+    expect(comfyErr.code).toBe("VIEW_TOO_LARGE");
+    expect(requested).toHaveLength(1);
+    expect(comfyErr.details).toMatchObject({ filename: "face_00005-audio.mp4", url: requested[0] });
+    expect(requested[0]).toContain("/view?filename=face_00005-audio.mp4&type=output&subfolder=clips");
+  });
+
   it("still lets a non-timeout stream failure through unchanged", async () => {
     const reason = Object.assign(new Error("read ECONNRESET"), { code: "ECONNRESET" });
     vi.stubGlobal("fetch", vi.fn(async () => stalledVideoResponse(reason)));

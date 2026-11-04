@@ -248,4 +248,25 @@ describe("get_image — oversized video (#3002)", () => {
     expect(mocks.open).not.toHaveBeenCalled();
     expect(mocks.writeFile).not.toHaveBeenCalled();
   });
+
+  it("names the server that actually answered, not the target configured by the time the error renders", async () => {
+    // fetchImage records the URL it fetched on the refusal (codex gate, #3002):
+    // a panel-selected target can be reassigned between the request and this
+    // message, and a download route must name the server that has the file.
+    const served = `http://render-box-a:8188/view?filename=${video}&type=output&subfolder=`;
+    mocks.fetchImage.mockRejectedValue(
+      new ComfyUIError(
+        `ComfyUI /view response for "${video}" exceeds the ${MAX_VIEW_RESPONSE_BYTES / 1024 ** 2} MB safety limit.`,
+        "VIEW_TOO_LARGE",
+        { filename: video, maxBytes: MAX_VIEW_RESPONSE_BYTES, url: served },
+      ),
+    );
+
+    const out = await getHandler("get_image")({ action: "get", filename: video, type: "output" });
+
+    expect(out.isError).toBe(true);
+    const text = out.content.map((block) => block.text ?? "").join(" ");
+    expect(text).toContain(served);
+    expect(text).not.toContain("127.0.0.1:8188/view");
+  });
 });
