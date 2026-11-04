@@ -836,24 +836,35 @@ function viewTooLargeForMedia(
   // Prefer the URL that actually answered (fetchImage records it on the
   // error): the configured target can be reassigned between the request and
   // this message, and the download route must name the server holding the file.
+  // A self-hosted /view is only reconstructed for a self-hosted target: in
+  // Comfy Cloud mode the configured base URL describes no server at all, so a
+  // refusal without a served URL names NO route rather than a fabricated one.
   const viewUrl =
     servedUrl ??
-    `${getComfyUIBaseUrl().replace(/\/+$/, "")}/view?` +
-      new URLSearchParams({ filename, type, subfolder }).toString();
+    (isCloudMode()
+      ? undefined
+      : `${getComfyUIBaseUrl().replace(/\/+$/, "")}/view?` +
+        new URLSearchParams({ filename, type, subfolder }).toString());
+  const directDownload = viewUrl
+    ? (localPath ? ` It can also be downloaded directly, with no size limit, from ${viewUrl}` : ` Download it directly instead, with no size limit, from ${viewUrl}`) +
+      ` (a browser, curl or wget, sending the same credentials this process uses if the server ` +
+      `requires them).`
+    : "";
   return new ComfyUIError(
     `ComfyUI /view response for "${filename}" exceeds the ${maxBytes / 1024 ** 2} MB safety limit, ` +
       `so it was NOT downloaded or saved — get_image holds a fetched file in memory and will not hold one ` +
       `this large. It is not an image, so there is no inline preview to shrink: max_preview_dimension and ` +
-      `action:"convert" do not apply. ` +
-      (localPath
-        ? `On this machine the file is at ${localPath} — read or copy it from there. It can also be ` +
-          `downloaded directly, with no size limit, from ${viewUrl}`
-        : `Download it directly instead, with no size limit, from ${viewUrl}`) +
-      ` (a browser, curl or wget, sending the same credentials this process uses if the server ` +
-      `requires them). ` +
-      `The output is still intact on the ComfyUI server — do not re-run the render.`,
+      `action:"convert" do not apply.` +
+      (localPath ? ` On this machine the file is at ${localPath} — read or copy it from there.` : "") +
+      directDownload +
+      ` The output is still intact on the ComfyUI server — do not re-run the render.`,
     "VIEW_TOO_LARGE",
-    { filename, maxBytes, view_url: viewUrl, ...(localPath ? { local_path: localPath } : {}) },
+    {
+      filename,
+      maxBytes,
+      ...(viewUrl ? { view_url: viewUrl } : {}),
+      ...(localPath ? { local_path: localPath } : {}),
+    },
   );
 }
 

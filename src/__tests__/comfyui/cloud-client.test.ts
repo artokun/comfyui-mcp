@@ -158,7 +158,13 @@ describe("cloud-client", () => {
 
     await expect(fetchImage("oversized.png")).rejects.toMatchObject({
       code: "VIEW_TOO_LARGE",
-      details: { filename: "oversized.png", maxBytes: MAX_VIEW_RESPONSE_BYTES },
+      // #3002 — carries the Cloud route that answered, so the media refusal
+      // names /api/view and never a fabricated self-hosted /view.
+      details: {
+        filename: "oversized.png",
+        maxBytes: MAX_VIEW_RESPONSE_BYTES,
+        url: expect.stringContaining("/api/view?filename=oversized.png"),
+      },
     });
   });
 
