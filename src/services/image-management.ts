@@ -1,6 +1,6 @@
 import { readFile, copyFile, open, readdir, realpath, stat } from "node:fs/promises";
 import { join, basename, extname, isAbsolute, relative, resolve, sep } from "node:path";
-import { config, isCloudMode, isRemoteMode } from "../config.js";
+import { config, getComfyUIBaseUrl, isCloudMode, isRemoteMode } from "../config.js";
 import {
   getHistory,
   getObjectInfo,
@@ -725,20 +725,17 @@ async function readLocalViewFileBounded(
 }
 
 /**
- * Recover a local file when ComfyUI rejects an otherwise valid /view reference
- * with HTTP 400. Some ComfyUI builds reject basenames containing repeated
- * periods even though the loader can read the file from disk. This is only a
- * local, 400-specific fallback; remote and cloud targets must never read this
- * process's filesystem.
+ * The canonical on-disk path of a /view reference on THIS machine, or undefined
+ * when there is no such local file to name (remote/cloud target, no resolvable
+ * root, a reference that escapes the root, or a symlink that would). Shared by
+ * the 400 fallback and the too-large refusal so both agree on what "local" means.
  */
-async function readLocalViewFallback(
+async function resolveLocalViewPath(
   filename: string,
   type: "output" | "input" | "temp",
   subfolder: string,
-  maxBytes: number = MAX_VIEW_RESPONSE_BYTES,
-): Promise<{ base64: string; mimeType: string } | undefined> {
+): Promise<string | undefined> {
   if (isRemoteMode() || isCloudMode()) return undefined;
-
   try {
     // Use the same live/argv-aware roots as local filesystem tools. In
     // particular, input may be redirected with --input-directory and the
@@ -762,6 +759,28 @@ async function readLocalViewFallback(
       realpath(candidate),
     ]);
     if (!isStrictlyInside(realRoot, realCandidate)) return undefined;
+    return realCandidate;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Recover a local file when ComfyUI rejects an otherwise valid /view reference
+ * with HTTP 400. Some ComfyUI builds reject basenames containing repeated
+ * periods even though the loader can read the file from disk. This is only a
+ * local, 400-specific fallback; remote and cloud targets must never read this
+ * process's filesystem.
+ */
+async function readLocalViewFallback(
+  filename: string,
+  type: "output" | "input" | "temp",
+  subfolder: string,
+  maxBytes: number = MAX_VIEW_RESPONSE_BYTES,
+): Promise<{ base64: string; mimeType: string } | undefined> {
+  try {
+    const realCandidate = await resolveLocalViewPath(filename, type, subfolder);
+    if (!realCandidate) return undefined;
     const candidateStat = await stat(realCandidate);
     if (!candidateStat.isFile() || candidateStat.size > maxBytes) return undefined;
     const data = await readLocalViewFileBounded(realCandidate, maxBytes);
@@ -795,6 +814,41 @@ function viewTooLargeForPreview(filename: string, maxBytes: number): ComfyUIErro
       `The output is still intact on the ComfyUI server — do not re-run the render.`,
     "VIEW_TOO_LARGE",
     { filename, maxBytes },
+  );
+}
+
+/**
+ * The too-large refusal for a VIDEO/AUDIO/attachment (#3002). The preview
+ * wording above is wrong for these: there is no inline preview to shrink, so
+ * `max_preview_dimension` does nothing, and action:"convert" is an image
+ * re-encoder that rejects an .mp4 — a remedy the caller cannot act on. What
+ * does work is the server's own /view URL (no size cap outside this process)
+ * and, on this machine, the file itself.
+ */
+function viewTooLargeForMedia(
+  filename: string,
+  type: "output" | "input" | "temp",
+  subfolder: string,
+  maxBytes: number,
+  localPath: string | undefined,
+): ComfyUIError {
+  const viewUrl =
+    `${getComfyUIBaseUrl().replace(/\/+$/, "")}/view?` +
+    new URLSearchParams({ filename, type, subfolder }).toString();
+  return new ComfyUIError(
+    `ComfyUI /view response for "${filename}" exceeds the ${maxBytes / 1024 ** 2} MB safety limit, ` +
+      `so it was NOT downloaded or saved — get_image holds a fetched file in memory and will not hold one ` +
+      `this large. It is not an image, so there is no inline preview to shrink: max_preview_dimension and ` +
+      `action:"convert" do not apply. ` +
+      (localPath
+        ? `On this machine the file is at ${localPath} — read or copy it from there. It can also be ` +
+          `downloaded directly, with no size limit, from ${viewUrl}`
+        : `Download it directly instead, with no size limit, from ${viewUrl}`) +
+      ` (a browser, curl or wget, sending the same credentials this process uses if the server ` +
+      `requires them). ` +
+      `The output is still intact on the ComfyUI server — do not re-run the render.`,
+    "VIEW_TOO_LARGE",
+    { filename, maxBytes, view_url: viewUrl, ...(localPath ? { local_path: localPath } : {}) },
   );
 }
 
@@ -1160,7 +1214,16 @@ export async function getOutputImage(
       if (local) {
         result = local;
       } else if (isViewTooLarge(error)) {
-        throw viewTooLargeForPreview(filename, maxBytes);
+        // Stills get the preview-aware wording (#2785). Anything else — a VHS
+        // .mp4, audio, a mesh — gets remedies that actually apply to it (#3002).
+        if (IMAGE_EXTENSIONS.has(ext)) throw viewTooLargeForPreview(filename, maxBytes);
+        throw viewTooLargeForMedia(
+          filename,
+          type,
+          subfolder,
+          maxBytes,
+          await resolveLocalViewPath(filename, type, subfolder),
+        );
       } else {
         throw error;
       }

@@ -1758,8 +1758,15 @@ async function readViewResponseBounded(
   } catch (error) {
     if (error instanceof BoundedResponseError) {
       if (error.kind === "too-large") throw viewTooLarge(filename, limit);
+      // #3002 — this used to be reachable only when the reader's own timer won
+      // the race against the fetch ceiling, which it never did; a stalled video
+      // body surfaced as the bare "The operation was aborted due to timeout".
       throw new ComfyUIError(
-        `ComfyUI /view did not finish sending "${filename}" within ${timeoutMs / 1000}s; the response was aborted.`,
+        `ComfyUI /view did not finish sending "${filename}" within ${timeoutMs / 1000}s; the response was aborted. ` +
+          `The headers had arrived, so the file exists on the server — the body stalled or the link is too slow ` +
+          `for the ceiling. Nothing was saved locally. The output is still intact on the ComfyUI server; do NOT ` +
+          `re-run the render. Raise COMFYUI_MCP_HTTP_TIMEOUT_S (seconds) and retry, or download the file ` +
+          `directly from the server's /view URL.`,
         "VIEW_READ_TIMEOUT",
         { filename, timeout_ms: timeoutMs },
       );

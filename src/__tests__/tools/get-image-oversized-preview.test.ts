@@ -203,3 +203,49 @@ describe("get_image — oversized PNG preview (#2785)", () => {
     expect(mocks.writeFile).not.toHaveBeenCalled();
   });
 });
+
+// #3002 — a VHS .mp4 over the 32 MB cap got the PNG wording above, which names
+// two remedies that cannot work on a video: max_preview_dimension shrinks an
+// inline preview a video never gets, and action:"convert" is an image
+// re-encoder that rejects an .mp4. A refusal must name a remedy that works.
+describe("get_image — oversized video (#3002)", () => {
+  const video = "face_00005-audio.mp4";
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mocks.config.comfyuiPath = resolve("test-fixtures", "configured-comfyui");
+    mocks.getSystemStats.mockResolvedValue({ system: { argv: ["python", "main.py"] } });
+    mocks.comfyApiFetch.mockResolvedValue(new Response("{}", { status: 200 }));
+    mocks.realpath.mockImplementation(async (path: string) => path);
+    mocks.mkdir.mockResolvedValue(undefined);
+    mocks.writeFile.mockResolvedValue(undefined);
+    mocks.fetchImage.mockRejectedValue(
+      new ComfyUIError(
+        `ComfyUI /view response for "${video}" exceeds the ${MAX_VIEW_RESPONSE_BYTES / 1024 ** 2} MB safety limit.`,
+        "VIEW_TOO_LARGE",
+        { filename: video, maxBytes: MAX_VIEW_RESPONSE_BYTES },
+      ),
+    );
+    mocks.stat.mockResolvedValue({ isFile: () => true, size: MAX_VIEW_RESPONSE_BYTES + 1 });
+  });
+
+  it("names the local file and the direct /view URL, not the image-only remedies", async () => {
+    const out = await getHandler("get_image")({ action: "get", filename: video, type: "output" });
+
+    expect(out.isError).toBe(true);
+    const text = out.content.map((block) => block.text ?? "").join(" ");
+    expect(text).toContain("VIEW_TOO_LARGE");
+    expect(text).toMatch(/32 MB safety limit/);    expect(text).toMatch(/NOT downloaded or saved/);
+    // The two remedies that cannot act on a video are named only to be ruled out.
+    // The tool result is JSON text, so the quotes around convert arrive escaped.
+    expect(text).toMatch(/max_preview_dimension and action:\\?"convert\\?" do not apply/);
+    expect(text).not.toMatch(/use get_image action:\\?"convert\\?"/);
+    expect(text).not.toMatch(/inline preview \(max_preview_dimension\) could not be built/);
+    // Remedies that DO work: the file on this machine, and the server's own /view URL.
+    // The tool result is JSON text, so a Windows separator arrives doubled; `+` absorbs that.
+    expect(text).toMatch(new RegExp(`On this machine the file is at .*[\\\\/]+output[\\\\/]+${video}`));
+    expect(text).toContain(`/view?filename=${video}&type=output&subfolder=`);
+    expect(mocks.open).not.toHaveBeenCalled();
+    expect(mocks.writeFile).not.toHaveBeenCalled();
+  });
+});
