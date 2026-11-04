@@ -391,7 +391,9 @@ export async function fetchImage(
         throw new ComfyUIError(
           `Cloud /api/view response for "${filename}" exceeds the ${limit / 1024 ** 2} MB safety limit.`,
           "VIEW_TOO_LARGE",
-          { filename, maxBytes: limit },
+          // #3002 — the route that answered, so a media refusal can name
+          // Cloud's /api/view and never a self-hosted /view it fabricated.
+          { filename, maxBytes: limit, url },
         );
       }
       throw new ConnectionError(
