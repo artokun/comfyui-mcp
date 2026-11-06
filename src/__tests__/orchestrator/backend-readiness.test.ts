@@ -272,6 +272,18 @@ describe("backendReadiness", () => {
     else process.env.ATLASCLOUD_API_KEY = real;
   });
 
+  it("popnow: ready when POPNOW_API_KEY is set", () => {
+    const real = process.env.POPNOW_API_KEY;
+    delete process.env.POPNOW_API_KEY;
+    expect(backendReadiness("popnow", { home: tmp }).ready).toBe(false);
+    process.env.POPNOW_API_KEY = "popnow-test-key";
+    const r = backendReadiness("popnow", { home: tmp });
+    expect(r.auth).toBe(true);
+    expect(r.ready).toBe(true);
+    if (real === undefined) delete process.env.POPNOW_API_KEY;
+    else process.env.POPNOW_API_KEY = real;
+  });
+
   it("unknown backend is never ready", () => {
     expect(backendReadiness("bogus").ready).toBe(false);
   });

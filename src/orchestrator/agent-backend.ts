@@ -24,6 +24,7 @@ export type BackendId =
   | "moonshot"
   | "minimax"
   | "atlascloud"
+  | "popnow"
   | "ollama"
   | "openrouter"
   | "copilot";

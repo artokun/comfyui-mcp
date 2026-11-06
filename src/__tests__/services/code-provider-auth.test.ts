@@ -8,6 +8,7 @@ import {
   resolveMoonshotCredentials,
   resolveMiniMaxCredentials,
   resolveAtlasCloudCredentials,
+  resolvePopNowCredentials,
   resolveOpenAICodexOAuth,
   __testing,
 } from "../../services/code-provider-auth.js";
@@ -101,6 +102,30 @@ describe("resolveAtlasCloudCredentials", () => {
 
   it("throws when ATLASCLOUD_API_KEY is not set", () => {
     expect(() => resolveAtlasCloudCredentials()).toThrow(/ATLASCLOUD_API_KEY/);
+  });
+});
+
+describe("resolvePopNowCredentials", () => {
+  afterEach(() => {
+    delete process.env.POPNOW_API_KEY;
+    delete process.env.COMFYUI_MCP_POPNOW_BASE_URL;
+  });
+
+  it("reads POPNOW_API_KEY and default base URL", () => {
+    process.env.POPNOW_API_KEY = "popnow-test-key";
+    const creds = resolvePopNowCredentials();
+    expect(creds.apiKey).toBe("popnow-test-key");
+    expect(creds.baseUrl).toBe(__testing.POPNOW_DEFAULT_BASE);
+  });
+
+  it("honors a base URL override (trailing slash stripped)", () => {
+    process.env.POPNOW_API_KEY = "popnow-test-key";
+    process.env.COMFYUI_MCP_POPNOW_BASE_URL = "https://popnow.example/v1/";
+    expect(resolvePopNowCredentials().baseUrl).toBe("https://popnow.example/v1");
+  });
+
+  it("throws when POPNOW_API_KEY is not set", () => {
+    expect(() => resolvePopNowCredentials()).toThrow(/POPNOW_API_KEY/);
   });
 });
 
