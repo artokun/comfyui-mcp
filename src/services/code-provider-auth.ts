@@ -42,6 +42,7 @@ export const KIMI_CODE_DEFAULT_BASE = "https://api.kimi.com/coding/v1";
 export const MOONSHOT_DEFAULT_BASE = "https://api.moonshot.ai/v1";
 export const MINIMAX_DEFAULT_BASE = "https://api.minimax.io/v1";
 export const ATLASCLOUD_DEFAULT_BASE = "https://api.atlascloud.ai/v1";
+export const POPNOW_DEFAULT_BASE = "https://api.popnow.ai/v1";
 
 const TOKEN_REFRESH_SKEW_MS = 120_000;
 
@@ -677,6 +678,17 @@ export function resolveAtlasCloudCredentials(): MoonshotCredentials {
   });
 }
 
+/** PopNow OpenAI-compatible LLM API. Env: POPNOW_API_KEY. */
+export function resolvePopNowCredentials(): MoonshotCredentials {
+  return resolveKeyedCredentials({
+    envKeys: ["POPNOW_API_KEY"],
+    missingMessage:
+      "PopNow requires POPNOW_API_KEY from https://popnow.ai/api/console/keys.",
+    baseUrlEnv: "COMFYUI_MCP_POPNOW_BASE_URL",
+    defaultBaseUrl: POPNOW_DEFAULT_BASE,
+  });
+}
+
 /**
  * Resolve credentials for a simple OpenAI-compatible api-key provider by its
  * registry id (see services/openai-provider-registry). This is the one place
@@ -689,6 +701,7 @@ export function resolveOpenAiKeyCredentials(id: string): { apiKey: string; baseU
   if (id === "moonshot") return resolveMoonshotCredentials();
   if (id === "minimax") return resolveMiniMaxCredentials();
   if (id === "atlascloud") return resolveAtlasCloudCredentials();
+  if (id === "popnow") return resolvePopNowCredentials();
   throw new ValidationError(`No OpenAI api-key credential resolver for provider "${id}".`);
 }
 
@@ -932,6 +945,7 @@ export const __testing = {
   MOONSHOT_DEFAULT_BASE,
   MINIMAX_DEFAULT_BASE,
   ATLASCLOUD_DEFAULT_BASE,
+  POPNOW_DEFAULT_BASE,
   codexAuthPath,
   kimiCodeAuthPath,
   grokAuthPath,

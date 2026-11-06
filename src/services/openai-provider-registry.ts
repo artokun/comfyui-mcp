@@ -30,7 +30,7 @@
 import { processLocale, trFor } from "../i18n/index.js";
 
 /** The simple OpenAI-compatible API-key providers, by id. */
-export type OpenAiKeyProviderId = "glm" | "kimi" | "moonshot" | "minimax" | "atlascloud";
+export type OpenAiKeyProviderId = "glm" | "kimi" | "moonshot" | "minimax" | "atlascloud" | "popnow";
 
 export interface OpenAiKeyProvider {
   /** Panel backend id (a member of orchestrator BackendId). */
@@ -187,6 +187,25 @@ export const OPENAI_KEY_PROVIDERS: OpenAiKeyProvider[] = [
       ),
     degradedMessage:
       "⚠️ The background agent isn't responding — Atlas Cloud couldn't start. Set ATLASCLOUD_API_KEY, then Disconnect → Connect to retry.",
+    simpleKeyAuth: true,
+  },
+  {
+    id: "popnow",
+    slotLabel: "PopNow",
+    slotHelp: "PopNow OpenAI-compatible LLM API",
+    envKeys: ["POPNOW_API_KEY"],
+    modelEnv: "COMFYUI_MCP_POPNOW_MODEL",
+    defaultModel: process.env.COMFYUI_MCP_POPNOW_MODEL?.trim() || "deepseek/v4-flash/chat",
+    ackFallbackLabel: "PopNow",
+    readyMessage: (agentLabel, locale) =>
+      trFor(
+        locale || processLocale(),
+        "banner.ready.popnow",
+        "🟢 comfyui-mcp agent ready — {label} via PopNow. Ask away.",
+        { label: agentLabel },
+      ),
+    degradedMessage:
+      "⚠️ The background agent isn't responding — PopNow couldn't start. Set POPNOW_API_KEY, then Disconnect → Connect to retry.",
     simpleKeyAuth: true,
   },
 ];
