@@ -2580,6 +2580,9 @@ export async function runPanelOrchestrator(): Promise<void> {
         cwd: comfyuiPath ?? process.cwd(),
         ...(antigravityModel ? { model: antigravityModel } : {}),
         systemAppend: sysAppend,
+        // comfyuiUrl: image refs are fetched from /view and inlined as ACP image
+        // blocks — without it the backend cannot deliver attachments (#3010).
+        comfyuiUrl,
         mcpServers: makeHttpBackendMcpServers(key),
       });
     }
@@ -2754,6 +2757,7 @@ export async function runPanelOrchestrator(): Promise<void> {
             ? new AntigravityBackend({
                 cwd: comfyuiPath ?? process.cwd(),
                 ...(antigravityModel ? { model: antigravityModel } : {}),
+                comfyuiUrl,
               })
           : backend === "pi"
             ? new PiBackend({

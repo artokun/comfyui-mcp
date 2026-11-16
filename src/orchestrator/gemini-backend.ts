@@ -124,7 +124,7 @@ function killProcessTree(pid: number | undefined): void {
 // message (ACP is strict JSON-RPC 2.0), and (2) the server→client request set we
 // auto-approve is the ACP one (session/request_permission).
 
-interface RpcMessage {
+export interface RpcMessage {
   jsonrpc?: string;
   id?: number | string;
   method?: string;
@@ -147,7 +147,7 @@ class RpcError extends Error {
   }
 }
 
-class AcpClient {
+export class AcpClient {
   private proc: ChildProcessWithoutNullStreams | null = null;
   private rl: readline.Interface | null = null;
   private pending = new Map<
@@ -243,6 +243,11 @@ class AcpClient {
       this.pending.set(id, { resolve: resolve as (v: unknown) => void, reject, method });
       this.send({ id, method, params });
     });
+  }
+
+  /** The child's pid — process-tree teardown targets `taskkill /PID <pid> /T`. */
+  get pid(): number | undefined {
+    return this.proc?.pid;
   }
 
   notify(method: string, params: unknown = {}): void {
@@ -394,7 +399,7 @@ interface AcpAuthMethod {
   description?: string;
 }
 
-interface AcpInitializeResult {
+export interface AcpInitializeResult {
   protocolVersion?: number;
   agentCapabilities?: {
     loadSession?: boolean;
