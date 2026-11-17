@@ -1,12 +1,6 @@
-// Unit tests for the Antigravity CLI backend (antigravity-backend.ts, issue #262).
-//
-// We cannot run the real `agy` here, so `node:child_process` is mocked: spawn()
-// returns an in-process fake child whose scripted stdout/stderr/exit behavior is
-// set per test. This exercises the real AntigravityBackend end-to-end: executable
-// resolution (env override), spawn argv shaping (-p / -c / --model / skip-
-// permissions), the stdout→delta→assistant→result event mapping, the terminal-
-// result invariant on failures, interrupt, `agy models` parsing, and the
-// merge-safe .agents/mcp_config.json writer.
+// Unit tests for the Antigravity ACP backend. Every child process is mocked.
+// The fake server exercises request framing, persistent sessions, streaming,
+// cancellation, model selection, attachments, and injected MCP config paths.
 
 import { mkdtempSync, readFileSync, writeFileSync, mkdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -62,10 +56,11 @@ vi.mock("node:child_process", async (importOriginal) => {
         hoisted.acpMessages.push(msg);
         const router = hoisted.acp ?? acpDefault();
         const out = router(msg) ?? {};
-        if (out.hang) continue;
         for (const n of out.notifications ?? []) {
           stdout.write(JSON.stringify({ jsonrpc: "2.0", ...n }) + "\n");
         }
+        if (out.hang) continue;
+        if (out.hang) continue;
         if (out.error !== undefined) {
           stdout.write(JSON.stringify({ jsonrpc: "2.0", id: msg.id, error: out.error }) + "\n");
         } else if (msg.id !== undefined) {
@@ -408,7 +403,7 @@ describe("effort + abandonment (#271)", () => {
     await backend.close();
   });
 
-  it("closes the ACP child when the generator is abandoned mid-turn without close()", async () => {
+  it("closes the ACP child when abandoned before the first prompt", async () => {
     // A prompt that never resolves: the turn stays in flight.
     hoisted.acp = (msg) => (msg.method === "session/prompt" ? { hang: true } : acpDefault()(msg));
     const backend = new AntigravityBackend({ cwd: workDir, mcpConfigPath: join(workDir, "mcp.json") });
@@ -416,10 +411,11 @@ describe("effort + abandonment (#271)", () => {
     const seen: AgentEvent[] = [];
     for await (const ev of gen) {
       seen.push(ev);
-      if (ev.type === "session") break; // abandon the generator mid-turn
+      if (ev.type === "session") break; // abandon before the first prompt
     }
     expect(seen.some((e) => e.type === "session")).toBe(true);
     expect(hoisted.spawns[0].args).toContain("acp");
+    expect(hoisted.procs[0].exitCode).not.toBeNull();
   });
 });
 
@@ -684,5 +680,307 @@ describe("AntigravityBackend.listModels", () => {
     hoisted.script.push({ stdout: [], stderr: "not authenticated", exit: 2 });
     const backend = new AntigravityBackend({ cwd: workDir });
     await expect(backend.listModels()).rejects.toThrow(/Sign-In/i);
+  });
+});
+
+describe("ACP lifecycle regressions", () => {
+  const methods = (name: string) => hoisted.acpMessages.filter((m) => m.method === name);
+  const reply = (method: string, result: unknown, procIndex = 0) => {
+    const request = methods(method).at(-1);
+    (hoisted.procs[procIndex].stdout as { write: (s: string) => void }).write(
+      JSON.stringify({ jsonrpc: "2.0", id: request.id, result }) + "\n",
+    );
+  };
+  const backendForTest = () => new AntigravityBackend({
+    cwd: workDir, mcpConfigPath: join(workDir, "mcp.json"),
+    comfyuiUrl: "http://127.0.0.1:8188", systemAppend: "PERSONA",
+  });
+
+  beforeEach(() => { hoisted.script.push({ hang: true }); });
+
+  it("closes a child whose initialize request rejects", async () => {
+    hoisted.acp = () => ({ error: { code: -32000, message: "initialize rejected" } });
+    const backend = backendForTest();
+    try {
+      await expect(backend.prepare()).rejects.toThrow("initialize rejected");
+      expect(hoisted.procs[0].exitCode).not.toBeNull();
+    } finally { await backend.close(); (hoisted.procs[0].kill as () => void)(); }
+  });
+
+  it("shares one concurrent prepare and replaces an exited child", async () => {
+    hoisted.acp = (msg) => msg.method === "initialize" ? { hang: true } : acpDefault()(msg);
+    const backend = backendForTest();
+    try {
+      const first = backend.prepare();
+      const second = backend.prepare();
+      for (let i = 0; i < hoisted.procs.length; i++) reply("initialize", acpDefault()({ method: "initialize" }).result, i);
+      await Promise.all([first, second]);
+      expect(hoisted.spawns).toHaveLength(1);
+      (hoisted.procs[0].kill as () => void)();
+      await Promise.resolve();
+      hoisted.acp = acpDefault();
+      await backend.prepare();
+      expect(hoisted.spawns).toHaveLength(2);
+    } finally {
+      for (const proc of hoisted.procs) (proc.kill as () => void)();
+      await backend.close();
+    }
+  });
+
+  it.each([false, true])("keeps Stop armed through a slow initialize handshake (early Stop: %s)", async (earlyStop) => {
+    hoisted.acp = (msg) => msg.method === "initialize" ? { hang: true } : acpDefault()(msg);
+    const backend = backendForTest();
+    if (earlyStop) await backend.interrupt();
+    const collecting = collect(backend.run({ channel: channelOf([{ text: "cancel me" }]) }));
+    try {
+      await waitFor(() => expect(methods("initialize")).toHaveLength(1));
+      if (!earlyStop) await backend.interrupt();
+      await new Promise((r) => setTimeout(r, 650));
+      reply("initialize", acpDefault()({ method: "initialize" }).result);
+      const events = await collecting;
+      expect(methods("session/prompt")).toHaveLength(0);
+      expect(events.filter((e) => e.type === "result")).toEqual([
+        expect.objectContaining({ ok: false, subtype: "cancelled" }),
+      ]);
+    } finally { await backend.close(); }
+  });
+
+  it("cancels a slow image fetch without submitting a prompt or losing the persona", async () => {
+    let finishFetch!: (value: unknown) => void;
+    const fetchMock = vi.fn(() => new Promise((resolve) => { finishFetch = resolve; }));
+    vi.stubGlobal("fetch", fetchMock);
+    const backend = backendForTest();
+    let cancelled: AgentEvent[] = [];
+    async function* turns() {
+      yield { text: "cancel image", images: [{ filename: "shot.png", type: "input" as const }] };
+      cancelled = events.filter((e) => e.type === "result");
+      yield { text: "next" };
+    }
+    const events: AgentEvent[] = [];
+    const collecting = (async () => { for await (const ev of backend.run({ channel: turns() })) events.push(ev); })();
+    try {
+      await waitFor(() => expect(fetchMock).toHaveBeenCalled());
+      await backend.interrupt();
+      await new Promise((r) => setTimeout(r, 650));
+      finishFetch({ ok: false });
+      await collecting;
+      expect(cancelled).toEqual([expect.objectContaining({ ok: false, subtype: "cancelled" })]);
+      expect(methods("session/prompt")).toHaveLength(1);
+      expect(methods("session/prompt")[0].params.prompt[0].text).toContain("PERSONA");
+    } finally { vi.unstubAllGlobals(); await backend.close(); }
+  });
+
+  it("does not let a settled turn's cancellation timer kill the following turn", async () => {
+    hoisted.acp = (msg) => msg.method === "session/prompt" ? { hang: true } : acpDefault()(msg);
+    const backend = backendForTest();
+    const collecting = collect(backend.run({ channel: channelOf([{ text: "first" }, { text: "second" }]) }));
+    try {
+      await waitFor(() => expect(methods("session/prompt")).toHaveLength(1));
+      await backend.interrupt();
+      reply("session/prompt", { stopReason: "cancelled" });
+      await waitFor(() => expect(methods("session/prompt")).toHaveLength(2));
+      await new Promise((r) => setTimeout(r, 5200));
+      expect(hoisted.killed).toHaveLength(0);
+      reply("session/prompt", { stopReason: "end_turn" });
+      await collecting;
+    } finally { await backend.close(); await collecting; }
+  });
+
+  it("releases the process when abandoned at the initial session event", async () => {
+    const backend = backendForTest();
+    try {
+      for await (const ev of backend.run({ channel: channelOf([{ text: "unused" }]) })) {
+        if (ev.type === "session") break;
+      }
+      expect(hoisted.procs[0].exitCode).not.toBeNull();
+      expect(methods("session/prompt")).toHaveLength(0);
+    } finally { await backend.close(); }
+  });
+
+  it("releases an abandoned streaming prompt and suppresses its late events", async () => {
+    hoisted.acp = (msg) => msg.method === "session/prompt"
+      ? { ...acpDefault()(msg), hang: true }
+      : acpDefault()(msg);
+    // Send a delta, but hold the prompt's response after the fake router writes it.
+    const backend = backendForTest();
+    try {
+      for await (const ev of backend.run({ channel: channelOf([{ text: "hi" }]) })) {
+        if (ev.type === "assistant_delta") break;
+      }
+      expect(hoisted.procs[0].exitCode).not.toBeNull();
+    } finally { await backend.close(); }
+  });
+
+  it("applies a model change before the next prompt on the same run", async () => {
+    const backend = backendForTest();
+    async function* turns() {
+      yield { text: "first" };
+      await backend.setModel("gemini-next");
+      yield { text: "second" };
+    }
+    try {
+      await collect(backend.run({ channel: turns(), model: "gemini-first" }));
+      const relevant = hoisted.acpMessages.filter((m) => ["session/set_model", "session/prompt"].includes(m.method));
+      expect(relevant.map((m) => m.method === "session/set_model" ? m.params.modelId : m.params.prompt[0].text)).toEqual([
+        "gemini-first", expect.stringContaining("first"), "gemini-next", "second",
+      ]);
+    } finally { await backend.close(); }
+  });
+
+  it("does not claim a model or send a prompt when both model-selection methods fail", async () => {
+    hoisted.acp = (msg) => ["session/set_model", "session/set_config_option"].includes(msg.method)
+      ? { error: { code: -32601, message: "unsupported model selection" } }
+      : acpDefault()(msg);
+    const backend = backendForTest();
+    try {
+      await expect(collect(backend.run({ channel: channelOf([{ text: "hi" }]), model: "gemini-requested" })))
+        .rejects.toThrow(/model/i);
+      expect(methods("session/prompt")).toHaveLength(0);
+    } finally { await backend.close(); }
+  });
+});
+
+describe("ACP session and attachment boundaries", () => {
+  beforeEach(() => { hoisted.script.push({ hang: true }); });
+
+  it("resumes after a clean child exit instead of reusing its dead stdin", async () => {
+    const backend = new AntigravityBackend({ cwd: workDir });
+    await backend.prepare();
+    const first = hoisted.procs[0];
+    first.exitCode = 0;
+    (first.emit as (name: string, ...args: unknown[]) => void)("exit", 0, null);
+    await Promise.resolve();
+    try {
+      const events = await collect(backend.run({ channel: channelOf([{ text: "again" }]), resume: ACP_SESSION }));
+      expect(hoisted.spawns).toHaveLength(2);
+      expect(hoisted.acpMessages.find((m) => m.method === "session/load")?.params.sessionId).toBe(ACP_SESSION);
+      expect(events.filter((e) => e.type === "result")).toEqual([expect.objectContaining({ ok: true })]);
+    } finally { await backend.close(); }
+  });
+
+  it("does not send a prompt if the ACP process exits during image preparation", async () => {
+    let finish!: (value: unknown) => void;
+    const fetchMock = vi.fn(() => new Promise((resolve) => { finish = resolve; }));
+    vi.stubGlobal("fetch", fetchMock);
+    const backend = new AntigravityBackend({ cwd: workDir, comfyuiUrl: "http://127.0.0.1:8188" });
+    const collecting = collect(backend.run({ channel: channelOf([{ text: "look", images: [{ filename: "x.png" }] }]) }));
+    try {
+      await waitFor(() => expect(fetchMock).toHaveBeenCalled());
+      (hoisted.procs[0].kill as () => void)();
+      await Promise.resolve();
+      finish({ ok: false });
+      const events = await collecting;
+      expect(hoisted.acpMessages.filter((m) => m.method === "session/prompt")).toHaveLength(0);
+      expect(events.filter((e) => e.type === "result")).toEqual([expect.objectContaining({ ok: false })]);
+    } finally { vi.unstubAllGlobals(); await backend.close(); }
+  });
+
+  it("uses model config fallback only after set_model rejects", async () => {
+    hoisted.acp = (msg) => msg.method === "session/set_model"
+      ? { error: { code: -32601, message: "method unavailable" } }
+      : acpDefault()(msg);
+    const backend = new AntigravityBackend({ cwd: workDir });
+    try {
+      const events = await collect(backend.run({ channel: channelOf([{ text: "hi" }]), model: "gemini-requested" }));
+      expect(hoisted.acpMessages.find((m) => m.method === "session/set_config_option")?.params)
+        .toMatchObject({ configId: "model", value: "gemini-requested" });
+      expect(events[0]).toMatchObject({ type: "session", model: "gemini-requested" });
+    } finally { await backend.close(); }
+  });
+
+  it("fails only the affected turn when a live model change is rejected", async () => {
+    hoisted.acp = (msg) => (msg.method === "session/set_model" && msg.params.modelId === "gemini-bad")
+      || (msg.method === "session/set_config_option" && msg.params.value === "gemini-bad")
+      ? { error: { code: -32000, message: "model unavailable" } }
+      : acpDefault()(msg);
+    const backend = new AntigravityBackend({ cwd: workDir });
+    async function* turns() {
+      yield { text: "first" };
+      await backend.setModel("gemini-bad");
+      yield { text: "blocked" };
+      await backend.setModel("gemini-good");
+      yield { text: "third" };
+    }
+    try {
+      const events = await collect(backend.run({ channel: turns(), model: "gemini-good" }));
+      expect(events.filter((e) => e.type === "result").map((e) => e.type === "result" && e.ok)).toEqual([true, false, true]);
+      expect(hoisted.acpMessages.filter((m) => m.method === "session/prompt")).toHaveLength(2);
+    } finally { await backend.close(); }
+  });
+
+  it("does not fetch images when the provider explicitly disables vision", async () => {
+    hoisted.acp = (msg) => msg.method === "initialize"
+      ? { result: { protocolVersion: 1, agentCapabilities: { promptCapabilities: { image: false } } } }
+      : acpDefault()(msg);
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+    const backend = new AntigravityBackend({ cwd: workDir, comfyuiUrl: "http://127.0.0.1:8188" });
+    try {
+      await collect(backend.run({ channel: channelOf([{ text: "look", images: [{ filename: "x.png" }] }]) }));
+      expect(fetchMock).not.toHaveBeenCalled();
+      const prompt = hoisted.acpMessages.find((m) => m.method === "session/prompt").params.prompt;
+      expect(prompt).toHaveLength(1);
+      expect(prompt[0].text).toContain("could not be delivered");
+    } finally { vi.unstubAllGlobals(); await backend.close(); }
+  });
+
+  it("starts a fresh session with its persona when session/load rejects", async () => {
+    hoisted.acp = (msg) => msg.method === "session/load"
+      ? { error: { code: -32000, message: "session missing" } }
+      : acpDefault()(msg);
+    const backend = new AntigravityBackend({ cwd: workDir, systemAppend: "PERSONA" });
+    try {
+      await collect(backend.run({ channel: channelOf([{ text: "hi" }]), resume: ACP_SESSION }));
+      expect(hoisted.acpMessages.filter((m) => m.method === "session/new")).toHaveLength(1);
+      expect(hoisted.acpMessages.find((m) => m.method === "session/prompt").params.prompt[0].text).toContain("PERSONA");
+    } finally { await backend.close(); }
+  });
+
+  it("pairs tool completion with its original name and ignores another session's updates", async () => {
+    hoisted.acp = (msg) => msg.method === "session/prompt" ? {
+      notifications: [
+        { method: "session/update", params: { sessionId: "other", update: { sessionUpdate: "agent_message_chunk", content: { type: "text", text: "LEAK" } } } },
+        { method: "session/update", params: { sessionId: ACP_SESSION, update: { sessionUpdate: "tool_call", toolCallId: "tool-1", title: "panel_run" } } },
+        { method: "session/update", params: { sessionId: ACP_SESSION, update: { sessionUpdate: "tool_call_update", toolCallId: "tool-1", status: "failed" } } },
+      ],
+      result: { stopReason: "end_turn" },
+    } : acpDefault()(msg);
+    const backend = new AntigravityBackend({ cwd: workDir });
+    try {
+      const events = await collect(backend.run({ channel: channelOf([{ text: "hi" }]) }));
+      expect(events.filter((e) => e.type === "tool_call")).toEqual([
+        expect.objectContaining({ name: "panel_run", phase: "start" }),
+        expect.objectContaining({ name: "panel_run", phase: "end", detail: expect.objectContaining({ status: "failed" }) }),
+      ]);
+      expect(JSON.stringify(events)).not.toContain("LEAK");
+    } finally { await backend.close(); }
+  });
+});
+
+describe("ACP startup cancellation deadline", () => {
+  it.each(["initialize", "session/new", "session/load", "session/set_model", "session/set_config_option"])("kills a %s request that never settles after Stop", async (method) => {
+    hoisted.script.push({ hang: true });
+    hoisted.acp = (msg) => msg.method === method ? { hang: true } : acpDefault()(msg);
+    const backend = new AntigravityBackend({ cwd: workDir });
+    const stoppedBeforeRun = method === "session/new";
+    if (stoppedBeforeRun) { await backend.prepare(); await backend.interrupt(); }
+    const collecting = collect(backend.run({
+      channel: channelOf([{ text: "cancel" }]),
+      ...(method === "session/load" ? { resume: ACP_SESSION } : {}),
+      ...(method === "session/set_model" ? { model: "gemini-test" } : {}),
+      ...(method === "session/set_config_option" ? { effort: "high" as const } : {}),
+    }))
+      .then(() => null, (err: unknown) => err);
+    try {
+      await waitFor(() => expect(hoisted.acpMessages.some((m) => m.method === method)).toBe(true));
+      if (!stoppedBeforeRun) await backend.interrupt();
+      await waitFor(() => expect(hoisted.killed).toHaveLength(1), { timeout: 8000 });
+      expect(await collecting).toBeInstanceOf(Error);
+      expect(hoisted.acpMessages.some((m) => m.method === "session/prompt")).toBe(false);
+      hoisted.acp = acpDefault();
+      const recovered = await collect(backend.run({ channel: channelOf([{ text: "retry" }]) }));
+      expect(recovered.filter((e) => e.type === "result")).toEqual([expect.objectContaining({ ok: true })]);
+      expect(hoisted.spawns).toHaveLength(2);
+    } finally { await backend.close(); }
   });
 });

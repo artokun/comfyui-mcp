@@ -1,54 +1,8 @@
-﻿// Google Antigravity CLI backend (issue #262) â€” the provider adapter behind the
-// AgentBackend port for `agy`, the official Antigravity CLI that replaced the
-// individual-tier Gemini CLI subscription path on 2026-06-18 (Google AI Pro /
-// Ultra / free tiers moved to Antigravity; Gemini CLI remains for enterprise +
-// API-key users, and keeps its own separate `gemini` backend here).
-//
-// Unlike the ACP/app-server adapters (gemini/codex), `agy` exposes NO documented
-// machine-readable streaming protocol â€” only a plain-text non-interactive print
-// mode. So this adapter is a SPAWN-PER-TURN driver over the supported public
-// surface, exactly as requested in #262 ("start with final-text responses"):
-//
-//   turn N=1        agy -p "<prompt>" [--model m] --dangerously-skip-permissions
-//   turn N>1        agy -c -p "<prompt>" ...        (--continue = latest conversation)
-//   resume          same as N>1 (`-c`); `agy` owns conversation storage
-//   interrupt()     kill the in-flight child process tree (Windows taskkill /T /F)
-//   listModels()    parse `agy models` (live account catalog â€” no static list)
-//
-// stdout is streamed to the panel as assistant deltas as it arrives (agy prints
-// the final answer progressively in -p mode; if a build buffers, the deltas just
-// land at once â€” still correct). There is no per-turn rewind anchor and no
-// in-process MCP: forkAtAnchor=false, inProcessMcp=false.
-//
-// AUTH: the CLI owns authentication (system keyring + Google Sign-In). Per #262
-// we deliberately do NOT read tokens from the keyring or Antigravity state files
-// â€” readiness is "the executable exists", and the real auth signal is whether
-// `agy models` answers (the connect ack's model probe). An unauthenticated CLI
-// gets an actionable "run `agy` once and sign in" message.
-//
-// MCP / ComfyUI tools â€” VERIFIED LIVE against agy 1.1.5 (2026-07-21): the CLI
-// honors ONLY the global shared `~/.gemini/config/mcp_config.json`; the
-// workspace `.agents/mcp_config.json` path in third-party docs is IDE-only and
-// silently ignored by `agy -p`. Before the first turn we MERGE our two servers â€”
-// the headless `comfyui` stdio MCP and the per-tab `panel` HTTP MCP â€” into that
-// file under our own names, preserving every other entry byte-for-byte.
-// Merge-safe and reversible (delete the two keys); global rather than
-// workspace-scoped only because the CLI offers nothing narrower.
-//
-// LIMITS (flagged honestly, mirrors the issue's "reduced capabilities" ask):
-//   - `-p` prints plain text: no structured tool-call events, so the panel shows
-//     no per-tool progress for agy turns (onActivity still fires on every stdout
-//     chunk, keeping the idle watchdog armed).
-//   - `--continue` binds to the account's LATEST conversation; a user running
-//     `agy` interactively in parallel â€” or a SECOND antigravity panel tab â€”
-//     can steal continuity (tab A's next turn continues tab B's thread). The
-//     supported surface offers no way to read the new conversation's id from
-//     -p output; revisit if a future agy prints one.
-//   - The prompt rides argv, so it is visible in the OS process list for the
-//     child's lifetime (same-host processes can read the conversation) and is
-//     capped at ~32K chars on Windows (preflighted with a legible error).
-//   - No documented image-input path for -p â†’ vision=false (image refs are
-//     already named in the turn text as a fallback).
+// Google Antigravity CLI backend: one persistent `agy acp` child per run.
+// ACP session ids support explicit resume; prompts and images travel over stdin.
+// The CLI owns OAuth authentication. Tool secrets are stripped from its environment.
+// MCP servers use the existing global-config integration with ownership-aware cleanup.
+// Model selection must succeed before a prompt can claim the requested model.
 
 import { spawn, spawnSync, type ChildProcessByStdio } from "node:child_process";
 import type { Readable } from "node:stream";
@@ -414,6 +368,11 @@ export class AntigravityBackend implements AgentBackend {
   /** The client an in-flight prepare() is spinning up, tracked so a concurrent
    *  close() can tear it down before it is published. */
   private preparingClient: AcpClient | null = null;
+  private preparing: Promise<void> | null = null;
+  private startingRun = false;
+  private cancelTimer: NodeJS.Timeout | null = null;
+  private turnAbort: AbortController | null = null;
+  private appliedModel: string | undefined;
   /** The live ACP session id â€” used for session/prompt + session/cancel. */
   private sessionId: string | null = null;
   /** What the agent advertised at initialize (promptCapabilities.imageâ€¦). */
@@ -458,6 +417,17 @@ export class AntigravityBackend implements AgentBackend {
   async prepare(): Promise<void> {
     if (this.disposed) throw new Error("antigravity backend is closed.");
     if (this.client) return;
+    if (this.preparing) return this.preparing;
+    const preparing = this.prepareClient();
+    this.preparing = preparing;
+    try {
+      await preparing;
+    } finally {
+      if (this.preparing === preparing) this.preparing = null;
+    }
+  }
+
+  private async prepareClient(): Promise<void> {
     this.ensureMcpConfig();
     const bin = this.resolveBin();
     const cwd = this.deps.cwd ?? process.cwd();
@@ -474,6 +444,8 @@ export class AntigravityBackend implements AgentBackend {
     // `-p` adapter this replaces).
     const client = new AcpClient(bin, args, cwd, buildAgentSpawnEnv(), false);
     this.preparingClient = client;
+    // A Stop can arrive before run() starts; give its pending startup the same deadline.
+    if (this.startingRun && this.interrupted) void this.interrupt();
     try {
       const init = await client.initialize(CLIENT_INFO);
       if (this.disposed) {
@@ -482,11 +454,23 @@ export class AntigravityBackend implements AgentBackend {
       }
       this.agentCaps = init.agentCapabilities;
       this.client = client;
+      void client.exitPromise.then(() => {
+        // Even a clean exit makes this client unusable.
+        if (this.client === client) {
+          this.client = null;
+          this.sessionId = null;
+          this.appliedModel = undefined;
+        }
+      });
       logger.info(
         `[antigravity-backend] ACP ready (protocol ${init.protocolVersion ?? "?"}, ` +
           `agent ${init.agentInfo?.name ?? "agy"}, ` +
           `vision ${this.agentCaps?.promptCapabilities?.image === true ? "yes" : "no"})`,
       );
+    } catch (err) {
+      // initialize may reject while the process is still alive.
+      if (client.pid) await client.close().catch(() => {});
+      throw err;
     } finally {
       if (this.preparingClient === client) this.preparingClient = null;
     }
@@ -496,7 +480,7 @@ export class AntigravityBackend implements AgentBackend {
    *  ContentBlock â€” or null when it cannot be fetched (the text reference still
    *  names the image as a fallback). Same posture as Gemini/Claude: inline base64,
    *  12 MiB cap. */
-  private async fetchImageBlock(ref: ImageRef): Promise<Record<string, unknown> | null> {
+  private async fetchImageBlock(ref: ImageRef, signal: AbortSignal): Promise<Record<string, unknown> | null> {
     const base = this.deps.comfyuiUrl ?? process.env.COMFYUI_URL;
     if (!base || !ref?.filename) return null;
     try {
@@ -504,7 +488,7 @@ export class AntigravityBackend implements AgentBackend {
       u.searchParams.set("filename", ref.filename);
       u.searchParams.set("type", ref.type || "input");
       if (ref.subfolder) u.searchParams.set("subfolder", ref.subfolder);
-      const res = await fetch(u, { signal: AbortSignal.timeout(15000) });
+      const res = await fetch(u, { signal: AbortSignal.any([signal, AbortSignal.timeout(15000)]) });
       if (!res.ok) return null;
       let mt = (res.headers.get("content-type") || "").split(";")[0].trim().toLowerCase();
       if (!["image/png", "image/jpeg", "image/gif", "image/webp"].includes(mt)) {
@@ -536,6 +520,7 @@ export class AntigravityBackend implements AgentBackend {
         this.needsSystemPreamble = false; // persona already delivered
         resumed = true;
       } catch (err) {
+        if (this.client !== client) throw err;
         logger.warn(`[antigravity-backend] session/load failed (${msgOf(err)}) â€” starting a fresh session`);
       }
     }
@@ -556,8 +541,10 @@ export class AntigravityBackend implements AgentBackend {
       this.sessionId = res.sessionId;
       this.needsSystemPreamble = !!this.deps.systemAppend;
     }
+    this.appliedModel = undefined;
     if (this.model) await this.applyModel();
     if (this.effort) await this.applyThoughtLevel();
+    if (this.client !== client || !this.sessionId) throw new Error("Antigravity ACP connection closed during session setup.");
     return this.sessionId as string;
   }
 
@@ -565,21 +552,25 @@ export class AntigravityBackend implements AgentBackend {
    *  a model switch no longer needs a respawn + fresh conversation). */
   private async applyModel(): Promise<void> {
     const client = this.client;
-    if (!client || !this.sessionId || !this.model) return;
+    if (!client || !this.sessionId || !this.model || this.appliedModel === this.model) return;
+    const model = this.model;
     try {
-      await client.request("session/set_model", { sessionId: this.sessionId, modelId: this.model });
+      await client.request("session/set_model", { sessionId: this.sessionId, modelId: model });
+      this.appliedModel = model;
       return;
     } catch (err) {
+      if (this.client !== client) throw err;
       logger.debug(`[antigravity-backend] session/set_model rejected (${msgOf(err)}) â€” trying set_config_option`);
     }
     try {
       await client.request("session/set_config_option", {
         sessionId: this.sessionId,
         configId: "model",
-        value: this.model,
+        value: model,
       });
+      this.appliedModel = model;
     } catch (err) {
-      logger.warn(`[antigravity-backend] could not select model ${this.model}: ${msgOf(err)}`);
+      throw new Error(`Antigravity could not select model ${model}: ${msgOf(err)}`);
     }
   }
 
@@ -604,33 +595,59 @@ export class AntigravityBackend implements AgentBackend {
    * batch per turn).
    */
   async *run(opts: BackendStartOptions): AsyncGenerator<AgentEvent> {
-    // Panel may pass the CLAUDE panel model unconditionally in opts.model â€” but a
-    // simple "reject claude-*" filter is WRONG here: Antigravity's own catalog
-    // legitimately offers Claude models. So validate claude-shaped ids against the
-    // account's real `agy models` catalog and only drop the ones it cannot serve.
-    if (opts.model) this.model = (await this.acceptableModel(opts.model)) ?? this.model;
-    // agy maps effort onto ACP's `thought_level` (low|medium|high). Other
-    // providers' scales (e.g. Codex xhigh) are ignored.
-    if (opts.effort && /^(low|medium|high)$/i.test(opts.effort)) {
-      this.effort = opts.effort.toLowerCase();
+    this.startingRun = true;
+    if (this.interrupted) void this.interrupt();
+    let completed = false;
+    try {
+      // Panel may pass the CLAUDE panel model unconditionally in opts.model â€” but a
+      // simple "reject claude-*" filter is WRONG here: Antigravity's own catalog
+      // legitimately offers Claude models. So validate claude-shaped ids against the
+      // account's real `agy models` catalog and only drop the ones it cannot serve.
+      if (opts.model) this.model = (await this.acceptableModel(opts.model)) ?? this.model;
+      // agy maps effort onto ACP's `thought_level` (low|medium|high). Other
+      // providers' scales (e.g. Codex xhigh) are ignored.
+      if (opts.effort && /^(low|medium|high)$/i.test(opts.effort)) {
+        this.effort = opts.effort.toLowerCase();
+      }
+      await this.prepare();
+      if (!this.client) throw new Error("agy acp is not initialized");
+      const cwd = opts.cwd ?? this.deps.cwd ?? process.cwd();
+      // forkAtAnchor is false â†’ ignore opts.rewindAnchor; whole-session resume only.
+      const wanted = opts.resume ?? opts.sessionId ?? null;
+      const resumeId = wanted && wanted !== this.sessionId ? wanted : null;
+      const sessionId = await this.ensureSession(cwd, resumeId);
+      // The ACP session id IS our session id (PanelAgent persists it for resume).
+      yield {
+        type: "session",
+        sessionId,
+        ...(this.appliedModel ? { model: this.appliedModel } : {}),
+      };
+      this.startingRun = false;
+      let turnSeq = 0;
+      for await (const turn of opts.channel) {
+        // End the run on connection loss so PanelAgent can resume the persisted id.
+        if (!this.client) throw new Error("Antigravity ACP connection closed; reconnect to resume.");
+        yield* stampTurn(this.runTurn(turn, opts.onActivity), ++turnSeq);
+      }
+      completed = true;
+    } finally {
+      this.startingRun = false;
+      this.clearCancelTimer();
+      if (this.idleInterruptExpiry) clearTimeout(this.idleInterruptExpiry);
+      this.idleInterruptExpiry = null;
+      this.interrupted = false;
+      const client = this.client;
+      this.client = null;
+      this.sessionId = null;
+      this.appliedModel = undefined;
+      if (client) await client.close().catch(() => {});
+      if (!completed) this.removeMcpConfig();
     }
-    await this.prepare();
-    if (!this.client) throw new Error("agy acp is not initialized");
-    const cwd = opts.cwd ?? this.deps.cwd ?? process.cwd();
-    // forkAtAnchor is false â†’ ignore opts.rewindAnchor; whole-session resume only.
-    const wanted = opts.resume ?? opts.sessionId ?? null;
-    const resumeId = wanted && wanted !== this.sessionId ? wanted : null;
-    const sessionId = await this.ensureSession(cwd, resumeId);
-    // The ACP session id IS our session id (PanelAgent persists it for resume).
-    yield {
-      type: "session",
-      sessionId,
-      ...(this.model ? { model: this.model } : {}),
-    };
-    let turnSeq = 0;
-    for await (const turn of opts.channel) {
-      yield* stampTurn(this.runTurn(turn, opts.onActivity), ++turnSeq);
-    }
+  }
+
+  private clearCancelTimer(): void {
+    if (this.cancelTimer) clearTimeout(this.cancelTimer);
+    this.cancelTimer = null;
   }
 
   /** Run ONE turn: `session/prompt` + stream its session/update notifications as
@@ -645,6 +662,12 @@ export class AntigravityBackend implements AgentBackend {
       yield { type: "result", ok: false, subtype: "error" };
       return;
     }
+
+    this.turnActive = true;
+    const abort = new AbortController();
+    this.turnAbort = abort;
+    if (this.idleInterruptExpiry) clearTimeout(this.idleInterruptExpiry);
+    this.idleInterruptExpiry = null;
 
     const queue: AgentEvent[] = [];
     let wake: (() => void) | null = null;
@@ -769,60 +792,58 @@ export class AntigravityBackend implements AgentBackend {
       emitTerminalError(client.exitError ? msgOf(client.exitError) : "agy acp connection closed.");
     });
 
-    // FIRST-TURN PERSONA: ACP session/new has no instructions field, so the panel
-    // system prompt is prepended to the first turn as a marked preamble.
-    let turnText = promptText(turn.text);
-    if (this.needsSystemPreamble && this.deps.systemAppend) {
-      turnText =
-        `<system>\n${this.deps.systemAppend}\n</system>\n\n` +
-        `The user's first message follows.\n\n${turnText}`;
-      this.needsSystemPreamble = false;
-    }
+    try {
+      if (!this.interrupted) await this.applyModel();
+      // FIRST-TURN PERSONA: ACP session/new has no instructions field, so the panel
+      // system prompt is prepended to the first turn as a marked preamble.
+      let turnText = promptText(turn.text);
+      if (this.needsSystemPreamble && this.deps.systemAppend) {
+        turnText =
+          `<system>\n${this.deps.systemAppend}\n</system>\n\n` +
+          `The user's first message follows.\n\n${turnText}`;
+      }
 
-    // Prompt ContentBlock[]: the text block first (preserves prompt context), then
-    // any resolved inline base64 image blocks. Only when the agent advertised
-    // promptCapabilities.image (default-allow when the capability is unknown).
-    const prompt: Array<Record<string, unknown>> = [{ type: "text", text: turnText }];
-    const refs = turn.images ?? [];
-    const imagesAllowed = this.agentCaps?.promptCapabilities?.image !== false;
-    let attached = 0;
-    if (imagesAllowed) {
-      for (const ref of refs) {
-        const block = await this.fetchImageBlock(ref);
-        if (block) {
-          prompt.push(block);
-          attached++;
+      // Prompt ContentBlock[]: the text block first (preserves prompt context), then
+      // any resolved inline base64 image blocks. Only when the agent advertised
+      // promptCapabilities.image (default-allow when the capability is unknown).
+      const prompt: Array<Record<string, unknown>> = [{ type: "text", text: turnText }];
+      const refs = turn.images ?? [];
+      const imagesAllowed = this.agentCaps?.promptCapabilities?.image !== false;
+      let attached = 0;
+      if (imagesAllowed) {
+        for (const ref of refs) {
+          if (this.interrupted || abort.signal.aborted) break;
+          const block = await this.fetchImageBlock(ref, abort.signal);
+          if (block) {
+            prompt.push(block);
+            attached++;
+          }
         }
       }
-    }
-    if (refs.length && attached < refs.length) {
-      // Honest fallback: name what did NOT arrive so the model cannot describe an
-      // image it never received.
-      prompt[0] = {
-        type: "text",
-        text:
-          `${turnText}\n\n[panel note: ${refs.length - attached} of ${refs.length} attached image(s) ` +
-          `could not be delivered to you. Do not claim or imply you saw them; if it matters, ask the ` +
-          `user to describe them.]`,
-      };
-    }
+      if (refs.length && attached < refs.length) {
+        // Honest fallback: name what did NOT arrive so the model cannot describe an
+        // image it never received.
+        prompt[0] = {
+          type: "text",
+          text:
+            `${turnText}\n\n[panel note: ${refs.length - attached} of ${refs.length} attached image(s) ` +
+            `could not be delivered to you. Do not claim or imply you saw them; if it matters, ask the ` +
+            `user to describe them.]`,
+        };
+      }
 
-    this.turnActive = true;
-    if (this.idleInterruptExpiry) {
-      clearTimeout(this.idleInterruptExpiry);
-      this.idleInterruptExpiry = null;
-    }
-    if (this.interrupted) {
-      // A Stop landed while this turn was setting up: honor it now.
-      this.turnActive = false;
-      this.interrupted = false;
-      yield { type: "error", message: "Antigravity turn interrupted." };
-      yield { type: "result", ok: false, subtype: "cancelled" };
-      return;
-    }
+      if (done) {
+        while (queue.length) yield queue.shift() as AgentEvent;
+        return;
+      }
+      if (this.interrupted || abort.signal.aborted) {
+        // A Stop landed while this turn was setting up: honor it now.
+        yield { type: "error", message: "Antigravity turn interrupted." };
+        yield { type: "result", ok: false, subtype: "cancelled" };
+        return;
+      }
 
-    let interrupted = false;
-    try {
+      this.needsSystemPreamble = false;
       // session/prompt is a REQUEST that RESOLVES with a stopReason at turn end.
       client
         .request<{ stopReason?: string }>("session/prompt", { sessionId, prompt })
@@ -840,7 +861,7 @@ export class AntigravityBackend implements AgentBackend {
           finish();
         })
         .catch((err) => {
-          if (interrupted) emitTerminalError("Antigravity turn interrupted.");
+          if (this.interrupted) emitTerminalError("Antigravity turn interrupted.");
           else emitTerminalError(msgOf(err));
         });
 
@@ -853,8 +874,16 @@ export class AntigravityBackend implements AgentBackend {
         });
       }
       while (queue.length) yield queue.shift() as AgentEvent;
+    } catch (err) {
+      emitTerminalError(msgOf(err));
+      while (queue.length) yield queue.shift() as AgentEvent;
     } finally {
-      interrupted = this.interrupted;
+      // Ignore late callbacks when a consumer abandons this turn.
+      finishedResult = true;
+      finish();
+      abort.abort();
+      this.turnAbort = null;
+      this.clearCancelTimer();
       if (client.notificationHandler && !client.exitError) client.notificationHandler = prev ?? null;
       this.turnActive = false;
       this.interrupted = false;
@@ -869,31 +898,35 @@ export class AntigravityBackend implements AgentBackend {
       clearTimeout(this.idleInterruptExpiry);
       this.idleInterruptExpiry = null;
     }
-    if (!this.turnActive) {
+    this.turnAbort?.abort();
+    if (!this.turnActive && !this.startingRun) {
       // Armed while NO turn was in flight: either a Stop racing its own turn's
       // startup (honor it â€” a turn starts within ms and consumes the flag) or a
       // stray idle Stop (must not cancel the user's NEXT message minutes later).
       const t = setTimeout(() => {
         this.idleInterruptExpiry = null;
-        if (!this.turnActive) this.interrupted = false;
+        if (!this.turnActive && !this.startingRun) this.interrupted = false;
       }, 500);
       t.unref?.();
       this.idleInterruptExpiry = t;
       return;
     }
-    const client = this.client;
-    if (client && this.sessionId) client.notify("session/cancel", { sessionId: this.sessionId });
+    const client = this.client ?? this.preparingClient;
+    if (!client) return;
+    if (this.sessionId) client.notify("session/cancel", { sessionId: this.sessionId });
     // FAILSAFE: an agent that ignores the cancel must still end the turn. Kill the
     // tree; the next turn re-prepares (fresh child + fresh session).
     const dying = client;
+    this.clearCancelTimer();
     const timer = setTimeout(() => {
-      if (!this.turnActive || this.client !== dying) return;
+      if ((!this.turnActive && !this.startingRun) || (this.client !== dying && this.preparingClient !== dying)) return;
       logger.warn("[antigravity-backend] session/cancel did not settle the turn â€” killing agy");
       this.client = null;
       this.sessionId = null;
       if (dying?.pid) killProcessTree(dying.pid);
     }, 5_000);
     timer.unref?.();
+    this.cancelTimer = timer;
   }
 
 
@@ -1026,9 +1059,7 @@ export class AntigravityBackend implements AgentBackend {
     return catalog?.has(model) ? model : undefined;
   }
 
-  /** Switch the model for subsequent turns (--model is per-spawn, so this is
-   *  free â€” no respawn dance). Drops ids the account's catalog can't serve
-   *  (see acceptableModel). */
+  /** Record a model for selection at the next ACP prompt boundary. */
   async setModel(model: string): Promise<void> {
     const ok = await this.acceptableModel(model);
     if (ok) this.model = ok;
@@ -1093,6 +1124,8 @@ export class AntigravityBackend implements AgentBackend {
    *  started. */
   async close(): Promise<void> {
     this.disposed = true;
+    this.turnAbort?.abort();
+    this.clearCancelTimer();
     const client = this.client;
     const preparing = this.preparingClient;
     this.client = null;
