@@ -40,6 +40,31 @@ export interface DegradedMcpServer {
   status: string | null;
 }
 
+/**
+ * The MCP servers the panel itself provides: the headless `comfyui` server and
+ * the in-process live-graph `panel` server. Losing either one breaks the agent,
+ * which is what the #1524 / #2742 watch exists to say out loud.
+ *
+ * Everything else in a Claude session's server set was INHERITED from the
+ * user's own `~/.claude.json` (readUserMcpServers). Those are the user's other
+ * tools, unrelated to ComfyUI: a personal server that is down or waiting on a
+ * sign-in in their normal Claude Code says nothing about this panel, and
+ * narrating it in the panel chat (once at session start and again after every
+ * reconnect attempt) was pure noise. They are logged, not shown, and are not
+ * reconnected; `panel_list_mcp` still reports them for anyone who asks.
+ */
+export const PANEL_OWN_MCP_SERVERS: ReadonlySet<string> = new Set(["comfyui", "panel"]);
+
+/** The subset of `names` the panel provides itself (see PANEL_OWN_MCP_SERVERS). */
+export function panelOwnMcpServers(names: readonly string[]): string[] {
+  return names.filter((n) => PANEL_OWN_MCP_SERVERS.has(n));
+}
+
+/** The subset of `names` inherited from the user's own Claude config. */
+export function inheritedMcpServers(names: readonly string[]): string[] {
+  return names.filter((n) => !PANEL_OWN_MCP_SERVERS.has(n));
+}
+
 /** What a report says about the servers we configured. */
 export interface McpSessionHealth {
   /** Configured servers the session does not have. */
