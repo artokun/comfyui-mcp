@@ -512,3 +512,101 @@ describe("a Claude session whose MCP server connected but registered nothing (#2
     expect(notices[0].message).toContain("started without");
   });
 });
+
+describe("inherited user MCP servers never fill the panel chat", () => {
+  // The user's own ~/.claude.json servers (a personal server that is down, one
+  // waiting on a sign-in) were narrated at every session start and again after
+  // every turn's reconnect attempt. They are not panel problems: log, don't show.
+  const PERSONAL = { type: "stdio", command: "personal-server", args: [] } as never;
+  const SIGNIN = { type: "http", url: "https://example.invalid/mcp" } as never;
+  const deps = {
+    mcpServers: { comfyui: COMFYUI_SERVER, "poly-ops": PERSONAL, starforged: SIGNIN },
+    panelServer: PANEL_SERVER,
+  };
+
+  it("stays silent at init when only inherited servers are down", async () => {
+    const events = await drive(
+      deps,
+      initWith([
+        { name: "comfyui", status: "connected" },
+        { name: "panel", status: "connected" },
+        { name: "poly-ops", status: "failed" },
+        { name: "starforged", status: "needs-auth" },
+      ]),
+    );
+    expect(noticesOf(events)).toHaveLength(0);
+    // Still handed to the session — this changes what is SHOWN, not what is given.
+    expect(Object.keys(hoisted.lastMcpServers ?? {}).sort()).toEqual(
+      ["comfyui", "panel", "poly-ops", "starforged"].sort(),
+    );
+  });
+
+  it("still names the panel's own server, and only it, when both kinds are down", async () => {
+    const events = await drive(
+      deps,
+      initWith([
+        { name: "comfyui", status: "connected" },
+        { name: "panel", status: "failed" },
+        { name: "poly-ops", status: "failed" },
+      ]),
+    );
+    const notices = noticesOf(events);
+    expect(notices).toHaveLength(1);
+    expect(notices[0].message).toContain("panel");
+    expect(notices[0].message).not.toContain("poly-ops");
+    expect(notices[0].message).not.toContain("starforged");
+  });
+
+  it("stays silent at turn end, and does not spend a reconnect, on an inherited drop", async () => {
+    hoisted.statusPoll = [
+      { name: "comfyui", status: "connected" },
+      { name: "panel", status: "connected" },
+      { name: "poly-ops", status: "failed" },
+      { name: "starforged", status: "needs-auth" },
+    ];
+    const events = await driveTurns(
+      deps,
+      initWith([
+        { name: "comfyui", status: "connected" },
+        { name: "panel", status: "connected" },
+        { name: "poly-ops", status: "failed" },
+        { name: "starforged", status: "needs-auth" },
+      ]),
+    );
+    expect(noticesOf(events)).toHaveLength(0);
+    expect(hoisted.reconnectCalls).toEqual([]);
+  });
+
+  it("keeps watching the panel's own server at turn end alongside quiet inherited ones", async () => {
+    hoisted.statusPoll = [
+      { name: "comfyui", status: "connected" },
+      { name: "panel", status: "failed" },
+      { name: "poly-ops", status: "failed" },
+    ];
+    const events = await driveTurns(
+      deps,
+      initWith([
+        { name: "comfyui", status: "connected" },
+        { name: "panel", status: "pending" },
+        { name: "poly-ops", status: "failed" },
+      ]),
+    );
+    const notices = noticesOf(events);
+    expect(notices).toHaveLength(1);
+    expect(notices[0].message).toContain("panel");
+    expect(notices[0].message).not.toContain("poly-ops");
+    expect(hoisted.reconnectCalls).toEqual(["panel"]);
+  });
+
+  it("does not report an inherited server that connected with zero tools (#2742 is about ours)", async () => {
+    const events = await drive(deps, {
+      ...initWith([
+        { name: "comfyui", status: "connected" },
+        { name: "panel", status: "connected" },
+        { name: "poly-ops", status: "connected" },
+      ]),
+      tools: ["mcp__comfyui__generate_image", "mcp__panel__panel_graph_outline"],
+    });
+    expect(noticesOf(events)).toHaveLength(0);
+  });
+});
