@@ -120,3 +120,20 @@ jobs:
       # (e.g. a files allowlist dropping a file the runtime needs) that unit
       # tests can't see.
       - run: node scripts/smoke-install.mjs
+
+  minimum-node:
+    # Node-API 10 first ships in Node 22.14. Earlier 22.x releases can crash
+    # loading the published SQLite prebuild, even when package engines pass.
+    name: Minimum Node (22.14.0)
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '22.14.0'
+          cache: npm
+      # Native packages ship prebuilds; build our package explicitly below.
+      - run: npm ci --ignore-scripts --no-audit --no-fund
+      - run: npm run build
+      - run: node scripts/smoke-native-deps.mjs
+      - run: node dist/index.js --help
