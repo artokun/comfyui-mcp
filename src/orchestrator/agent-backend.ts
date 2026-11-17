@@ -393,23 +393,24 @@ export const GEMINI_CAPABILITIES: AgentCapabilities = {
 
 /** Capability descriptor for the Antigravity CLI backend (`agy`, issue #262) —
  *  Google's official replacement for the individual-tier Gemini CLI subscription
- *  path (Google AI Pro/Ultra). `agy` exposes no machine-readable event protocol,
- *  only plain-text `-p` print mode + `--continue` conversation continuity — so
- *  this is a spawn-per-turn adapter with honestly reduced capabilities:
- *  streamingDeltas=true is the CLI's own progressive stdout (final answer text
- *  only, no structured tool events), and vision=false (no documented -p image
- *  input). Models come LIVE from `agy models` (no static catalog). */
+ *  path (Google AI Pro/Ultra). The adapter drives `agy acp`: an ACP (JSON-RPC 2.0
+ *  over stdio) server the CLI ships alongside its plain-text `-p` mode. That gives
+ *  real per-turn streaming deltas, thinking chunks, per-tool events, session ids
+ *  for resume, `session/cancel` interrupts, a prompt on stdin (no ~32K Windows
+ *  argv ceiling, #2234) and image input (#3010). Models come LIVE from
+ *  `agy models` (no static catalog). */
 export const ANTIGRAVITY_CAPABILITIES: AgentCapabilities = {
   persistentChannel: true, // spawn-per-turn, continuity via `agy --continue`
   streamingDeltas: true, // progressive stdout of the final answer
   interruptMidTurn: true, // kill the in-flight child tree; next turn continues
   forkAtAnchor: false, // agy owns conversation storage; no per-turn anchor
-  inProcessMcp: false, // workspace .agents/mcp_config.json only
+  inProcessMcp: false, // servers come from ~/.gemini/config/mcp_config.json; session/new mcpServers work but are additive (budget, #3010)
   modelEnumeration: true, // `agy models` (live account catalog)
   slashCommands: false,
   hooks: false,
-  vision: false, // no documented image input in -p mode
-  audio: false, // `agy -p` has no documented media input at all (#790)
+  vision: true, // `agy acp` advertises promptCapabilities.image and takes inline
+  // base64 image blocks (#3010 — verified live against Antigravity ACP Server 1.5.9)
+  audio: false, // the ACP agent advertises audio=false, and `-p` has no media input (#790)
   turnMarkers: true, // stampTurn() wraps each per-turn stream
 };
 
