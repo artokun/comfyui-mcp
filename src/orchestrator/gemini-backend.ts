@@ -237,7 +237,7 @@ export class AcpClient {
   }
 
   request<T = unknown>(method: string, params: unknown): Promise<T> {
-    if (this.closed) return Promise.reject(new Error("gemini --acp client is closed."));
+    if (this.isUnavailable) return Promise.reject(this.exitError ?? new Error("gemini --acp client is closed."));
     const id = this.nextId++;
     return new Promise<T>((resolve, reject) => {
       this.pending.set(id, { resolve: resolve as (v: unknown) => void, reject, method });

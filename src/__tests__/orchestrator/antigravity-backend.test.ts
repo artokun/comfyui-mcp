@@ -1106,3 +1106,34 @@ describe("ACP transport failure fallbacks", () => {
     }
   });
 });
+
+describe("ACP successful response followed by transport failure", () => {
+  it.each(["malformed", "clean exit"])("does not send a new request after a same-tick %s", async (failure) => {
+    vi.useFakeTimers();
+    hoisted.script.push({ hang: true });
+    hoisted.acp = (msg) => msg.method === "session/new" ? { hang: true } : acpDefault()(msg);
+    const backend = new AntigravityBackend({ cwd: workDir });
+    let outcome: unknown;
+    try {
+      void collect(backend.run({ channel: channelOf([{ text: "never sent" }]), model: "gemini-test" }))
+        .then((value) => { outcome = value; }, (err) => { outcome = err; });
+      await vi.advanceTimersByTimeAsync(0);
+      const request = hoisted.acpMessages.find((m) => m.method === "session/new");
+      expect(request).toBeDefined();
+      const proc = hoisted.procs[0];
+      const response = JSON.stringify({ jsonrpc: "2.0", id: request.id, result: { sessionId: ACP_SESSION } }) + "\n";
+      (proc.stdout as { write: (s: string) => void }).write(response + (failure === "malformed" ? "{invalid JSON\n" : ""));
+      if (failure === "clean exit") {
+        proc.exitCode = 0;
+        (proc.emit as (name: string, ...args: unknown[]) => void)("exit", 0, null);
+      }
+      await vi.advanceTimersByTimeAsync(100);
+      expect(hoisted.acpMessages.some((m) => ["session/set_model", "session/prompt"].includes(m.method))).toBe(false);
+      expect(outcome).toBeInstanceOf(Error);
+    } finally {
+      for (const proc of hoisted.procs) (proc.kill as () => void)();
+      vi.useRealTimers();
+      await backend.close();
+    }
+  });
+});
