@@ -984,3 +984,125 @@ describe("ACP startup cancellation deadline", () => {
     } finally { await backend.close(); }
   });
 });
+
+describe("ACP independent review regressions", () => {
+  beforeEach(() => { hoisted.script.push({ hang: true }); });
+
+  it.each([false, true])("stops standalone prepare (Stop before prepare: %s)", async (stopBeforePrepare) => {
+    vi.useFakeTimers();
+    hoisted.acp = (msg) => msg.method === "initialize" ? { hang: true } : acpDefault()(msg);
+    const backend = new AntigravityBackend({ cwd: workDir });
+    try {
+      if (stopBeforePrepare) await backend.interrupt();
+      const preparing = backend.prepare().then(() => null, (err: unknown) => err);
+      if (!stopBeforePrepare) await backend.interrupt();
+      await vi.advanceTimersByTimeAsync(5100);
+      expect(hoisted.killed).toHaveLength(1);
+      expect(await preparing).toBeInstanceOf(Error);
+      expect(hoisted.acpMessages.some((m) => m.method === "session/prompt")).toBe(false);
+      hoisted.acp = acpDefault();
+      await backend.prepare();
+      expect(hoisted.spawns).toHaveLength(2);
+    } finally {
+      for (const proc of hoisted.procs) (proc.kill as () => void)();
+      vi.useRealTimers();
+      await backend.close();
+    }
+  });
+
+  it.each(["malformed stdout", "pipe error"])("closes a still-running child after %s", async (failure) => {
+    vi.useFakeTimers();
+    const backend = new AntigravityBackend({ cwd: workDir });
+    try {
+      await backend.prepare();
+      const proc = hoisted.procs[0];
+      expect(proc.exitCode).toBeNull();
+      if (failure === "malformed stdout") {
+        (proc.stdout as { write: (s: string) => void }).write("{invalid JSON\n");
+      } else {
+        (proc.stdin as { emit: (name: string, err: Error) => void }).emit("error", new Error("broken pipe"));
+      }
+      // Transport failure is not a child-exit event.
+      expect(proc.exitCode).toBeNull();
+      await vi.advanceTimersByTimeAsync(100);
+      expect(hoisted.killed).toEqual([proc.pid]);
+      expect(proc.exitCode).not.toBeNull();
+      await backend.prepare();
+      expect(hoisted.spawns).toHaveLength(2);
+    } finally {
+      for (const proc of hoisted.procs) (proc.kill as () => void)();
+      vi.useRealTimers();
+      await backend.close();
+    }
+  });
+
+  it.each(["\u2713", "\u2714", "\u2022"])("parses the supported Unicode model marker %s", (marker) => {
+    const models = parseAgyModels("gemini-3-flash\n" + marker + " claude-opus-5\n");
+    expect(models.map((m) => m.id).sort()).toEqual(["claude-opus-5", "gemini-3-flash"]);
+    if (marker !== "\u2022") expect(models[0].id).toBe("claude-opus-5");
+  });
+});
+
+describe("standalone preparation cancellation race", () => {
+  it("rejects a handshake completed after Stop and leaves the next run usable", async () => {
+    vi.useFakeTimers();
+    hoisted.script.push({ hang: true });
+    hoisted.acp = (msg) => msg.method === "initialize" ? { hang: true } : acpDefault()(msg);
+    const backend = new AntigravityBackend({ cwd: workDir });
+    try {
+      const preparing = backend.prepare().then(() => null, (err: unknown) => err);
+      await backend.interrupt();
+      const request = hoisted.acpMessages.find((m) => m.method === "initialize");
+      (hoisted.procs[0].stdout as { write: (s: string) => void }).write(JSON.stringify({
+        jsonrpc: "2.0", id: request.id, result: acpDefault()({ method: "initialize" }).result,
+      }) + "\n");
+      await vi.advanceTimersByTimeAsync(100);
+      expect(await preparing).toBeInstanceOf(Error);
+      expect(hoisted.procs[0].exitCode).not.toBeNull();
+      vi.useRealTimers();
+      hoisted.acp = acpDefault();
+      const events = await collect(backend.run({ channel: channelOf([{ text: "retry" }]) }));
+      expect(events.filter((e) => e.type === "result")).toEqual([expect.objectContaining({ ok: true })]);
+    } finally {
+      for (const proc of hoisted.procs) (proc.kill as () => void)();
+      vi.useRealTimers();
+      await backend.close();
+    }
+  });
+});
+
+describe("ACP transport failure fallbacks", () => {
+  it.each([
+    ["session/load", "malformed"], ["session/set_model", "malformed"],
+    ["session/load", "clean exit"], ["session/set_model", "clean exit"],
+  ])("does not retry %s after %s", async (method, failure) => {
+    vi.useFakeTimers();
+    hoisted.script.push({ hang: true });
+    hoisted.acp = (msg) => msg.method === method ? { hang: true } : acpDefault()(msg);
+    const backend = new AntigravityBackend({ cwd: workDir });
+    let outcome: unknown;
+    try {
+      void collect(backend.run({
+        channel: channelOf([{ text: "never sent" }]),
+        ...(method === "session/load" ? { resume: ACP_SESSION } : { model: "gemini-test" }),
+      })).then((value) => { outcome = value; }, (err) => { outcome = err; });
+      await vi.advanceTimersByTimeAsync(0);
+      expect(hoisted.acpMessages.some((m) => m.method === method)).toBe(true);
+      const proc = hoisted.procs[0];
+      if (failure === "malformed") {
+        (proc.stdout as { write: (s: string) => void }).write("{invalid JSON\n");
+      } else {
+        proc.exitCode = 0;
+        (proc.emit as (name: string, ...args: unknown[]) => void)("exit", 0, null);
+      }
+      await vi.advanceTimersByTimeAsync(100);
+      const fallback = method === "session/load" ? "session/new" : "session/set_config_option";
+      expect(hoisted.acpMessages.filter((m) => m.method === fallback)).toHaveLength(0);
+      expect(outcome).toBeInstanceOf(Error);
+    } finally {
+      for (const proc of hoisted.procs) (proc.kill as () => void)();
+      vi.useRealTimers();
+      await backend.close();
+    }
+  });
+});

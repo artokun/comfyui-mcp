@@ -140,10 +140,10 @@ export function parseAgyModels(output: string): ModelChoice[] {
     const line = raw.trim();
     if (!line) continue;
     // Header / separator / prose rows.
-    if (/^[-=â”€â”‚+|]+$/.test(line)) continue;
+    if (/^[-=\u2500\u2502+|]+$/.test(line)) continue;
     if (/^(available|models?|name|id|description|usage|use )\b/i.test(line) && !/^[a-z0-9][\w.:/-]*$/i.test(line)) continue;
-    const marked = /^[*âœ“âœ”>]/.test(line);
-    const cleaned = line.replace(/^[*âœ“âœ”>â€¢\-\s]+/, "");
+    const marked = /^[*\u2713\u2714>]/.test(line);
+    const cleaned = line.replace(/^[*\u2713\u2714>\u2022\-\s]+/, "");
     const isDefault = marked || /\((default|current|active)\)/i.test(cleaned);
     const token = cleaned.split(/\s+/)[0]?.replace(/[,;]$/, "") ?? "";
     // A plausible model id: starts alphanumeric, id-ish charset, has a digit or
@@ -424,6 +424,10 @@ export class AntigravityBackend implements AgentBackend {
       await preparing;
     } finally {
       if (this.preparing === preparing) this.preparing = null;
+      if (!this.startingRun && !this.turnActive) {
+        this.clearCancelTimer();
+        this.interrupted = false;
+      }
     }
   }
 
@@ -445,17 +449,19 @@ export class AntigravityBackend implements AgentBackend {
     const client = new AcpClient(bin, args, cwd, buildAgentSpawnEnv(), false);
     this.preparingClient = client;
     // A Stop can arrive before run() starts; give its pending startup the same deadline.
-    if (this.startingRun && this.interrupted) void this.interrupt();
+    if (this.interrupted) void this.interrupt();
     try {
       const init = await client.initialize(CLIENT_INFO);
-      if (this.disposed) {
+      if (this.disposed || (this.interrupted && !this.startingRun)) {
         await client.close().catch(() => {});
-        throw new Error("antigravity backend is closed.");
+        throw new Error(this.disposed ? "antigravity backend is closed." : "Antigravity preparation interrupted.");
       }
       this.agentCaps = init.agentCapabilities;
       this.client = client;
       void client.exitPromise.then(() => {
-        // Even a clean exit makes this client unusable.
+        // exitPromise also resolves on protocol/pipe failure while the child is
+        // still alive. close() schedules its tree teardown before ownership moves.
+        void client.close().catch(() => {});
         if (this.client === client) {
           this.client = null;
           this.sessionId = null;
@@ -520,7 +526,7 @@ export class AntigravityBackend implements AgentBackend {
         this.needsSystemPreamble = false; // persona already delivered
         resumed = true;
       } catch (err) {
-        if (this.client !== client) throw err;
+        if (this.client !== client || client.isUnavailable) throw err;
         logger.warn(`[antigravity-backend] session/load failed (${msgOf(err)}) â€” starting a fresh session`);
       }
     }
@@ -544,7 +550,7 @@ export class AntigravityBackend implements AgentBackend {
     this.appliedModel = undefined;
     if (this.model) await this.applyModel();
     if (this.effort) await this.applyThoughtLevel();
-    if (this.client !== client || !this.sessionId) throw new Error("Antigravity ACP connection closed during session setup.");
+    if (this.client !== client || client.isUnavailable || !this.sessionId) throw new Error("Antigravity ACP connection closed during session setup.");
     return this.sessionId as string;
   }
 
@@ -559,7 +565,7 @@ export class AntigravityBackend implements AgentBackend {
       this.appliedModel = model;
       return;
     } catch (err) {
-      if (this.client !== client) throw err;
+      if (this.client !== client || client.isUnavailable) throw err;
       logger.debug(`[antigravity-backend] session/set_model rejected (${msgOf(err)}) â€” trying set_config_option`);
     }
     try {
@@ -899,13 +905,13 @@ export class AntigravityBackend implements AgentBackend {
       this.idleInterruptExpiry = null;
     }
     this.turnAbort?.abort();
-    if (!this.turnActive && !this.startingRun) {
+    if (!this.turnActive && !this.startingRun && !this.preparingClient) {
       // Armed while NO turn was in flight: either a Stop racing its own turn's
       // startup (honor it â€” a turn starts within ms and consumes the flag) or a
       // stray idle Stop (must not cancel the user's NEXT message minutes later).
       const t = setTimeout(() => {
         this.idleInterruptExpiry = null;
-        if (!this.turnActive && !this.startingRun) this.interrupted = false;
+        if (!this.turnActive && !this.startingRun && !this.preparingClient) this.interrupted = false;
       }, 500);
       t.unref?.();
       this.idleInterruptExpiry = t;
@@ -919,7 +925,8 @@ export class AntigravityBackend implements AgentBackend {
     const dying = client;
     this.clearCancelTimer();
     const timer = setTimeout(() => {
-      if ((!this.turnActive && !this.startingRun) || (this.client !== dying && this.preparingClient !== dying)) return;
+      if ((!this.turnActive && !this.startingRun && !this.preparingClient) ||
+          (this.client !== dying && this.preparingClient !== dying)) return;
       logger.warn("[antigravity-backend] session/cancel did not settle the turn â€” killing agy");
       this.client = null;
       this.sessionId = null;

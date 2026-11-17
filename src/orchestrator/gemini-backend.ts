@@ -250,6 +250,11 @@ export class AcpClient {
     return this.proc?.pid;
   }
 
+  /** Synchronous transport state, including clean exit and protocol/pipe failure. */
+  get isUnavailable(): boolean {
+    return this.closed || this.exitResolved;
+  }
+
   notify(method: string, params: unknown = {}): void {
     if (this.closed) return;
     // Fire-and-forget: a write failure (dead child) must not throw into the caller.
