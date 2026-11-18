@@ -1194,8 +1194,8 @@ function readSkillAction(rawName: string): ToolText {
   return { content: [{ type: "text" as const, text }] };
 }
 
-/** action:"generate_skill". Returns `structuredContent` alongside the markdown,
- *  exactly as the retired tool did — the return shape is part of the contract. */
+/** action:"generate_skill". Return the complete artifact for both text and
+ *  structured-result clients, alongside the existing cache metadata. */
 async function generateSkillAction(args: {
   source: string;
   install_in?: string;
@@ -1204,6 +1204,7 @@ async function generateSkillAction(args: {
   const result = await generateSkillCached(args.source, { refresh: args.refresh });
   const markdown = result.markdown;
   const structuredContent = {
+    markdown,
     cache_hit: result.cacheHit,
     cache_key: result.safeKey,
     cache_dir: result.cacheDir,
