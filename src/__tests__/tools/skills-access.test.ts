@@ -595,8 +595,9 @@ describe("actions call the same services with the same arguments", () => {
       refresh: true,
     });
     expect(text(res)).toBe("# SKILL");
-    // The return SHAPE is part of the contract the retired tool had.
+    // Preserve cache metadata while exposing the artifact to structured clients.
     expect(res.structuredContent).toEqual({
+      markdown: "# SKILL",
       cache_hit: true,
       cache_key: "k",
       cache_dir: "/cache",
