@@ -91,7 +91,7 @@
     "cross-env": "^10.1.0",
     "tsx": "^4.23.15",
     "typescript": "^7.0.2",
-    "vitest": "^4.1.11"
+    "vitest": "^5.1.0"
   },
   "repository": {
     "type": "git",
