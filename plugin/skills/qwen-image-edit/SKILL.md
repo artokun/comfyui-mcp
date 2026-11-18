@@ -72,7 +72,7 @@ Outputs (10):
 
 ### Other Conditioning Variants
 
-- **TextEncodeQwenImageEditPlus** (Phr00t v2, built-in) is simpler: 4 image inputs, outputs only CONDITIONING. Requires separate EmptyLatentImage. Good for quick edits.
+- **TextEncodeQwenImageEditPlus** (built-in) accepts up to three optional reference images (`image1`, `image2`, and `image3`) and outputs only CONDITIONING. Requires separate EmptyLatentImage. Good for quick edits.
 - **TextEncodeQwenImageEditPlus_lrzjason**: 5 image inputs, resize toggles, but less control than Advance
 - **TextEncodeQwenImageEditPlusPro_lrzjason**: Per-image VL resize selection via `vl_resize_indexs` string, `main_image_index` control
 
