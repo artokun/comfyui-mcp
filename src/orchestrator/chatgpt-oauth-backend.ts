@@ -51,10 +51,16 @@ function msgOf(err: unknown): string {
   return errorText(err);
 }
 
-/** Codex model slugs (gpt-5.x, codex-*) — not Claude panel ids. */
+/** Codex model slugs (gpt-*, codex-*) — not Claude panel ids.
+ *
+ *  Its job is to keep a CLAUDE id the panel pushes (claude-opus-5) from being sent
+ *  to ChatGPT, not to decide which ChatGPT generation is current. It used to be
+ *  `/^gpt-5/`, which made `setModel` silently ignore every gpt-6 pick: no error,
+ *  the model just never changed. `gpt-oss` is excluded because it is an
+ *  open-weight model served by Ollama, matching ollama-backend's classifier. */
 export function isChatGptModel(id: string): boolean {
   const m = id.trim().toLowerCase();
-  return /^gpt-5/.test(m) || m.startsWith("codex") || m.includes("codex");
+  return /^gpt-(?!oss)/.test(m) || m.startsWith("codex") || m.includes("codex");
 }
 
 function codexModelsCachePath(home = homedir()): string {
@@ -62,20 +68,107 @@ function codexModelsCachePath(home = homedir()): string {
   return join(root, "models_cache.json");
 }
 
-async function loadCodexModelIds(home = homedir()): Promise<string[]> {
+/** One entry of the Codex CLI's models cache. Current Codex writes the server's
+ *  own catalog metadata; older versions wrote bare ids, so every field past `id`
+ *  is optional and its absence is meaningful (see `hasCatalogMetadata`). */
+export interface CodexModelEntry {
+  id: string;
+  label?: string;
+  /** "list" = offer it; "hide" = usable but not for a picker (internal or reserve models). */
+  visibility?: string;
+  /** Server ordering: 1 is the model Codex itself puts first. */
+  priority?: number;
+  /** The server's retirement notice: the model to move to and when the old one stops working. */
+  upgrade?: { model: string; retirementAt?: string };
+}
+
+export async function loadCodexModels(home = homedir()): Promise<CodexModelEntry[]> {
   const path = codexModelsCachePath(home);
   if (!existsSync(path)) return [];
   try {
-    const raw = JSON.parse(await readFile(path, "utf8")) as {
-      models?: Array<{ id?: string; slug?: string; name?: string }>;
-      data?: Array<{ id?: string }>;
+    type Raw = {
+      id?: string;
+      slug?: string;
+      name?: string;
+      display_name?: string;
+      visibility?: string;
+      priority?: number;
+      upgrade?: { model?: string; retirement_at?: string } | null;
     };
-    const fromModels = (raw.models ?? []).map((m) => m.id ?? m.slug ?? m.name).filter(Boolean);
-    const fromData = (raw.data ?? []).map((m) => m.id).filter(Boolean);
-    return [...new Set([...fromModels, ...fromData].filter((x): x is string => !!x))];
+    const raw = JSON.parse(await readFile(path, "utf8")) as { models?: Raw[]; data?: Raw[] };
+    const seen = new Set<string>();
+    const out: CodexModelEntry[] = [];
+    for (const m of [...(raw.models ?? []), ...(raw.data ?? [])]) {
+      const id = m.id ?? m.slug ?? m.name;
+      if (!id || seen.has(id)) continue;
+      seen.add(id);
+      out.push({
+        id,
+        ...(m.display_name ? { label: m.display_name } : {}),
+        ...(typeof m.visibility === "string" ? { visibility: m.visibility } : {}),
+        ...(typeof m.priority === "number" ? { priority: m.priority } : {}),
+        ...(m.upgrade?.model
+          ? { upgrade: { model: m.upgrade.model, ...(m.upgrade.retirement_at ? { retirementAt: m.upgrade.retirement_at } : {}) } }
+          : {}),
+      });
+    }
+    return out;
   } catch {
     return [];
   }
+}
+
+/** True when the cache carries the server's catalog (current Codex). A bare-id
+ *  cache from an older Codex has none of these, and falls back to the 5.6 floor. */
+function hasCatalogMetadata(entries: CodexModelEntry[]): boolean {
+  return entries.some((e) => e.visibility !== undefined || e.priority !== undefined);
+}
+
+/** gpt-<major>[.<minor>] → [major, minor]; null for unversioned ids (gpt-reserve, codex-*). */
+function gptVersion(id: string): [number, number] | null {
+  const m = /^gpt-(\d+)(?:\.(\d+))?/.exec(id.trim().toLowerCase());
+  return m ? [Number(m[1]), Number(m[2] ?? 0)] : null;
+}
+
+/** At or above the 2026-07-20 deprecation floor (gpt-5.6). A FLOOR, not a pin:
+ *  every newer generation passes. */
+function atLeastGpt56(id: string): boolean {
+  const v = gptVersion(id);
+  return !!v && (v[0] > 5 || (v[0] === 5 && v[1] >= 6));
+}
+
+/** What the server offers for a picker, in the server's own order. */
+function listedByPriority(entries: CodexModelEntry[]): CodexModelEntry[] {
+  return entries
+    .filter((e) => e.visibility !== "hide")
+    .sort((a, b) => (a.priority ?? Number.MAX_SAFE_INTEGER) - (b.priority ?? Number.MAX_SAFE_INTEGER));
+}
+
+/**
+ * The ChatGPT model a session starts on when the user named none: the Codex
+ * catalog's top-ranked listed model (priority 1).
+ *
+ * A baked id here goes stale the day a generation ships — gpt-5.6-luna was still
+ * the default after the catalog described it as an "Older fast and efficient
+ * model". The catalog is per-account and refreshed by the Codex CLI, so its top
+ * pick is both current and something this account can use. An explicit
+ * COMFYUI_MCP_CHATGPT_MODEL always wins, and a cache without catalog metadata
+ * (older Codex) falls back to the baked default, so nothing gets worse offline.
+ */
+export async function resolveChatGptDefaultModel(home = homedir()): Promise<string> {
+  const explicit = process.env.COMFYUI_MCP_CHATGPT_MODEL?.trim();
+  if (explicit) return explicit;
+  const entries = await loadCodexModels(home);
+  if (!hasCatalogMetadata(entries)) return CHATGPT_DEFAULT_MODEL;
+  return listedByPriority(entries)[0]?.id ?? CHATGPT_DEFAULT_MODEL;
+}
+
+function isRetired(entry: CodexModelEntry | undefined, now = Date.now()): boolean {
+  if (!entry?.upgrade) return false;
+  const at = entry.upgrade.retirementAt ? Date.parse(entry.upgrade.retirementAt) : NaN;
+  // An upgrade notice with no (or an unparseable) date is treated as retired:
+  // the server is saying "move", and keeping the user on it is the riskier side.
+  return Number.isNaN(at) || now >= at;
 }
 
 function toResponsesTools(tools: Array<Record<string, unknown>>): Array<Record<string, unknown>> {
@@ -490,20 +583,56 @@ export class ChatGptOAuthBackend extends OllamaBackend {
   }
 
   override async listModels(): Promise<ModelChoice[]> {
-    const cached = await loadCodexModelIds();
-    // GPT-5.6-only policy: hide deprecated pre-5.6 ids when the cache carries
-    // the 5.6 family; a cache without any 5.6 keeps its full list.
-    const fam = cached.filter((id) => id.startsWith("gpt-5.6"));
+    const entries = await loadCodexModels();
+    return hasCatalogMetadata(entries) ? this.listFromCatalog(entries) : this.listFromBareIds(entries);
+  }
+
+  /**
+   * Current Codex: follow the server's own catalog.
+   *
+   * This replaces a hardcoded "GPT-5.6-only" policy that was meant to hide OLDER
+   * models but was written as "show only gpt-5.6*", so it hid NEWER ones too:
+   * gpt-6-astra and gpt-6.1-sol sat in a fresh cache and never reached the picker,
+   * and a gen-6 pick was force-migrated back to 5.6 as "deprecated". The catalog
+   * already says everything that policy guessed at — what to list (`visibility`),
+   * in what order (`priority`), and what is being retired and its replacement
+   * (`upgrade`) — so a new generation needs no code change here.
+   */
+  private listFromCatalog(entries: CodexModelEntry[]): ModelChoice[] {
+    const byId = new Map(entries.map((e) => [e.id, e]));
+    const listed = listedByPriority(entries);
+    const active = byId.get(this.model);
+    // Migrate the ACTIVE model only on a real signal. Re-inserting a dead model at
+    // the head kept it selected and 400ing every turn (codex review), so:
+    //   • retired per the server's own notice -> its named replacement;
+    //   • absent from the catalog entirely    -> the catalog's top-ranked model.
+    // A HIDDEN model is not dead (the user or env chose it deliberately), and a
+    // model with an upgrade notice still works until its retirement date.
+    let target: string | undefined;
+    if (isRetired(active)) target = active?.upgrade?.model;
+    else if (!active && listed.length) target = listed[0].id;
+    if (target && target !== this.model) {
+      logger.info(`[chatgpt-oauth-backend] active model ${this.model} is retired or unavailable — migrating to ${target}`);
+      this.model = target;
+    }
+    const head = byId.get(this.model);
+    const rest = listed.filter((e) => e.id !== this.model).slice(0, 40);
+    return [{ id: this.model, label: head?.label ?? this.model }, ...rest.map((e) => ({ id: e.id, label: e.label ?? e.id }))];
+  }
+
+  /** Older Codex wrote bare ids with no catalog metadata. Keep the 2026-07-20
+   *  deprecation, but as a floor: hide what is OLDER than gpt-5.6 when anything
+   *  at or above it exists, and let every newer generation through. A cache with
+   *  nothing at or above the floor keeps its full list, so older plans never brick. */
+  private listFromBareIds(entries: CodexModelEntry[]): ModelChoice[] {
+    const cached = entries.map((e) => e.id);
+    const fam = cached.filter(atLeastGpt56);
     const ids = fam.length
       ? fam
       : cached.length
         ? cached
         : ["gpt-5.6-sol", "gpt-5.6-terra", CHATGPT_DEFAULT_MODEL];
-    // A deprecated ACTIVE model (e.g. a tab that saved the old gpt-5.4-mini
-    // default) must not be re-inserted at the head of the filtered list — that
-    // kept it selected and 400ing every turn (codex review). Migrate the
-    // instance to the family default instead so the next turn works.
-    if (fam.length && this.model && !this.model.startsWith("gpt-5.6")) {
+    if (fam.length && this.model && !atLeastGpt56(this.model)) {
       logger.info(
         `[chatgpt-oauth-backend] active model ${this.model} is deprecated — migrating to ${CHATGPT_DEFAULT_MODEL}`,
       );

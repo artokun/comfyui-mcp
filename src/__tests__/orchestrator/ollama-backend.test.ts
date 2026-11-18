@@ -11,6 +11,10 @@ import {
   ollamaToolSurfaceRecoveredMessage,
   __resetOllamaToolSurfaceAnnouncementForTests,
   type McpToolClient,
+  type OllamaContextSetting,
+  AUTO_NUM_CTX_CAP,
+  parseOllamaContextSetting,
+  nativeContextFromModelInfo,
 } from "../../orchestrator/ollama-backend.js";
 import { logger } from "../../utils/logger.js";
 import { PANEL_TOOL_MCP_TIMEOUT_MS, __panelAskTestHooks } from "../../orchestrator/panel-tools.js";
@@ -26,6 +30,8 @@ type ChatScript = Array<Array<Record<string, unknown>>>;
 
 let chatScript: ChatScript = [];
 let chatRequests: Array<{ model: string; messages: Array<Record<string, unknown>>; tools: unknown[] }> = [];
+// /api/show model_info to serve; null keeps the old 404 (native context unknown).
+let showModelInfo: Record<string, unknown> | null = null;
 let hangingStreamController: ReadableStreamDefaultController<Uint8Array> | null = null;
 
 function ndjsonStream(chunks: Array<Record<string, unknown>>, hang = false): ReadableStream<Uint8Array> {
@@ -66,6 +72,9 @@ const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit): Pr
   const url = String(input);
   if (url.endsWith("/api/version")) {
     return new Response(JSON.stringify({ version: "0.31.1" }), { status: 200 });
+  }
+  if (url.endsWith("/api/show") && showModelInfo) {
+    return new Response(JSON.stringify({ model_info: showModelInfo }), { status: 200 });
   }
   if (url.endsWith("/api/tags")) {
     return new Response(
@@ -158,6 +167,7 @@ async function collect(backend: OllamaBackend, channel: AsyncIterable<NeutralTur
 beforeEach(() => {
   chatScript = [];
   chatRequests = [];
+  showModelInfo = null;
   hangNextChat = false;
   modelsRequests = [];
   modelsResponse = [];
@@ -241,6 +251,95 @@ describe("OllamaBackend", () => {
     chatScript.push(oneTurn);
     await collect(backend, turnsOf({ text: "hi" }));
     expect((chatRequests.at(-1) as { options?: unknown }).options).toEqual({ num_ctx: 16384 });
+  });
+
+  describe("context window from the model's native length", () => {
+    const qwen27b = { "general.architecture": "qwen35", "qwen35.context_length": 262144 };
+    const oneTurn: Array<Record<string, unknown>> = [{ message: { content: "ok" }, done: true }];
+    async function sentNumCtx(deps: ConstructorParameters<typeof OllamaBackend>[0]): Promise<unknown> {
+      const { client } = fakeMcpClient(COMFY_META);
+      const backend = new OllamaBackend({ connectToolClients: async () => ({ comfyui: client }), ...deps });
+      chatScript.push(oneTurn);
+      await collect(backend, turnsOf({ text: "hi" }));
+      return (chatRequests.at(-1) as { options?: { num_ctx?: number } }).options?.num_ctx;
+    }
+
+    it("auto uses the native window capped at 64K, or all of a smaller one", async () => {
+      showModelInfo = qwen27b;
+      expect(await sentNumCtx({ model: "qwen3.8-27b:q8" })).toBe(AUTO_NUM_CTX_CAP);
+      expect(await sentNumCtx({ model: "qwen3.8-27b:q8", contextSetting: () => "auto" })).toBe(AUTO_NUM_CTX_CAP);
+      showModelInfo = { "general.architecture": "llama", "llama.context_length": 8192 };
+      expect(await sentNumCtx({ model: "llama3:8b" })).toBe(8192);
+    });
+
+    it("max sends the full native window, including for the fine-tune", async () => {
+      showModelInfo = qwen27b;
+      expect(await sentNumCtx({ model: "qwen3.8-27b:q8", contextSetting: () => "max" })).toBe(262144);
+      showModelInfo = { "general.architecture": "gemma4", "gemma4.context_length": 131072 };
+      expect(await sentNumCtx({ model: "artokun/gemma4-comfyui-mcp:e4b", contextSetting: () => "max" })).toBe(131072);
+      // Auto still leaves the fine-tune's baked Modelfile window alone.
+      expect(await sentNumCtx({ model: "artokun/gemma4-comfyui-mcp:e4b" })).toBeUndefined();
+    });
+
+    it("a fixed size is sent as-is, but never past the native window", async () => {
+      showModelInfo = qwen27b;
+      expect(await sentNumCtx({ model: "qwen3.8-27b:q8", contextSetting: () => 32768 })).toBe(32768);
+      expect(await sentNumCtx({ model: "qwen3.8-27b:q8", contextSetting: () => 1_048_576 })).toBe(262144);
+    });
+
+    it("an explicit panel choice beats the env var; the env var still drives auto, clamped", async () => {
+      showModelInfo = qwen27b;
+      process.env.COMFYUI_MCP_OLLAMA_NUM_CTX = "1048576";
+      try {
+        expect(await sentNumCtx({ model: "qwen3.8-27b:q8" })).toBe(262144);
+        expect(await sentNumCtx({ model: "qwen3.8-27b:q8", contextSetting: () => 32768 })).toBe(32768);
+      } finally {
+        delete process.env.COMFYUI_MCP_OLLAMA_NUM_CTX;
+      }
+    });
+
+    it("an unreadable native window falls back to 16K, even for max", async () => {
+      showModelInfo = null; // /api/show 404s
+      expect(await sentNumCtx({ model: "qwen3.8-27b:q8" })).toBe(16384);
+      expect(await sentNumCtx({ model: "qwen3.8-27b:q8", contextSetting: () => "max" })).toBe(16384);
+    });
+
+    it("a setting change applies on the next turn of a live session", async () => {
+      showModelInfo = qwen27b;
+      const { client } = fakeMcpClient(COMFY_META);
+      let setting: OllamaContextSetting = "auto";
+      const backend = new OllamaBackend({
+        model: "qwen3.8-27b:q8",
+        contextSetting: () => setting,
+        connectToolClients: async () => ({ comfyui: client }),
+      });
+      chatScript.push(oneTurn, oneTurn);
+      const turns = (async function* () {
+        yield { text: "one" } as NeutralTurn;
+        setting = "max";
+        yield { text: "two" } as NeutralTurn;
+      })();
+      await collect(backend, turns);
+      expect(chatRequests.map((r) => (r as { options?: { num_ctx?: number } }).options?.num_ctx)).toEqual([
+        AUTO_NUM_CTX_CAP,
+        262144,
+      ]);
+    });
+
+    it("parses settings and model_info defensively", () => {
+      expect(parseOllamaContextSetting("auto")).toBe("auto");
+      expect(parseOllamaContextSetting("max")).toBe("max");
+      expect(parseOllamaContextSetting("65536")).toBe(65536);
+      expect(parseOllamaContextSetting(131072)).toBe(131072);
+      for (const bad of ["", "big", "-1", "512", 1.5, null, undefined, {}]) {
+        expect(parseOllamaContextSetting(bad)).toBeUndefined();
+      }
+      expect(nativeContextFromModelInfo(qwen27b)).toBe(262144);
+      // No general.architecture: any *.context_length still counts.
+      expect(nativeContextFromModelInfo({ "mystery.context_length": 4096 })).toBe(4096);
+      expect(nativeContextFromModelInfo({ "general.architecture": "x" })).toBeNull();
+      expect(nativeContextFromModelInfo(null)).toBeNull();
+    });
   });
 
   it("breaks a tool loop: identical repeat calls are blocked, 4th repeat ends the turn", async () => {

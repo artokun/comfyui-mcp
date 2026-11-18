@@ -28,12 +28,14 @@ const mocks = vi.hoisted(() => ({
   stopComfyUI: vi.fn(),
   startComfyUI: vi.fn(),
   restartComfyUI: vi.fn(),
+  describeLifecycleStatus: vi.fn(),
 }));
 
 vi.mock("../../services/process-control.js", () => ({
   stopComfyUI: (...args: unknown[]) => mocks.stopComfyUI(...args),
   startComfyUI: (...args: unknown[]) => mocks.startComfyUI(...args),
   restartComfyUI: (...args: unknown[]) => mocks.restartComfyUI(...args),
+  describeLifecycleStatus: (...args: unknown[]) => mocks.describeLifecycleStatus(...args),
 }));
 
 import { registerProcessControlTools } from "../../tools/process-control.js";
@@ -95,7 +97,7 @@ describe("restart_comfyui registration", () => {
     // All three retired tools took NO parameters, so unlike the other slice-7
     // folds there is nothing else to expose — and nothing to presence-guard.
     expect(Object.keys(json.properties ?? {})).toEqual(["action"]);
-    expect(json.properties?.action.enum?.slice().sort()).toEqual(["restart", "start", "stop"]);
+    expect(json.properties?.action.enum?.slice().sort()).toEqual(["restart", "start", "status", "stop"]);
     expect(json.required).toEqual(["action"]);
   });
 
@@ -103,7 +105,7 @@ describe("restart_comfyui registration", () => {
     const res = await handler()({ action: "reboot" });
     expect(res.isError).toBe(true);
     expect(text(res)).toMatch(/unknown restart_comfyui action/i);
-    expect(text(res)).toMatch(/restart, start, stop/);
+    expect(text(res)).toMatch(/restart, start, stop, status/);
     for (const mock of Object.values(mocks)) expect(mock).not.toHaveBeenCalled();
   });
 
@@ -149,6 +151,18 @@ describe("restart_comfyui actions call the same services with the same arguments
       has_restart_info: true,
       message: "ok",
     });
+  });
+
+  // #2948: the read-only query dispatches ONLY to the status service — never to a
+  // service that stops, starts or restarts anything.
+  it('action:"status" returns the read-only lifecycle status and touches no other service', async () => {
+    mocks.describeLifecycleStatus.mockResolvedValueOnce({ read_only: true, summary: "s" });
+    const res = await handler()({ action: "status" });
+    expect(mocks.describeLifecycleStatus).toHaveBeenCalledWith();
+    expect(mocks.stopComfyUI).not.toHaveBeenCalled();
+    expect(mocks.startComfyUI).not.toHaveBeenCalled();
+    expect(mocks.restartComfyUI).not.toHaveBeenCalled();
+    expect(JSON.parse(text(res))).toEqual({ read_only: true, summary: "s" });
   });
 
   // The services throw ProcessControlError for remote/cloud targets and for a

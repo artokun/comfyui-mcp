@@ -245,7 +245,8 @@ export async function resolveServableViewRef(
   // against a root we could not canonicalise is not a proven miss.
   const inconclusive: string[] = [];
   try {
-    const file = await canonical(resolve(absPath));
+    const lexicalFile = resolve(absPath);
+    const file = await canonical(lexicalFile);
     if (!file.resolved) {
       // The caller already stat'ed this file successfully, so it exists and is
       // reachable; a realpath that still fails means a link this process cannot
@@ -263,7 +264,17 @@ export async function resolveServableViewRef(
           `ComfyUI's ${root.kind} directory could not be canonicalised (${realRoot.why ?? "unknown error"})`,
         );
       }
-      if (!isStrictlyInside(file.path, realRoot.path)) continue;
+      // When one side fell back to its lexical spelling, comparing it with the
+      // OTHER side's canonical spelling is a spelling test, not a containment test:
+      // under a /var → /private/var or 8.3 short-name alias it misses a file that
+      // sits lexically inside the root, and the doubt below was never consulted.
+      // So an unproven pair is also compared as written — lexical against lexical.
+      // That arm can only ever lead to "unknown" (one side is unproven by
+      // definition); a ref is derived solely from a fully canonical pair.
+      const looksInside =
+        isStrictlyInside(file.path, realRoot.path) ||
+        ((!file.resolved || !realRoot.resolved) && isStrictlyInside(lexicalFile, root.dir));
+      if (!looksInside) continue;
       // A MATCH made against a path we could not canonicalise is not a proven
       // match (independent gate P0). `inconclusive` was consulted only on the
       // matched-nothing path below, so a lexical fallback that happened to land

@@ -399,15 +399,31 @@ export function resolveInJail(
   const root = customNodesRoot(resolvedBase);
   const candidate = isAbsolute(raw) ? resolve(raw) : resolve(root, raw);
 
-  // 1. Lexical containment on the un-resolved candidate.
+  const realRootOf = (): string => (deps.existsSync(root) ? deps.realpath(root) : root);
+
+  // 1. Lexical containment on the un-resolved candidate. The root has two
+  // spellings when it is reached through an alias (macOS /var → /private/var, a
+  // junction, an 8.3 short name), and an absolute path written in the REAL one —
+  // e.g. copied from a path this module returned, which is always realpath'd — is
+  // as lexically contained as one written in the configured spelling. Only a
+  // candidate outside BOTH spellings is a lexical escape; a root that cannot be
+  // canonicalised offers no second spelling, so the refusal stands.
   if (isEscape(root, candidate)) {
-    throw new NodeDevError(
-      `Refusing "${input}": resolves to "${candidate}", which is outside custom_nodes/.`,
-    );
+    let realSpelling: string | undefined;
+    try {
+      realSpelling = realRootOf();
+    } catch {
+      realSpelling = undefined;
+    }
+    if (realSpelling === undefined || isEscape(realSpelling, candidate)) {
+      throw new NodeDevError(
+        `Refusing "${input}": resolves to "${candidate}", which is outside custom_nodes/.`,
+      );
+    }
   }
 
   // 2. Symlink/junction safety: re-check containment on realpaths.
-  const realRoot = deps.existsSync(root) ? deps.realpath(root) : root;
+  const realRoot = realRootOf();
   const realCandidate = realpathDeepestExisting(candidate, deps);
   if (isEscape(realRoot, realCandidate)) {
     throw new NodeDevError(

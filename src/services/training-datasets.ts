@@ -4,7 +4,7 @@
 // contained, and inlining is size-capped (a phone is the other end).
 
 import { existsSync, readdirSync, readFileSync, realpathSync, statSync, writeFileSync } from "node:fs";
-import { basename, extname, join, resolve, sep } from "node:path";
+import { basename, dirname, extname, join, resolve, sep } from "node:path";
 import { parse as parseYaml } from "yaml";
 import { datasetsRoot, getJob, trainingRoot } from "./training-jobs.js";
 
@@ -26,13 +26,32 @@ export interface DatasetDetail extends DatasetSummary {
 }
 
 /** Containment on REAL paths — a symlinked dir must not smuggle reads across
- *  the root (same lesson as the ref resolver, #302). Missing paths resolve
- *  lexically and fail later with an honest not-found. */
+ *  the root (same lesson as the ref resolver, #302). A MISSING path resolves
+ *  through its deepest existing ancestor with the absent tail re-appended, so it
+ *  is spelled the same way as the (existing, realpath'd) root it is compared
+ *  against and fails later with an honest not-found. Resolving it lexically
+ *  instead compared "/var/…/datasets/x" with "/private/var/…/datasets" under any
+ *  aliased root (macOS temp, a symlinked home, a Windows junction) and reported an
+ *  ordinary unknown name as an ESCAPE. An ENOENT tail is not proof that no link
+ *  is involved — a DANGLING symlink also reports ENOENT, and its eventual target
+ *  is not resolved here; such a path has nothing to read now, and callers still
+ *  stat/read it and fail on absence. Any other realpath failure keeps the lexical
+ *  form, as before. */
 function realOrLexical(p: string): string {
-  try {
-    return realpathSync(p);
-  } catch {
-    return resolve(p);
+  const abs = resolve(p);
+  const tail: string[] = [];
+  let cur = abs;
+  for (;;) {
+    try {
+      const real = realpathSync(cur);
+      return tail.length ? join(real, ...tail.reverse()) : real;
+    } catch (err) {
+      const code = (err as NodeJS.ErrnoException)?.code;
+      const parent = dirname(cur);
+      if ((code !== "ENOENT" && code !== "ENOTDIR") || parent === cur) return abs;
+      tail.push(basename(cur));
+      cur = parent;
+    }
   }
 }
 

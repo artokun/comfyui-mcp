@@ -110,6 +110,14 @@ describe("panel-settings agent model preferences", () => {
     });
   });
 
+  it("persists the ollama context window alongside the endpoint", () => {
+    setAgentSettings({ ollama: { baseUrl: "http://192.168.1.113:11434" } });
+    setAgentSettings({ ollama: { numCtx: "max" } });
+    expect(getAgentSettings().ollama).toEqual({ baseUrl: "http://192.168.1.113:11434", numCtx: "max" });
+    setAgentSettings({ ollama: { numCtx: 32768 } });
+    expect(getAgentSettings().ollama?.numCtx).toBe(32768);
+  });
+
   it("leaves ollama config untouched when only preferred models change", () => {
     setAgentSettings({ ollama: { model: "gemma4:e4b" } });
     setAgentSettings({ preferredModels: ["x/y"] });

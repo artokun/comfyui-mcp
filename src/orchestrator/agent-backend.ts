@@ -393,23 +393,24 @@ export const GEMINI_CAPABILITIES: AgentCapabilities = {
 
 /** Capability descriptor for the Antigravity CLI backend (`agy`, issue #262) —
  *  Google's official replacement for the individual-tier Gemini CLI subscription
- *  path (Google AI Pro/Ultra). `agy` exposes no machine-readable event protocol,
- *  only plain-text `-p` print mode + `--continue` conversation continuity — so
- *  this is a spawn-per-turn adapter with honestly reduced capabilities:
- *  streamingDeltas=true is the CLI's own progressive stdout (final answer text
- *  only, no structured tool events), and vision=false (no documented -p image
- *  input). Models come LIVE from `agy models` (no static catalog). */
+ *  path (Google AI Pro/Ultra). The adapter drives `agy acp`: an ACP (JSON-RPC 2.0
+ *  over stdio) server the CLI ships alongside its plain-text `-p` mode. That gives
+ *  real per-turn streaming deltas, thinking chunks, per-tool events, session ids
+ *  for resume, `session/cancel` interrupts, a prompt on stdin (no ~32K Windows
+ *  argv ceiling, #2234) and image input (#3010). Models come LIVE from
+ *  `agy models` (no static catalog). */
 export const ANTIGRAVITY_CAPABILITIES: AgentCapabilities = {
   persistentChannel: true, // spawn-per-turn, continuity via `agy --continue`
   streamingDeltas: true, // progressive stdout of the final answer
   interruptMidTurn: true, // kill the in-flight child tree; next turn continues
   forkAtAnchor: false, // agy owns conversation storage; no per-turn anchor
-  inProcessMcp: false, // workspace .agents/mcp_config.json only
+  inProcessMcp: false, // servers come from ~/.gemini/config/mcp_config.json; session/new mcpServers work but are additive (budget, #3010)
   modelEnumeration: true, // `agy models` (live account catalog)
   slashCommands: false,
   hooks: false,
-  vision: false, // no documented image input in -p mode
-  audio: false, // `agy -p` has no documented media input at all (#790)
+  vision: true, // `agy acp` advertises promptCapabilities.image and takes inline
+  // base64 image blocks (#3010 — verified live against Antigravity ACP Server 1.5.9)
+  audio: false, // the ACP agent advertises audio=false, and `-p` has no media input (#790)
   turnMarkers: true, // stampTurn() wraps each per-turn stream
 };
 
@@ -418,16 +419,19 @@ export const ANTIGRAVITY_CAPABILITIES: AgentCapabilities = {
  *  exposes a DOCUMENTED machine-readable JSON-lines event stream (`--mode json`)
  *  with real text deltas, per-tool events, and a resumable session id — so this
  *  is a spawn-per-turn adapter that parses that stream. inProcessMcp is false and
- *  there is NO config-MCP path either: pi has no MCP client at all (its tools are
- *  built-ins + TS extensions), so a pi turn does NOT get the ComfyUI panel_* /
- *  comfyui tools — a real limitation surfaced in the ready banner. vision=false
- *  (no documented headless image input). Models come from `pi --list-models`. */
+ *  there is NO config-MCP path from US either: we cannot declare our servers to a
+ *  pi spawn, so a pi turn does NOT get the ComfyUI panel_* / comfyui tools from
+ *  the panel — a real limitation surfaced in the ready banner. (pi itself CAN
+ *  have an MCP client — pi-mcp-adapter, or pi 0.99+'s built-in MCP — and the
+ *  user may have wired our servers into it; pi-mcp-bridge.ts detects that and
+ *  the capability note says so, #2996.) vision=false (no documented headless
+ *  image input). Models come from `pi --list-models`. */
 export const PI_CAPABILITIES: AgentCapabilities = {
   persistentChannel: true, // spawn-per-turn, continuity via `pi --session <id>`
   streamingDeltas: true, // `--mode json` text_delta events
   interruptMidTurn: true, // kill the in-flight child tree; next turn continues
   forkAtAnchor: false, // whole-session resume only (no per-turn anchor wired)
-  inProcessMcp: false, // pi has no MCP client at all (built-in tools + extensions)
+  inProcessMcp: false, // we hand pi no servers; its OWN MCP bridge, if any, is the user's (#2996)
   modelEnumeration: true, // `pi --list-models`
   slashCommands: false,
   hooks: false,

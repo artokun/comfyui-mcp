@@ -6,6 +6,34 @@ All notable changes to this project are documented here. This project adheres to
 
 ## Unreleased
 
+### MCP
+
+#### Fixed
+- The panel chat no longer reports the user's own MCP servers. Servers inherited from `~/.claude.json` (a personal server that is down, or one waiting on a sign-in) were narrated as "⚠️ MCP server … is unavailable to the agent" at every session start and again after every turn's reconnect attempt, although they have nothing to do with ComfyUI. The health watch now covers only the servers the panel provides itself (`comfyui` and the live-graph `panel` server, #1524 / #2742); inherited ones are logged instead of shown, are not reconnected, and are still listed by `panel_list_mcp`.
+- `get_image` (action:"get") on a video/audio output that exceeds the 32 MB /view cap no longer prescribes `max_preview_dimension` and action:"convert" (image-only remedies that cannot act on an .mp4); the refusal now names the file's on-disk path when the server is local and the direct /view URL for a no-limit download. A /view body that stalls past the HTTP ceiling (`COMFYUI_MCP_HTTP_TIMEOUT_S`, default 120 s) now reports a structured `VIEW_READ_TIMEOUT` naming the file and the remedy instead of the bare "The operation was aborted due to timeout". (#3002)
+- pi readiness no longer reports "no usable provider credential" when `~/.pi/agent/models.json` or `auth.json` starts with a UTF-8 BOM (PowerShell's default on Windows); the leading BOM is stripped exactly as pi does. (#2995)
+- The pi backend no longer tells the model it has "NO ComfyUI tools" when the user's own pi carries an MCP bridge (the `pi-mcp-adapter` package, or pi 0.99+'s built-in MCP) configured with servers; the per-turn capability note now says any ComfyUI/MCP tools come from that bridge and to go by the tool list actually given. A stock pi keeps the hard retraction. (#2996)
+
+## [0.52.206] - 2026-10-14
+
+### MCP
+
+#### Added
+- Ollama sizes `num_ctx` from the model's native context window instead of a fixed 16K, configurable from the panel (Auto / Max / fixed 16K–256K).
+- Compacted Ollama messages keep a gist and can be recalled in full.
+- New sessions default to the top-ranked model the account offers, never the SDK's `default` row (matching the panel).
+- `-beta.N` tags publish to the npm `beta` dist-tag, so prereleases can't reach `latest` users.
+
+#### Fixed
+- Ollama history is bounded so the window can't eat the system prompt, and the protected tail is compacted too, so an overflow can't drop the user's request.
+- The ChatGPT model list follows the Codex catalog, so new generations appear.
+- The ready banner no longer labels a new backend with the model the previous backend resolved.
+- The panel-skew assertions tolerate a prerelease version.
+
+#### Changed
+- `@anthropic-ai/claude-agent-sdk` 0.3.240 → 0.3.296, so the Claude 5.5 family is selectable; provider and MCP SDKs updated.
+
+
 ## [0.52.205] - 2026-10-01
 
 ### MCP

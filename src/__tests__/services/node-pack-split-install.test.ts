@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { existsSync } from "node:fs";
+import { existsSync, realpathSync } from "node:fs";
 import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -45,7 +45,11 @@ import { scaffoldCustomNode } from "../../services/node-authoring.js";
 import { resolveCustomNodesScanBaseLive } from "../../services/workspace-env.js";
 
 async function tmpDir(): Promise<string> {
-  return mkdtemp(join(tmpdir(), "comfyui-pack-split-"));
+  // Canonical from the start: the live root is realpath'd (ComfyUI anchors on
+  // realpath(__file__)), so on a host whose temp dir is an alias (macOS /var →
+  // /private/var) every expected path must be spelled the same way. Alias handling
+  // itself is covered by the tests that build an explicit symlink/junction/script.
+  return realpathSync(await mkdtemp(join(tmpdir(), "comfyui-pack-split-")));
 }
 
 beforeEach(() => {

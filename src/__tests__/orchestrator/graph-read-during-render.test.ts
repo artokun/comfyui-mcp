@@ -125,6 +125,11 @@ afterEach(() => {
   qm.url = null;
 });
 
+// #2931 — an untyped panel_set_widget whose address could name a widget a known pack
+// owns (`text` here) first takes ONE read-only identity probe. Reads are not fenced
+// during a render (panel#1489), and no MUTATION is sent before the fence refuses.
+const SET_WIDGET_IDENTITY_PROBE = ["graph_query"];
+
 describe("read-only graph inspection is allowed while a prompt runs (panel#1489)", () => {
   it("panel_graph_outline IS dispatched mid-render and returns the graph", async () => {
     startRender();
@@ -194,7 +199,7 @@ describe("graph MUTATIONS still fail fast while a prompt is running (#1639)", ()
     );
     const text = textOf(res);
 
-    expect(sent).toEqual([]);
+    expect(sent).toEqual(SET_WIDGET_IDENTITY_PROBE);
     expect(res.isError).toBe(true);
     expect(text).toMatch(/QUEUE BUSY/);
     expect(text).toMatch(/was NOT sent — nothing was applied/);
@@ -226,7 +231,7 @@ describe("graph MUTATIONS still fail fast while a prompt is running (#1639)", ()
       ctx,
     );
 
-    expect(sent).toEqual(["graph_set_widget"]);
+    expect(sent).toEqual([...SET_WIDGET_IDENTITY_PROBE, "graph_set_widget"]);
     expect(res.isError).not.toBe(true);
   });
 
@@ -240,7 +245,7 @@ describe("graph MUTATIONS still fail fast while a prompt is running (#1639)", ()
       ctx,
     );
 
-    expect(sent).toEqual([]);
+    expect(sent).toEqual(SET_WIDGET_IDENTITY_PROBE);
     expect(res.isError).toBe(true);
     expect(textOf(res)).toMatch(/QUEUE BUSY/);
   });
@@ -261,7 +266,7 @@ describe("graph MUTATIONS still fail fast while a prompt is running (#1639)", ()
     );
     const text = textOf(res);
 
-    expect(sent).toEqual([]);
+    expect(sent).toEqual(SET_WIDGET_IDENTITY_PROBE);
     expect(res.isError).toBe(true);
     expect(text).toMatch(/defer_until_idle/);
     expect(text).toMatch(/expected_value/);
@@ -327,7 +332,7 @@ describe("graph MUTATIONS still fail fast while a prompt is running (#1639)", ()
       ctx,
     );
 
-    expect(sent).toEqual([]);
+    expect(sent).toEqual(SET_WIDGET_IDENTITY_PROBE);
     expect(textOf(res)).toMatch(/scalar/);
   });
 
@@ -467,7 +472,7 @@ describe("graph MUTATIONS still fail fast while a prompt is running (#1639)", ()
       ctx,
     );
 
-    expect(sent).toEqual(["graph_set_widget"]);
+    expect(sent).toEqual([...SET_WIDGET_IDENTITY_PROBE, "graph_set_widget"]);
     expect(res.isError).not.toBe(true);
   });
 
@@ -621,7 +626,7 @@ describe("the refusal names the CALLING tool, across the whole fenced surface (#
         continue;
       }
       // Nothing may have been dispatched, or "was NOT sent" is a false claim.
-      expect([tool, sent]).toEqual([tool, []]);
+      expect([tool, sent]).toEqual([tool, tool === "panel_set_widget" ? SET_WIDGET_IDENTITY_PROBE : []]);
 
       const named = text.match(/(?:Error:\s*)?(\S+) was NOT sent/)?.[1];
       if (named !== tool) mismatches.push(`${tool}: refusal named ${String(named)}`);

@@ -1486,6 +1486,158 @@ describe("panel_set_widget promoted STRING prompt/value (#2533)", () => {
   );
 });
 
+/** #2933 review P2 — a promoted MiniMaxH3Easy `prompt`. With an authoritative
+ * parent rail the inner prompt is a LIVE input linked from the enclosing
+ * subgraph, and the pack's queue hook keeps a linked prompt; writing that host
+ * rail is the established safe route. When the inner prompt is NOT a live input
+ * (a proxy-style promotion), the only route is the derived inner widget, which
+ * stays refused, as does LoraManager `text` on any route (its backend ignores
+ * `text`). */
+function promotedDerivedSubgraph(
+  nodeType: string,
+  widget: string,
+  linked: boolean,
+): Record<string, unknown> {
+  return {
+    subgraph_of: { node_id: 12, title: "H3 shot" },
+    node_count: 1,
+    nodes: [
+      {
+        id: 140,
+        type: nodeType,
+        widgets: { [widget]: "old" },
+        inputs: linked ? [{ name: widget, type: "STRING" }] : [],
+      },
+    ],
+    promoted_terminals: [
+      {
+        widget,
+        parent_rail: { authoritative: true, widget },
+        immediate_node_id: 140,
+        immediate_widget: widget,
+        terminal_node_id: 140,
+        terminal_node_type: nodeType,
+        terminal_widget: widget,
+        terminal_inputs: linked ? [{ name: widget, type: "STRING" }] : [],
+        chain_depth: 0,
+      },
+    ],
+  };
+}
+
+describe("panel_set_widget promoted derived widgets: host rail vs inner (#2933 review P2)", () => {
+  const hostDetail = {
+    text:
+      '1 match(es) of 1 in scope (viewing: 1 nodes)\n' +
+      '{"id":12,"type":"SubgraphNode","is_subgraph":true}',
+  };
+
+  it("writes a linked H3 Easy prompt on the enclosing host rail", async () => {
+    const { text, isError, calls, mutations } = await setWidget(
+      { node_id: 12, widget: "prompt", value: "a new shot" },
+      {
+        ownerNodeId: 12,
+        firstWrite: "ok",
+        promotedTerminalWitnesses: true,
+        promotedDetail: hostDetail,
+        subgraph: promotedDerivedSubgraph("MiniMaxH3Easy", "prompt", true),
+      },
+    );
+
+    expect(isError).toBe(false);
+    expect(mutations).toBe(1);
+    expect(calls.filter((call) => call.cmd === "graph_enter_subgraph")).toHaveLength(0);
+    expect(calls.filter((call) => call.cmd === "graph_set_widget")).toEqual([
+      expect.objectContaining({ node_id: 12, widget: "prompt", value: "a new shot" }),
+    ]);
+    expect(calls.some((call) => Number(call.node_id) === 140)).toBe(false);
+    expect(text).toMatch(/enclosing subgraph node 12 widget "prompt"/);
+  });
+
+  it("refuses an H3 Easy prompt whose only route is the derived inner widget", async () => {
+    const { text, isError, calls, mutations } = await setWidget(
+      { node_id: 12, widget: "prompt", value: "a new shot" },
+      {
+        ownerNodeId: 12,
+        firstWrite: "ok",
+        promotedTerminalWitnesses: true,
+        promotedDetail: hostDetail,
+        subgraph: promotedDerivedSubgraph("MiniMaxH3Easy", "prompt", false),
+      },
+    );
+
+    expect(isError).toBe(true);
+    expect(text).toMatch(/cannot set "prompt" on MiniMaxH3Easy/);
+    expect(mutations).toBe(0);
+    expect(calls.filter((call) => call.cmd === "graph_set_widget")).toHaveLength(0);
+  });
+
+  it("refuses an H3 prompt whose host-proven STRING mapping reaches no terminal prompt input", async () => {
+    // #2791's host-proven STRING shape (host input + proxyWidgets, incomplete terminal
+    // witness) makes the generic host classification write the host. For H3 that is not
+    // proof of a LINKED prompt: the terminal publishes no `prompt` input, and an
+    // unlinked prompt is rebuilt from the editor at queue time.
+    const host = {
+      nodes: [
+        {
+          id: 12,
+          type: "SubgraphNode",
+          is_subgraph: true,
+          widgets: { prompt: "old" },
+          inputs: [{ label: "prompt", name: "prompt", type: "STRING", widget: { name: "prompt" } }],
+          properties: { proxyWidgets: [["140", "prompt"]] },
+        },
+      ],
+    };
+    const subgraph = {
+      subgraph_of: { node_id: 12, title: "H3 shot" },
+      node_count: 1,
+      nodes: [{ id: 140, type: "MiniMaxH3Easy", widgets: { prompt: "old" }, inputs: [] }],
+      promoted_terminals: [
+        {
+          widget: "prompt",
+          immediate_node_id: 140,
+          immediate_widget: "prompt",
+          error: "the promoted parent rail was missing, externally linked, or not authoritative",
+        },
+      ],
+    };
+    const { text, isError, calls, mutations } = await setWidget(
+      { node_id: 12, widget: "prompt", value: "a new shot" },
+      {
+        ownerNodeId: 12,
+        firstWrite: "ok",
+        promotedTerminalWitnesses: true,
+        promotedDetail: host,
+        subgraph,
+      },
+    );
+
+    expect(isError).toBe(true);
+    expect(text).toMatch(/cannot set "prompt" on MiniMaxH3Easy/);
+    expect(mutations).toBe(0);
+    expect(calls.filter((call) => call.cmd === "graph_set_widget")).toHaveLength(0);
+  });
+
+  it("refuses LoraManager text even on an authoritative linked host rail", async () => {
+    const { text, isError, calls, mutations } = await setWidget(
+      { node_id: 12, widget: "text", value: "<lora:a:1>" },
+      {
+        ownerNodeId: 12,
+        firstWrite: "ok",
+        promotedTerminalWitnesses: true,
+        promotedDetail: hostDetail,
+        subgraph: promotedDerivedSubgraph("Lora Loader (LoraManager)", "text", true),
+      },
+    );
+
+    expect(isError).toBe(true);
+    expect(text).toMatch(/cannot set "text" on Lora Loader \(LoraManager\)/);
+    expect(mutations).toBe(0);
+    expect(calls.filter((call) => call.cmd === "graph_set_widget")).toHaveLength(0);
+  });
+});
+
 describe("panel_set_widget promoted MiniMax unet_name/clip_name (#2533)", () => {
   const hostDetail = {
     text:
@@ -2003,6 +2155,36 @@ const NESTED_TERMINAL_CASES = [
     }),
     firstWriteError: STACK_DATA_CONTRADICTORY,
     message: /DaSiWa_LTX2LoraLoader/,
+  },
+  {
+    // #2931 — the backend ignores `text`; a read-back cannot certify it.
+    name: "LoraManager autocomplete text",
+    widget: "text",
+    value: "<lora:style:0.8>",
+    subgraph: nestedTerminalSubgraph("text", {
+      nodeId: 2771,
+      nodeType: "Lora Loader (LoraManager)",
+      inputs: [],
+    }),
+    firstWriteError:
+      `Cannot set widget on subgraph node 78: "text" is not a promoted widget on this subgraph ` +
+      `(promoted: text).`,
+    message: /cannot set "text" on Lora Loader \(LoraManager\)/,
+  },
+  {
+    // #2933 — the H3 Easy prompt editor copies its document back over `prompt`.
+    name: "MiniMaxH3Easy editor prompt",
+    widget: "prompt",
+    value: "a new prompt",
+    subgraph: nestedTerminalSubgraph("prompt", {
+      nodeId: 2772,
+      nodeType: "MiniMaxH3Easy",
+      inputs: [],
+    }),
+    firstWriteError:
+      `Cannot set widget on subgraph node 78: "prompt" is not a promoted widget on this subgraph ` +
+      `(promoted: prompt).`,
+    message: /cannot set "prompt" on MiniMaxH3Easy/,
   },
 ] as const;
 
@@ -3849,7 +4031,14 @@ describe("panel_set_widget promoted-subgraph recovery (#1655)", () => {
     );
 
     expect(isError).toBe(true);
-    expect(calls.map((c) => c.cmd)).toEqual(["graph_query", "graph_get_subgraph", "graph_set_widget", "graph_query"]);
+    // #2931 — the untyped `text` write takes one identity probe before dispatch.
+    expect(calls.map((c) => c.cmd)).toEqual([
+      "graph_query",
+      "graph_get_subgraph",
+      "graph_query",
+      "graph_set_widget",
+      "graph_query",
+    ]);
     expect(text).toMatch(/slot:1, name:"text", label:null/);
     expect(text).toMatch(/slot:2, name:"text_1", label:"text"/);
     expect(text).toMatch(/no second write was attempted/i);
@@ -3862,17 +4051,20 @@ describe("panel_set_widget promoted-subgraph recovery (#1655)", () => {
     );
 
     expect(isError).toBe(false);
+    // #2931 — each untyped `text` attempt takes one identity probe before dispatch.
     expect(calls.map((c) => c.cmd)).toEqual([
       "graph_query",
       "graph_get_subgraph",
+      "graph_query",
       "graph_set_widget",
       "graph_enter_subgraph",
       "graph_query",
       "graph_get_subgraph",
+      "graph_query",
       "graph_set_widget",
     ]);
-    expect(calls[3]).toMatchObject({ node_id: "190" });
-    expect(calls[6]).toMatchObject({ node_id: 188, widget: "text", value: "hello" });
+    expect(calls[4]).toMatchObject({ node_id: "190" });
+    expect(calls[8]).toMatchObject({ node_id: 188, widget: "text", value: "hello" });
     expect(text).toMatch(/route was re-entered and the write was retried once/i);
   });
 

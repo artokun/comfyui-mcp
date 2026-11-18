@@ -1008,7 +1008,9 @@ describe("#790 — more attachments than one turn carries", () => {
 describe("#790 — a turn with no audio is completely unaffected", () => {
   it("never probes and never mentions audio", async () => {
     const events = await collect(nativeBackend(), turnsOf({ text: "hello" }));
-    expect(showCalls).toBe(0);
+    // Exactly one /api/show: the once-per-model context-window read. A
+    // capability probe would make it two.
+    expect(showCalls).toBe(1);
     expect(assistantText(events)).not.toContain("audio");
   });
 });

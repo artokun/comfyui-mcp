@@ -38,6 +38,11 @@ export class BoundedResponseError extends Error {
   }
 }
 
+/** An abort raised by an expired AbortSignal.timeout — never a caller's own abort. */
+function isTimeoutAbortError(error: unknown): boolean {
+  return error instanceof Error && error.name === "TimeoutError";
+}
+
 function readChunkWithAbort(
   reader: ReadableStreamDefaultReader<Uint8Array>,
   signal: AbortSignal,
@@ -108,7 +113,14 @@ export async function readResponseBodyBounded(
       try {
         result = await readChunkWithAbort(reader, signal);
       } catch (error) {
-        if (signal.aborted) {
+        // #3002 — the read can also die because the signal handed to fetch()
+        // itself expired: comfyuiFetch arms its ceiling BEFORE the request goes
+        // out, so on a stalled /view body it always fires ahead of the reader's
+        // own timer above, and the stream rejects with the bare DOMException
+        // "The operation was aborted due to timeout" — no endpoint, no file, no
+        // remedy. Both are the same event, "the body did not finish in time",
+        // so both are reported as one.
+        if (signal.aborted || isTimeoutAbortError(error)) {
           throw new BoundedResponseError("timeout", "The response read timed out.");
         }
         throw error;

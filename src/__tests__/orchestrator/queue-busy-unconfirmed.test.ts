@@ -225,7 +225,8 @@ describe("#2684: the mutation fence still fences — only its wording changes", 
     // Fail-closed is CORRECT here and must not be loosened: an unverified run is
     // not a verified idle, and a delivered mutation cannot be retracted. The bug
     // was never that the fence fenced — it was what the refusal claimed.
-    expect(sent).toEqual([]);
+    // #2931 — only the read-only identity probe for a `text` address goes out.
+    expect(sent).toEqual(["graph_query"]);
     expect(res.isError).toBe(true);
     expect(text).toMatch(/QUEUE BUSY/);
     expect(text).toMatch(/panel_set_widget was NOT sent — nothing was applied/);

@@ -194,6 +194,24 @@ function expectSpawnedDesktop2(): void {
   expect(dumped).not.toMatch(/ComfyUI\.exe/i);
 }
 
+// #2947: off Windows the recorded launcher is what action:"start" spawns. On a
+// Windows host start refuses every direct launch, so the recorded launcher is
+// informational only and the stop must not claim a way back (#2948).
+const HOST_IS_WIN = process.platform === "win32";
+
+async function expectStartFollowsHostContract(): Promise<void> {
+  const started = await startComfyUI();
+  if (HOST_IS_WIN) {
+    expect(started.started).toBe(false);
+    expect(started.startup).toBe("not-attempted");
+    expect(started.message).toMatch(/does not launch ComfyUI itself/i);
+    expect(mockSpawn).not.toHaveBeenCalled();
+    return;
+  }
+  expect(started.started).toBe(true);
+  expectSpawnedDesktop2();
+}
+
 beforeEach(() => {
   vi.useRealTimers();
   vi.clearAllMocks();
@@ -225,20 +243,18 @@ afterEach(() => {
 });
 
 describe("restart_comfyui — Desktop-2 recognition and stop/start (#2482)", () => {
-  it("records the Desktop-2 launcher from the parent process so start can relaunch it", async () => {
+  it("records the Desktop-2 launcher from the parent process (start relaunches it off Windows)", async () => {
     mockLivePortThenFree();
     installDesktop2Tree();
     spawnDesktop();
 
     const stopped = await stopComfyUI();
     expect(stopped.stopped).toBe(true);
-    expect(stopped.has_restart_info).toBe(true);
+    expect(stopped.has_restart_info).toBe(!HOST_IS_WIN);
     expect(stopped.launch?.exe).toBe(DESKTOP2_EXE);
     expect(stopped.message).not.toMatch(/left as it was/i);
 
-    const started = await startComfyUI();
-    expect(started.started).toBe(true);
-    expectSpawnedDesktop2();
+    await expectStartFollowsHostContract();
   });
 
   it("recognises Desktop-2 via the .comfyui-desktop-2 marker when argv has no Desktop token", async () => {
@@ -253,12 +269,10 @@ describe("restart_comfyui — Desktop-2 recognition and stop/start (#2482)", () 
 
     const stopped = await stopComfyUI();
     expect(stopped.stopped).toBe(true);
-    expect(stopped.has_restart_info).toBe(true);
+    expect(stopped.has_restart_info).toBe(!HOST_IS_WIN);
     expect(stopped.launch?.exe).toBe(DESKTOP2_EXE);
 
-    const started = await startComfyUI();
-    expect(started.started).toBe(true);
-    expectSpawnedDesktop2();
+    await expectStartFollowsHostContract();
   });
 
   it("recognises Desktop-2 via .launcher/snapshots/*.json", async () => {
@@ -279,7 +293,7 @@ describe("restart_comfyui — Desktop-2 recognition and stop/start (#2482)", () 
 
     const stopped = await stopComfyUI();
     expect(stopped.stopped).toBe(true);
-    expect(stopped.has_restart_info).toBe(true);
+    expect(stopped.has_restart_info).toBe(!HOST_IS_WIN);
     expect(stopped.launch?.exe).toBe(DESKTOP2_EXE);
   });
 
@@ -322,14 +336,12 @@ describe("restart_comfyui — Desktop-2 recognition and stop/start (#2482)", () 
 
     const stopped = await stopComfyUI();
     expect(stopped.stopped).toBe(true);
-    expect(stopped.has_restart_info).toBe(true);
+    expect(stopped.has_restart_info).toBe(!HOST_IS_WIN);
     expect(stopped.launch?.exe).toBe(DESKTOP2_EXE);
     expect(stopped.message).not.toMatch(/left as it was/i);
     expect(stopped.message).not.toMatch(/Could not stop ComfyUI/i);
 
-    const started = await startComfyUI();
-    expect(started.started).toBe(true);
-    expectSpawnedDesktop2();
+    await expectStartFollowsHostContract();
   });
 
   it("still reports stopped:false when the kill fails and the original pid owns the port", async () => {
@@ -368,31 +380,29 @@ describe("restart_comfyui — Desktop-2 recognition and stop/start (#2482)", () 
   });
 
   it.skipIf(process.platform !== "win32")(
-    "prefers the Desktop-2 launcher over legacy ComfyUI.exe when both exist on disk",
+    "spawns NEITHER the Desktop-2 nor the legacy ComfyUI.exe launcher when both exist on disk",
     async () => {
-    mockExecSync.mockImplementation((cmd: string) => {
-      if (/taskkill|pkill|\bkill\b/i.test(cmd)) return "";
-      if (/tasklist/i.test(cmd)) return "";
-      if (/pgrep/i.test(cmd)) {
-        const err = new Error("no match") as Error & { status?: number };
-        err.status = 1;
-        throw err;
-      }
-      if (/if exist/i.test(cmd)) {
-        if (cmd.includes("Comfy Desktop.exe") || cmd.includes("ComfyUI.exe")) return "found";
+      // #2482's hazard was spawning legacy v1 against the shared Desktop-2 venv.
+      // #2947: a Windows start now refuses before any launcher lookup, so neither
+      // is spawned — and nothing even probes for one.
+      mockExecSync.mockImplementation((cmd: string) => {
+        if (/if exist/i.test(cmd)) {
+          if (cmd.includes("Comfy Desktop.exe") || cmd.includes("ComfyUI.exe")) return "found";
+          return "";
+        }
+        if (/netstat/i.test(cmd) || /lsof/i.test(cmd)) throw noListener();
         return "";
-      }
-      if (/netstat/i.test(cmd) || /lsof/i.test(cmd)) throw noListener();
-      return "";
-    });
-    onDisk(DESKTOP2_EXE, LEGACY_V1_EXE);
-    spawnDesktop();
+      });
+      onDisk(DESKTOP2_EXE, LEGACY_V1_EXE);
+      spawnDesktop();
 
-    const started = await startComfyUI();
-    expect(started.started).toBe(true);
-    expectSpawnedDesktop2();
-    const dumped = JSON.stringify(mockSpawn.mock.calls[0]);
-    expect(dumped).not.toContain(LEGACY_V1_EXE.replace(/\\/g, "\\\\"));
+      const started = await startComfyUI();
+
+      expect(started.started).toBe(false);
+      expect(started.startup).toBe("not-attempted");
+      expect(started.message).toMatch(/does not launch ComfyUI itself/i);
+      expect(mockSpawn).not.toHaveBeenCalled();
+      expect(mockExecSync.mock.calls.some(([c]) => /if exist/i.test(String(c)))).toBe(false);
     },
   );
 });

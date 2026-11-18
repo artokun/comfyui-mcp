@@ -163,10 +163,39 @@ triggers the GitHub Actions workflow that publishes to npm with provenance (OIDC
 npm run release        # patch
 npm run release:minor  # minor
 npm run release:major  # major
+npm run release:beta   # prerelease on the `beta` channel (see below)
 ```
 
 Each script runs `npm version <bump>` (creating the commit and tag) and `git push --follow-tags`.
 Update `CHANGELOG.md` (Keep a Changelog) and rebuild the docs before tagging.
+
+### Prerelease channels
+
+A tag whose version carries a prerelease suffix publishes to a non-`latest` npm dist-tag and is
+marked as a prerelease on the GitHub Release. The dist-tag is chosen by the prerelease
+identifier:
+
+| Tag              | npm dist-tag | Installed by                 |
+| ---------------- | ------------ | ---------------------------- |
+| `v0.53.0`        | `latest`     | everyone, incl. auto-update  |
+| `v0.53.0-beta.1` | `beta`       | `npx comfyui-mcp@beta`       |
+| `v0.53.0-rc.1`   | `next`       | `npx comfyui-mcp@next`       |
+
+**Why this is safe for existing users.** `src/services/self-update.ts` polls
+`registry.npmjs.org/comfyui-mcp/latest` and installs `@latest`, and `compareSemver` ranks a
+version *without* a prerelease suffix above one with it. So a prerelease cannot pull anyone
+forward; only an explicit `@beta` / `@next` install reaches it. That matters because
+self-update only ever moves users FORWARD, so a bad `latest` cannot be walked back. Promote a
+soaked beta deliberately:
+
+```bash
+npm dist-tag add comfyui-mcp@0.52.206-beta.3 latest
+```
+
+Beta work lives on the `beta` branch. The release workflow triggers on `v*` tags from **any**
+branch, so tag from `beta` directly; nothing has to merge to `main` first. Keep the beta version
+ahead of the published `latest`, or `npx comfyui-mcp@beta` resolves to something older than what
+users already run.
 
 ## Questions
 

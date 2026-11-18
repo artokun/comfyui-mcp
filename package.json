@@ -1,6 +1,6 @@
 {
   "name": "comfyui-mcp",
-  "version": "0.52.205",
+  "version": "0.52.206",
   "mcpName": "io.github.artokun/comfyui-mcp",
   "description": "Local-first, agent-native control plane for ComfyUI — MCP server + autonomous sidebar agent that drives your live graph in natural language on ANY LLM: Claude/ChatGPT/Gemini on your subscription (no API key), free local models via Ollama (fully offline), or any hosted model via an OpenAI-compatible endpoint (DeepSeek, GLM, MiMo, OpenRouter). Generate images, video & audio, author and run workflows, manage models and custom nodes; a compact tool-router mode keeps even 4B models effective, and a built-in LLM Arena benchmarks them on real ComfyUI tasks. Also a Claude Code plugin with skills, slash commands, and installer packs. Local, LAN, VPS, or Comfy Cloud.",
   "homepage": "https://comfyui-mcp.artokun.io/docs",
@@ -48,6 +48,7 @@
     "release": "npm version patch && git push --follow-tags",
     "release:minor": "npm version minor && git push --follow-tags",
     "release:major": "npm version major && git push --follow-tags",
+    "release:beta": "npm version prerelease --preid beta && git push --follow-tags",
     "changelog": "node scripts/gen-changelog.mjs",
     "version": "node scripts/gen-changelog.mjs --from-pkg && git add CHANGELOG.md",
     "prepare": "tsc",
@@ -62,36 +63,35 @@
     "check:blog-structure": "node scripts/check-blog-structure.mjs"
   },
   "dependencies": {
-    "@comfyorg/sdk": "^0.1.7",
-    "@modelcontextprotocol/sdk": "~1.30.0",
+    "@modelcontextprotocol/sdk": "~1.32.2",
     "@stable-canvas/comfyui-client": "^1.5.9",
-    "better-sqlite3": "^13.0.3",
+    "better-sqlite3": "^13.1.1",
     "dotenv": "^17.4.2",
-    "sharp": "^0.35.3",
+    "sharp": "^0.35.5",
     "undici": "7.29.0",
-    "ws": "^8.21.3",
-    "yaml": "^2.9.0",
-    "zod": "^4.0.0"
+    "ws": "^8.23.0",
+    "yaml": "^2.9.1",
+    "zod": "^4.6.7"
   },
   "optionalDependencies": {
-    "@ai-sdk/anthropic": "^4.0.41",
-    "@ai-sdk/google": "^4.0.50",
-    "@ai-sdk/openai": "^4.0.46",
-    "@anthropic-ai/claude-agent-sdk": "^0.3.240",
-    "@aws-sdk/client-s3": "^3.1116.0",
-    "@azure/storage-blob": "^12.33.0",
-    "@openai/codex": "0.149.0",
-    "ai": "^7.0.77",
+    "@ai-sdk/anthropic": "^4.0.104",
+    "@ai-sdk/google": "^4.0.120",
+    "@ai-sdk/openai": "^4.0.117",
+    "@anthropic-ai/claude-agent-sdk": "^0.3.323",
+    "@aws-sdk/client-s3": "^3.1168.0",
+    "@azure/storage-blob": "^12.34.0",
+    "@openai/codex": "0.169.0",
+    "ai": "^7.0.172",
     "cloudflared": "^0.7.3"
   },
   "devDependencies": {
     "@types/better-sqlite3": "^7.6.13",
     "@types/node": "^22.13.4",
-    "@types/ws": "^8.18.1",
+    "@types/ws": "^8.18.2",
     "cross-env": "^10.1.0",
-    "tsx": "^4.23.12",
+    "tsx": "^4.23.15",
     "typescript": "^7.0.2",
-    "vitest": "^5.0.3"
+    "vitest": "^5.1.0"
   },
   "repository": {
     "type": "git",
@@ -145,7 +145,7 @@
   "author": "artokun",
   "license": "MIT",
   "engines": {
-    "node": ">=22.0.0"
+    "node": "^22.14.0 || >=24.0.0"
   },
   "pnpm": {
     "onlyBuiltDependencies": [

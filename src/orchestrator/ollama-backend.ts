@@ -91,15 +91,14 @@ export interface OllamaBackendDeps {
   mcpServers?: Record<string, GeminiMcpServerSpec>;
   /** Panel system prompt (persona), prepended to the system message. */
   systemAppend?: string;
-  /** Context window tokens for /api/chat options.num_ctx. Default is
-   *  MODEL-AWARE: for our fine-tune (artokun/gemma4-comfyui-mcp:*) num_ctx is
-   *  OMITTED so the tag's baked Modelfile window (65536) governs — request
-   *  options override Modelfile params, and a blanket 16384 here silently
-   *  clamped the fine-tune and truncated conversations mid-flight. Stock
-   *  models keep 16384 (their tags bake no window and Ollama's own default is
-   *  4096). Env COMFYUI_MCP_OLLAMA_NUM_CTX overrides everything — the
-   *  architecture allows up to 128K (e2b/e4b) / 256K (12b), VRAM permitting. */
+  /** Fixed context window tokens for /api/chat options.num_ctx. Beats every
+   *  other source; mostly a test seam. Callers that want the panel's live
+   *  choice pass `contextSetting` instead. */
   numCtx?: number;
+  /** The panel's "Context window" choice, read FRESH each turn so a Settings
+   *  change applies on the next message without reconnecting. See
+   *  OllamaContextSetting and effectiveNumCtx for what each value means. */
+  contextSetting?: () => OllamaContextSetting | undefined;
   /** Test seam: replaces the MCP client construction from mcpServers specs. */
   connectToolClients?: () => Promise<{ comfyui?: McpToolClient; panel?: McpToolClient }>;
   /** Panel backend id when reusing this driver for GLM/Kimi/Ollama (default ollama). */
@@ -177,7 +176,71 @@ type ChatMessage = {
    *  demonstrably did. Fabricating a non-delivery for an accepted attachment is
    *  the same class of error as hiding a real one. */
   mediaDelivered?: boolean;
+  /** True once this message's text has been replaced by a compaction stub
+   *  (#2231). Guards against re-stubbing an already-stubbed message, which
+   *  would stack notes without reclaiming a single token, and keeps the
+   *  "did the model ever see this" wording honest on later turns. */
+  compacted?: boolean;
 };
+
+/** Fraction of the context window the re-serialized TEXT history may occupy
+ *  before compaction fires. Headroom is not optional: the budget has to leave
+ *  room for the model's own reply plus the tool results this turn has not
+ *  produced yet, and the window is a hard wall rather than a soft one. */
+const HISTORY_BUDGET_FRACTION = 0.75;
+
+/** Chars per token for the history estimate. Deliberately 3.5, not the usual
+ *  prose figure of 4: this history is dominated by TOOL RESULTS, which are JSON
+ *  and tokenize denser than English (braces, quotes and node ids rarely merge
+ *  into one token). A prose-calibrated 4 therefore UNDER-counts exactly the
+ *  payload that fills the window, and under-counting here is the failure this
+ *  whole function exists to prevent. Erring high costs a little context; erring
+ *  low costs the system prompt. */
+const HISTORY_CHARS_PER_TOKEN = 3.5;
+
+/** Messages shorter than this are left alone — stubbing them reclaims nothing
+ *  and the note is longer than the text it replaces. */
+const HISTORY_SHRINK_FLOOR_CHARS = 240;
+
+/** How many messages at the TAIL are never compacted: the live user turn and
+ *  the tool exchange in flight around it. Compacting those would blank the
+ *  very thing the model is reasoning about right now. */
+const HISTORY_TAIL_KEEP = 6;
+
+/** Budget fraction override, same env convention as the other Ollama knobs. */
+/** The tool a compacted stub points at. Registered only once something has been
+ *  archived (see buildModelTools), so a session that never compacts carries
+ *  exactly the tool surface it always did. */
+const HISTORY_RECALL_TOOL = "history_recall";
+
+/** Cap on one recall. A recalled message re-enters the live context, so an
+ *  unbounded one could undo the compaction that archived it. */
+const HISTORY_RECALL_MAX_CHARS = 6000;
+
+/** How much of the original each stub keeps inline. A user's words get more room
+ *  than tool output: intent cannot be re-obtained by calling a tool again. */
+const HISTORY_EXCERPT_CHARS = { tool: 160, assistant: 160, user: 300, unseen: 1200 } as const;
+
+/** True when an http error means "this prompt does not fit the context window".
+ *  Two shapes, both seen live on Ollama 0.40's llama.cpp runner: an explicit
+ *  400 exceed_context_size_error, and a Qwen-family chat template raising "No
+ *  user query found in messages" (500) because the server front-truncated the
+ *  overflow and the user's request was the first message to go. */
+export function contextOverflowed(status: number | undefined, message: string): boolean {
+  if (typeof status !== "number") return false;
+  return /no user query found in messages|exceed_context_size|exceeds the available context size|context length exceeded|maximum context length/i.test(message);
+}
+
+/** Whitespace-collapsed head of `text`, ellipsized past `max`. */
+function excerptOf(text: string, max: number): string {
+  const flat = text.replace(/\s+/g, " ").trim();
+  return flat.length <= max ? flat : `${flat.slice(0, max - 1).trimEnd()}…`;
+}
+
+function historyBudgetFraction(): number {
+  const raw = Number(process.env.COMFYUI_MCP_OLLAMA_HISTORY_BUDGET);
+  return Number.isFinite(raw) && raw > 0 && raw <= 1 ? raw : HISTORY_BUDGET_FRACTION;
+}
 
 type OllamaToolCall = {
   id?: string;
@@ -261,6 +324,42 @@ function toOllamaMessages(messages: ChatMessage[]): Array<Record<string, unknown
 // previous arena best, 9/10). Ladder: :e2b ~2 GB VRAM at q4 / :e4b ~3.5 GB
 // (default) / :12b ~8 GB — `ollama pull artokun/gemma4-comfyui-mcp:<size>`.
 const DEFAULT_MODEL = "artokun/gemma4-comfyui-mcp:e4b";
+
+/**
+ * The user's context-window choice for the Ollama backend.
+ *  - "auto": the model's native window (from /api/show), capped at
+ *    AUTO_NUM_CTX_CAP so a 256K-capable model can't silently claim tens of GB
+ *    of KV cache on a small GPU. Our fine-tune keeps its baked Modelfile window.
+ *  - "max": the model's full native window, VRAM permitting.
+ *  - a number: that many tokens, clamped to the native window when known.
+ */
+export type OllamaContextSetting = "auto" | "max" | number;
+
+/** Ceiling for "auto". 64K holds a long tool-heavy session (the full tool list
+ *  alone can take several thousand tokens of every request) and costs a few GB
+ *  of KV cache on most architectures. */
+export const AUTO_NUM_CTX_CAP = 65536;
+/** Used when the native window can't be read (probe failed, non-Ollama host).
+ *  Ollama's own default is only 4096, far too small for the tool list. */
+const FALLBACK_NUM_CTX = 16384;
+
+/** Parse a persisted/panel value into an OllamaContextSetting, or undefined. */
+export function parseOllamaContextSetting(v: unknown): OllamaContextSetting | undefined {
+  if (v === "auto" || v === "max") return v;
+  const n = typeof v === "number" ? v : typeof v === "string" && /^\d+$/.test(v.trim()) ? Number(v) : NaN;
+  return Number.isInteger(n) && n >= 2048 ? n : undefined;
+}
+
+/** `<arch>.context_length` from an /api/show model_info block, or null. */
+export function nativeContextFromModelInfo(info: unknown): number | null {
+  if (!info || typeof info !== "object") return null;
+  const rec = info as Record<string, unknown>;
+  const arch = rec["general.architecture"];
+  const exact = typeof arch === "string" ? rec[`${arch}.context_length`] : undefined;
+  const v =
+    exact ?? Object.entries(rec).find(([k, val]) => k.endsWith(".context_length") && typeof val === "number")?.[1];
+  return typeof v === "number" && Number.isInteger(v) && v > 0 ? v : null;
+}
 const MAX_TOOL_ROUNDS = 32;
 
 /**
@@ -836,6 +935,11 @@ export class OllamaBackend implements AgentBackend {
   protected panelTools: McpToolInfo[] = [];
   /** Conversation history for the live session (Ollama is stateless per request). */
   private history: ChatMessage[] = [];
+  /** Full text of every message compaction stubbed, by handle (h1, h2, …).
+   *  Lives exactly as long as `history` does: it is reset wherever history is,
+   *  so a handle can never resolve to a message from another conversation. */
+  private historyArchive = new Map<string, { role: ChatMessage["role"]; toolName?: string; content: string }>();
+  private historyArchiveSeq = 0;
   private sessionId: string | null = null;
 
   /** Wire dialect (see OllamaBackendDeps.api). */
@@ -904,11 +1008,68 @@ export class OllamaBackend implements AgentBackend {
   }
 
   /** num_ctx to SEND (0 = omit and let the Modelfile govern). Precedence:
-   *  deps.numCtx (settings) → COMFYUI_MCP_OLLAMA_NUM_CTX env → model-aware
-   *  default (fine-tune: omit → baked 65536; stock: 16384). */
+   *  deps.numCtx → the panel's Context window setting (unless "auto") →
+   *  COMFYUI_MCP_OLLAMA_NUM_CTX env → auto. Auto is the model's native window
+   *  capped at AUTO_NUM_CTX_CAP, except our fine-tune, which omits num_ctx so
+   *  its baked 65536 governs (a blanket 16384 once clamped it and truncated
+   *  conversations mid-flight). Every explicit size is clamped to the native
+   *  window when known: tokens past what the model was trained on buy nothing
+   *  but KV cache. */
   private effectiveNumCtx(): number {
+    if (this.deps.numCtx) return this.deps.numCtx;
+    const native = this.nativeCtx?.model === this.model ? this.nativeCtx.tokens : null;
+    const clamp = (n: number) => (native ? Math.min(n, native) : n);
+    const setting = this.deps.contextSetting?.();
+    if (typeof setting === "number") return clamp(setting);
+    if (setting === "max" && native) return native;
     const envCtx = Number(process.env.COMFYUI_MCP_OLLAMA_NUM_CTX) || 0;
-    return this.deps.numCtx ?? (envCtx > 0 ? envCtx : this.isFinetune() ? 0 : 16384);
+    if (envCtx > 0) return clamp(envCtx);
+    if (this.isFinetune()) return 0;
+    return native ? Math.min(native, AUTO_NUM_CTX_CAP) : FALLBACK_NUM_CTX;
+  }
+
+  /** Native window of the active model, from /api/show. Cached per model
+   *  name; a failed read is not cached, so the next turn retries. */
+  private nativeCtx: { model: string; tokens: number } | null = null;
+  /** Model whose failed read was already logged, so retries stay quiet. */
+  private nativeCtxWarnedFor: string | null = null;
+
+  /** Read the active model's native context length once per model. Only the
+   *  Ollama dialect has /api/show; an OpenAI-compatible host keeps the
+   *  fallback window. Never throws: an unknown window just means no clamp. */
+  protected async refreshNativeContext(): Promise<void> {
+    if (this.api !== "ollama" || this.nativeCtx?.model === this.model) return;
+    const model = this.model;
+    const warn = (msg: string) => {
+      if (this.nativeCtxWarnedFor === model) return;
+      this.nativeCtxWarnedFor = model;
+      logger.warn(`[ollama-backend] ${msg} — native context unknown, using ${this.effectiveNumCtx() || "the Modelfile's window"}`);
+    };
+    try {
+      const res = await fetch(`${this.host}/api/show`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ model }),
+        signal: AbortSignal.timeout(20000),
+      });
+      if (!res.ok) {
+        warn(`/api/show for ${model} returned http ${res.status}`);
+        return;
+      }
+      const tokens = nativeContextFromModelInfo(((await res.json()) as { model_info?: unknown }).model_info);
+      if (!tokens) {
+        warn(`/api/show for ${model} reported no context_length`);
+        return;
+      }
+      if (this.model !== model) return; // switched mid-probe; the next turn re-reads
+      this.nativeCtx = { model, tokens };
+      const sent = this.effectiveNumCtx();
+      logger.info(
+        `[ollama-backend] ${model}: native context ${tokens} tokens; using ${sent || "the Modelfile's window"}`,
+      );
+    } catch (err) {
+      warn(`/api/show context probe failed for ${model}: ${msgOf(err)}`);
+    }
   }
 
   /** The context window actually in effect (for pressure warnings): the sent
@@ -1142,6 +1303,21 @@ export class OllamaBackend implements AgentBackend {
         },
       );
     }
+    if (this.historyArchive.size > 0) {
+      defs.push({
+        type: "function",
+        function: {
+          name: HISTORY_RECALL_TOOL,
+          description:
+            "Read back the full text of an earlier message that was compacted out of your context to save space. Compacted messages say 'archived as h<N>'; pass that id.",
+          parameters: {
+            type: "object",
+            properties: { id: { type: "string", description: "The archive handle, e.g. h3." } },
+            required: ["id"],
+          },
+        },
+      });
+    }
     return defs;
   }
 
@@ -1159,6 +1335,7 @@ export class OllamaBackend implements AgentBackend {
     }
 
     try {
+      if (name === HISTORY_RECALL_TOOL && this.historyArchive.size > 0) return this.recallArchived(args);
       const comfyTool = this.comfyTools.find((t) => t.name === name);
       if (comfyTool) {
         if (!this.comfy) return { text: "comfyui tools are unavailable in this session.", isError: true };
@@ -1502,7 +1679,7 @@ export class OllamaBackend implements AgentBackend {
           const win = this.contextWindow();
           if (usage.input_tokens >= win * 0.85) {
             logger.warn(
-              `[ollama-backend] context ${usage.input_tokens}/${win} tokens (${Math.round((usage.input_tokens / win) * 100)}%) — history truncation imminent. Raise COMFYUI_MCP_OLLAMA_NUM_CTX (arch supports 128K on :e2b/:e4b, 256K on :12b, VRAM permitting) or start a fresh chat.`,
+              `[ollama-backend] context ${usage.input_tokens}/${win} tokens (${Math.round((usage.input_tokens / win) * 100)}%) — history truncation imminent. Raise Settings › Ollama › Context window (or COMFYUI_MCP_OLLAMA_NUM_CTX)${this.nativeCtx?.model === this.model ? ` — this model supports up to ${this.nativeCtx.tokens}` : ""}, VRAM permitting, or start a fresh chat.`,
             );
           }
         }
@@ -1647,6 +1824,8 @@ export class OllamaBackend implements AgentBackend {
       // systemPromptForSurface(), which the post-model-switch rewrite also uses,
       // so the two writers cannot disagree about what this session was told.
       this.history = [{ role: "system", content: this.systemPromptForSurface() }];
+      this.historyArchive.clear();
+      this.historyArchiveSeq = 0;
     }
     yield { type: "session", sessionId: this.sessionId, model: this.model };
 
@@ -1769,6 +1948,189 @@ export class OllamaBackend implements AgentBackend {
         : `\n[note: the ${count} image(s) attached to this message were removed BEFORE the request was sent - together with the rest of this conversation they exceeded the endpoint's image limit (${formatByteBudget(budget)}). You did NOT receive them: you did not see any image. Say so plainly rather than describing or guessing at the contents.]`;
     }
     return { droppedImages, undeliveredImages, budget, bytesBefore };
+  }
+
+  /** Approximate token cost of one message's TEXT (content + tool-call args).
+   *  Images are deliberately excluded — they are bounded separately by
+   *  trimImagePayloadToBudget, and double-counting them here would make this
+   *  budget fire on a history whose text is actually small. */
+  private estimateTextTokens(m: ChatMessage): number {
+    let chars = m.content.length;
+    for (const call of m.tool_calls ?? []) {
+      const args = call.function?.arguments;
+      chars += (call.function?.name?.length ?? 0) + (typeof args === "string" ? args.length : JSON.stringify(args ?? {}).length);
+    }
+    return Math.ceil(chars / HISTORY_CHARS_PER_TOKEN);
+  }
+
+  /**
+   * Bound the TEXT history so the next request cannot overflow num_ctx (#2231).
+   *
+   * Ollama does NOT error when a prompt exceeds the context window — it
+   * truncates the prompt from the FRONT. The front of this history is
+   * `history[0]`, the system prompt, followed by the tool-surface instructions.
+   * So the observed failure of a long local-model session is not a crash: the
+   * model silently loses its instructions and its tool vocabulary, stops
+   * emitting valid tool calls, and the turn collapses with no error anywhere.
+   * The pressure telltale in chatStream reports that this is ABOUT to happen;
+   * this is what actually prevents it.
+   *
+   * Two rules make the result safe to send:
+   *
+   *  1. Messages are SHRUNK IN PLACE, never removed. Both wire dialects pair a
+   *     tool result to the assistant message that requested it (`tool_call_id`
+   *     on the OpenAI side, `tool_name` on Ollama's), and a strict endpoint 400s
+   *     on a tool message whose call has vanished — or worse, on an assistant
+   *     `tool_calls` whose result has. Rewriting `content` and leaving the
+   *     envelope alone keeps every pairing structurally intact by construction,
+   *     so no amount of compaction can produce an unsendable history. For the
+   *     same reason `tool_calls` arguments are left untouched even though they
+   *     can be bulky: correctness outranks the extra tokens.
+   *
+   *  2. `history[0]` is never touched. Index 0 is the pin — the thing
+   *     front-truncation would have eaten, and what the rest of this class
+   *     assumes is the system prompt. The last HISTORY_TAIL_KEEP messages (the
+   *     live turn) are left alone UNLESS everything older has already been
+   *     compacted and the request still does not fit — then the tail's tool
+   *     results go too (pass 3).
+   *
+   * Pass 3 exists because "the tail is too big, let the window cope" is not a
+   * soft failure. Each tool result may carry 16000 chars, so three of them in
+   * the tail alone can outgrow a 16K window, and the server then drops messages
+   * from the FRONT — first the user's request at index 1. Qwen-family chat
+   * templates refuse a history with no user query outright ("No user query found
+   * in messages", http 500), so the turn dies instead of degrading.
+   *
+   * The budget counts the tool DEFINITIONS too (`extraTokens`): they ride every
+   * request and share the same window, and leaving them out is how a history
+   * "under budget" still overflows.
+   *
+   * Eviction order is cheapest-value-first: tool results before prose. A tool
+   * result is re-obtainable (call the tool again) and is usually the bulk of the
+   * window; a user's sentence is not re-obtainable at all. Within each class the
+   * sweep runs oldest-first.
+   *
+   * Every stub says plainly that the model DID see the content at the time, so
+   * it reports a gap in its memory instead of concluding the step never happened.
+   * The exception is a pass-3 result the model has NOT read yet (it arrived after
+   * the last assistant message): that stub says so, and keeps a longer excerpt.
+   */
+  private compactHistoryToBudget(opts: { extraTokens?: number; fraction?: number } = {}): {
+    shrunkMessages: number;
+    tokensBefore: number;
+    tokensAfter: number;
+    budgetTokens: number;
+    window: number;
+  } {
+    const window = this.contextWindow();
+    const budgetTokens = Math.floor(window * (opts.fraction ?? historyBudgetFraction()));
+    let tokensBefore = opts.extraTokens ?? 0;
+    for (const m of this.history) tokensBefore += this.estimateTextTokens(m);
+    if (tokensBefore <= budgetTokens) {
+      return { shrunkMessages: 0, tokensBefore, tokensAfter: tokensBefore, budgetTokens, window };
+    }
+
+    const lastTouchable = Math.max(1, this.history.length - HISTORY_TAIL_KEEP);
+    let remaining = tokensBefore;
+    let shrunkMessages = 0;
+
+    // A stub is a GIST plus a HANDLE. The gist keeps the part a small model most
+    // needs in place, at the message's own position (never in history[0], which
+    // the surface reconnect rewrites wholesale); the handle reaches the full text
+    // through history_recall. Each still says the model DID see the original, so
+    // a gap reads as "I can look that up", not "that never happened".
+    const stubFor = (m: ChatMessage, id: string, unseen = false): string => {
+      const recall = `${HISTORY_RECALL_TOOL} {"id":"${id}"}`;
+      if (unseen) {
+        return `[${m.tool_name ?? "tool"} result, too large to fit the context window alongside this conversation, so only its start is shown here; the full result is archived as ${id}. Start: "${excerptOf(m.content, HISTORY_EXCERPT_CHARS.unseen)}". Call ${recall} to read more of it.]`;
+      }
+      if (m.role === "tool") {
+        return `[compacted ${m.tool_name ?? "tool"} result, archived as ${id}. Gist: "${excerptOf(m.content, HISTORY_EXCERPT_CHARS.tool)}". You DID receive the full result earlier; to read it again call ${recall} rather than guessing.]`;
+      }
+      if (m.role === "user") {
+        return `[compacted user message, archived as ${id}. They said: "${excerptOf(m.content, HISTORY_EXCERPT_CHARS.user)}". You did see the whole message; full text: ${recall}.]`;
+      }
+      return `[compacted earlier reply of yours, archived as ${id}. Gist: "${excerptOf(m.content, HISTORY_EXCERPT_CHARS.assistant)}". Full text: ${recall}.]`;
+    };
+
+    // Messages after the last assistant message are results the model has not
+    // read yet; only pass 3 can reach them, and their stub must not claim it did.
+    let lastAssistant = -1;
+    for (let i = this.history.length - 1; i > 0; i--) {
+      if (this.history[i].role === "assistant") {
+        lastAssistant = i;
+        break;
+      }
+    }
+
+    // Pass 1 tool results, pass 2 prose, pass 3 the tail's tool results the
+    // model has read, pass 4 the ones it has not. Oldest-first inside each pass.
+    // An unread history_recall result is never cut: the model asked for exactly
+    // that text, and HISTORY_RECALL_MAX_CHARS already sized it to fit.
+    const unreadRecall = (m: ChatMessage, i: number) => i > lastAssistant && m.tool_name === HISTORY_RECALL_TOOL;
+    const passes: ReadonlyArray<{ roles: ReadonlyArray<ChatMessage["role"]>; from: number; to: number; unseen?: boolean }> = [
+      { roles: ["tool"], from: 1, to: lastTouchable },
+      { roles: ["assistant", "user"], from: 1, to: lastTouchable },
+      { roles: ["tool"], from: lastTouchable, to: this.history.length, unseen: false },
+      { roles: ["tool"], from: lastTouchable, to: this.history.length, unseen: true },
+    ];
+    for (const pass of passes) {
+      for (let i = pass.from; i < pass.to; i++) {
+        if (remaining <= budgetTokens) break;
+        const m = this.history[i];
+        if (!pass.roles.includes(m.role)) continue;
+        if (pass.unseen !== undefined && pass.unseen !== i > lastAssistant) continue;
+        if (unreadRecall(m, i)) continue;
+        if (m.compacted) continue;
+        if (m.content.length < HISTORY_SHRINK_FLOOR_CHARS) continue;
+        // Peek the handle so the stub can be sized BEFORE anything is archived: a
+        // gist plus a handle can outgrow a short message, and stubbing that would
+        // spend context to "save" it.
+        const reused = this.recalledHandleOf(m);
+        const id = reused ?? `h${this.historyArchiveSeq + 1}`;
+        const stub = stubFor(m, id, i > lastAssistant);
+        if (stub.length >= m.content.length) continue;
+        if (!reused) {
+          this.historyArchiveSeq++;
+          this.historyArchive.set(id, { role: m.role, ...(m.tool_name ? { toolName: m.tool_name } : {}), content: m.content });
+        }
+        const before = this.estimateTextTokens(m);
+        m.content = stub;
+        m.compacted = true;
+        remaining -= before - this.estimateTextTokens(m);
+        shrunkMessages++;
+      }
+      if (remaining <= budgetTokens) break;
+    }
+
+    return { shrunkMessages, tokensBefore, tokensAfter: remaining, budgetTokens, window };
+  }
+
+  /** A history_recall RESULT that gets compacted again keeps its original handle.
+   *  Archiving it afresh would store a second copy of the same text under a new
+   *  id on every recall-then-compact cycle. */
+  private recalledHandleOf(m: ChatMessage): string | undefined {
+    if (m.role !== "tool" || m.tool_name !== HISTORY_RECALL_TOOL) return undefined;
+    const id = /^\[recalled (h\d+)\]/.exec(m.content)?.[1];
+    return id && this.historyArchive.has(id) ? id : undefined;
+  }
+
+  /** history_recall: the archived full text, capped so a recall cannot undo the
+   *  compaction that archived it. Unknown ids answer with the ids that DO exist,
+   *  so a mistyped handle is one retry, not a dead end. */
+  private recallArchived(args: Record<string, unknown>): { text: string; isError: boolean } {
+    const id = typeof args.id === "string" ? args.id.trim() : "";
+    const hit = id ? this.historyArchive.get(id) : undefined;
+    if (!hit) {
+      const known = [...this.historyArchive.keys()].slice(-12).join(", ") || "none";
+      return { text: `No archived message "${id}". Archived ids in this conversation: ${known}.`, isError: true };
+    }
+    const from = hit.role === "tool" ? `${hit.toolName ?? "tool"} result` : hit.role === "user" ? "user message" : "your earlier reply";
+    const body =
+      hit.content.length <= HISTORY_RECALL_MAX_CHARS
+        ? hit.content
+        : `${hit.content.slice(0, HISTORY_RECALL_MAX_CHARS)}\n[…truncated: the original is ${hit.content.length} chars; this recall shows the first ${HISTORY_RECALL_MAX_CHARS}.]`;
+    return { text: `[recalled ${id}] (${from})\n${body}`, isError: false };
   }
 
   /**
@@ -1946,10 +2308,15 @@ export class OllamaBackend implements AgentBackend {
     // should get. Reconcile BEFORE buildModelTools reads the catalog, and here
     // rather than in setModel because nothing is in flight at this point.
     await this.reconcileToolModeForModel();
+    // Before anything sizes the window: learn the model's native context so
+    // auto/max/clamping resolve against it (cached per model, so cheap).
+    await this.refreshNativeContext();
     // #1972 — same reason, for audio the history is still carrying: the model
     // selected NOW may not be the one that was verified when it was attached.
     this.stripUnverifiedAudioFromHistory();
-    const tools = this.buildModelTools();
+    // `let`: compaction can archive mid-turn, and the stubs it writes point at
+    // history_recall, so the tool list is rebuilt the moment that tool exists.
+    let tools = this.buildModelTools();
     // Vision is a per-MODEL property (gemma4 sees images, qwen3 doesn't;
     // DeepSeek's API rejects image parts outright), so ALWAYS attempt delivery:
     // resolve the ComfyUI refs inline and let the strip-and-retry below handle
@@ -2041,11 +2408,47 @@ export class OllamaBackend implements AgentBackend {
     // NOT here — describing many distinct tools is legitimate exploration.
     const discoveryCounts = new Map<string, number>();
     let emptyFinalRetried = false;
+    // Compaction can fire on several rounds of one turn; the user is told once.
+    let compactionNotified = false;
     let attachmentsStripped = false;
+    // The round whose request the server refused as too long; that round is
+    // re-sent once at half the usual budget (see contextOverflowed).
+    let overflowRetryRound = -1;
     try {
       for (let round = 0; round < MAX_TOOL_ROUNDS; round++) {
         // Drain the chat stream manually: yield each delta event as it arrives,
         // and capture the generator's RETURN value (the accumulated message).
+        // #2231 — bound the text history before EVERY request, not once per
+        // turn. Tool results land mid-turn and are the fastest-growing part of
+        // the context, so a turn that starts with room to spare can still walk
+        // into the window by round six. Runs after the image trim, which bounds
+        // a different budget on a different axis.
+        const compacted = this.compactHistoryToBudget({
+          extraTokens: Math.ceil(JSON.stringify(tools).length / HISTORY_CHARS_PER_TOKEN),
+          ...(overflowRetryRound === round ? { fraction: historyBudgetFraction() / 2 } : {}),
+        });
+        if (this.historyArchive.size > 0 && !tools.some((t) => (t.function as { name?: string } | undefined)?.name === HISTORY_RECALL_TOOL)) {
+          tools = this.buildModelTools();
+        }
+        if (compacted.shrunkMessages && !compactionNotified) {
+          compactionNotified = true;
+          logger.warn(
+            `[ollama-backend] history ~${compacted.tokensBefore} tokens over the ${compacted.budgetTokens}-token budget (num_ctx ${compacted.window}) — compacted ${compacted.shrunkMessages} message(s) to ~${compacted.tokensAfter}`,
+          );
+          // Two different facts, and the user is owed the second one: compaction
+          // that GOT under the window, versus compaction that did all it could
+          // and is still over. The protected tail is not evictable, so a single
+          // turn bigger than the window cannot be fixed by any amount of
+          // trimming — and reporting that as "staying inside the window" would
+          // promise a safety that is not there.
+          const stillOver = compacted.tokensAfter > compacted.budgetTokens;
+          yield {
+            type: "assistant",
+            text: stillOver
+              ? `🧠 This conversation is bigger than ${this.model} can hold at once. I condensed the oldest tool results, but the recent turns alone still fill the window, so the model may start losing the beginning of this conversation. Raising \`COMFYUI_MCP_OLLAMA_NUM_CTX\` (or starting a fresh chat) is the real fix.`
+              : `🧠 This conversation has grown past what ${this.model} can hold at once, so I condensed the oldest tool results to stay inside the window. I kept a short gist of each in place and can pull any of them back in full, so nothing is lost — if I still seem to have forgotten a detail, say it again. Raising \`COMFYUI_MCP_OLLAMA_NUM_CTX\` or starting a fresh chat both buy more room.`,
+          };
+        }
         const stream = this.chatStream(this.history, tools, abort.signal, opts.onActivity);
         let content = "";
         let toolCalls: OllamaToolCall[] = [];
@@ -2104,6 +2507,16 @@ export class OllamaBackend implements AgentBackend {
           // missing data required for image input") and the OpenAI dialect with
           // 400 ("invalid image input"), both reproduced live.
           const status = (err as { httpStatus?: number } | null)?.httpStatus;
+          // The window overflowed despite compaction (the history estimate is a
+          // chars-per-token heuristic, not the model's tokenizer). Re-send this
+          // round ONCE with half the budget rather than ending the turn: the
+          // refusal is about size, and size is the one thing we can still cut.
+          if (!abort.signal.aborted && overflowRetryRound !== round && contextOverflowed(status, msgOf(err))) {
+            overflowRetryRound = round;
+            logger.warn(`[ollama-backend] request overflowed the context window (${msgOf(err).slice(0, 160)}) — compacting harder and retrying once`);
+            round--; // the refused request didn't count as a tool round
+            continue;
+          }
           const requestWasRejected = typeof status === "number" && status >= 400 && status < 500;
           // Arm ONLY when THIS turn attached media that has not yet come back
           // from a successful request. Two things follow, and both matter:

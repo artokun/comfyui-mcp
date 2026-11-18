@@ -234,8 +234,15 @@ import { AntigravityBackend } from "./antigravity-backend.js";
 import { PiBackend } from "./pi-backend.js";
 import { GrokBackend, GROK_DEFAULT_MODEL } from "./grok-backend.js";
 import { QwenBackend, QWEN_DEFAULT_MODEL } from "./qwen-backend.js";
-import { OllamaBackend, OLLAMA_SYSTEM_PROMPT, type OllamaBackendDeps } from "./ollama-backend.js";
-import { ChatGptOAuthBackend, CHATGPT_DEFAULT_MODEL } from "./chatgpt-oauth-backend.js";
+import {
+  OllamaBackend,
+  OLLAMA_SYSTEM_PROMPT,
+  parseOllamaContextSetting,
+  type OllamaBackendDeps,
+  type OllamaContextSetting,
+} from "./ollama-backend.js";
+import { ChatGptOAuthBackend, CHATGPT_DEFAULT_MODEL, resolveChatGptDefaultModel } from "./chatgpt-oauth-backend.js";
+import { pickTopClaudeModel } from "./model-defaults.js";
 import { KimiBackend } from "./kimi-backend.js";
 import {
   OPENAI_KEY_PROVIDER_IDS,
@@ -253,6 +260,7 @@ import {
   discoverBackendAvailability,
   piCredentialPresent,
 } from "./backend-readiness.js";
+import { detectPiMcpBridge, type PiMcpBridge } from "./pi-mcp-bridge.js";
 import { handleOAuthBegin, handleOAuthStatus, handleOAuthSignout } from "./oauth-bridge.js";
 // HUMAN-facing `say` bubbles only — `trFor`, never `tr`: each frame renders inside one
 // specific panel tab, in THAT user's language (bridge.tabLocale), not the language of
@@ -260,7 +268,7 @@ import { handleOAuthBegin, handleOAuthStatus, handleOAuthSignout } from "./oauth
 // prompts, ack `message` fields, log lines — is read by a machine and stays English.
 import { trFor } from "../i18n/index.js";
 import { buildStartFailureNotice, startFailureSay } from "./start-failure-notice.js";
-import { readyBannerText, bannerCorrection } from "./ready-banner.js";
+import { readyBannerText, bannerCorrection, greetingLabel } from "./ready-banner.js";
 import { OAUTH_PROVIDERS } from "../services/oauth-flow.js";
 import { startPanelMcpHttpServer, type PanelMcpHttpServer } from "./panel-mcp-http.js";
 import { resolveHttpLaneComfyToolMode } from "./http-backend-tools.js";
@@ -412,14 +420,62 @@ Never invent component types beyond: Text, Heading, Button, Row, Column, Card, D
 // Capability override appended to the pi (pi.dev) backend's system prompt ONLY.
 // The shared PANEL_SYSTEM_APPEND above tells the agent it can SEE/EDIT the canvas
 // via panel_* (and headless comfyui) tools — TRUE for every other CLI backend,
-// which are handed those MCP servers. But pi has NO MCP client at all, so it gets
-// none of those tools; without this override pi would attempt or hallucinate
+// which are handed those MCP servers. pi is NOT handed them (see the "pi" branch
+// of makeBackend), so without an override pi would attempt or hallucinate
 // panel_*/comfyui_* calls it cannot make (issue #491 codex P0a). This is appended
 // LAST so it overrides the claims above.
+//
+// This is the STOCK-pi wording: pi with no MCP bridge of its own has none of those
+// tools, full stop. It is NOT the only wording any more — see piCapabilityNote():
+// when the user's pi carries an MCP bridge (pi-mcp-adapter, or pi 0.99+'s built-in
+// MCP, pointed at servers), asserting "NONE of them exist" is false and the model
+// obeys it, refusing canvas work the user wired up themselves (#2996).
 const PI_CAPABILITY_OVERRIDE = `
 
 === IMPORTANT CAPABILITY OVERRIDE — READ THIS, IT SUPERSEDES THE ABOVE ===
 You are running on the pi (pi.dev) backend, which has NO ComfyUI tools. Disregard every instruction above about panel_* tools (panel_graph_outline, panel_query_graph, panel_add_node, panel_connect, panel_set_widget, panel_run, panel_save_workflow, panel_install_node, panel_free_vram, …) and the headless comfyui tools (generate_image, enqueue_workflow, list_packs, apply_manifest, …): NONE of them exist in your runtime. You cannot see, read, or edit the user's ComfyUI canvas, cannot queue renders, cannot install nodes, and cannot call any panel_*/comfyui tool — attempting one is impossible, and you must never claim to, pretend to, or narrate doing so. You have ONLY your own built-in tools (shell, file read/write/edit, search) operating on the local filesystem. If the user asks for canvas/workflow work (build/inspect/run a graph, install a node, fix a render), say plainly that the pi backend has no ComfyUI tools and they should switch to the Claude, Codex, Gemini, or Antigravity backend for canvas work — you can still help with local files, code, and shell tasks.`;
+
+/**
+ * The pi capability note when the user's OWN pi carries an MCP bridge (#2996).
+ *
+ * Same shape as NO_PANEL_TOOLS_OVERRIDE and NO_INHERITED_MCP_OVERRIDE, and held to
+ * the same bar: it retracts exactly what we observed and attaches no new claim.
+ * What we observed is on disk — an adapter package in pi's settings, or built-in
+ * MCP not disabled, plus at least one enabled server in a file that bridge reads
+ * (pi-mcp-bridge.ts). What we did NOT observe is whether that server starts, signs
+ * in, or exposes the tool the user wants; so this says where any MCP tools come
+ * from and how a bridge of that kind surfaces them, and then sends the model to
+ * the tool list it was actually handed. A model under this note with no MCP tool
+ * in reach behaves exactly as it does under the stock retraction: it says so.
+ *
+ * Two retractions it keeps, because they stay true with a bridge: the panel does
+ * not hand pi our servers (so the prompt's panel_* / comfyui claims are still not
+ * ours to make), and panel_add_mcp / panel_reload do not grow THIS agent's toolset.
+ */
+function piBridgeCapabilityNote(bridge: PiMcpBridge): string {
+  const servers = bridge.servers.map((s) => "`" + s + "`").join(", ");
+  const how =
+    bridge.kind === "pi-mcp-adapter"
+      ? "Your pi has the pi-mcp-adapter extension installed. It surfaces MCP servers through ONE proxy tool named `mcp` (search for a tool, describe it, then call it by name through that proxy), unless a server lists `directTools`, in which case those appear under their own names."
+      : "Your pi has its built-in MCP support, with servers configured in pi's mcp.json. Each server tool is registered as `mcp__<server>__<tool>`; by default they are reached through the `codemode` tool (or loaded by `tool_search`), and only servers configured with `direct` exposure appear under their own names.";
+  return `
+
+=== CAPABILITY CORRECTION — READ THIS, IT SUPERSEDES THE ABOVE ===
+You are running on the pi (pi.dev) backend. The panel does NOT hand pi its ComfyUI MCP servers, so disregard every instruction above that assumes the panel_* tools (panel_graph_outline, panel_query_graph, panel_add_node, panel_connect, panel_set_widget, panel_run, …) and the headless comfyui tools (generate_image, enqueue_workflow, list_packs, …) are simply there: they are not provided by this panel, and panel_add_mcp / panel_reload do not add them to this session.
+Any ComfyUI or MCP tool you DO have comes from the user's own pi MCP bridge, which is installed on this machine. ${how} The servers it is configured with are: ${servers}. Go by the tool list you were actually given: if an MCP tool (or the proxy that reaches one) is in it, use it for canvas and ComfyUI work and say that you are working through the user's pi bridge; if it is not, say plainly that no ComfyUI tool is reachable in this session — do not claim, pretend, or narrate a call you cannot make, and do not tell the user pi cannot have ComfyUI tools, because theirs is set up for them.
+You also have pi's own built-in tools (shell, file read/write/edit, search) on the local filesystem.`;
+}
+
+/**
+ * The capability note a pi turn carries: the stock retraction when no MCP bridge
+ * is detectable, the bridge-aware correction when one is (#2996). Pure in the
+ * verdict so the choice is testable on its own — the alternative is a constant
+ * buried in makeBackend, which is how the stock wording was shipped unconditionally
+ * and stayed that way after pi grew an MCP client.
+ */
+export function piCapabilityNote(bridge: PiMcpBridge | null): string {
+  return bridge ? piBridgeCapabilityNote(bridge) : PI_CAPABILITY_OVERRIDE;
+}
 
 /**
  * Appended when the loopback panel HTTP MCP FAILED TO BIND, for every backend that
@@ -520,17 +576,18 @@ That is all this tells you. It says nothing about MCP servers your own CLI confi
  * never drift into disagreeing about the same session.
  */
 export function inheritedMcpRetraction(backend: string): string {
-  // pi has no MCP client at all, so PI_CAPABILITY_OVERRIDE already retracts
-  // strictly more than this would; stacking a narrower one only muddies it.
+  // pi's own capability note (piCapabilityNote) already says, in both of its
+  // wordings, that this panel hands pi no MCP servers and that panel_add_mcp /
+  // panel_reload do not grow this session; stacking a narrower one only muddies it.
   if (backend === "pi") return "";
   return backendInheritsUserMcpServers(backend) ? "" : NO_INHERITED_MCP_OVERRIDE;
 }
 
 export function panelToolsRetraction(backend: string, panelToolsAvailable: boolean): string {
   if (panelToolsAvailable) return "";
-  // pi has no MCP client at all; PI_CAPABILITY_OVERRIDE already retracts strictly
-  // more than this would, and stacking a second, narrower retraction on top would
-  // only muddy it.
+  // pi is never handed the panel HTTP MCP, and its own capability note
+  // (piCapabilityNote) already retracts that in both of its wordings; stacking a
+  // second, narrower retraction on top would only muddy it.
   if (backend === "pi") return "";
   // claude drives the canvas through its own IN-PROCESS panel server, so a failed
   // HTTP bind takes nothing away from it. Listed explicitly rather than relying on
@@ -1430,6 +1487,9 @@ export async function runPanelOrchestrator(): Promise<void> {
       ? { COMFYUI_MCP_FORCE_REMOTE: "1" }
       : {};
   const model = process.env.COMFYUI_MCP_PANEL_MODEL ?? "claude-opus-5";
+  // Unset = "first rank": the probe below adopts the newest Opus the account
+  // advertises, and `model` is only the fallback until it answers. Set = pinned.
+  const claudeModelExplicit = !!process.env.COMFYUI_MCP_PANEL_MODEL?.trim();
   const envEffort = process.env.COMFYUI_MCP_PANEL_EFFORT;
   const effort: Effort | undefined = isEffort(envEffort) ? envEffort : undefined;
   // Single-port multi-provider: ONE orchestrator on ONE bridge port serves ALL
@@ -1643,7 +1703,13 @@ export async function runPanelOrchestrator(): Promise<void> {
   const persistedAgent = getAgentSettings();
   let ollamaModel =
     process.env.COMFYUI_MCP_OLLAMA_MODEL ?? persistedAgent.ollama?.model ?? "artokun/gemma4-comfyui-mcp:e4b";
-  const chatgptModel = process.env.COMFYUI_MCP_CHATGPT_MODEL ?? CHATGPT_DEFAULT_MODEL;
+  // First rank: the Codex catalog's top-ranked model unless one is pinned in env.
+  // Resolved once here so the backend, the ready banner and the picker's "current"
+  // all name the same model.
+  const chatgptModel = await resolveChatGptDefaultModel();
+  if (!process.env.COMFYUI_MCP_CHATGPT_MODEL?.trim() && chatgptModel !== CHATGPT_DEFAULT_MODEL) {
+    logger.info(`[panel-orchestrator] chatgpt default model → ${chatgptModel} (top of the Codex catalog)`);
+  }
   // kimi keeps a local model var (its bespoke KimiBackend takes it). glm/moonshot
   // read their model straight from the registry via the shared factory, so no
   // per-provider model var is needed for them anymore. All three still resolve to
@@ -1665,9 +1731,15 @@ export async function runPanelOrchestrator(): Promise<void> {
       ? "openai"
       : "ollama";
   let ollamaBaseUrl = process.env.COMFYUI_MCP_OLLAMA_BASE_URL ?? persistedAgent.ollama?.baseUrl;
+  // Panel Settings › Ollama › Context window. Unlike the fields above, an
+  // explicit panel choice beats COMFYUI_MCP_OLLAMA_NUM_CTX: the env var is the
+  // fallback for "auto", so a stale .env line can't lock the panel control.
+  // Read through a getter so a change applies to live sessions on the next turn.
+  let ollamaNumCtx: OllamaContextSetting = parseOllamaContextSetting(persistedAgent.ollama?.numCtx) ?? "auto";
   const ollamaApiKey = process.env.COMFYUI_MCP_OLLAMA_API_KEY || process.env.OPENROUTER_API_KEY;
   const ollamaDeps = () => ({
     api: ollamaApi,
+    contextSetting: () => ollamaNumCtx,
     ...(ollamaBaseUrl ? { host: ollamaBaseUrl } : {}),
     ...(ollamaApi === "openai" && ollamaApiKey ? { apiKey: ollamaApiKey } : {}),
   });
@@ -1779,7 +1851,8 @@ export async function runPanelOrchestrator(): Promise<void> {
   // The SDK-resolved model per tab, learned from the session/init event. Kept so a
   // greeting emitted AFTER the model is already known (the onSession-before-greeting
   // race) can label itself correctly instead of showing the pre-init default.
-  const resolvedModelByTab = new Map<string, string>();
+  // Tagged with the backend that resolved it: the entry survives a backend switch.
+  const resolvedModelByTab = new Map<string, { backend: string; model: string }>();
   const headlessTabs = new Set<string>(); // tabs with no ComfyUI canvas (mobile/remote) — deliver renders in-turn
   // The UUID stamped on the NEXT panel command for a tab — the per-workflow
   // COMMAND FENCE (#570 P0c, kept under #884 because it is a ROUTING guard, not
@@ -2507,22 +2580,36 @@ export async function runPanelOrchestrator(): Promise<void> {
         cwd: comfyuiPath ?? process.cwd(),
         ...(antigravityModel ? { model: antigravityModel } : {}),
         systemAppend: sysAppend,
+        // comfyuiUrl: image refs are fetched from /view and inlined as ACP image
+        // blocks — without it the backend cannot deliver attachments (#3010).
+        comfyuiUrl,
         mcpServers: makeHttpBackendMcpServers(key),
       });
     }
     if (backend === "pi") {
-      // pi has NO MCP client, so it gets NO mcpServers (comfyui/panel tools are
-      // unavailable to pi turns — see pi-backend.ts). It runs as a coding/chat
-      // agent on the user's own provider. The panel prompt claims panel_*/comfyui
-      // tools it can't run, so PI_CAPABILITY_OVERRIDE is passed as capabilityNote
-      // — re-asserted on EVERY turn (incl. resume), not folded into the
-      // first-turn-only systemAppend (#491 codex P0a-resume).
+      // pi is NOT handed our mcpServers (see pi-backend.ts): it runs as a
+      // coding/chat agent on the user's own provider. The panel prompt claims
+      // panel_*/comfyui tools the panel does not give it, so a capability note is
+      // passed — re-asserted on EVERY turn (incl. resume), not folded into the
+      // first-turn-only systemAppend (#491 codex P0a-resume). WHICH note depends
+      // on whether the user's own pi carries an MCP bridge (#2996): the stock
+      // "no ComfyUI tools" retraction for a bare pi, the bridge-aware correction
+      // when pi-mcp-adapter or pi's built-in MCP is configured with servers —
+      // asserting NONE to a user who wired one up made the model refuse their
+      // canvas work. Detected once per backend construction, i.e. per connect:
+      // the tool set pi loads is fixed per spawn, but a reconnect re-reads disk.
+      const piBridge = detectPiMcpBridge(undefined, undefined, comfyuiPath ?? process.cwd());
+      if (piBridge) {
+        logger.info(
+          `[pi] MCP bridge detected (${piBridge.kind}; servers: ${piBridge.servers.join(", ")}) — using the bridge-aware capability note`,
+        );
+      }
       return new PiBackend({
         cwd: comfyuiPath ?? process.cwd(),
         ...(piModel ? { model: piModel } : {}),
         ...(piProvider ? { provider: piProvider } : {}),
         systemAppend: sysAppend,
-        capabilityNote: PI_CAPABILITY_OVERRIDE,
+        capabilityNote: piCapabilityNote(piBridge),
       });
     }
     if (backend === "grok") {
@@ -2670,6 +2757,7 @@ export async function runPanelOrchestrator(): Promise<void> {
             ? new AntigravityBackend({
                 cwd: comfyuiPath ?? process.cwd(),
                 ...(antigravityModel ? { model: antigravityModel } : {}),
+                comfyuiUrl,
               })
           : backend === "pi"
             ? new PiBackend({
@@ -2823,7 +2911,7 @@ export async function runPanelOrchestrator(): Promise<void> {
       // duplicates). Per tab: each participating tab advertised its own banner.
       // Banner corrections are "say" frames (mirror-safe) — viewers via mirror.
       for (const panelTab of conversationDeliveryTabs(key, "say")) {
-        if (typeof model === "string" && model.trim()) resolvedModelByTab.set(panelTab, model);
+        if (typeof model === "string" && model.trim()) resolvedModelByTab.set(panelTab, { backend: backendForTab(panelTab), model });
         const corrected = bannerCorrection({
           backend: backendForTab(panelTab),
           advertisedLabel: advertisedBannerModel.get(panelTab),
@@ -3789,6 +3877,17 @@ export async function runPanelOrchestrator(): Promise<void> {
         : fetchSupportedModels(model);
       p = probe.then((list) => {
         if (!list.length) modelsByBackend.delete(backend); // don't cache a failed probe
+        // First-rank Claude default: adopt the newest Opus this account advertises.
+        if (backend === "claude" && !claudeModelExplicit && list.length) {
+          const top = pickTopClaudeModel(list);
+          if (top && top !== manager.defaultModel) {
+            void manager.adoptDefaultModel(top, (key) => backendOf(key) === "claude").then((switched) => {
+              logger.info(
+                `[panel-orchestrator] claude default model → ${top} (newest advertised Opus)${switched.length ? `; switched ${switched.length} live tab(s) at their next turn` : ""}`,
+              );
+            });
+          }
+        }
         // LM Studio / llama.cpp ship no sane hardcoded default (the model is
         // whatever the user downloaded/launched) — adopt the server's first
         // offering when unset. llama-server serves exactly one model, so this
@@ -3839,6 +3938,12 @@ export async function runPanelOrchestrator(): Promise<void> {
     }
     return p;
   }
+  // First-rank Claude default: probe at startup rather than at the first hello, so
+  // a tab opened right away spawns on the adopted model instead of racing the probe
+  // on the fallback. Only when Claude is the default backend and no model is pinned
+  // (other users would pay for a Claude subprocess they never use). A failed probe
+  // is not cached, so the hello path still retries.
+  if (defaultBackend === "claude" && !claudeModelExplicit) void ensureModels("claude");
   // The model to highlight as "current" for a backend: the panel's configured
   // model for claude; the env override (or account default = the list's own
   // current) for codex/gemini.
@@ -3858,7 +3963,10 @@ export async function runPanelOrchestrator(): Promise<void> {
     const reg = openAiKeyProvider(backend);
     if (reg) return openAiKeyProviderModel(reg); // glm / kimi / moonshot
     if (backend === "copilot") return copilotModel;
-    return model;
+    // The manager's LIVE default, not the startup `model`: once the probe adopts the
+    // account's top-ranked Claude, the picker's "current" and the agent identity
+    // stamp must name it, not the fallback it replaced.
+    return manager.defaultModel;
   }
   /**
    * Publish WHICH LLM is driving an agent, so report_issue can stamp it into the
@@ -4659,7 +4767,7 @@ export async function runPanelOrchestrator(): Promise<void> {
                       ? (openrouterModel ?? (models[0] as { value?: string }).value ?? "OpenRouter")
                       : isCp
                         ? (copilotModel ?? (models[0] as { value?: string }).value ?? "Copilot")
-                        : model;
+                        : manager.defaultModel;
             // llama.cpp launch gotchas (issue #161): a reachable server can still
             // be useless for us — tool calling needs --jinja (rejected requests),
             // and a launch-time -c under ~16K silently truncates the tool payload.
@@ -4711,7 +4819,7 @@ export async function runPanelOrchestrator(): Promise<void> {
               // greeting (#376) — otherwise the pre-init label. Remember what we
               // advertised so the onSession correction re-sends only on a real
               // mismatch.
-              const bannerLabel = resolvedModelByTab.get(panelTab) ?? agentLabel;
+              const bannerLabel = greetingLabel(resolvedModelByTab.get(panelTab), backend, agentLabel);
               advertisedBannerModel.set(panelTab, bannerLabel);
               bridge.push(
                 { type: "say", text: readyBannerText(backend, bannerLabel, customBaseUrl) },
@@ -4988,8 +5096,8 @@ export async function runPanelOrchestrator(): Promise<void> {
         }
       }
       if (cfg.ollama && typeof cfg.ollama === "object") {
-        const o = cfg.ollama as { model?: unknown; api?: unknown; base_url?: unknown };
-        const patch: { model?: string; api?: "ollama" | "openai"; baseUrl?: string } = {};
+        const o = cfg.ollama as { model?: unknown; api?: unknown; base_url?: unknown; num_ctx?: unknown };
+        const patch: { model?: string; api?: "ollama" | "openai"; baseUrl?: string; numCtx?: OllamaContextSetting } = {};
         // Only count a field as changed when it's env-unset AND the value actually
         // differs from the current one — so a repeated identical heartbeat config is
         // a no-op (no re-push, no loop). An env override wins and never "changes".
@@ -5007,6 +5115,11 @@ export async function runPanelOrchestrator(): Promise<void> {
           const nb = patch.baseUrl || undefined;
           if (!process.env.COMFYUI_MCP_OLLAMA_BASE_URL && nb !== ollamaBaseUrl) { changed = true; ollamaBaseUrl = nb; }
         }
+        const nc = parseOllamaContextSetting(o.num_ctx);
+        if (nc !== undefined) {
+          patch.numCtx = nc;
+          if (nc !== ollamaNumCtx) { changed = true; ollamaNumCtx = nc; }
+        }
         if (Object.keys(patch).length && changed) {
           setAgentSettings({ ollama: patch });
           ollamaChanged = true;
@@ -5016,7 +5129,7 @@ export async function runPanelOrchestrator(): Promise<void> {
           if (pb?.close) void pb.close().catch(() => {});
           probeBackends.delete("ollama");
           logger.info(
-            `[panel-orchestrator] ollama config → model=${ollamaModel} api=${ollamaApi} host=${ollamaBaseUrl ?? "(default)"}`,
+            `[panel-orchestrator] ollama config → model=${ollamaModel} api=${ollamaApi} host=${ollamaBaseUrl ?? "(default)"} num_ctx=${ollamaNumCtx}`,
           );
         }
       }

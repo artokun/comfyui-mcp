@@ -125,9 +125,19 @@ jobs:
           set -euo pipefail
           version="${GITHUB_REF_NAME#v}"
           if [[ "${version}" == *-* ]]; then
-            echo "value=next" >> "$GITHUB_OUTPUT"
+            # Route by the prerelease IDENTIFIER so `npx comfyui-mcp@beta` is a
+            # real channel: v0.53.0-beta.1 -> 'beta', everything else (rc, alpha,
+            # anything malformed) keeps the historical 'next'. Only the dist-tag
+            # differs — both are non-'latest', which is the property that makes
+            # them safe (see the comment above).
+            prerelease="${version#*-}"
+            case "${prerelease%%.*}" in
+              beta) channel="beta" ;;
+              *) channel="next" ;;
+            esac
+            echo "value=${channel}" >> "$GITHUB_OUTPUT"
             echo "prerelease=true" >> "$GITHUB_OUTPUT"
-            echo "${GITHUB_REF_NAME} is a prerelease -> npm dist-tag 'next'"
+            echo "${GITHUB_REF_NAME} is a prerelease -> npm dist-tag '${channel}'"
           else
             echo "value=latest" >> "$GITHUB_OUTPUT"
             echo "prerelease=false" >> "$GITHUB_OUTPUT"
@@ -166,7 +176,7 @@ jobs:
           fi
 
       - name: Create GitHub Release
-        uses: softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228  # v3.0.2
+        uses: softprops/action-gh-release@8a0cd651e5b2365bd640854a3fa5dfc70e4875f3  # v3.0.4
         with:
           body_path: ${{ steps.relnotes.outputs.from_changelog == 'true' && 'RELEASE_NOTES.md' || '' }}
           generate_release_notes: ${{ steps.relnotes.outputs.from_changelog != 'true' }}

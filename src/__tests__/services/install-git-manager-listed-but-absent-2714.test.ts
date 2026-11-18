@@ -25,12 +25,15 @@
 // existing #1765 coverage never produces (its `/customnode/installed` always
 // answers `[]`, so the list never had to be doubted).
 import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
 // ── One REAL local install, which the server reports as its own root ───────────
-const SANDBOX = mkdtempSync(join(tmpdir(), "manager-listed-absent-2714-"));
+// Canonical from the start: the clone lands under the realpath'd live root, so on a
+// host whose temp dir is an alias (macOS /var → /private/var) PACK_DIR must be spelled
+// the same way.
+const SANDBOX = realpathSync(mkdtempSync(join(tmpdir(), "manager-listed-absent-2714-")));
 const CONNECTED = join(SANDBOX, "comfy");
 mkdirSync(join(CONNECTED, "custom_nodes"), { recursive: true });
 mkdirSync(join(CONNECTED, "models"), { recursive: true });

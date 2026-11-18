@@ -17,16 +17,20 @@
 // so PanelAgent can persist it and resume across restarts. This is genuine
 // per-conversation continuity, not antigravity's "latest conversation" sentinel.
 //
-// NO MCP — IMPORTANT LIMITATION: pi has NO Model Context Protocol client (verified
-// against the earendil-works/pi repo tree, CHANGELOG, and extensions docs — pi's
-// tool surface is its OWN built-in tools (bash/read/write/edit/grep/…) plus
-// TypeScript extensions registered via `pi.registerTool()`, never external MCP
-// servers). So unlike every other CLI backend here, pi CANNOT be handed our
-// `comfyui` (stdio) + `panel` (http) MCP servers — a pi turn drives the local
-// workspace with pi's own tools but does not get the ComfyUI panel_* / comfyui
-// tools. This is surfaced honestly in the ready banner. (Full ComfyUI-tool parity
-// would require shipping a pi EXTENSION that bridges to the panel HTTP MCP —
-// tracked as follow-up, out of scope for #491's "include pi as an agent".)
+// MCP — IMPORTANT LIMITATION: this adapter hands pi NO MCP servers. There is no
+// per-spawn way to declare our `comfyui` (stdio) + `panel` (http) servers to pi
+// the way the other CLI backends get them, so a pi turn drives the local
+// workspace with pi's own tools (bash/read/write/edit/grep/…) and whatever the
+// USER'S pi loads on its own. That last part is the #2996 correction to what this
+// header used to say ("pi has no MCP client at all"): the `pi-mcp-adapter`
+// package, and pi 0.99+'s built-in MCP (`pi mcp add` → ~/.pi/agent/mcp.json), both
+// give pi an MCP client, both load in `--mode json` (we pass neither
+// --no-extensions nor --no-mcp), and a user can point either at our servers
+// themselves. The capability note the orchestrator attaches therefore comes in
+// two wordings — the stock "no ComfyUI tools" retraction, and a bridge-aware one
+// when pi-mcp-bridge.ts finds a bridge on disk — see piCapabilityNote() in
+// index.ts. Shipping a pi extension that bridges to the panel HTTP MCP for
+// everyone else remains a tracked follow-up, out of scope for #491.
 //
 // AUTH: pi resolves credentials from (1) `~/.pi/agent/auth.json` (API keys and
 // OAuth subscriptions written by `/login`), (2) provider env vars (pi's full map
@@ -44,7 +48,8 @@
 // vars are ComfyUI-tool-scoped and intentionally withheld from agent subprocesses).
 //
 // LIMITS (flagged honestly):
-//   - No ComfyUI MCP tools (see above).
+//   - No ComfyUI MCP tools from US (see above); only what the user's own pi
+//     MCP bridge, if any, provides.
 //   - No documented image-input path for headless mode → vision=false (image
 //     refs are already named in the turn text as a fallback).
 //   - `pi --list-models` prints pi's built-in provider CATALOG (not gated on

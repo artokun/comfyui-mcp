@@ -7,7 +7,15 @@
 // it needs to be, so the tests below assert the REASON, not just the outcome.
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { mkdtempSync, mkdirSync, existsSync, readFileSync, writeFileSync } from "node:fs";
+import {
+  mkdtempSync,
+  mkdirSync,
+  existsSync,
+  readFileSync,
+  realpathSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
@@ -296,6 +304,61 @@ describe("resolveServableViewRef — a failed canonicalisation is a doubt, not a
   });
 });
 
+// The cases above pass on a host whose temp dir has ONE spelling and failed on
+// macOS (/var → /private/var) and Windows (RUNNER~1 → runneradmin): the side that
+// DID canonicalise took its real spelling, the side that failed kept its lexical
+// one, and the two never compared as contained — so a file lexically under the
+// root fell to the matched-nothing path. An explicit alias (a junction on Windows,
+// a directory symlink elsewhere) makes that reproducible on every host.
+describe("resolveServableViewRef — a failed canonicalisation under an ALIASED root", () => {
+  let aliasOut: string;
+  beforeEach(() => {
+    const aliasRoot = join(root, "via-alias");
+    symlinkSync(join(root, "ComfyUI"), aliasRoot, "junction");
+    aliasOut = join(aliasRoot, "output");
+    state.outputDir = aliasOut;
+    state.inputDir = join(aliasRoot, "input");
+  });
+
+  it("the file's realpath failing is still a doubt about the MATCH, not an outside verdict", async () => {
+    const target = touch(join(aliasOut, "takes", "clip.mp4"));
+    state.realpathFail.set(resolve(target), "ELOOP");
+    const res = await resolveServableViewRef(target);
+    expect(res.status).toBe("unknown");
+    if (res.status !== "unknown") return;
+    expect(res.reason).toContain("unverified path");
+    expect(res.reason).toContain("real location could not be resolved");
+  });
+
+  it("the matching root's realpath failing (even ENOENT) is still a doubt about the MATCH", async () => {
+    const target = touch(join(aliasOut, "takes", "clip2.mp4"));
+    for (const code of ["EACCES", "ENOENT"]) {
+      state.realpathFail.set(resolve(aliasOut), code);
+      const res = await resolveServableViewRef(target);
+      expect(res.status).toBe("unknown");
+      if (res.status !== "unknown") return;
+      expect(res.reason).toContain("unverified path");
+    }
+  });
+
+  it("with both sides canonical, the alias is collapsed and the file is servable", async () => {
+    const res = await resolveServableViewRef(touch(join(aliasOut, "takes", "ok.mp4")));
+    expect(res.status).toBe("servable");
+    if (res.status !== "servable") return;
+    expect(res.ref).toEqual({ filename: "ok.mp4", subfolder: "takes", type: "output" });
+  });
+
+  it("a lexical match is NOT trusted once both sides canonicalise elsewhere (symlink escape)", async () => {
+    // The lexical arm is consulted only for an UNPROVEN pair. A link inside the
+    // root that resolves outside it must still be "outside", not servable/unknown.
+    const outsideDir = join(root, "elsewhere-real");
+    touch(join(outsideDir, "escape.mp4"));
+    symlinkSync(outsideDir, join(aliasOut, "escape-link"), "junction");
+    const res = await resolveServableViewRef(join(aliasOut, "escape-link", "escape.mp4"));
+    expect(res.status).toBe("outside");
+  });
+});
+
 describe("resolveServableViewRef — never throws", () => {
   it("returns UNKNOWN when a resolver rejects with a value that cannot be stringified", async () => {
     // Object.create(null) has no toString; an unguarded String(err) inside the
@@ -574,7 +637,12 @@ describe("stageFileIntoServedDir (#802)", () => {
     // the file — the by-reference route shows the copy, so it must BE it.
     expect(res.ref.filename).toMatch(/^\d+-clip\.mp4$/);
     expect(readFileSync(res.stagedPath, "utf8")).toBe("video-bytes");
-    expect(res.stagedPath).toBe(join(outDir, "_panel_staged", res.ref.filename));
+    // Staging writes under the CANONICAL output root (fs/promises realpath, i.e.
+    // native semantics), so on a host whose temp dir is an alias the path is spelled
+    // through the real directory, not the configured one.
+    expect(res.stagedPath).toBe(
+      join(realpathSync.native(outDir), "_panel_staged", res.ref.filename),
+    );
     // The ORIGINAL was not modified or moved.
     expect(readFileSync(src, "utf8")).toBe("video-bytes");
   });

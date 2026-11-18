@@ -222,7 +222,12 @@ describe("#2784 the OTHER surfaces the same classification drives", () => {
     expect(desktopEvidenceClause(NAME_MATCH)).toContain("this refusal");
   });
 
-  it("auto-restart's unsupported message carries the evidence — a REAL call", async () => {
+  // #2947: on a Windows host auto-restart is unsupported for every install, and
+  // says so with its own reason (pinned in restart-windows-direct-launch.test.ts),
+  // so these two describe the off-Windows message.
+  const offWindows = it.skipIf(process.platform === "win32");
+
+  offWindows("auto-restart's unsupported message carries the evidence — a REAL call", async () => {
     const { supervisorResult } = __processControlTestHooks;
     const prev = process.env.COMFYUI_ALWAYS_RESTART;
     process.env.COMFYUI_ALWAYS_RESTART = "1";
@@ -241,7 +246,7 @@ describe("#2784 the OTHER surfaces the same classification drives", () => {
     }
   });
 
-  it("a NON-Desktop install's supervisor message is unchanged (no stray note)", async () => {
+  offWindows("a NON-Desktop install's supervisor message is unchanged (no stray note)", async () => {
     const { supervisorResult } = __processControlTestHooks;
     const prev = process.env.COMFYUI_ALWAYS_RESTART;
     process.env.COMFYUI_ALWAYS_RESTART = "1";

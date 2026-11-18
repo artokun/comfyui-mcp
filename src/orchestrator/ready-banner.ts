@@ -82,6 +82,21 @@ export function readyBannerText(
 }
 
 /**
+ * The model name a fresh greeting advertises. A model the SDK already resolved
+ * for this tab wins (#376: init can race ahead of the greeting), but only when it
+ * was resolved by the backend the tab is greeting for NOW. The map outlives a
+ * backend switch, so without that check a tab that ran Claude and then switched
+ * to Ollama greeted with "claude-opus-5-5 running locally via Ollama".
+ */
+export function greetingLabel(
+  resolved: { backend: string; model: string } | undefined,
+  backend: string,
+  fallback: string,
+): string {
+  return resolved && resolved.backend === backend ? resolved.model : fallback;
+}
+
+/**
  * Decide the CORRECTED ready banner to re-send once the SDK reports the real model
  * (#376), or `null` when no correction is warranted. Returns a banner ONLY when:
  *   - a banner WAS actually advertised for this tab (`advertisedLabel` is a

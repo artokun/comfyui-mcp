@@ -76,6 +76,18 @@ vi.mock("../../config.js", () => ({
   isRemoteMode: () => false,
 }));
 
+// #2947: a Windows host never relaunches (restart refuses before the stop; see
+// restart-windows-direct-launch.test.ts), so on the Windows CI leg these
+// relaunch-environment cases run the POSIX branch instead. Other hosts keep their
+// own platform.
+vi.mock("node:os", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("node:os")>();
+  return {
+    ...actual,
+    platform: () => (actual.platform() === "win32" ? "linux" : actual.platform()),
+  };
+});
+
 vi.mock("node:child_process", () => ({
   execSync: mockExecSync,
   spawn: mockSpawn,

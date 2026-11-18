@@ -2675,6 +2675,36 @@ export class PanelAgentManager {
     this.effort = opts.effort;
   }
 
+  /** The shared default a tab with no picker choice of its own spawns on. */
+  get defaultModel(): string {
+    return this.model;
+  }
+
+  /**
+   * Move the SHARED default to `model`, e.g. the account's top-ranked Claude once
+   * the supportedModels() probe answers.
+   *
+   * New spawns pick it up through modelFor(). Live agents switch too, at their next
+   * turn exactly like a picker change, because the probe usually answers AFTER the
+   * first tab has already spawned on the fallback: a default-only update would leave
+   * that very tab behind. Two kinds of agent are never touched:
+   *   • a key with a picker override — an explicit choice outranks any default;
+   *   • a key `isTarget` rejects — the default is a model id for ONE provider, and
+   *     handing a Claude id to a ChatGPT agent is the switch-then-error bug.
+   * Returns the keys that were switched live.
+   */
+  async adoptDefaultModel(model: string, isTarget: (key: string) => boolean): Promise<string[]> {
+    if (!model || model === this.model) return [];
+    this.model = model;
+    const switched: string[] = [];
+    for (const [key, agent] of this.agents) {
+      if (!isTarget(key) || this.modelByKey.has(key)) continue;
+      await agent.setModel(model);
+      switched.push(key);
+    }
+    return switched;
+  }
+
   /** The model a newly-spawned agent for `tabId` should use: the per-key override
    *  (picker) when set for THIS key, else the shared default. */
   private modelFor(tabId: string): string {

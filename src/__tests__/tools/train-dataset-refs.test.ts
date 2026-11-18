@@ -133,6 +133,11 @@ describe("train_prepare_dataset — path/ref items", () => {
     outRoot = out;
     await call([{ ref: { filename: "y.png", subfolder: "alias" } }]);
     expect(prepareMock).toHaveBeenCalled();
-    expect(prepareMock.mock.calls[0][0].items[0].path).toBe(realpathSync(join(out, "alias", "y.png")));
+    // train.ts canonicalises with fs/promises realpath — NATIVE semantics, which also
+    // expands an 8.3 short temp dir (RUNNER~1 on GitHub's Windows runners); the JS
+    // realpathSync would not, and expected a spelling the tool never produces.
+    expect(prepareMock.mock.calls[0][0].items[0].path).toBe(
+      realpathSync.native(join(out, "alias", "y.png")),
+    );
   });
 });

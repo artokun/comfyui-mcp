@@ -504,6 +504,80 @@ describe("actions call the same services with the same arguments", () => {
     expect(text(res)).toContain("### Manager queue status");
   });
 
+  // #2765 — an ambiguous class is known to Manager; it must not render as "not known",
+  // and a pattern match must not read like a listing.
+  it('action:"extract_deps" lists ambiguous claimants apart from unknown nodes and labels pattern inference', async () => {
+    const A = "https://github.com/DemonGatanjieu/Anomalous_Model_Browser";
+    const R = "https://github.com/rgthree/rgthree-comfy";
+    mocks.extractWorkflowDependencies.mockResolvedValueOnce({
+      classTypes: ["Mystery", "Power Lora Loader (rgthree)", "Switch latent [Crystools]"],
+      requiredPacks: ["Crystools"],
+      missingPacks: ["Crystools"],
+      unresolved: ["Mystery", "Power Lora Loader (rgthree)"],
+      ambiguous: [{ class_type: "Power Lora Loader (rgthree)", claimants: [A, R] }],
+      dependencies: [
+        { class_type: "Mystery", pack: null, builtin: false, installed: false, source: "unresolved" },
+        { class_type: "Power Lora Loader (rgthree)", pack: null, builtin: false, installed: false, source: "unresolved", claimants: [A, R] },
+        { class_type: "Switch latent [Crystools]", pack: "Crystools", builtin: false, installed: false, source: "manager_pattern" },
+      ],
+    });
+    const out = text(await handler()({ action: "extract_deps", workflow: { "1": { class_type: "Mystery", inputs: {} } } }));
+    expect(out).toContain("### Ambiguous ownership (1)");
+    expect(out).toContain(`- Power Lora Loader (rgthree): ${A}, ${R}`);
+    const unknown = out.slice(out.indexOf("### Unresolved node types"), out.indexOf("### Per-node mapping"));
+    expect(unknown).toContain("### Unresolved node types (1)");
+    expect(unknown).toContain("- Mystery");
+    expect(unknown).not.toContain("Power Lora Loader");
+    expect(out).toContain("`Power Lora Loader (rgthree)` → AMBIGUOUS (2 claimants)");
+    expect(out).toContain("`Switch latent [Crystools]` → Crystools (missing; inferred from name pattern)");
+  });
+
+  it('action:"install_deps" does not call an ambiguous class "Not found in ComfyUI-Manager"', async () => {
+    mocks.installWorkflowDependencies.mockResolvedValueOnce({
+      installed: [],
+      alreadyInstalled: [],
+      unresolved: ["Power Lora Loader (rgthree)"],
+      ambiguous: [{ class_type: "Power Lora Loader (rgthree)", claimants: ["a", "b"] }],
+    });
+    const out = text(await handler()({ action: "install_deps", workflow: { "1": { class_type: "X", inputs: {} } } }));
+    expect(out).toContain("### Ambiguous ownership (1)");
+    expect(out).toContain("does not queue any of them");
+    expect(out).not.toContain("Not found in ComfyUI-Manager");
+  });
+
+  it('action:"extract_deps" does not call an all-ambiguous workflow "all built-in"', async () => {
+    mocks.extractWorkflowDependencies.mockResolvedValueOnce({
+      classTypes: ["ShowText"],
+      requiredPacks: [],
+      missingPacks: [],
+      unresolved: ["ShowText"],
+      ambiguous: [{ class_type: "ShowText", claimants: ["a", "b"] }],
+      dependencies: [
+        { class_type: "ShowText", pack: null, builtin: false, installed: false, source: "unresolved", claimants: ["a", "b"] },
+      ],
+    });
+    const out = text(await handler()({ action: "extract_deps", workflow: { "1": { class_type: "ShowText", inputs: {} } } }));
+    expect(out).not.toContain("core/built-in");
+    expect(out).toContain("No custom node pack ownership was resolved");
+  });
+
+  it('action:"install_deps" says nothing was queued, lists refused targets apart from "not found"', async () => {
+    mocks.installWorkflowDependencies.mockResolvedValueOnce({
+      installed: [],
+      alreadyInstalled: [],
+      unresolved: ["Mystery", "https://github.com/x/pack"],
+      target_refusals: [{ pack: "https://github.com/x/pack", reason: "known only by its repository URL" }],
+    });
+    const out = text(await handler()({ action: "install_deps", workflow: { "1": { class_type: "X", inputs: {} } } }));
+    expect(out).toContain("## No packs were queued");
+    expect(out).not.toContain("No packs needed installation");
+    expect(out).toContain("### Not queued: install target not established (1)");
+    expect(out).toContain("- https://github.com/x/pack: known only by its repository URL");
+    const notFound = out.slice(out.indexOf("### Could not resolve"));
+    expect(notFound).toContain("### Could not resolve (1)");
+    expect(notFound).not.toContain("https://github.com/x/pack");
+  });
+
   it('action:"generate_skill" forwards source + refresh and keeps structuredContent', async () => {
     mocks.generateSkillCached.mockResolvedValueOnce({
       markdown: "# SKILL",

@@ -28,7 +28,8 @@ The wait always expires after 5s. Reload, `panel_refresh_nodes`, and retry
 `LoRA Text Loader (LoraManager)` is the same backend as `Lora Loader
 (LoraManager)` (MODEL / CLIP / `trigger_words` / `loaded_loras`). The difference
 is the LoRA input: `lora_syntax` is a **STRING socket** (`forceInput`), so a
-regular string node or `panel_set_widget` can drive it.
+wired string node such as `PrimitiveStringMultiline` drives it. It has no widget
+of its own for `panel_set_widget` to write.
 
 Syntax (spaces or punctuation between entries):
 
@@ -42,8 +43,9 @@ Syntax (spaces or punctuation between entries):
 1. `panel_add_node(class_type="LoRA Text Loader (LoraManager)")`. Do **not** add
    `Lora Loader (LoraManager)`; it will wait 5s and refuse.
 2. Wire `MODEL` (and `CLIP` if you have one) through it.
-3. Drive `lora_syntax` with `panel_set_widget` or a wired STRING, e.g.
-   `<lora:style/foo.safetensors:0.8>`.
+3. Add a `PrimitiveStringMultiline`, `panel_set_widget` its `value` to the LoRA
+   syntax (e.g. `<lora:style/foo.safetensors:0.8>`), and `panel_connect` its
+   STRING output to `lora_syntax`.
 4. Put the node's `trigger_words` output into the prompt if the sidecar has any.
 
 If LoRA Manager is not installed, use core `LoraLoader` and set `lora_name` /
@@ -57,8 +59,14 @@ If LoRA Manager is not installed, use core `LoraLoader` and set `lora_name` /
   was created. The working widget name is `lora_syntax`.
 - A freshly added Text Loader still needs `lora_syntax` written; an empty
   string loads no LoRA.
+- A `Lora Loader` / `Lora Stacker` / `WanVideo Lora Select` / `Create Hook LoRA`
+  that is already in a loaded workflow cannot be edited with `panel_set_widget`:
+  `text` and `loras` writes are refused. The backend ignores `text` and applies
+  only the DOM-owned `loras` list, so a written `text` would read back as set and
+  still load nothing. Swap in `LoRA Text Loader (LoraManager)` (or
+  `WanVideo Lora Select From Text (LoraManager)`), or edit the rows in the node UI.
 
 ## Sources
 
-- **Official:** https://github.com/willmiao/ComfyUI-Lora-Manager for node class names and the `lora_syntax` format from the pack; no vendor panel-authoring guide exists.
-- **Empirical:** the `panel_add_node` AUTOCOMPLETE_TEXT_* refusal, which nodes add cleanly, and the widget-store explanation from observed panel behavior in this repo.
+- **Official:** https://github.com/willmiao/ComfyUI-Lora-Manager for node class names and the `lora_syntax` format from the pack; its `py/nodes` sources show each widget loader deleting or ignoring `text` and applying only `loras`, and `lora_syntax` declared `forceInput`. No vendor panel-authoring guide exists.
+- **Empirical:** the `panel_add_node` AUTOCOMPLETE_TEXT_* refusal, which nodes add cleanly, and the widget-store explanation from observed panel behavior in this repo; the silent `text` no-op under an applied:true receipt was reported in #2931.

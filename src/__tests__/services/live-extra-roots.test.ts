@@ -435,15 +435,21 @@ describe("getLiveExtraModelRoots — fail-closed authorization", () => {
   winIt(
     "joins a drive-relative category entry to base_path's DRIVE (D:\\base + \\unet → D:\\unet)",
     async () => {
+      // base_path must sit on a drive OTHER than the process's current one, or the
+      // two readings coincide and the negative assertion below contradicts the
+      // positive one (GitHub's Windows runners check out — and run — on D:).
+      const cwdDrive = resolve("\\").slice(0, 1).toUpperCase();
+      const baseDrive = cwdDrive === "D" ? "E" : "D";
       const liveRoot = await trackTmp();
       await writeFile(
         join(liveRoot, "extra_model_paths.yaml"),
-        ["grp:", "  base_path: D:\\base", "  unet: \\unet"].join("\n"),
+        ["grp:", `  base_path: ${baseDrive}:\\base`, "  unet: \\unet"].join("\n"),
         "utf-8",
       );
       const res = await getLiveExtraModelRoots(reachable(["python", join(liveRoot, "main.py")]));
-      // Authorizes D:\unet (base's drive), NOT C:\unet (the MCP process drive).
-      expect(res.roots).toContainEqual({ category: "unet", dir: "D:\\unet", group: "grp" });
+      // Authorizes <base drive>:\unet, NOT <process drive>:\unet.
+      expect(resolve("\\unet")).not.toBe(`${baseDrive}:\\unet`);
+      expect(res.roots).toContainEqual({ category: "unet", dir: `${baseDrive}:\\unet`, group: "grp" });
       expect(res.roots).not.toContainEqual({ category: "unet", dir: resolve("\\unet"), group: "grp" });
     },
   );

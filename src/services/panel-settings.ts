@@ -32,6 +32,9 @@ export interface OllamaAgentConfig {
   api?: "ollama" | "openai";
   /** Endpoint base URL (e.g. https://openrouter.ai/api/v1, incl. /v1). */
   baseUrl?: string;
+  /** Context window: "auto" | "max" | a token count (Ollama backend only).
+   *  See OllamaContextSetting in orchestrator/ollama-backend.ts. */
+  numCtx?: "auto" | "max" | number;
 }
 
 export interface AgentSettings {

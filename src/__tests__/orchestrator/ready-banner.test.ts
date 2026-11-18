@@ -3,7 +3,7 @@
 // SDK-init handler uses to re-send a corrected banner.
 
 import { describe, expect, it } from "vitest";
-import { readyBannerText, bannerCorrection } from "../../orchestrator/ready-banner.js";
+import { readyBannerText, bannerCorrection, greetingLabel } from "../../orchestrator/ready-banner.js";
 
 describe("ready-banner text + correction (#376)", () => {
   it("readyBannerText substitutes the given model label (Claude/default path)", () => {
@@ -80,5 +80,23 @@ describe("ready-banner text + correction (#376)", () => {
         resolvedModel: "   ",
       }),
     ).toBeNull();
+  });
+});
+
+describe("greetingLabel — a resolved model never crosses a backend switch", () => {
+  it("uses the model the same backend already resolved (#376 race)", () => {
+    expect(greetingLabel({ backend: "claude", model: "claude-opus-5-5" }, "claude", "opus")).toBe("claude-opus-5-5");
+  });
+
+  it("ignores a model resolved by the tab's previous backend", () => {
+    // Live: a tab that ran Claude, then switched to Ollama, greeted with
+    // "claude-opus-5-5 running locally via Ollama".
+    const label = greetingLabel({ backend: "claude", model: "claude-opus-5-5" }, "ollama", "qwen3.8-27b-uncensored:q8");
+    expect(label).toBe("qwen3.8-27b-uncensored:q8");
+    expect(readyBannerText("ollama", label, "", "en")).toContain("qwen3.8-27b-uncensored:q8 running locally via Ollama");
+  });
+
+  it("falls back to the pre-init label when nothing was resolved", () => {
+    expect(greetingLabel(undefined, "ollama", "artokun/gemma4-comfyui-mcp:e4b")).toBe("artokun/gemma4-comfyui-mcp:e4b");
   });
 });

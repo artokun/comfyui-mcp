@@ -19,6 +19,7 @@ import {
   extractWorkflowDependencies,
   installWorkflowDependencies,
   defaultWorkflowDepsDeps,
+  type AmbiguousOwnership,
 } from "../services/workflow-deps.js";
 import { generateSkillCached } from "../services/skill-cache.js";
 import { resolvePackManifestFile } from "../services/manifest.js";
@@ -981,7 +982,13 @@ async function extractDepsAction(input: string | Record<string, unknown>): Promi
   lines.push(`## Workflow dependencies (${result.classTypes.length} node type(s))`, "");
 
   if (result.requiredPacks.length === 0) {
-    lines.push("All node types are core/built-in ComfyUI nodes. No custom node packs required.");
+    // #2765 — an empty pack list also follows from every claim being refused; only an
+    // all-builtin workflow may say "built-in".
+    lines.push(
+      result.dependencies.every((d) => d.builtin)
+        ? "All node types are core/built-in ComfyUI nodes. No custom node packs required."
+        : "No custom node pack ownership was resolved for this workflow — see the ambiguous / unresolved node types below.",
+    );
   } else {
     lines.push(`### Required custom node packs (${result.requiredPacks.length})`);
     for (const pack of result.requiredPacks) {
@@ -1011,27 +1018,56 @@ async function extractDepsAction(input: string | Record<string, unknown>): Promi
     // still reads as "does not exist" wherever this one was forgotten.
     if (result.catalogue_currency_unverified)
       lines.push(result.catalogue_currency_unverified, "");
-    lines.push(
-      `### Unresolved node types (${result.unresolved.length})`,
-      "These class_types are neither installed nor known to ComfyUI-Manager:",
-      ...result.unresolved.map((c) => `- ${c}`),
-      "",
-    );
+    lines.push(...ambiguousOwnershipLines(result.ambiguous));
+    const unknown = withoutAmbiguous(result.unresolved, result.ambiguous);
+    if (unknown.length > 0) {
+      lines.push(
+        `### Unresolved node types (${unknown.length})`,
+        "These class_types are neither installed nor known to ComfyUI-Manager:",
+        ...unknown.map((c) => `- ${c}`),
+        "",
+      );
+    }
   }
 
   lines.push("### Per-node mapping");
   for (const dep of result.dependencies) {
+    const inferred = dep.source === "manager_pattern" ? "; inferred from name pattern" : "";
     const where = dep.builtin
       ? "built-in"
       : dep.pack
-        ? `${dep.pack} (${dep.installed ? "installed" : "missing"})`
-        : dep.installed
-          ? "installed, pack unknown"
-          : "UNRESOLVED";
+        ? `${dep.pack} (${dep.installed ? "installed" : "missing"}${inferred})`
+        : dep.claimants
+          ? `AMBIGUOUS (${dep.claimants.length} claimants${dep.installed ? ", installed" : ""})`
+          : dep.installed
+            ? "installed, pack unknown"
+            : "UNRESOLVED";
     lines.push(`- \`${dep.class_type}\` → ${where}`);
   }
 
   return { content: [{ type: "text" as const, text: lines.join("\n") }] };
+}
+
+/**
+ * #2765 — a class the catalogue gives to several repositories is KNOWN to Manager, so it
+ * must not render under "not known to ComfyUI-Manager"; and naming one claimant would be
+ * a guess, so every claimant is listed and none is installed.
+ */
+function ambiguousOwnershipLines(ambiguous: AmbiguousOwnership[] | undefined): string[] {
+  if (!ambiguous?.length) return [];
+  return [
+    `### Ambiguous ownership (${ambiguous.length})`,
+    "The ComfyUI-Manager catalogue attributes each of these to more than one repository, so no " +
+      'owner is named and list_packs (action:"install_deps") does not queue any of them. Confirm which repository actually ships ' +
+      "the node before installing any of them:",
+    ...ambiguous.map((a) => `- ${a.class_type}: ${a.claimants.join(", ")}`),
+    "",
+  ];
+}
+
+function withoutAmbiguous(unresolved: string[], ambiguous: AmbiguousOwnership[] | undefined): string[] {
+  const named = new Set((ambiguous ?? []).map((a) => a.class_type));
+  return unresolved.filter((u) => !named.has(u));
 }
 
 /** action:"install_deps" — THE ONLY MUTATING ACTION on this tool. */
@@ -1050,7 +1086,8 @@ async function installDepsAction(input: string | Record<string, unknown>): Promi
       "",
     );
   } else {
-    lines.push("## No packs needed installation", "");
+    // #2765 — "needed" is only true when nothing was left unresolved.
+    lines.push(result.unresolved.length > 0 ? "## No packs were queued" : "## No packs needed installation", "");
   }
 
   if (result.alreadyInstalled.length > 0) {
@@ -1071,12 +1108,24 @@ async function installDepsAction(input: string | Record<string, unknown>): Promi
     if (result.mappings_unavailable) lines.push(result.mappings_unavailable, "");
     if (result.catalogue_currency_unverified)
       lines.push(result.catalogue_currency_unverified, "");
-    lines.push(
-      `### Could not resolve (${result.unresolved.length})`,
-      "Not found in ComfyUI-Manager — install manually:",
-      ...result.unresolved.map((p) => `- ${p}`),
-      "",
-    );
+    lines.push(...ambiguousOwnershipLines(result.ambiguous));
+    const refused = new Set((result.target_refusals ?? []).map((r) => r.pack));
+    if (refused.size > 0) {
+      lines.push(
+        `### Not queued: install target not established (${refused.size})`,
+        ...(result.target_refusals ?? []).map((r) => `- ${r.pack}: ${r.reason}`),
+        "",
+      );
+    }
+    const unknown = withoutAmbiguous(result.unresolved, result.ambiguous).filter((p) => !refused.has(p));
+    if (unknown.length > 0) {
+      lines.push(
+        `### Could not resolve (${unknown.length})`,
+        "Not found in ComfyUI-Manager — install manually:",
+        ...unknown.map((p) => `- ${p}`),
+        "",
+      );
+    }
   }
 
   if (result.queue) {

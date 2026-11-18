@@ -548,9 +548,23 @@ describe("panel-tools: panel_set_widget Anima regional textarea (#1658)", () => 
   });
 
   it("does not probe a generic widget (existing writes stay one hop)", async () => {
-    const { res, cmds } = await run({ widget: "text" }, { text: "#2768 AnimaRegionalCanvasInline" });
+    const { res, cmds } = await run(
+      { widget: "filename_prefix" },
+      { text: "#2768 AnimaRegionalCanvasInline" },
+    );
     expect(res.isError).toBeUndefined();
     expect(cmds).toEqual(["graph_set_widget"]);
+  });
+
+  it("#2931: an untyped `text` write takes one identity probe and discloses an unreadable one", async () => {
+    // `text` is a LoraManager-owned name; this context proves no node type, and the
+    // probe's compact prose cannot name one, so the success says the checks did not run.
+    const { res, cmds } = await run({ widget: "text" }, { text: "#2768 AnimaRegionalCanvasInline" });
+    expect(res.isError).toBeUndefined();
+    expect(cmds).toEqual(["graph_query", "graph_set_widget"]);
+    const payload = JSON.parse(res.content[0].text) as Record<string, unknown>;
+    expect(payload.post_write_readback).toMatchObject({ status: "unverified" });
+    expect(JSON.stringify(payload.post_write_readback)).toMatch(/checks .* did not run/);
   });
 
   it("fail-open: an unreadable probe still writes (identity unknown, not a refusal)", async () => {
@@ -672,7 +686,9 @@ describe("panel-tools: panel_set_widget V3 dynamic-combo sub-widgets (#2299)", (
       { node_id: 4, widget: "prompt.foo", value: "safe" },
     );
     expect(res.isError).toBeUndefined();
-    expect(cmds).toEqual(["graph_query", "graph_set_widget"]);
+    // The dotted head `prompt` could name an H3 Easy widget, so the untyped write
+    // also takes the #2933 identity probe; OrdinaryNode is not a guarded type.
+    expect(cmds).toEqual(["graph_query", "graph_query", "graph_set_widget"]);
   });
 
   it("keeps the V3 parent selector writable", async () => {
