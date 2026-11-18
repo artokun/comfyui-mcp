@@ -71,7 +71,7 @@ describe("MiniMax text choices and actual serialized requests", () => {
     // The global case exercises the resolver's default; CN uses its documented override.
     if (host.includes("minimaxi.com")) vi.stubEnv("COMFYUI_MCP_MINIMAX_BASE_URL", `${host}/`);
     const backend = nativeBackend();
-    expect((await backend.listModels()).map((m) => m.id)).toEqual([FLASH, "MiniMax-M3", "image-01"]);
+    expect((await backend.listModels()).map((m) => m.id)).toEqual([FLASH, "MiniMax-M3", "image-01", "MiniMax-M2.7", "MiniMax-M3-highspeed"]);
     const request = await run(backend);
     expect(request.url).toBe(`${host}/chat/completions`);
     expect(request.headers.get("authorization")).toBe("Bearer fixture-minimax-key");
@@ -113,19 +113,26 @@ describe("MiniMax text choices and actual serialized requests", () => {
     expect(request.body.model).toBe("custom-deployment");
   });
 
-  it("curates OpenRouter text choices without dropping other providers, media, or a saved legacy model", async () => {
+  it("prioritizes OpenRouter Flash without hiding gateway-served legacy models", async () => {
     catalog = ["minimax/minimax-m2.7", "minimax/minimax-01", "minimax/minimax-m3", OR_FLASH, "minimax/image-01", "vendor/other"];
     const backend = new OllamaBackend({
       backendId: "openrouter", api: "openai", host: "https://openrouter.ai/api/v1",
       model: OR_FLASH, apiKey: "fixture-router-key", connectToolClients: async () => ({}),
     });
     expect((await backend.listModels()).map((m) => m.id)).toEqual([
-      OR_FLASH, "minimax/minimax-m3", "minimax/image-01", "vendor/other",
+      OR_FLASH, "minimax/minimax-m3", "minimax/image-01", "minimax/minimax-01", "minimax/minimax-m2.7", "vendor/other",
     ]);
     const request = await run(backend, "minimax/minimax-m2.7");
     expect(request.url).toBe("https://openrouter.ai/api/v1/chat/completions");
     expect(request.body.model).toBe("minimax/minimax-m2.7");
     expect((await backend.listModels()).map((m) => m.id)).toContain("minimax/minimax-m2.7");
+  });
+
+  it("preserves newly discovered native models without a hardcoded allowlist", async () => {
+    catalog = [FLASH, "MiniMax-M3", "MiniMax-M4", "MiniMax-M3-future"];
+    expect((await nativeBackend().listModels()).map((m) => m.id)).toEqual([
+      FLASH, "MiniMax-M3", "MiniMax-M3-future", "MiniMax-M4",
+    ]);
   });
 
   it("sends the verified OpenRouter Flash route verbatim", async () => {

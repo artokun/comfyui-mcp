@@ -2903,10 +2903,10 @@ export class OllamaBackend implements AgentBackend {
   }
 
   async listModels(): Promise<ModelChoice[]> {
-    // Curate only verified routes. A custom base URL owns its own catalog.
+    // Promote current native defaults without hiding endpoint-discovered models.
+    // Native retirement dates do not determine third-party gateway availability.
     const nativeMiniMax = this.api === "openai" && this.id === "minimax" &&
       ["https://api.minimax.io/v1", "https://api.minimaxi.com/v1"].includes(this.host);
-    const openRouter = this.host === "https://openrouter.ai/api/v1";
     const nativeModels: ModelChoice[] = nativeMiniMax
       ? ["MiniMax-M3.1-Flash", "MiniMax-M3"].map((id) => ({ id, label: id }))
       : [];
@@ -2914,16 +2914,6 @@ export class OllamaBackend implements AgentBackend {
     if ((this.model || !nativeMiniMax) && !fallback.some((m) => m.id === this.model)) {
       fallback.push({ id: this.model, label: this.model });
     }
-    const ordinaryModel = (id: string): boolean => {
-      // Filter text families only; media models and explicit selections survive.
-      if (nativeMiniMax && /^(?:MiniMax-(?:M\d|Text-01|VL-01)|abab)/i.test(id)) {
-        return nativeModels.some((m) => m.id === id);
-      }
-      if (openRouter && /^minimax\/(?:minimax-(?:m\d|01)|text-01|vl-01)/i.test(id)) {
-        return id === "minimax/minimax-m3.1-flash" || id === "minimax/minimax-m3";
-      }
-      return true;
-    };
     try {
       if (this.api === "openai") {
         const res = await fetch(`${this.host}/models`, {
@@ -2932,7 +2922,7 @@ export class OllamaBackend implements AgentBackend {
         });
         if (!res.ok) return fallback;
         const data = (await res.json()) as { data?: Array<{ id?: string }> };
-        const ids = (data.data ?? []).map((m) => m.id).filter((n): n is string => !!n && ordinaryModel(n));
+        const ids = (data.data ?? []).map((m) => m.id).filter((n): n is string => !!n);
         const available = new Set(ids);
         // Official native choices first, then curated gateway models actually
         // served by the endpoint, the configured model, and a bounded slice
