@@ -540,6 +540,7 @@ export interface RecommendedModel {
 }
 export const RECOMMENDED_OPENROUTER_MODELS: readonly RecommendedModel[] = [
   { id: "xiaomi/mimo-v2.5", label: "MiMo v2.5 (1M · SOTA · open)", context1m: true },
+  { id: "minimax/minimax-m3.1-flash", label: "MiniMax M3.1 Flash (1M · open)", context1m: true },
   { id: "minimax/minimax-m3", label: "MiniMax M3 (1M · SOTA · open)", context1m: true },
   { id: "moonshotai/kimi-k2.5", label: "Kimi K2.5 (SOTA · open)" },
   { id: "z-ai/glm-5.1", label: "GLM 5.1 (SOTA · open)" },
@@ -2902,20 +2903,34 @@ export class OllamaBackend implements AgentBackend {
   }
 
   async listModels(): Promise<ModelChoice[]> {
+    // Promote current native defaults without hiding endpoint-discovered models.
+    // Native retirement dates do not determine third-party gateway availability.
+    const nativeMiniMax = this.api === "openai" && this.id === "minimax" &&
+      ["https://api.minimax.io/v1", "https://api.minimaxi.com/v1"].includes(this.host);
+    const nativeModels: ModelChoice[] = nativeMiniMax
+      ? ["MiniMax-M3.1-Flash", "MiniMax-M3"].map((id) => ({ id, label: id }))
+      : [];
+    const fallback = [...nativeModels];
+    if ((this.model || !nativeMiniMax) && !fallback.some((m) => m.id === this.model)) {
+      fallback.push({ id: this.model, label: this.model });
+    }
     try {
       if (this.api === "openai") {
         const res = await fetch(`${this.host}/models`, {
           headers: this.authHeaders(),
           signal: AbortSignal.timeout(8000),
         });
-        if (!res.ok) return [{ id: this.model, label: this.model }];
+        if (!res.ok) return fallback;
         const data = (await res.json()) as { data?: Array<{ id?: string }> };
         const ids = (data.data ?? []).map((m) => m.id).filter((n): n is string => !!n);
         const available = new Set(ids);
-        // Curated arena winners first (only those the endpoint actually serves),
-        // with their context/tier labels; then the configured model; then a
-        // bounded slice of the rest — OpenRouter's 300+ catalog isn't a browser.
-        const recommended = RECOMMENDED_OPENROUTER_MODELS.filter((m) => available.has(m.id));
+        // Official native choices first, then curated gateway models actually
+        // served by the endpoint, the configured model, and a bounded slice
+        // of the rest — OpenRouter's 300+ catalog isn't a browser.
+        const recommended = [
+          ...nativeModels,
+          ...RECOMMENDED_OPENROUTER_MODELS.filter((m) => available.has(m.id)),
+        ];
         const recIds = new Set(recommended.map((m) => m.id));
         // Sort the overflow alphabetically so a vendor's models CLUSTER (all
         // deepseek/* together, findable). The cap must cover OpenRouter's WHOLE
@@ -2953,7 +2968,7 @@ export class OllamaBackend implements AgentBackend {
         .filter((n): n is string => !!n)
         .map((id) => ({ id, label: id }));
     } catch {
-      return this.api === "openai" ? [{ id: this.model, label: this.model }] : [];
+      return this.api === "openai" ? fallback : [];
     }
   }
 

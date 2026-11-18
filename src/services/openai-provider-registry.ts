@@ -154,10 +154,10 @@ export const OPENAI_KEY_PROVIDERS: OpenAiKeyProvider[] = [
   {
     id: "minimax",
     slotLabel: "MiniMax",
-    slotHelp: "MiniMax M3 via the MiniMax platform API key",
+    slotHelp: "MiniMax M3.1 Flash / M3 via the MiniMax platform API key",
     envKeys: ["MINIMAX_API_KEY"],
     modelEnv: "COMFYUI_MCP_MINIMAX_MODEL",
-    defaultModel: process.env.COMFYUI_MCP_MINIMAX_MODEL?.trim() || "MiniMax-M3",
+    defaultModel: process.env.COMFYUI_MCP_MINIMAX_MODEL?.trim() || "MiniMax-M3.1-Flash",
     ackFallbackLabel: "MiniMax",
     readyMessage: (agentLabel, locale) =>
       trFor(
