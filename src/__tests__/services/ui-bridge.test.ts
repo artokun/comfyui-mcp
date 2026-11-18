@@ -1226,13 +1226,18 @@ describe("UiBridge (multi-tab)", () => {
       { cmd: "graph_get_subgraph", node_id: 78 },
       { tabId: "tab-2478-one-shot", timeoutMs: 1000, maxReconnectRetries: 0 },
     );
+    // Observe the rejection BEFORE the drop. With a zero budget the bridge rejects
+    // synchronously inside the server's close handler, and that can run while the
+    // replacement below is still connecting — a rejection with no handler attached
+    // yet is reported as unhandled (seen on macOS CI) even though it is asserted.
+    const rejected = expect(promise).rejects.toThrow(/disconnected mid-command|genuinely gone/);
     await waitFor(() => expect(firstFrames).toHaveLength(1));
     a1.close();
 
     const a2 = await connectPanel("tab-2478-one-shot");
     const replacementFrames: Array<Record<string, unknown>> = [];
     a2.on("message", (buf) => replacementFrames.push(JSON.parse(buf.toString())));
-    await expect(promise).rejects.toThrow(/disconnected mid-command|genuinely gone/);
+    await rejected;
     await new Promise((resolve) => setTimeout(resolve, 50));
     expect(replacementFrames.some((msg) => msg.cmd === "graph_get_subgraph")).toBe(false);
     a2.close();
@@ -1604,10 +1609,13 @@ describe("UiBridge (multi-tab)", () => {
     // near the original 300ms deadline, not restart a fresh full timeout.
     const started = Date.now();
     const promise = bridge.send({ cmd: "graph_get_errors" }, { timeoutMs: 300 });
+    // Observed up front, for the same reason as the zero-budget case above: the 300ms
+    // deadline can reject while the reconnect below is still pending on a slow runner.
+    const rejected = expect(promise).rejects.toThrow(/did not reply|genuinely gone/);
     await new Promise((r) => setTimeout(r, 30));
     a1.close();
     const a2 = await connectPanel("tab-aaaa-1111", "workflow-a", { tabSessionId: "browser-tab-450d" }); // reconnects but never autoReplies
-    await expect(promise).rejects.toThrow(/did not reply|genuinely gone/);
+    await rejected;
     expect(Date.now() - started).toBeLessThan(2000);
     a2.close();
   });

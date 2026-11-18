@@ -23,6 +23,7 @@
 // gating for panel_clear/panel_restart_comfyui) is IDENTICAL across providers,
 // so parity is automatic — neither path reimplements a tool.
 
+import { AsyncLocalStorage } from "node:async_hooks";
 import { z } from "zod";
 import { createHash, randomUUID } from "node:crypto";
 // #873 — the operator's tool-surface policy also governs the panel surface.
@@ -95,6 +96,14 @@ import {
 import { retryConnectAgainstLiveGraph } from "../services/connect-live-graph.js";
 import { verifyPrimitiveForceInputAfterConnect } from "../services/primitive-force-input-connect.js";
 import { rewriteMiniMaxH3DirectorPrimitiveAdvice } from "../services/minimax-h3-director-widget.js";
+import {
+  addressMayNameDerivedWidget,
+  isDerivedWidgetName,
+  isKnownDerivedNodeType,
+  knownDerivedWidgetForAddress,
+  knownDerivedWidgetRefusalText,
+  resolveDerivedAddressFromRow,
+} from "../services/derived-widget-write.js";
 import { retryRailSlotConnect } from "../services/rail-slot-connect.js";
 import { retryWildcardSlotConnect } from "../services/wildcard-slot-connect.js";
 import { retryExposeSubgraphInput } from "../services/expose-ae-wildcard.js";
@@ -403,7 +412,11 @@ import {
   isMidCommandDisconnectTagged,
   isReplyTimeoutTagged,
   isRoutingAmbiguity,
+  replyLeavesOutcomeUnknown,
   requiresWorkflowStampEnforcement,
+  type DeliveredMutationReceipt,
+  type UncertainTarget,
+  type UnsettledMutation,
 } from "../services/ui-bridge.js";
 import {
   GRAPH_READ_CMD_BY_TOOL,
@@ -1441,6 +1454,15 @@ export const __panelToolsTestHooks = {
   setOutstandingMutationReadSettleMs(ms: number | null): void {
     outstandingMutationReadSettleMsOverride = ms;
   },
+  /** Shrink the #2955 panel_run wait for earlier unacknowledged graph edits. */
+  setRunFreshnessBarrierMs(ms: number | null): void {
+    runFreshnessBarrierMsOverride = ms;
+  },
+  /** #2955 — observe the moment panel_run starts waiting, and on what, so a test
+   *  can order its releases against the barrier instead of against a clock. */
+  setRunFreshnessWaitObserver(fn: ((snapshot: RunFreshnessSnapshot) => void) | null): void {
+    runFreshnessWaitObserver = fn;
+  },
   /** Mark a synthetic graph_run result as the bridge's authoritative reply timeout. */
   markRunReplyTimeout(res: ToolResult): ToolResult {
     Object.defineProperty(res, REPLY_TIMEOUT_RESULT, {
@@ -1557,6 +1579,18 @@ function outstandingMutationReadSettleMs(): number {
   return outstandingMutationReadSettleMsOverride ?? OUTSTANDING_MUTATION_READ_SETTLE_MS;
 }
 
+// #2955 — how long panel_run waits for graph edits issued BEFORE it to be
+// acknowledged before it refuses (nothing dispatched). The same window graph_run
+// itself is given to answer: a run is willing to wait for the edits it must
+// include as long as it waits for its own reply, and no longer.
+const RUN_FRESHNESS_BARRIER_MS = 20_000;
+let runFreshnessBarrierMsOverride: number | null = null;
+function runFreshnessBarrierMs(): number {
+  return runFreshnessBarrierMsOverride ?? RUN_FRESHNESS_BARRIER_MS;
+}
+type RunFreshnessSnapshot = { intents: number; awaited: number; unknown: number };
+let runFreshnessWaitObserver: ((snapshot: RunFreshnessSnapshot) => void) | null = null;
+
 const GRAPH_READ_SETTLE_CMDS: ReadonlySet<string> = new Set([
   ...Object.values(GRAPH_READ_CMD_BY_TOOL),
   "graph_get_subgraph",
@@ -1591,7 +1625,44 @@ function mutationIdentityMatches(
       sameMutationScalar(retryCmd.value, delivered.value)
     );
   }
+  // #2955 — a run token names ONE run: a different batch or branch is a different
+  // run, and must never be answered from (or deduped onto) another run's receipt.
+  if (retryCmd.cmd === "graph_run") {
+    return (
+      sameMutationScalar(retryCmd.batch_count ?? 1, delivered.batch_count ?? 1) &&
+      sameMutationScalar(retryCmd.to_node_id, delivered.to_node_id)
+    );
+  }
   if ("node_id" in delivered) return sameMutationScalar(retryCmd.node_id, delivered.node_id);
+  return true;
+}
+
+/**
+ * #2955 — may this retry reply settle an outcome-unknown receipt? Only a
+ * definite, applied answer. A deferral (`waiting_for_queue_idle`), the panel's
+ * still-running duplicate (an error), a queue-uncertain reply, an explicit
+ * `applied:false`, a timeout or a drop all leave the outcome unknown. A widget
+ * write must report the `set` it applied.
+ */
+function isTerminalReconcileReply(cmd: Record<string, unknown>, res: ToolResult): boolean {
+  if (res.isError || isReplyTimeoutResult(res) || isMidCommandDisconnectResult(res)) return false;
+  const body = parseToolResultJson(res);
+  if (!body) return false;
+  // The bridge's own settlement classification first (an explicitly unresolved
+  // `applied` or `queued_unknown` is never an outcome), then the stricter bar a
+  // RECONCILIATION needs: the retry must have applied — a deferral or an explicit
+  // `applied:false` is a definite answer, but not one that settles another rid.
+  if (
+    replyLeavesOutcomeUnknown({ ok: true, result: body }) ||
+    body.deferred === true ||
+    body.status === "waiting_for_queue_idle" ||
+    (Object.prototype.hasOwnProperty.call(body, "applied") && body.applied !== true)
+  ) {
+    return false;
+  }
+  if (cmd.cmd === "graph_set_widget") {
+    return !!body.set && typeof body.set === "object" && !Array.isArray(body.set);
+  }
   return true;
 }
 
@@ -4712,27 +4783,59 @@ function observedWidgetFromQuery(
   widget: string,
   expectedScope?: SetWidgetReadbackScope,
   expectedNodeIdentity?: string,
-): { status: "value"; value: unknown } | { status: "unknown" } {
-  if (res.isError) return { status: "unknown" };
+  rejectDuplicateRows = false,
+):
+  | { status: "value"; value: unknown; drivenByLink?: unknown }
+  | { status: "unknown"; reason: string } {
+  if (res.isError) return { status: "unknown", reason: "the graph read failed" };
   const payload = parseToolResultJson(res);
-  if (!setWidgetReadbackScopeMatches(payload, expectedScope)) return { status: "unknown" };
+  if (!setWidgetReadbackScopeMatches(payload, expectedScope)) {
+    return { status: "unknown", reason: "the graph read did not name the same graph view" };
+  }
   const row = widgetRowFromGraphQuery(payload);
-  if (!row) return { status: "unknown" };
+  if (!row) {
+    return { status: "unknown", reason: "the graph read did not return exactly one complete node row" };
+  }
   const identity = parseQueriedNodeIdentityRow(row);
   const requestedId = canonicalQueriedNodeId(nodeId);
-  if (!identity || !requestedId || identity.id !== requestedId) return { status: "unknown" };
+  if (!identity || !requestedId || identity.id !== requestedId) {
+    return { status: "unknown", reason: "the graph read did not name the written node" };
+  }
   // The numeric id is reusable. A matching value on a replacement live object
   // cannot certify the timed-out write, even when every graph/tab fence still
   // matches; require the opaque per-object incarnation captured at dispatch.
   if (!expectedNodeIdentity || identity.nodeIdentity !== expectedNodeIdentity) {
-    return { status: "unknown" };
+    return { status: "unknown", reason: "the node id now names a different node incarnation" };
   }
   const widgets = row.widgets;
-  if (!widgets || typeof widgets !== "object" || Array.isArray(widgets)) return { status: "unknown" };
-  if (!Object.prototype.hasOwnProperty.call(widgets, widget)) return { status: "unknown" };
+  if (!widgets || typeof widgets !== "object" || Array.isArray(widgets)) {
+    return { status: "unknown", reason: "the graph read carried no widget values" };
+  }
+  if (!Object.prototype.hasOwnProperty.call(widgets, widget)) {
+    return { status: "unknown", reason: `the graph read did not list "${widget}"` };
+  }
+  // Several rows sharing one name (#1402) make the name-keyed map ambiguous.
+  const duplicates = row.duplicate_widgets;
+  if (
+    rejectDuplicateRows &&
+    duplicates &&
+    typeof duplicates === "object" &&
+    Object.prototype.hasOwnProperty.call(duplicates, widget)
+  ) {
+    return { status: "unknown", reason: `several widgets on the node are named "${widget}"` };
+  }
   const value = (widgets as Record<string, unknown>)[widget];
-  if (!isReadableWidgetScalar(value)) return { status: "unknown" };
-  return { status: "value", value };
+  if (!isReadableWidgetScalar(value)) {
+    return { status: "unknown", reason: `the graph read could not show "${widget}" as a scalar` };
+  }
+  // #607 — the panel names widgets a link overrides at run time.
+  const driven = row.driven_by_link;
+  const drivenByLink =
+    driven && typeof driven === "object" && !Array.isArray(driven) &&
+    Object.prototype.hasOwnProperty.call(driven, widget)
+      ? (driven as Record<string, unknown>)[widget]
+      : undefined;
+  return { status: "value", value, ...(drivenByLink !== undefined ? { drivenByLink } : {}) };
 }
 
 function setWidgetTimeoutUnknown(
@@ -4859,6 +4962,215 @@ async function settleSetWidgetAfterAckTimeout(
             observed: observed.value,
             confirmed_by: "graph read after ack timeout",
             note: setWidgetNotAppliedNote(widget),
+          },
+          null,
+          2,
+        ),
+      },
+    ],
+  };
+}
+
+// ---- #2933 / #2918: one fenced read after an acknowledged string write ------
+// The panel verifies `widget.value` inside its own write envelope; a later
+// change is invisible to that receipt. The reporters' very next
+// panel_query_graph showed the old value under an applied:true reply. Take ONE
+// graph read on the same tab, connection, graph view and node incarnation as
+// the write and compare it with the value the panel echoed. No sleep and no
+// retry: a mismatch proves only that the written value was not observed
+// afterwards — not that the write never applied, not why (node frontend code or
+// another edit), and not what a run would use (a linked input supplies its own
+// value). Node-specific causes and remedies live in the derived-widget refusal
+// table, not here. String values only — numeric snaps (#805) and coerced
+// composites have their own panel semantics.
+
+type SetWidgetPostWriteFence = {
+  dispatchTab: string;
+  scope: SetWidgetReadbackScope;
+  connection?: SetWidgetReadbackConnection;
+  nodeIdentity?: string;
+};
+
+const POST_WRITE_READBACK_MATCHED =
+  "One graph read on the same tab, connection, graph view and node incarnation, taken right " +
+  "after the acknowledgement, showed the written value. It cannot see a later change; if a run " +
+  "must use this value, panel_query_graph the node again first.";
+
+const POST_WRITE_READBACK_UNVERIFIED =
+  "The panel acknowledged this write (its set/applied fields are that acknowledgement); the " +
+  "current value was not verified afterwards. This is not a durability or execution claim.";
+
+const POST_WRITE_LINK_DRIVEN =
+  " This widget's input is linked (driven_by_link): at run time the linked source supplies the " +
+  "value, not the stored widget value.";
+
+function unverifiedReadback(reason: string): Record<string, unknown> {
+  return { status: "unverified", reason, note: POST_WRITE_READBACK_UNVERIFIED };
+}
+
+function setWidgetNotObservedNote(
+  widget: string,
+  observedPrevious: boolean,
+  linkDriven: boolean,
+): string {
+  return (
+    `The panel acknowledged this write, but one graph read taken right after it, on the same ` +
+    `tab, graph view and node incarnation, did not show "${widget}" holding the written value ` +
+    (observedPrevious
+      ? `(it showed the value the panel reported as previous). `
+      : `(it showed a different value). `) +
+    `That establishes only that the value was not observed afterwards — not that the write ` +
+    `never applied, and not why: the node's frontend code may have synchronized its own state ` +
+    `over it, or another edit (the user or another agent) may have changed it in between. It ` +
+    `does not say what a run would use.` +
+    (linkDriven ? POST_WRITE_LINK_DRIVEN : "") +
+    ` Nothing was retried. Inspect the node with panel_query_graph before deciding whether to ` +
+    `write again.`
+  );
+}
+
+/** The graph view an ordinary write plan fenced, as a read-back fence. */
+function ordinaryReadbackScope(plan: OrdinaryWritePlan): SetWidgetReadbackScope {
+  return {
+    activeView: plan.activeView,
+    ...(plan.activeView === "subgraph" ? { ownerNodeId: plan.scopeOwnerNodeId } : {}),
+    graphIdentity: plan.graphIdentity,
+    ...(plan.workflowUuid !== undefined ? { workflowUuid: plan.workflowUuid } : {}),
+  };
+}
+
+const POST_WRITE_CONFIRMED_BY = "graph read after write";
+
+/** A read-back mismatch receipt: terminal for every automatic recovery path. */
+function isPostWriteMismatchResult(res: ToolResult): boolean {
+  if (!res.isError) return false;
+  const text = res.content.find((c) => c.type === "text")?.text;
+  if (typeof text !== "string") return false;
+  try {
+    const payload = JSON.parse(text) as Record<string, unknown>;
+    const readback = payload.post_write_readback as Record<string, unknown> | undefined;
+    return (
+      payload.value_observed_after_write === false &&
+      readback?.status === "mismatch" &&
+      readback.confirmed_by === POST_WRITE_CONFIRMED_BY
+    );
+  } catch {
+    return false;
+  }
+}
+
+function withPostWriteReadback(
+  written: ToolResult,
+  payload: Record<string, unknown>,
+  readback: Record<string, unknown>,
+): ToolResult {
+  return rewriteToolResultJson(written, { ...payload, post_write_readback: readback });
+}
+
+async function confirmSetWidgetAfterWrite(
+  ctx: PanelToolCtx,
+  written: ToolResult,
+  nodeId: unknown,
+  mutationId: string | undefined,
+  fence: SetWidgetPostWriteFence,
+  echoFull: boolean,
+): Promise<ToolResult> {
+  if (written.isError) return written;
+  const payload = parseToolResultJson(written);
+  const set = payload?.set;
+  if (!payload || !set || typeof set !== "object" || Array.isArray(set)) return written;
+  if (payload.applied === false || payload.applied === "unknown") return written;
+  if (payload.refresh_pending === true) return written;
+  const record = set as Record<string, unknown>;
+  const writtenValue = record.value;
+  if (typeof writtenValue !== "string") return written;
+  const unverified = (reason: string): ToolResult =>
+    withPostWriteReadback(written, payload, unverifiedReadback(reason));
+  // The panel echoes the REAL widget name after label / NAME[i] resolution (#2143).
+  const widget = typeof record.widget === "string" ? record.widget : null;
+  const echoedId = canonicalQueriedNodeId(record.node_id);
+  const requestedId = canonicalQueriedNodeId(nodeId);
+  if (!widget || !echoedId || !requestedId || echoedId !== requestedId) {
+    return unverified("the panel's receipt did not name the written node and widget");
+  }
+  if (record.widget_occurrence !== undefined) {
+    return unverified(`several widgets on the node are named "${widget}"`);
+  }
+  // Same fences as the #2489 settle read: the dispatch tab, the connection
+  // incarnation captured at dispatch, the fenced graph view and the node
+  // incarnation. Any of them missing means a read cannot be about this write.
+  if (ctx.tabId !== fence.dispatchTab || !isUsablePanelConnectionIdentity(fence.connection)) {
+    return unverified("the dispatch tab or connection identity was not available for a read-back");
+  }
+  if (!fence.nodeIdentity) {
+    return unverified("the panel did not publish a node incarnation to fence a read-back");
+  }
+  const sameConnection = (): boolean => {
+    try {
+      const now = ctx.panelConnectionIdentity?.();
+      return (
+        ctx.tabId === fence.dispatchTab &&
+        isUsablePanelConnectionIdentity(now) &&
+        samePanelConnectionIdentity(fence.connection!, now)
+      );
+    } catch {
+      return false;
+    }
+  };
+  if (!sameConnection()) return unverified("the panel tab or connection changed after the write");
+  const probe = await ctx.call(
+    setWidgetReadbackProbe(nodeId, widget, writtenValue),
+    SET_WIDGET_RECONCILE_MS,
+  );
+  if (!sameConnection()) return unverified("the panel tab or connection changed during the read-back");
+  const observed = observedWidgetFromQuery(
+    probe,
+    nodeId,
+    widget,
+    fence.scope,
+    fence.nodeIdentity,
+    true,
+  );
+  if (observed.status === "unknown") return unverified(observed.reason);
+  const linkDriven = observed.drivenByLink !== undefined;
+  if (widgetValuesMatch(writtenValue, observed.value)) {
+    return withPostWriteReadback(written, payload, {
+      status: "matched",
+      ...(linkDriven ? { driven_by_link: observed.drivenByLink } : {}),
+      note: POST_WRITE_READBACK_MATCHED + (linkDriven ? POST_WRITE_LINK_DRIVEN : ""),
+    });
+  }
+  if (widgetValuePossiblyClipped(writtenValue, observed.value)) {
+    return unverified("the read-back value was clipped by the panel's size cap");
+  }
+  const hasPrevious = Object.prototype.hasOwnProperty.call(record, "previous");
+  const observedPrevious = hasPrevious && widgetValuesMatch(record.previous, observed.value);
+  return {
+    isError: true,
+    content: [
+      {
+        type: "text",
+        text: JSON.stringify(
+          {
+            acknowledged: true,
+            value_observed_after_write: false,
+            mutation_id: mutationId ?? null,
+            requested: {
+              node_id: record.node_id,
+              widget,
+              value: summarizeSetWidgetEchoValue(writtenValue, echoFull),
+            },
+            ...(hasPrevious
+              ? { previous: summarizeSetWidgetEchoValue(record.previous, echoFull) }
+              : {}),
+            post_write_readback: {
+              status: "mismatch",
+              observed: summarizeSetWidgetEchoValue(observed.value, echoFull),
+              observed_equals_previous: observedPrevious,
+              ...(linkDriven ? { driven_by_link: observed.drivenByLink } : {}),
+              confirmed_by: POST_WRITE_CONFIRMED_BY,
+            },
+            note: setWidgetNotObservedNote(widget, observedPrevious, linkDriven),
           },
           null,
           2,
@@ -5640,7 +5952,12 @@ function inspectNewRegistryPack(
     }
     // Reject junctions and other directory indirections too. The panel's local
     // proof must describe the directory Manager just populated, not another tree.
-    if (!sameFilesystemPath(realpathSync(dir), dir)) {
+    // Compared against the pack spelled through the CANONICAL scan base: an alias
+    // ABOVE the base (macOS /var → /private/var, a junctioned or symlinked install
+    // root) is a second spelling of the same tree, and comparing against the
+    // as-given spelling refused every pack under it. An indirection at custom_nodes
+    // or at the pack itself still differs and is still refused.
+    if (!sameFilesystemPath(realpathSync(dir), join(realpathSync(scanBase), "custom_nodes", entry.name))) {
       return { state: "not-found", scanned: customNodes };
     }
 
@@ -6980,22 +7297,23 @@ async function withModelInventoryDisclosure(
 const SET_WIDGET_ECHO_SUMMARY_THRESHOLD = 1000;
 const SET_WIDGET_ECHO_PREVIEW_CHARS = 160;
 
+function summarizeSetWidgetEchoValue(v: unknown, full: boolean): unknown {
+  if (full || typeof v !== "string" || v.length <= SET_WIDGET_ECHO_SUMMARY_THRESHOLD) return v;
+  return {
+    chars: v.length,
+    sha256: createHash("sha256").update(v, "utf8").digest("hex"),
+    preview: `${v.slice(0, SET_WIDGET_ECHO_PREVIEW_CHARS)}…`,
+  };
+}
+
 function summarizeSetWidgetEcho(res: ToolResult, full: boolean): ToolResult {
   if (full || res.isError) return res;
   const payload = parseToolResultJson(res);
   const set = payload?.set;
   if (!payload || !set || typeof set !== "object" || Array.isArray(set)) return res;
   const record = set as Record<string, unknown>;
-  const summarize = (v: unknown): unknown => {
-    if (typeof v !== "string" || v.length <= SET_WIDGET_ECHO_SUMMARY_THRESHOLD) return v;
-    return {
-      chars: v.length,
-      sha256: createHash("sha256").update(v, "utf8").digest("hex"),
-      preview: `${v.slice(0, SET_WIDGET_ECHO_PREVIEW_CHARS)}…`,
-    };
-  };
-  const previous = summarize(record.previous);
-  const value = summarize(record.value);
+  const previous = summarizeSetWidgetEchoValue(record.previous, false);
+  const value = summarizeSetWidgetEchoValue(record.value, false);
   // Nothing crossed the threshold — return the reply untouched rather than
   // dressing up an unfitted payload as a fitted one.
   if (previous === record.previous && value === record.value) return res;
@@ -7951,14 +8269,165 @@ async function refuseAnimaRegionalPromptWrite(
   return animaRegionalPromptRefusal(type, widget);
 }
 
+/** #2931 / #2933 — refuse a known frontend-owned widget on a PROVEN node type.
+ *  `nodeType` must come from a live witness (ordinary plan, promoted mapping,
+ *  terminal witness); a missing type refuses nothing. `address` is matched the
+ *  way the panel matches names (`NAME[i]`, dotted base, case-insensitive); display
+ *  labels need {@link refuseKnownDerivedAddress}. `linkedHostRoute` is set only on
+ *  the established promoted host-rail route. */
+function knownDerivedWidgetRefusal(
+  nodeType: string | undefined,
+  address: string,
+  opts: { linkedHostRoute?: boolean } = {},
+): ToolResult | null {
+  if (!nodeType) return null;
+  const widget = knownDerivedWidgetForAddress(nodeType, address);
+  if (!widget) return null;
+  const text = knownDerivedWidgetRefusalText(nodeType, widget, {
+    address,
+    linkedHostRoute: opts.linkedHostRoute,
+  });
+  return text ? fail(text) : null;
+}
+
+function derivedAddressRefusal(nodeType: string, address: string, reason: string): ToolResult {
+  return fail(
+    `panel_set_widget refused "${address}" on ${nodeType}: this node type has frontend-owned ` +
+      `widgets whose writes do not reach execution, and the address could not be resolved to ` +
+      `a canonical widget name before dispatch (${reason}). No graph_set_widget was dispatched. ` +
+      `Address the widget by its exact name as listed by panel_query_graph {fields:"detail"}.`,
+  );
+}
+
+/** One pinpoint detail read of the addressed node, for its type and widget rows. */
+async function readDerivedAddressRow(
+  ctx: PanelToolCtx,
+  nodeId: unknown,
+): Promise<{ type: string; row: Record<string, unknown> } | { reason: string }> {
+  const probe = await ctx.call({
+    cmd: "graph_query",
+    ids: [nodeId],
+    fields: "detail",
+    limit: 1,
+    max_chars: DYNAMIC_COMBO_PROBE_MAX_CHARS,
+  });
+  if (probe.isError) return { reason: "the node read failed" };
+  const row = widgetRowFromGraphQuery(parseToolResultJson(probe));
+  if (!row) return { reason: "the node read did not return exactly one complete node row" };
+  const identity = parseQueriedNodeIdentityRow(row);
+  const requestedId = canonicalQueriedNodeId(nodeId);
+  if (!identity || !requestedId || identity.id !== requestedId) {
+    return { reason: "the node read did not name the addressed node" };
+  }
+  return { type: identity.type, row };
+}
+
+function classifyDerivedAddressRow(
+  nodeType: string,
+  address: string,
+  row: Record<string, unknown>,
+): ToolResult | null {
+  const resolved = resolveDerivedAddressFromRow(nodeType, address, row);
+  if (resolved.kind === "safe") return null;
+  if (resolved.kind === "unresolved") return derivedAddressRefusal(nodeType, address, resolved.reason);
+  const text = knownDerivedWidgetRefusalText(nodeType, resolved.widget, { address });
+  return text ? fail(text) : null;
+}
+
+/** Typed form: the node's type is already proven. Ordinary node types pay
+ *  nothing. On a known derived type an address that is not a guarded name by
+ *  spelling is resolved from one detail read (labels included), and refused when
+ *  the read cannot establish its canonical target. */
+async function refuseKnownDerivedAddress(
+  ctx: PanelToolCtx,
+  nodeId: unknown,
+  address: string,
+  nodeType: string | undefined,
+): Promise<ToolResult | null> {
+  if (!nodeType || !isKnownDerivedNodeType(nodeType)) return null;
+  const byName = knownDerivedWidgetRefusal(nodeType, address);
+  if (byName) return byName;
+  const read = await readDerivedAddressRow(ctx, nodeId);
+  if ("reason" in read) return derivedAddressRefusal(nodeType, address, read.reason);
+  if (read.type !== nodeType) {
+    return derivedAddressRefusal(nodeType, address, `the node read named type ${read.type}`);
+  }
+  return classifyDerivedAddressRow(nodeType, address, read.row);
+}
+
+/** What an untyped (no ordinary/promoted plan) write learned before dispatch. */
+type UntypedDerivedCheck =
+  | { kind: "checked" }
+  | { kind: "not-probed" }
+  | { kind: "unavailable"; reason: string };
+
+/** Untyped form, for a write no plan typed: probe once when the address could
+ *  name a guarded widget by spelling (`text`, `prompt`, `text[0]`, …). A probe
+ *  that cannot read the node is not a refusal, but the success must say the
+ *  checks did not run ({@link untypedDerivedAfterWrite}). */
+async function untypedDerivedPreflight(
+  ctx: PanelToolCtx,
+  nodeId: unknown,
+  address: string,
+): Promise<ToolResult | UntypedDerivedCheck> {
+  if (!addressMayNameDerivedWidget(address)) return { kind: "not-probed" };
+  const read = await readDerivedAddressRow(ctx, nodeId);
+  if ("reason" in read) return { kind: "unavailable", reason: read.reason };
+  if (!isKnownDerivedNodeType(read.type)) return { kind: "checked" };
+  return classifyDerivedAddressRow(read.type, address, read.row) ?? { kind: "checked" };
+}
+
+/** After an untyped write the panel acknowledged: disclose checks that could not
+ *  run. A display-label alias the PANEL resolved onto a guarded name is only
+ *  knowable from its echo, and an untyped context has no node incarnation to bind
+ *  a later read to the node that took the write (it may have been replaced, or the
+ *  canvas switched), so the semantic check is reported as unverified — no later
+ *  node's type is ever attributed to this write. Never retries or rolls back. */
+function untypedDerivedAfterWrite(
+  written: ToolResult,
+  address: string,
+  pre: UntypedDerivedCheck,
+): ToolResult {
+  if (written.isError || pre.kind === "checked") return written;
+  const payload = parseToolResultJson(written);
+  const set = payload?.set;
+  if (!payload || !set || typeof set !== "object" || Array.isArray(set)) return written;
+  const unchecked = (reason: string): ToolResult =>
+    withPostWriteReadback(written, payload, unverifiedReadback(reason));
+  if (pre.kind === "unavailable") {
+    return unchecked(
+      `the node type could not be read (${pre.reason}), so the known frontend-owned widget ` +
+        `checks (LoraManager text/loras, MiniMaxH3Easy prompt) did not run`,
+    );
+  }
+  const echoed = (set as Record<string, unknown>).widget;
+  if (typeof echoed !== "string" || echoed === address || !isDerivedWidgetName(echoed)) {
+    return written;
+  }
+  return unchecked(
+    `the panel resolved "${address}" to "${echoed}", a widget name some node types own ` +
+      `(LoraManager text/loras, MiniMaxH3Easy prompt). The written node's type was not ` +
+      `established before dispatch and no later read can be bound to that node, so whether ` +
+      `this write reaches execution was not checked; read the node's type with ` +
+      `panel_query_graph before relying on it`,
+  );
+}
+
 /** Run the complete known-bad widget refusal set for the node that will actually
  * be written. Keep this as one call site so a new promoted-write path cannot
  * accidentally re-run only one of the guards. The DaSiWa identity fence remains
- * a separate final check because it also supplies the expected node type. */
+ * a separate final check because it also supplies the expected node type.
+ *
+ * `knownNodeType` is the live-proven type of `nodeId` when the caller holds one.
+ * The derived-widget table (#2931/#2933) is keyed on it and runs no probe here:
+ * a caller resolves label aliases with {@link refuseKnownDerivedAddress} once its
+ * preflight proved the type, or runs {@link untypedDerivedPreflight} when no plan
+ * will supply one, and `write()` re-checks every typed dispatch. */
 async function refuseKnownBadWidgetWrite(
   ctx: PanelToolCtx,
   nodeId: unknown,
   widget: string,
+  knownNodeType?: string,
 ): Promise<ToolResult | null> {
   const animaBlocked = await refuseAnimaRegionalPromptWrite(ctx, nodeId, widget);
   if (animaBlocked) return animaBlocked;
@@ -7966,16 +8435,40 @@ async function refuseKnownBadWidgetWrite(
   const dynamicComboBlocked = await refuseDynamicComboSubWidgetWrite(ctx, nodeId, widget);
   if (dynamicComboBlocked) return dynamicComboBlocked;
 
+  const derivedBlocked = knownDerivedWidgetRefusal(knownNodeType, widget);
+  if (derivedBlocked) return derivedBlocked;
+
   return refuseDaSiWaStackWrite(ctx, nodeId, widget);
 }
 
-/** Apply the same three known-bad guards to the terminal concrete endpoint
+/** #2933 review — the ACTUAL linked route a derived widget's host-rail exemption
+ *  needs: an authoritative parent rail AND the terminal node publishing a live input
+ *  of that widget's own name, which is what the subgraph rail links into. The
+ *  broader `innerLinkDriven` host classification (which also admits a host-proven
+ *  STRING mapping whose terminal publishes no such input, #2791) is not enough on
+ *  its own: MiniMaxH3Easy rebuilds an UNLINKED prompt from its editor at queue
+ *  time. That classification stays unchanged for every other node. */
+function promotedTerminalInputRouteProven(
+  terminal: PromotedTerminalWitness | undefined,
+  parentRail: PromotedParentRailWitness | undefined,
+): boolean {
+  if (!terminal || parentRail?.authoritative !== true) return false;
+  return terminal.inputs.some((input) => input.name === terminal.widget);
+}
+
+/** Apply the same known-bad guards to the terminal concrete endpoint
  * published by the receiver. The terminal is not in MCP's current graph after
  * entering the outer container, so this decision uses the panel's authenticated
  * value-free identity/shape witness rather than a second graph_query that could
- * resolve a graph-local id in the wrong scope. */
+ * resolve a graph-local id in the wrong scope.
+ *
+ * `linkedHostRoute` is set only where the write goes to the enclosing host rail
+ * because the inner widget is proven link-driven from it (`innerLinkDriven`). A
+ * MiniMaxH3Easy `prompt` reached that way executes through the link; a direct
+ * inner write, or any LoraManager `text`, stays refused. */
 function refuseKnownBadPromotedTerminal(
   terminal: PromotedTerminalWitness,
+  opts: { linkedHostRoute?: boolean } = {},
 ): ToolResult | null {
   if (ANIMA_REGIONAL_CANVAS_TYPES.has(terminal.nodeType) && isAnimaRegionalPromptWidget(terminal.widget)) {
     return animaRegionalPromptRefusal(terminal.nodeType, terminal.widget);
@@ -7990,6 +8483,8 @@ function refuseKnownBadPromotedTerminal(
     terminal.widget,
   );
   if (dynamic) return dynamic;
+  const derived = knownDerivedWidgetRefusal(terminal.nodeType, terminal.widget, opts);
+  if (derived) return derived;
   if (terminal.nodeType === DASIWA_LTX2_LORA_LOADER && terminal.widget === DASIWA_STACK_WIDGET) {
     return daSiWaStackRefusal(terminal.nodeType);
   }
@@ -8032,8 +8527,9 @@ async function refuseKnownBadWriteBeforeDispatch(
   ctx: PanelToolCtx,
   nodeId: unknown,
   widget: string,
+  knownNodeType?: string,
 ): Promise<ToolResult | null> {
-  return refuseKnownBadWidgetWrite(ctx, nodeId, widget);
+  return refuseKnownBadWidgetWrite(ctx, nodeId, widget, knownNodeType);
 }
 
 /**
@@ -9668,9 +10164,24 @@ async function preparePromotedWidgetWrite(
       "the receiver did not publish a terminal witness for the nested promotion chain",
     );
   }
+  // #2500/#2533 — classified once here and carried on the plan: a link-driven
+  // inner is written ONLY through the enclosing host rail, never directly.
+  const innerLinkDriven =
+    hostProvenString ||
+    promotedInnerWidgetIsLinkDriven(innerNode, inner.widget, inner.terminal, inner.parentRail);
   if (inner.terminal) {
-    const terminalBlocked = refuseKnownBadPromotedTerminal(inner.terminal);
+    const terminalBlocked = refuseKnownBadPromotedTerminal(inner.terminal, {
+      linkedHostRoute:
+        innerLinkDriven && promotedTerminalInputRouteProven(inner.terminal, inner.parentRail),
+    });
     if (terminalBlocked) return terminalBlocked;
+  } else {
+    // #2931 / #2933 — without a terminal witness the mapped inner node is the
+    // concrete endpoint (a nested chain was refused above), and a host-first
+    // write reaches it without the inner path's own guard. No terminal means no
+    // proven linked route, so no derived widget is exempt here.
+    const derivedBlocked = knownDerivedWidgetRefusal(innerNodeType, inner.widget);
+    if (derivedBlocked) return derivedBlocked;
   }
   // A receiver that advertises the identity fence must publish the immediate
   // inner node's opaque identity. Carry the captured value through the
@@ -9732,14 +10243,7 @@ async function preparePromotedWidgetWrite(
     ...(outerNodeIdentity ? { outerNodeIdentity } : {}),
     inner,
     innerNodeType,
-    innerLinkDriven:
-      hostProvenString ||
-      promotedInnerWidgetIsLinkDriven(
-        innerNode,
-        inner.widget,
-        inner.terminal,
-        inner.parentRail,
-      ),
+    innerLinkDriven,
     ...(inner.terminal ? { terminal: inner.terminal } : {}),
     scope,
     binding: {
@@ -20722,6 +21226,12 @@ function withRetryToken(d: PanelToolDef): PanelToolDef {
       // workflow". Answer from the receipt instead. A sibling mutation inside
       // the same handler (enter_subgraph during a set_widget retry) must not
       // carry this token at all.
+      // #2955 — the retry's own dispatch of the original's exact frame, and the rid
+      // it went out under, kept so the bridge can PROVE (same receiver, same exact
+      // command) that it settles the original — after the handler has judged it.
+      const reconcile: {
+        last: { cmd: Record<string, unknown>; res: ToolResult; retryRid?: string } | null;
+      } = { last: null };
       const wrapped = Object.create(ctx) as PanelToolCtx;
       wrapped.call = (
         cmd: Record<string, unknown>,
@@ -20744,9 +21254,20 @@ function withRetryToken(d: PanelToolDef): PanelToolDef {
           if (mutationIdentityMatches(cmd, original.frame)) {
             const replay: Record<string, unknown> = { ...original.frame, retry_of: retryOf };
             delete replay.rid;
-            return ctx.call(replay, timeoutMs, onDispatchedRid, beforeDispatch);
+            let retryRid: string | undefined;
+            const observeRetryRid = (dispatched: string): void => {
+              retryRid = dispatched;
+              onDispatchedRid?.(dispatched);
+            };
+            return ctx.call(replay, timeoutMs, observeRetryRid, beforeDispatch).then((res) => {
+              if (original.status !== "settled") reconcile.last = { cmd: replay, res, retryRid };
+              return res;
+            });
           }
         }
+        // #2955 — no full receipt for this token (never seen, or evicted to an
+        // uncertainty marker): nothing here can prove the retry is the original's
+        // exact command on its receiver, so this path never settles anything.
         return ctx.call(
           // Ask the RETRY MAP's question, not the workflow fence's (codex gate).
           // These were the same answer only while isMutatingGraphCommand
@@ -20768,6 +21289,20 @@ function withRetryToken(d: PanelToolDef): PanelToolDef {
         );
       };
       const out = await d.handler(args, wrapped);
+      // #2955 — the panel's rid ledger answers an exact retry of a retained
+      // original with the original's own outcome (awaiting it if still running),
+      // and runs the same fingerprint fresh only when it holds no record of it.
+      // Only a TERMINAL answer — not a deferral, a still-running duplicate, an
+      // uncertain queue reply — and a handler that accepted it settle the
+      // outcome-unknown receipt a run barrier is holding on.
+      const candidate = reconcile.last;
+      if (
+        candidate?.retryRid &&
+        !out.isError &&
+        isTerminalReconcileReply(candidate.cmd, candidate.res)
+      ) {
+        ctx.bridge?.markMutationReconciled?.(retryOf, candidate.retryRid);
+      }
       // Drained AFTER the handler, deliberately, for two measured reasons.
       //
       // (1) The drain is destructive. Draining first meant a handler that threw
@@ -20808,6 +21343,517 @@ function withRetryToken(d: PanelToolDef): PanelToolDef {
           ...out.content,
         ],
       };
+    },
+  };
+}
+
+/**
+ * #2955 — a mutating panel tool call that has started and not yet returned, on
+ * one tool session. Covers the whole handler, including the read-only preflight
+ * (graph_get_subgraph / graph_query / graph_outline) that runs BEFORE its write
+ * frame is sent — a window no bridge receipt can see. `failed` records how the
+ * call ENDED (an error result or a throw), because a run that depended on an
+ * edit must not treat "the call returned" as "the edit applied". `rids` are the
+ * mutation receipts the call itself dispatched (bounded; `ridOverflow` past the
+ * bound): a call that finishes without error has only proved its waiter
+ * completed — each of its receipts still needs its own definite outcome.
+ */
+type MutationIntent = {
+  tool: string;
+  finished: boolean;
+  failed: boolean;
+  done: Promise<void>;
+  rids: Set<string>;
+  ridOverflow: boolean;
+};
+
+/** Keyed by the session's ctx: one agent's overlapping calls share it. */
+const mutationIntents = new WeakMap<PanelToolCtx, Set<MutationIntent>>();
+
+/**
+ * #2955 — the intent a send() belongs to, carried by async context rather than by
+ * a delegating ctx: the handler keeps the session ctx itself (so a rebind or any
+ * ctx-keyed state behaves exactly as before), and two edit calls running at once
+ * on ONE ctx still get their own receipts. The bridge reads it synchronously at
+ * send() entry (setMutationOwnership) — every send path, ctx.call or a direct
+ * ctx.bridge.send, is covered.
+ */
+const intentScope = new AsyncLocalStorage<MutationIntent>();
+const liveIntentObjects = new WeakSet<MutationIntent>();
+const MAX_INTENT_RECEIPTS = 64;
+const intentTrackedBridges = new WeakSet<object>();
+
+function ensureIntentReceiptTracking(bridge: PanelToolCtx["bridge"]): void {
+  if (!bridge || typeof bridge.setMutationOwnership !== "function") return;
+  if (intentTrackedBridges.has(bridge)) return;
+  intentTrackedBridges.add(bridge);
+  bridge.setMutationOwnership(
+    () => intentScope.getStore(),
+    (rid, owner) => {
+      if (!owner || typeof owner !== "object" || !liveIntentObjects.has(owner as MutationIntent)) return;
+      const intent = owner as MutationIntent;
+      // Only while the call is running: nothing may grow a finished intent.
+      if (intent.finished) return;
+      if (intent.rids.size >= MAX_INTENT_RECEIPTS) {
+        intent.ridOverflow = true;
+        return;
+      }
+      intent.rids.add(rid);
+    },
+  );
+}
+
+function withMutationIntent(d: PanelToolDef): PanelToolDef {
+  return {
+    ...d,
+    handler: async (args: Record<string, unknown>, ctx: PanelToolCtx): Promise<ToolResult> => {
+      let finish = (): void => {};
+      const intent: MutationIntent = {
+        tool: d.name,
+        finished: false,
+        failed: true,
+        done: new Promise<void>((resolve) => {
+          finish = resolve;
+        }),
+        rids: new Set<string>(),
+        ridOverflow: false,
+      };
+      liveIntentObjects.add(intent);
+      ensureIntentReceiptTracking(ctx.bridge);
+      let live = mutationIntents.get(ctx);
+      if (!live) {
+        live = new Set();
+        mutationIntents.set(ctx, live);
+      }
+      live.add(intent);
+      try {
+        const res = await intentScope.run(intent, () => d.handler(args, ctx));
+        intent.failed = res.isError === true;
+        return res;
+      } finally {
+        intent.finished = true;
+        live.delete(intent);
+        finish();
+      }
+    },
+  };
+}
+
+function describeDeliveredEdit(m: Pick<DeliveredMutationReceipt, "cmd" | "frame">): string {
+  const node = m.frame.node_id !== undefined ? ` node ${String(m.frame.node_id)}` : "";
+  const widget = typeof m.frame.widget === "string" ? ` widget "${m.frame.widget}"` : "";
+  return `"${m.cmd}"${node}${widget}`;
+}
+
+async function settleWithin(work: Promise<unknown>, ms: number): Promise<void> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    await Promise.race([
+      work.then(
+        () => undefined,
+        () => undefined,
+      ),
+      new Promise<void>((resolve) => {
+        timer = setTimeout(resolve, Math.max(0, ms));
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
+/**
+ * #2955 — the canvas a run would serialize, as the existing write fences
+ * identify it: the session's tab and workflow pin, the receiving connection's
+ * hello generation + incarnation (panelWriteConnectionIdentity, as promoted
+ * writes bind it), the bridge's workflow stamp for the tab (workflowUuidFor, the
+ * uuid graph_run is stamped with), and the panel's last structured graph-scope
+ * witness (promotedScopeFor).
+ */
+type RunTargetWitness = {
+  tabId: string;
+  pin: string;
+  connection: { generation: number; tabSessionId: string } | undefined;
+  workflow: TabWorkflowUuidRead;
+  scope: TabPromotedScopeRead;
+};
+
+function captureRunTargetWitness(ctx: PanelToolCtx): RunTargetWitness {
+  let connection: { generation: number; tabSessionId: string } | undefined;
+  try {
+    connection = panelWriteConnectionIdentity(ctx);
+  } catch {
+    connection = undefined;
+  }
+  const bridge = ctx.bridge;
+  let workflow: TabWorkflowUuidRead = {
+    known: false,
+    reason: "this bridge exposes no workflow identity",
+  };
+  if (typeof bridge?.workflowUuidFor === "function") {
+    workflow = bridge.workflowUuidFor(ctx.tabId);
+  }
+  let scope: TabPromotedScopeRead = {
+    known: false,
+    reason: "this bridge exposes no graph-scope witness",
+  };
+  if (typeof bridge?.promotedScopeFor === "function") {
+    try {
+      scope = bridge.promotedScopeFor(ctx.tabId);
+    } catch {
+      scope = { known: false, reason: "the graph-scope witness became unreadable" };
+    }
+  }
+  return {
+    tabId: ctx.tabId,
+    pin: JSON.stringify(ctx.workflowTarget?.get(ctx.tabId) ?? null),
+    connection,
+    workflow,
+    scope,
+  };
+}
+
+/** Why `w` cannot certify a canvas at all, or null. */
+function unverifiableRunTarget(w: RunTargetWitness): string | null {
+  if (!isUsablePanelConnectionIdentity(w.connection)) {
+    return "the receiving panel connection's identity could not be read";
+  }
+  if (w.workflow.known !== true) {
+    return `the tab's workflow identity could not be read (${w.workflow.reason})`;
+  }
+  return null;
+}
+
+/** Why the canvas after the wait is not proven to be the one before it, or null. */
+function runTargetDrift(before: RunTargetWitness, after: RunTargetWitness): string | null {
+  if (after.tabId !== before.tabId) {
+    return `the session's canvas target changed from "${before.tabId}" to "${after.tabId}"`;
+  }
+  if (after.pin !== before.pin) return "the session's workflow pin changed";
+  const unverifiable = unverifiableRunTarget(after);
+  if (unverifiable) return `${unverifiable} after the wait`;
+  if (
+    !isUsablePanelConnectionIdentity(before.connection) ||
+    !isUsablePanelConnectionIdentity(after.connection) ||
+    !samePanelConnectionIdentity(before.connection, after.connection)
+  ) {
+    return "the panel connection was replaced or re-registered (a reconnect or re-hello)";
+  }
+  if (before.workflow.known !== true || after.workflow.known !== true) {
+    return "the tab's workflow identity became unverifiable";
+  }
+  if (before.workflow.uuid !== after.workflow.uuid) return "the workflow on that tab changed";
+  if (before.scope.known) {
+    if (!after.scope.known) return "the canvas graph identity became unverifiable";
+    if (
+      before.scope.scope !== after.scope.scope ||
+      before.scope.ownerNodeId !== after.scope.ownerNodeId ||
+      before.scope.workflowUuid !== after.scope.workflowUuid ||
+      before.scope.graphIdentity !== after.scope.graphIdentity
+    ) {
+      return "the canvas graph identity changed";
+    }
+  }
+  return null;
+}
+
+/**
+ * #2955 — does an edit received by browser document `received` bear on a run
+ * whose receiving document is the witness's? Only a PROVEN different document
+ * (two distinct `tab_session_id`s: two in-memory graphs) is unaffected. An
+ * unknown or anonymous identity on either side cannot be told apart from the
+ * run's document — anonymous ids are minted per connection, so a surviving
+ * document that reconnects gets a new one — and stays relevant.
+ */
+function incarnationRelevant(received: string | undefined, w: RunTargetWitness): boolean {
+  const target = w.connection?.tabSessionId;
+  if (!received || !target || received.startsWith("anon:") || target.startsWith("anon:")) return true;
+  return received === target;
+}
+
+/** An evicted-uncertainty marker binds like an unsettled edit: by document and workflow stamp. */
+function uncertaintyRelevantToRun(t: UncertainTarget, w: RunTargetWitness): boolean {
+  if (!incarnationRelevant(t.incarnation, w)) return false;
+  if (t.unstamped || w.workflow.known !== true || w.workflow.uuid === undefined) return true;
+  return t.workflowUuids.includes(w.workflow.uuid);
+}
+
+/**
+ * An unsettled edit received by a DIFFERENT proven browser document, or stamped
+ * for a DIFFERENT workflow than the one the run would be stamped with, cannot
+ * apply to this graph — another document is another in-memory graph, and the
+ * panel's write-time stamp fence refuses a mismatched workflow. Anything
+ * unstamped, anonymous or unverifiable stays relevant.
+ */
+function editRelevantToRun(m: UnsettledMutation, w: RunTargetWitness): boolean {
+  if (!incarnationRelevant(m.incarnation, w)) return false;
+  const stamped = typeof m.frame.workflow_uuid === "string" ? m.frame.workflow_uuid : undefined;
+  if (stamped === undefined || w.workflow.known !== true || w.workflow.uuid === undefined) return true;
+  return stamped === w.workflow.uuid;
+}
+
+function runFreshnessRefusal(retryOf: string | undefined, reasons: string[]): ToolResult {
+  const why = reasons.join(" ");
+  if (retryOf) {
+    return fail(
+      `panel_run (retry_of:"${retryOf}") was NOT dispatched — this retry attempt sent nothing to ` +
+        `the panel. The ORIGINAL run you are retrying is still outcome-UNKNOWN: it may already be ` +
+        `queued or rendering, and this refusal says nothing about it. ${why} Do NOT re-run ` +
+        `panel_run without retry_of — that could queue a duplicate of the original. Check queue ` +
+        `(action:"list") or get_history for it, and once the above is resolved call panel_run ` +
+        `again with the SAME retry_of:"${retryOf}" so the panel reconciles it against the ` +
+        `original instead of queueing it twice.`,
+    );
+  }
+  return fail(
+    `panel_run was NOT dispatched — this attempt sent nothing to the panel, nothing was queued, ` +
+      `and the queue is untouched. ${why} Call panel_run again once that is resolved; this ` +
+      `attempt minted no retry_of token, so there is nothing of its own to dedupe (if you are ` +
+      `reconciling an EARLIER outcome-unknown panel_run, keep passing that run's own retry_of).`,
+  );
+}
+
+/**
+ * #2955 — panel_run must not serialize the graph while edits the caller issued
+ * BEFORE it are unacknowledged or of unknown outcome.
+ *
+ * The bridge's graph lane releases a targeted mutation as soon as its frame is
+ * written (#2559), and the frontend's graph_set_widget awaits /object_info work
+ * before it applies the value. So a graph_run issued alongside a write — or while
+ * that write's handler is still in its preflight — reaches the serializer first
+ * and queues the PREVIOUS values; the write then acks `set` and the run reports
+ * queued.
+ *
+ * The barrier snapshots what is outstanding when the run STARTS — this session's
+ * in-progress mutating calls, and every edit delivered to this tab whose outcome
+ * is not definite (awaiting its reply, or unknown after a timeout / drop /
+ * same-tab replacement) — and waits for exactly those to SETTLE: answered,
+ * acknowledged late, or reconciled by an exact retry_of. Edits issued after the
+ * run started are not waited for. It runs before the handler, so the duplicate
+ * fence and everything after it read post-wait state.
+ *
+ * Fails closed BEFORE dispatch, so no prompt can exist: when a snapshotted edit
+ * is still unsettled at the end of the bound; when the receiving canvas cannot
+ * be identified; or when it is not provably the same canvas after the wait
+ * (tab, pin, connection generation/incarnation, workflow stamp, graph-scope
+ * witness). It never rebinds, re-dispatches an edit, or replays a run. A
+ * retry_of gets no shortcut: while edits are outstanding it is refused like a
+ * fresh run, but its refusal keeps the ORIGINAL run's token and outcome-unknown
+ * guidance. Receipts the bounded cache had to forget still count (uncertainty
+ * markers): forgotten history is never read as freshness.
+ */
+function withRunFreshnessBarrier(d: PanelToolDef): PanelToolDef {
+  return {
+    ...d,
+    handler: async (args: Record<string, unknown>, ctx: PanelToolCtx): Promise<ToolResult> => {
+      const retryOf =
+        typeof args.retry_of === "string" && args.retry_of !== "" ? args.retry_of : undefined;
+      const bridge = ctx.bridge;
+      const before = captureRunTargetWitness(ctx);
+      const intents = [...(mutationIntents.get(ctx) ?? [])];
+      const edits =
+        typeof bridge?.listUnsettledMutations === "function"
+          ? bridge.listUnsettledMutations(before.tabId).filter((m) => editRelevantToRun(m, before))
+          : [];
+      const evictedNow = () =>
+        typeof bridge?.listUncertainTargets === "function"
+          ? bridge.listUncertainTargets(before.tabId).filter((t) => uncertaintyRelevantToRun(t, before))
+          : [];
+      const evicted = evictedNow();
+      if (intents.length === 0 && edits.length === 0 && evicted.length === 0) {
+        return d.handler(args, ctx);
+      }
+
+      const awaiting = edits.filter((m) => m.settlement === "awaiting");
+      runFreshnessWaitObserver?.({
+        intents: intents.length,
+        awaited: awaiting.length,
+        unknown: edits.length - awaiting.length + evicted.reduce((n, t) => n + t.count, 0),
+      });
+      const unverifiable = unverifiableRunTarget(before);
+      if (unverifiable) {
+        return runFreshnessRefusal(retryOf, [
+          `Earlier graph edits on this canvas are still outstanding, and ${unverifiable}, so ` +
+            `this run cannot prove that the graph it would serialize is the one those edits target.`,
+        ]);
+      }
+      // Live calls or awaited replies get graph_run's own window; edits that are
+      // already outcome-unknown get the #2527 settle a graph read gets.
+      const budgetMs =
+        intents.length > 0 || awaiting.length > 0
+          ? runFreshnessBarrierMs()
+          : outstandingMutationReadSettleMs();
+      const waitStartedAt = Date.now();
+      await settleWithin(
+        Promise.all([
+          Promise.all(intents.map((intent) => intent.done)),
+          typeof bridge.waitForMutationSettlement === "function"
+            ? bridge.waitForMutationSettlement(
+                [...edits.map((m) => m.rid), ...evicted.flatMap((t) => t.rids)],
+                budgetMs,
+              )
+            : undefined,
+        ]),
+        budgetMs,
+      );
+      // #2955 — the receipts the SNAPSHOTTED edit calls dispatched, including those
+      // sent after the snapshot (an intent caught in its preflight had none yet).
+      // Each needs its own definite outcome: a call that returned without error
+      // may only have had its waiter completed (a #2559 borrowed ack) or been told
+      // applied:"unknown". Receipts of edits issued AFTER the run started are not
+      // here — the run's ordering contract is unchanged.
+      const snapshotRids = new Set(edits.map((m) => m.rid));
+      const owned = [...new Set(intents.flatMap((intent) => [...intent.rids]))].filter(
+        (rid) => !snapshotRids.has(rid),
+      );
+      if (owned.length && typeof bridge.waitForMutationSettlement === "function") {
+        const remaining = Math.max(0, waitStartedAt + budgetMs - Date.now());
+        await settleWithin(bridge.waitForMutationSettlement(owned, remaining), remaining);
+      }
+
+      const drift = runTargetDrift(before, captureRunTargetWitness(ctx));
+      if (drift) {
+        return runFreshnessRefusal(retryOf, [
+          `While this run waited for earlier graph edits, ${drift}, so the edits it waited for ` +
+            `and the canvas it would now serialize are not proven to be the same graph. Nothing ` +
+            `was rebound and nothing was replayed. Confirm the target (panel_graph_outline / ` +
+            `panel_set_workflow_target) before running.`,
+        ]);
+      }
+      const settlementOf = (rid: string) =>
+        typeof bridge.mutationSettlement === "function" ? bridge.mutationSettlement(rid) : "unknown";
+      const unfinished = [
+        ...intents
+          .filter((intent) => !intent.finished)
+          .map((intent) => `${intent.tool} (call still in progress)`),
+        ...edits
+          .filter((m) => settlementOf(m.rid) === "awaiting")
+          .map((m) => `${describeDeliveredEdit(m)} (delivered, awaiting the panel's reply)`),
+      ];
+      const ownedOpen = owned
+        .map((rid) => {
+          const peek = typeof bridge.peekDeliveredMutation === "function" ? bridge.peekDeliveredMutation(rid) : undefined;
+          return { rid, cmd: peek?.cmd ?? "graph mutation", frame: peek?.frame ?? {}, settlement: settlementOf(rid) };
+        })
+        .filter((m) => m.settlement !== "settled");
+      for (const m of ownedOpen) {
+        if (m.settlement === "awaiting") {
+          unfinished.push(`${describeDeliveredEdit(m)} (dispatched by that call, awaiting the panel's reply)`);
+        }
+      }
+      const unknown: Array<{ rid: string; cmd: string; frame: Record<string, unknown> }> = [
+        ...edits.filter((m) => settlementOf(m.rid) === "unknown"),
+        ...ownedOpen.filter((m) => m.settlement === "unknown"),
+      ];
+      const failed = intents.filter((intent) => intent.finished && intent.failed);
+      const reasons: string[] = [];
+      const overflowed = intents.filter((intent) => intent.ridOverflow);
+      if (overflowed.length) {
+        reasons.push(
+          `${overflowed.map((intent) => intent.tool).join(", ")} dispatched more than ` +
+            `${MAX_INTENT_RECEIPTS} graph edits, more than this run can track individually, so it ` +
+            `cannot prove they all settled. Read the canvas with panel_query_graph, then call ` +
+            `panel_run again on its own.`,
+        );
+      }
+      if (failed.length) {
+        reasons.push(
+          `${failed.length} graph edit call(s) issued before this run FAILED: ` +
+            `${failed.map((intent) => intent.tool).join(", ")} returned an error. Queueing now ` +
+            `would render the graph without the change this run was issued after. Read that ` +
+            `call's result and fix or re-issue the edit — or, if you mean to render the graph as ` +
+            `it stands, call panel_run again on its own.`,
+        );
+      }
+      if (unfinished.length) {
+        reasons.push(
+          `${unfinished.length} graph edit(s) issued on this canvas before this run were still ` +
+            `unacknowledged after ${(budgetMs / 1000).toFixed(1)}s: ${unfinished.join("; ")}. ` +
+            `Serializing now would queue the graph WITHOUT them and render the previous values ` +
+            `(#2955). Wait for those calls to return and check that each reported success ` +
+            `(confirm the values with panel_query_graph if unsure).`,
+        );
+      }
+      if (unknown.length) {
+        reasons.push(
+          `${unknown.length} earlier graph edit(s) on this canvas have an UNKNOWN outcome — ` +
+            `delivered, but the reply timed out, the connection dropped, the workflow was ` +
+            `replaced, or the panel's answer did not settle it (an acknowledgement borrowed from ` +
+            `another request, or an explicit unknown outcome): ` +
+            unknown
+              .map(
+                (m) =>
+                  `${panelToolForGraphCmd(m.cmd) ?? m.cmd} ${describeDeliveredEdit(m)} ` +
+                  `(that edit's own token retry_of:"${m.rid}")`,
+              )
+              .join("; ") +
+            `. Each may have applied or may still apply, so the graph this run would serialize ` +
+            `is not known. Settle each first: re-issue that edit with its own retry_of token (the ` +
+            `panel reconciles it against the original instead of applying it twice), or wait ` +
+            `for its late acknowledgement — panel_run then proceeds.`,
+        );
+      }
+      const forgotten = evictedNow();
+      if (forgotten.length) {
+        const total = forgotten.reduce((n, t) => n + t.count, 0);
+        const tracked = forgotten.flatMap((t) => t.rids);
+        const cmds = [...new Set(forgotten.flatMap((t) => t.cmds))];
+        reasons.push(
+          `${total} earlier graph edit(s) on this canvas were dropped from the bridge's bounded ` +
+            `receipt memory while their outcome was still UNKNOWN (${cmds.join(", ") || "unrecorded commands"}). ` +
+            `Forgotten history is not freshness: they may have applied or may still apply. ` +
+            (tracked.length
+              ? `Their command details were not kept, so a retry cannot prove it re-issued the ` +
+                `same command on the same canvas and does NOT clear them; each tracked one ` +
+                `(${tracked.map((rid) => `retry_of:"${rid}"`).join(", ")}) clears only on its own ` +
+                `late acknowledgement. `
+              : "") +
+            (total > tracked.length
+              ? `${total - tracked.length} of them were not individually tracked and cannot be ` +
+                `cleared in this orchestrator process: a disconnect proves nothing about the browser ` +
+                `document that received them. Runs on a DIFFERENT browser tab's canvas are not ` +
+                `affected by them. `
+              : ""),
+        );
+      }
+      if (reasons.length) return runFreshnessRefusal(retryOf, reasons);
+      // The handler still awaits (reachability, the graph lane) before graph_run
+      // is written. Hold the canvas proven above through to the bridge's final
+      // synchronous dispatch point, so a reconnect / re-hello / replacement in
+      // that window refuses there instead of dispatching onto the new canvas.
+      // Every graph_run the handler sends — including the #2537 and run-to-node
+      // re-issues — goes through this fence.
+      const fenced = Object.create(ctx) as PanelToolCtx;
+      fenced.call = async (cmd, timeoutMs, onDispatchedRid, beforeDispatch, options) => {
+        if (cmd.cmd !== "graph_run") {
+          return ctx.call(cmd, timeoutMs, onDispatchedRid, beforeDispatch, options);
+        }
+        let fenceDrift: string | null = null;
+        const res = await ctx.call(
+          cmd,
+          timeoutMs,
+          onDispatchedRid,
+          () => {
+            fenceDrift = runTargetDrift(before, captureRunTargetWitness(ctx));
+            if (fenceDrift) {
+              throw new Error(`panel_run refused graph_run at dispatch: ${fenceDrift}`);
+            }
+            beforeDispatch?.();
+          },
+          options,
+        );
+        if (fenceDrift) {
+          return runFreshnessRefusal(retryOf, [
+            `After the earlier graph edits settled, ${fenceDrift} before graph_run could be ` +
+              `written, so the canvas it would serialize is not proven to be the one those edits ` +
+              `target. The bridge refused the frame unsent. Nothing was rebound and nothing was ` +
+              `replayed. Confirm the target (panel_graph_outline / panel_set_workflow_target) ` +
+              `before running.`,
+          ]);
+        }
+        return res;
+      };
+      return d.handler(args, fenced);
     },
   };
 }
@@ -22013,7 +23059,7 @@ export function buildPanelToolDefs(): PanelToolDef[] {
     ),
     def(
       "panel_set_widget",
-      "Set a widget value on a node in the user's open graph (steps, cfg, seed, ckpt_name, text prompts, …). Returns the previous and new value (a string longer than 1000 chars is echoed as {chars, sha256, preview} so batched calls stay inside the outer tool-result budget — pass `echo: \"full\"` for the verbatim string). Undoable with Ctrl+Z. To CLEAR a text widget to an empty string, pass `clear: true` (some MCP clients drop an empty-string `value` from the serialized payload, so `value: \"\"` may not arrive — `clear: true` always works). For the LTXDirector timeline node (WhatDreamsCost CSGlide), set `timeline_data` with the FULL timeline JSON (segments + global_prompt) to drive its custom timeline UI — this re-syncs the editor and regenerates its derived `local_prompts`/`segment_lengths`/`guide_strength` widgets; setting those derived widgets directly is refused (they are silently reverted). For AnimaRegionalCanvasInline / Krea2RegionalCanvasInline (LC123), quality/scene/red/green/blue/negative prompt writes are refused: the custom textarea and node.properties.animaPrompts overwrite widget.value on APPLY. Drive quality/scene/negative via a PrimitiveStringMultiline wired into quality_prompt_in / scene_prompt_in / negative_prompt_in; red/green/blue have no socket. DaSiWa_LTX2LoraLoader's `stack_data` write is also refused: its custom multi-row widget reserializes its own JS state over `widget.value`, so the echoed write would be a false success; edit the stack rows in the node UI instead. For MiniMaxH3Director, prompt / builder_state / timeline_data writes are refused (they are derived write-backs of the in-memory builderState). Drive the prompt via a backend STRING producer such as PrimitiveStringMultiline wired into external_prompt_overwrite — not a frontend PrimitiveNode; panel_connect refuses that forceInput-only STRING.",
+      "Set a widget value on a node in the user's open graph (steps, cfg, seed, ckpt_name, text prompts, …). Returns the previous and new value (a string longer than 1000 chars is echoed as {chars, sha256, preview} so batched calls stay inside the outer tool-result budget — pass `echo: \"full\"` for the verbatim string). Undoable with Ctrl+Z. To CLEAR a text widget to an empty string, pass `clear: true` (some MCP clients drop an empty-string `value` from the serialized payload, so `value: \"\"` may not arrive — `clear: true` always works). For the LTXDirector timeline node (WhatDreamsCost CSGlide), set `timeline_data` with the FULL timeline JSON (segments + global_prompt) to drive its custom timeline UI — this re-syncs the editor and regenerates its derived `local_prompts`/`segment_lengths`/`guide_strength` widgets; setting those derived widgets directly is refused (they are silently reverted). For AnimaRegionalCanvasInline / Krea2RegionalCanvasInline (LC123), quality/scene/red/green/blue/negative prompt writes are refused: the custom textarea and node.properties.animaPrompts overwrite widget.value on APPLY. Drive quality/scene/negative via a PrimitiveStringMultiline wired into quality_prompt_in / scene_prompt_in / negative_prompt_in; red/green/blue have no socket. DaSiWa_LTX2LoraLoader's `stack_data` write is also refused: its custom multi-row widget reserializes its own JS state over `widget.value`, so the echoed write would be a false success; edit the stack rows in the node UI instead. For MiniMaxH3Director, prompt / builder_state / timeline_data writes are refused (they are derived write-backs of the in-memory builderState). Drive the prompt via a backend STRING producer such as PrimitiveStringMultiline wired into external_prompt_overwrite — not a frontend PrimitiveNode; panel_connect refuses that forceInput-only STRING. For MiniMaxH3Easy (and MiniMaxH3EasyContextSegments / MiniMaxH3EasySelectedVideoContext), prompt / h3_prompt_mentions writes are refused: the prompt editor copies its own text over prompt on serialize and rebuilds an unlinked prompt from the editor at queue time. Wire a PrimitiveStringMultiline into the prompt input instead; a promoted prompt whose inner input is linked from the enclosing subgraph rail is written on that host rail. For ComfyUI-Lora-Manager's Lora Loader / Lora Stacker / WanVideo Lora Select / Create Hook LoRA, text / loras writes are refused (also when addressed by label, NAME[i] or another alias): the backend ignores text and applies only the DOM-owned loras list. Use LoRA Text Loader (LoraManager) with a PrimitiveStringMultiline wired into lora_syntax, or edit the rows in the node UI. An ordinary string write on a fenced graph view is read back once right after the acknowledgement and the reply carries post_write_readback: matched (one read saw the value), unverified (the panel acknowledged; the current value was not verified, with the reason), or — as an error with acknowledged:true, value_observed_after_write:false and the observed value — mismatch. A mismatch says only that the value was not observed afterwards, not why (node code or another edit) and not what a run uses (a linked input supplies its own value); nothing is retried, so inspect the node before writing again. None of these is a durability or execution guarantee; re-read the node before panel_run when it matters.",
       {
         node_id: nodeId().describe("Node id from panel_graph_outline / panel_query_graph."),
         widget: z.string().describe("Widget name (e.g. 'steps', 'cfg', 'text')."),
@@ -22086,6 +23132,28 @@ export function buildPanelToolDefs(): PanelToolDef[] {
           if (daSiWaFence && "content" in daSiWaFence) return daSiWaFence;
           expectedNodeType = daSiWaFence?.expectedNodeType;
         }
+        // #2931 / #2933 — the derived-widget table is keyed on the type of the
+        // node this call writes. An ordinary plan (or the DaSiWa fence) proved it,
+        // and only a known derived type pays a read to resolve label aliases; a
+        // promoted plan was checked on its terminal / inner node in preflight. A
+        // write with no type probes once when its address could name a guarded
+        // widget, and its success discloses checks that could not run.
+        let untypedDerived: UntypedDerivedCheck | null = null;
+        if (!promotedPlan) {
+          if (expectedNodeType) {
+            const derivedBlocked = await refuseKnownDerivedAddress(
+              ctx,
+              args.node_id,
+              args.widget as string,
+              expectedNodeType,
+            );
+            if (derivedBlocked) return derivedBlocked;
+          } else {
+            const pre = await untypedDerivedPreflight(ctx, args.node_id, args.widget as string);
+            if ("content" in pre) return pre;
+            untypedDerived = pre;
+          }
+        }
         // #599: the frontend runs refresh-before-validate here (pulls a fresh
         // /object_info so a just-staged/-downloaded/-installed value is accepted on
         // a single revalidation, #338/#458) — that authoritative fetch can outlast
@@ -22105,7 +23173,15 @@ export function buildPanelToolDefs(): PanelToolDef[] {
           beforeDispatch?: () => void,
           targetExpectedScope?: PromotedExpectedScope,
           targetExpectedNodeIdentity: string | undefined = expectedNodeIdentity,
+          // #2933 / #2918 — set only for an ORDINARY write whose plan fenced
+          // this graph view. A promoted write lands on the host rail and its
+          // inner widget may legitimately keep the old value (#1707).
+          postWriteReadbackScope?: SetWidgetReadbackScope,
         ): Promise<ToolResult> => {
+          // Every typed dispatch re-checks the derived-widget table against the
+          // type it is about to fence, whichever path proved that type.
+          const derivedBlocked = knownDerivedWidgetRefusal(targetExpectedNodeType, widget);
+          if (derivedBlocked) return derivedBlocked;
           let mutationId: string | undefined;
           let dispatchTab = ctx.tabId;
           let dispatchConnection: SetWidgetReadbackConnection | undefined;
@@ -22186,8 +23262,25 @@ export function buildPanelToolDefs(): PanelToolDef[] {
             beforeDispatch,
             ),
           );
+          // Read back the RAW echo, before #1695 summarizes a long value away.
+          const confirmed =
+            postWriteReadbackScope && args.defer_until_idle !== true
+              ? await confirmSetWidgetAfterWrite(
+                  ctx,
+                  written,
+                  nodeId,
+                  mutationId,
+                  {
+                    dispatchTab,
+                    scope: postWriteReadbackScope,
+                    connection: dispatchConnection,
+                    nodeIdentity: targetExpectedNodeIdentity,
+                  },
+                  echoFull,
+                )
+              : written;
           const echoed = stripVerifiedLastObservedSchemaNote(
-            summarizeSetWidgetEcho(written, echoFull),
+            summarizeSetWidgetEcho(confirmed, echoFull),
           );
           const classified = await classifyLandedDirectorDurationWriteWarning(
             ctx,
@@ -22232,16 +23325,7 @@ export function buildPanelToolDefs(): PanelToolDef[] {
                   : {}),
               }
             : ordinaryPlan
-              ? {
-                  activeView: ordinaryPlan.activeView,
-                  ...(ordinaryPlan.activeView === "subgraph"
-                    ? { ownerNodeId: ordinaryPlan.scopeOwnerNodeId }
-                    : {}),
-                  graphIdentity: ordinaryPlan.graphIdentity,
-                  ...(ordinaryPlan.workflowUuid !== undefined
-                    ? { workflowUuid: ordinaryPlan.workflowUuid }
-                    : {}),
-                }
+              ? ordinaryReadbackScope(ordinaryPlan)
               : undefined;
           const settled =
             isReplyTimeoutResult(classified) &&
@@ -22273,19 +23357,50 @@ export function buildPanelToolDefs(): PanelToolDef[] {
           if (promotedRetry && promotedRetry.kind === "promoted-write") {
             return writePromotedInner(promotedRetry);
           }
-          const blocked = await refuseKnownBadWriteBeforeDispatch(ctx, nodeId, widget);
+          const ordinaryRetry =
+            promotedRetry && promotedRetry.kind === "ordinary-write" ? promotedRetry : null;
+          const blocked = await refuseKnownBadWriteBeforeDispatch(
+            ctx,
+            nodeId,
+            widget,
+            ordinaryRetry?.expectedNodeType,
+          );
           if (blocked) return blocked;
-          if (promotedRetry && promotedRetry.kind === "ordinary-write") {
+          if (ordinaryRetry) {
+            const aliasBlocked = await refuseKnownDerivedAddress(
+              ctx,
+              nodeId,
+              widget,
+              ordinaryRetry.expectedNodeType,
+            );
+            if (aliasBlocked) return aliasBlocked;
             return write(
               nodeId,
               widget,
-              promotedRetry.expectedNodeType,
-              ordinaryWriteBeforeDispatch(ctx, widget, promotedRetry),
+              ordinaryRetry.expectedNodeType,
+              ordinaryWriteBeforeDispatch(ctx, widget, ordinaryRetry),
               undefined,
-              promotedRetry.expectedNodeIdentity,
+              ordinaryRetry.expectedNodeIdentity,
+              ordinaryReadbackScope(ordinaryRetry),
             );
           }
-          return write(nodeId, widget, targetExpectedNodeType);
+          if (targetExpectedNodeType) {
+            const aliasBlocked = await refuseKnownDerivedAddress(
+              ctx,
+              nodeId,
+              widget,
+              targetExpectedNodeType,
+            );
+            if (aliasBlocked) return aliasBlocked;
+            return write(nodeId, widget, targetExpectedNodeType);
+          }
+          const pre = await untypedDerivedPreflight(ctx, nodeId, widget);
+          if ("content" in pre) return pre;
+          return untypedDerivedAfterWrite(
+            await write(nodeId, widget, targetExpectedNodeType),
+            widget,
+            pre,
+          );
         };
 
         writePromotedInner = async (plan: PromotedWritePlan): Promise<ToolResult> => {
@@ -22327,7 +23442,14 @@ export function buildPanelToolDefs(): PanelToolDef[] {
             // when the #2488 host-rail write already contradicted.
             if (plan.innerLinkDriven) {
               if (plan.terminal) {
-                const terminalBlocked = refuseKnownBadPromotedTerminal(plan.terminal);
+                // This branch writes only the host rail. A derived widget may take
+                // it only when the terminal's own linked input route is proven.
+                const terminalBlocked = refuseKnownBadPromotedTerminal(plan.terminal, {
+                  linkedHostRoute: promotedTerminalInputRouteProven(
+                    plan.terminal,
+                    plan.inner.parentRail,
+                  ),
+                });
                 if (terminalBlocked) return terminalBlocked;
               }
               const hostWidget = plan.hostWidget;
@@ -22435,6 +23557,7 @@ export function buildPanelToolDefs(): PanelToolDef[] {
               ctx,
               plan.inner.innerNodeId,
               plan.inner.widget,
+              afterEnterMapping.innerNodeType,
             );
             if (innerBlocked) {
               const exited = await leave();
@@ -22741,13 +23864,20 @@ export function buildPanelToolDefs(): PanelToolDef[] {
             : undefined,
           undefined,
           expectedNodeIdentity,
+          ordinaryPlan ? ordinaryReadbackScope(ordinaryPlan) : undefined,
         );
+        if (untypedDerived && !first.isError) {
+          first = untypedDerivedAfterWrite(first, args.widget as string, untypedDerived);
+        }
         if (!first.isError) {
           if (parseToolResultJson(first)?.refresh_pending !== true) {
             markPanelSchemaReady(panelSchemaKey(ctx));
           }
           return persistUnpromotedControlAfterGenerate(first, ctx, args.node_id);
         }
+        // An acknowledged write whose value a read did not show afterwards is a
+        // verdict, not a refusal for the recovery paths below to reinterpret.
+        if (isPostWriteMismatchResult(first)) return first;
         // #2202 — stale-combo recovery may have retired the panel's last usable
         // whole-schema snapshot before its bounded refresh wait abandoned. The
         // panel refused before writing, so dispatching its idempotent,
@@ -22840,6 +23970,8 @@ export function buildPanelToolDefs(): PanelToolDef[] {
                 `write was retried once. The tab remains in that entered scope.)`,
             );
           }
+          // The retried write was acknowledged; only its read-back disagreed.
+          if (isPostWriteMismatchResult(retried)) return retried;
           return appendToolResultText(
             retried,
             `\n\n(The panel_enter_subgraph route was re-entered, but the exact write ` +
@@ -22877,6 +24009,7 @@ export function buildPanelToolDefs(): PanelToolDef[] {
           if (!retried.isError) {
             return persistUnpromotedControlAfterGenerate(retried, ctx, args.node_id);
           }
+          if (isPostWriteMismatchResult(retried)) return retried;
           if (isObjectInfoBudgetRefusal(retried)) {
             markPanelSchemaBlocked(schemaKey);
             first = appendToolResultText(retried, objectInfoWidgetRefreshNote(refreshed, true));
@@ -29717,7 +30850,14 @@ CHECKED FOR YOU: the graph read this message prescribes was just run, and it ` +
   ];
   // #694: every MUTATING panel tool (RETRY_TOKEN_CMD_BY_TOOL) accepts the explicit
   // retry token in its schema and forwards it, untouched, on its command frames.
-  return defs.map((d) => (d.name in RETRY_TOKEN_CMD_BY_TOOL ? withRetryToken(d) : d));
+  // #2955: those same tools register an in-progress intent, and panel_run waits
+  // for the ones that started before it. Both are OUTERMOST so they see the
+  // session ctx itself, not withRetryToken's per-call delegate.
+  return defs.map((d) => {
+    if (!(d.name in RETRY_TOKEN_CMD_BY_TOOL)) return d;
+    const tokened = withRetryToken(d);
+    return d.name === "panel_run" ? withRunFreshnessBarrier(tokened) : withMutationIntent(tokened);
+  });
 }
 
 /**

@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { realpathSync } from "node:fs";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -71,7 +72,11 @@ let dirs: string[] = [];
 const oldComfyuiPathEnv = process.env.COMFYUI_PATH;
 
 async function trackTmp(): Promise<string> {
-  const dir = await mkdtemp(join(tmpdir(), "comfyui-observed-root-"));
+  // Canonical from the start: the live root is realpath'd (ComfyUI anchors on
+  // realpath(__file__)), so on a host whose temp dir is an alias (macOS /var →
+  // /private/var) every expected path must be spelled the same way. Alias handling
+  // itself is covered by the tests that build an explicit symlink/junction/script.
+  const dir = realpathSync(await mkdtemp(join(tmpdir(), "comfyui-observed-root-")));
   dirs.push(dir);
   return dir;
 }

@@ -26,7 +26,9 @@ import { loadTurnRegistry, saveTurnRegistry, tombstoneTurn } from "./turn-regist
 import {
   degradedMcpNotice,
   emptyToolsMcpNotice,
+  inheritedMcpServers,
   inspectMcpServers,
+  panelOwnMcpServers,
   serversWithoutTools,
   reconnectableMcpStatus,
   recoveredMcpNotice,
@@ -499,7 +501,7 @@ export class ClaudeBackend implements AgentBackend {
    * — silent — and never takes the turn stream down with it.
    */
   private async checkMcpServers(q: Query): Promise<AgentEvent[]> {
-    const names = Object.keys(this.mcpServersForRun() ?? {});
+    const names = this.watchedMcpNames();
     if (names.length === 0) return [];
     let reported = await this.pollMcpStatus(q);
     if (!reported) return [];
@@ -615,6 +617,15 @@ export class ClaudeBackend implements AgentBackend {
    * never handed — which is a false alarm in one direction and blindness in the
    * other, and neither shows up in a test that builds both sides itself.
    */
+  /**
+   * The servers the health watch reports on: only the ones the panel provides
+   * itself. Inherited user servers (`~/.claude.json`) are logged instead of
+   * narrated in the chat — see PANEL_OWN_MCP_SERVERS.
+   */
+  private watchedMcpNames(): string[] {
+    return panelOwnMcpServers(Object.keys(this.mcpServersForRun() ?? {}));
+  }
+
   private mcpServersForRun(): Options["mcpServers"] {
     return {
       ...this.deps.mcpServers,
@@ -979,10 +990,20 @@ export class ClaudeBackend implements AgentBackend {
           // fires the same either way, which is the point — it turns a silent,
           // unreproducible degradation into one that names itself the moment it
           // happens, on whichever transport it happens to.
-          const health = inspectMcpServers(
-            Object.keys(this.mcpServersForRun() ?? {}),
+          const health = inspectMcpServers(this.watchedMcpNames(), message.mcp_servers);
+          // Inherited user servers that did not come up: log only (see
+          // PANEL_OWN_MCP_SERVERS) — a personal server that is down or awaiting a
+          // sign-in is not a panel problem and must not fill the chat.
+          const inheritedDown = inspectMcpServers(
+            inheritedMcpServers(Object.keys(this.mcpServersForRun() ?? {})),
             message.mcp_servers,
-          );
+          ).degraded;
+          if (inheritedDown.length) {
+            logger.info(
+              `[claude-backend] inherited user MCP server(s) unavailable (not shown in the panel): ` +
+                inheritedDown.map((d) => `${d.name} (${d.status ?? "missing"})`).join(", "),
+            );
+          }
           // A server still CONNECTING at init is not a failure — server startup
           // does not block the session, so a slow one is legitimately `pending`
           // here and connected a moment later. It needs no tracking of its own:
@@ -1006,7 +1027,7 @@ export class ClaudeBackend implements AgentBackend {
           // why the reporters had to establish it with ToolSearch, and one
           // reinstalled twice while every signal said the panel was fine.
           const emptyServers = serversWithoutTools(
-            Object.keys(this.mcpServersForRun() ?? {}),
+            this.watchedMcpNames(),
             message.mcp_servers,
             message.tools,
           );

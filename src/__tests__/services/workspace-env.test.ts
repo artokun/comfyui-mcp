@@ -1,4 +1,5 @@
 import { describe, expect, it, beforeEach, afterEach, vi } from "vitest";
+import { realpathSync } from "node:fs";
 import { mkdtemp, rm, readFile, writeFile, mkdir, symlink } from "node:fs/promises";
 import { tmpdir, platform } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
@@ -286,6 +287,48 @@ describe("resolveInstallInterpreter (#651)", () => {
       });
     } finally {
       await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("an ALIAS of the live install is the SAME install, not 'a different install'", async () => {
+    // The server root is realpath'd; the requested root is whatever spelling the
+    // caller holds. Compared lexically, a junction / symlink / macOS /var spelling of
+    // the very install that is running was refused before any interpreter evidence
+    // was looked at.
+    const dir = await tmpDir();
+    try {
+      const real = join(dir, "real");
+      const alias = join(dir, "alias");
+      const other = join(dir, "other");
+      await mkdir(real, { recursive: true });
+      await mkdir(other, { recursive: true });
+      await writeFile(join(real, "main.py"), "", "utf-8");
+      await writeFile(join(other, "main.py"), "", "utf-8");
+      await symlink(real, alias, "junction");
+      mockGetSystemStats.mockResolvedValue({
+        system: {
+          argv: [join(real, "main.py")],
+          python_version: "3.12.12",
+          pytorch_version: "2.13.0+cu130",
+        },
+      });
+      h.mockLiveInterpreter.mockReturnValue({
+        python: "D:/ComfyUI/.venv/Scripts/python.exe",
+        source: "process-table",
+        pid: 777,
+      });
+      mockTrustedInterpreterProbes();
+
+      await expect(resolveInstallInterpreter(alias)).resolves.toMatchObject({
+        python: "D:/ComfyUI/.venv/Scripts/python.exe",
+        source: "observed",
+      });
+      // The control: a genuinely different install is still refused.
+      const refused = await resolveInstallInterpreter(other);
+      expect(refused.source).toBe("undetermined");
+      expect(refused.reason).toContain("different install");
+    } finally {
+      await rm(dir, { recursive: true, force: true });
     }
   });
 
@@ -832,7 +875,9 @@ describe("split code-root resolution", () => {
       mockGetSystemStats.mockResolvedValue({
         system: { argv: ["python", join(root, "main.py")] },
       });
-      await expect(resolveEffectiveComfyUICodeBaseLive()).resolves.toBe(root);
+      // The live root is realpath'd (ComfyUI anchors on realpath(__file__)), so it is
+      // spelled through the real directory on a host whose temp dir is an alias.
+      await expect(resolveEffectiveComfyUICodeBaseLive()).resolves.toBe(realpathSync(root));
 
       mockGetSystemStats.mockRejectedValue(new Error("offline"));
       await expect(resolveEffectiveComfyUICodeBaseLive()).resolves.toBe("/offline-code");
@@ -852,7 +897,7 @@ describe("split code-root resolution", () => {
       mockGetSystemStats.mockResolvedValue({
         system: { argv: ["python", join(root, "main.py"), "--base-directory", "data"] },
       });
-      await expect(resolveEffectiveComfyUICodeBaseLive()).resolves.toBe(root);
+      await expect(resolveEffectiveComfyUICodeBaseLive()).resolves.toBe(realpathSync(root));
     } finally {
       await rm(root, { recursive: true, force: true });
     }
@@ -1964,10 +2009,11 @@ itWithSymlinks("realpath-resolves a symlinked absolute launch script for live au
     await writeFile(realScript, "# real ComfyUI\n", "utf-8");
     await symlink(realScript, launchScript, "file");
 
-    expect(liveScriptFromArgv([launchScript])).toBe(realScript);
+    // The REAL target, in its canonical spelling (the temp dir itself may be an alias).
+    expect(liveScriptFromArgv([launchScript])).toBe(realpathSync(realScript));
     const resolved = resolveLiveServerRoot([launchScript]);
     expect(resolved.source).toBe("argv");
-    expect(resolved.root).toBe(realRoot);
+    expect(resolved.root).toBe(realpathSync(realRoot));
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
@@ -2200,7 +2246,7 @@ describe("resolveCustomNodesScanBaseLive (#2031 — scan path, not data workspac
         system: { argv: [join(code, "main.py"), "--listen"] },
       });
 
-      expect(await resolveCustomNodesScanBaseLive()).toBe(code);
+      expect(await resolveCustomNodesScanBaseLive()).toBe(realpathSync(code));
       // The data resolver still answers the workspace — models/output belong
       // there. Only custom_nodes scan must not follow it.
       expect(await resolveEffectiveComfyUIBaseLive()).toBe(workspace);
@@ -2573,8 +2619,8 @@ describe("resolveLiveServerRoot (#369)", () => {
 
       const resolved = resolveLiveServerRoot(["main.py"], undefined, {});
       expect(resolved.source).toBe("observed-process");
-      expect(resolved.root).toBe(realRoot);
-      expect(resolved.observedLaunchScript).toBe(realScript);
+      expect(resolved.root).toBe(realpathSync(realRoot));
+      expect(resolved.observedLaunchScript).toBe(realpathSync(realScript));
     } finally {
       await rm(dir, { recursive: true, force: true });
     }

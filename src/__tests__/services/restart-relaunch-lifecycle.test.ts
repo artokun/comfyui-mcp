@@ -582,7 +582,42 @@ describe("restart_comfyui (action:\"stop\") — has_restart_info means a relaunc
     return () => swapped;
   }
 
-  it("rebuilds the relaunch from the OS command line when the server cannot answer", async () => {
+  // #2947: on Windows action:"start" never launches, so has_restart_info is false
+  // there by design; the Windows contract is pinned below and in
+  // restart-windows-direct-launch.test.ts.
+  const HOST_IS_WIN = process.platform === "win32";
+
+  it.runIf(HOST_IS_WIN)(
+    "WINDOWS (#2947): still rebuilds the OS command line for the hint, but start will not run it",
+    async () => {
+      wedgedServer();
+      mockLivePortThenFree();
+      __processControlTestHooks.setProcessIdentityResolver(() => ({
+        startedAt: "stable-stamp",
+        commandLine: `${ABS_PYTHON} ${ABS_MAIN} --cache-none`,
+        argv: [ABS_PYTHON, ABS_MAIN, "--cache-none"],
+        argvFidelity: "exact" as const,
+      }));
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(async () => ({ ok: true }) as Response),
+      );
+
+      const stopped = await stopComfyUI();
+      expect(stopped.stopped).toBe(true);
+      expect(stopped.has_restart_info).toBe(false);
+      expect(stopped.relaunch_blocked).toMatch(/does not launch ComfyUI itself/i);
+      expect(stopped.restart_hint?.command).toContain(ABS_MAIN);
+      expect(stopped.message).toMatch(/will NOT be able to bring this back/);
+
+      const started = await startComfyUI();
+      expect(started.started).toBe(false);
+      expect(started.startup).toBe("not-attempted");
+      expect(mockSpawn).not.toHaveBeenCalled();
+    },
+  );
+
+  it.skipIf(HOST_IS_WIN)("rebuilds the relaunch from the OS command line when the server cannot answer", async () => {
     // The user's own recovery in #767 was to read the command line out of the
     // process table by hand. It was readable the whole time.
     wedgedServer();
@@ -790,7 +825,7 @@ describe("restart_comfyui (action:\"stop\") — has_restart_info means a relaunc
     killSpy.mockRestore();
   });
 
-  it("a healthy install still reports has_restart_info true", async () => {
+  it.skipIf(HOST_IS_WIN)("a healthy install still reports has_restart_info true", async () => {
     // The control: the claim must not become uniformly pessimistic. A server whose
     // relaunch really is buildable still says so.
     mockGetSystemStats.mockResolvedValue({
@@ -852,16 +887,18 @@ describe("restart_comfyui — anchors the observed embedded-python root (#2252)"
     mockSpawn.mockImplementation(() => new FakeChild());
     vi.stubGlobal("fetch", vi.fn(async () => ({ ok: true }) as Response));
 
-    await restartComfyUI();
+    // #2947: the corroborated pair still validates — the preflight passes and the
+    // restart reaches the Windows refusal, not "script does not exist" — but
+    // nothing is stopped or spawned.
+    const preflight = await preflightLocalRestart();
+    const result = await restartComfyUI();
 
-    const [exe, args, options] = mockSpawn.mock.calls[0] as [
-      string,
-      string[],
-      { cwd?: string },
-    ];
-    expect(exe).toBe(python);
-    expect(args).toEqual([main, "--port", "8188"]);
-    expect(options.cwd).toBe(root);
+    expect(preflight.ok).toBe(true);
+    expect(result.message).toMatch(/does not launch ComfyUI itself/i);
+    expect(result.message).not.toMatch(/does not exist on disk/i);
+    expect(result.stopped).toBe(false);
+    expect(killWasIssued()).toBe(false);
+    expect(mockSpawn).not.toHaveBeenCalled();
   });
 
   runOnWindows("keeps the refusal when the exact embedded layout is symlinked", async () => {
@@ -1983,7 +2020,33 @@ describe("restart_comfyui — a Desktop reboot needs a supervisor that is actual
     expect(killWasIssued()).toBe(false);
   });
 
-  it("#1847: parent exists but is unreadable — proven launch files allow Manager reboot", async () => {
+  // #2947: the #1847 pass ends by spawning the proven command from this process,
+  // which Windows refuses — so on Windows it refuses BEFORE the Manager stop
+  // instead. The four off-Windows cases below keep the #1847 behaviour pinned.
+  it.runIf(TEST_IS_WIN)(
+    "#1847 on WINDOWS (#2947): proven launch files still REFUSE before the Manager stop",
+    async () => {
+      desktopServer();
+      unreadableParentIdentity();
+      proveLaunchFilesOnDisk();
+      const fetchSpy = vi.fn(async () => ({ ok: true, status: 200 }) as Response);
+      vi.stubGlobal("fetch", fetchSpy);
+
+      const preflight = await preflightLocalRestart();
+      const result = await restartComfyUI();
+
+      expect(preflight.ok).toBe(false);
+      expect(preflight.selfRelaunch).toBeUndefined();
+      expect(result.stopped).toBe(false);
+      expect(result.message).toMatch(/refusing to restart/i);
+      expect(result.message).toMatch(/does not launch ComfyUI itself/i);
+      expect(fetchSpy).not.toHaveBeenCalled();
+      expect(killWasIssued()).toBe(false);
+      expect(mockSpawn).not.toHaveBeenCalled();
+    },
+  );
+
+  it.skipIf(TEST_IS_WIN)("#1847: parent exists but is unreadable — proven launch files allow Manager reboot", async () => {
     // The reporter's case: sys.argv, interpreter, main.py, and the Desktop
     // instance-model-paths config all resolve on disk. Confirmation/preflight
     // may proceed; nothing is killed locally (#400).
@@ -2057,7 +2120,7 @@ describe("restart_comfyui — a Desktop reboot needs a supervisor that is actual
     return { fetchSpy };
   }
 
-  it("#1847: a free port under a live parent is a cold start in flight — does not spawn", async () => {
+  it.skipIf(TEST_IS_WIN)("#1847: a free port under a live parent is a cold start in flight — does not spawn", async () => {
     // The gate P1: parent PID alive, command line unreadable, Manager reboot
     // ACKed, Desktop relaunching, cold start outruns the budget, netstat shows
     // nothing on 8188 because the child is still importing. A free-port check
@@ -2078,7 +2141,7 @@ describe("restart_comfyui — a Desktop reboot needs a supervisor that is actual
     expect(result.message).toMatch(/was not spawned/i);
   });
 
-  it("#1847: after Manager stops and the parent is gone, relaunches the proven command", async () => {
+  it.skipIf(TEST_IS_WIN)("#1847: after Manager stops and the parent is gone, relaunches the proven command", async () => {
     desktopServer();
     unreadableParentIdentity();
     proveLaunchFilesOnDisk();
@@ -2098,7 +2161,7 @@ describe("restart_comfyui — a Desktop reboot needs a supervisor that is actual
     expect(result.message).toMatch(/parent process was gone/i);
   });
 
-  it("#1847: unreadable parent existence after the stop does not spawn", async () => {
+  it.skipIf(TEST_IS_WIN)("#1847: unreadable parent existence after the stop does not spawn", async () => {
     desktopServer();
     unreadableParentIdentity();
     proveLaunchFilesOnDisk();

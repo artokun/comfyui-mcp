@@ -105,7 +105,17 @@ beforeEach(() => {
   delete process.env.COMFYUI_MCP_ALLOW_GIT_WRITES;
 });
 
+const aliasLinks: string[] = [];
+
 afterEach(() => {
+  // Unlink alias junctions first — they live BESIDE the workspace, not inside it.
+  for (const link of aliasLinks.splice(0)) {
+    try {
+      rmSync(link, { force: true });
+    } catch {
+      /* best effort */
+    }
+  }
   try {
     rmSync(workspace, { recursive: true, force: true });
   } catch {
@@ -170,6 +180,47 @@ describe("resolveInJail", () => {
     }
     // Lexically "junction/loot.txt" is inside; realpath must catch the escape.
     expect(() => resolveInJail("junction/loot.txt")).toThrow(NodeDevError);
+  });
+
+  // The configured install reached through an ALIAS (macOS /var → /private/var, a
+  // junction, an 8.3 short name): the root has two spellings, and an absolute path
+  // written in the REAL one — what this module itself returns — used to fail the
+  // lexical check against the configured spelling.
+  describe("under an ALIASED install root", () => {
+    let realCustomNodes: string;
+    beforeEach(() => {
+      const alias = join(workspace, "..", `${workspace.split(/[\\/]/).pop()}-alias`);
+      symlinkSync(workspace, alias, "junction");
+      aliasLinks.push(alias);
+      config.comfyuiPath = alias;
+      realCustomNodes = realpathSync.native(customNodes);
+      mkdirSync(join(customNodes, "MyPack"), { recursive: true });
+    });
+
+    it("accepts the configured (alias) spelling and the real spelling alike", () => {
+      expect(resolveInJail(join(config.comfyuiPath!, "custom_nodes", "MyPack")).rel).toBe("MyPack");
+      const viaReal = resolveInJail(join(realCustomNodes, "MyPack", "nodes.py"));
+      expect(viaReal.rel).toBe(join("MyPack", "nodes.py"));
+      expect(viaReal.abs).toBe(join(realCustomNodes, "MyPack", "nodes.py"));
+    });
+
+    it("still rejects a real-spelled path outside custom_nodes, and traversal in either spelling", () => {
+      expect(() => resolveInJail(join(realCustomNodes, "..", "outside"))).toThrow(NodeDevError);
+      expect(() => resolveInJail(join(realpathSync.native(workspace), "secret.txt"))).toThrow(
+        NodeDevError,
+      );
+      expect(() => resolveInJail("MyPack/../../secret")).toThrow(NodeDevError);
+    });
+
+    it("still rejects a real-spelled path through a link that escapes (physical check)", () => {
+      const outside = join(workspace, "outside_target");
+      mkdirSync(outside, { recursive: true });
+      writeFileSync(join(outside, "loot.txt"), "secret");
+      symlinkSync(outside, join(customNodes, "escape"), "junction");
+      expect(() => resolveInJail(join(realCustomNodes, "escape", "loot.txt"))).toThrow(
+        /escapes custom_nodes/,
+      );
+    });
   });
 
   it("refuses when no local install is configured (remote mode, no saved default)", () => {
@@ -344,7 +395,7 @@ describe("searchNodePacks", () => {
     const res = searchNodePacks({ query: "hit", path: "Pack" }, deps);
     expect(res.engine).toBe("ripgrep");
     expect(res.matches).toEqual([{ file: "Pack/nodes.py", line: 3, text: "hit here" }]);
-    expect(rgCallsSpy[0].cwd).toBe(realpathSync(pack));
+    expect(rgCallsSpy[0].cwd).toBe(realpathSync.native(pack));
   });
 
   it.each([
@@ -863,7 +914,7 @@ describe("nodePackGit", () => {
       ]);
       // The pathspecs are handed to git with the PACK as cwd, so a pack-relative
       // spelling is what git itself resolves them against.
-      expect(gitCalls[0].cwd).toBe(realpathSync(join(customNodes, "Pack")));
+      expect(gitCalls[0].cwd).toBe(realpathSync.native(join(customNodes, "Pack")));
     });
 
     it("stages pack-relative paths on commit", () => {
@@ -1078,7 +1129,7 @@ describe("nodePackGit", () => {
       // written — which is what the refusal message tells the caller to do.
       mkPackFiles();
       const { deps, gitCalls } = makeDeps();
-      const abs = join(realpathSync(join(customNodes, "Pack")), "Pack", "gone.py");
+      const abs = join(realpathSync.native(join(customNodes, "Pack")), "Pack", "gone.py");
       nodePackGit({ pack: "Pack", action: "diff", paths: [abs] }, deps);
       expect(gitCalls[0].args).toEqual(["diff", "--", "Pack/gone.py"]);
       // …while the relative spelling of the same path is still corrected.

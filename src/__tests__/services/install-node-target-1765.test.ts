@@ -21,12 +21,15 @@
 // These tests drive the REAL `installCustomNode` — the call site, not a helper — through
 // the REAL resolvers against two REAL directories on disk.
 import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
 // ── Two REAL installs on one machine ───────────────────────────────────────────
-const SANDBOX = mkdtempSync(join(tmpdir(), "wrong-install-1765-"));
+// Canonical from the start: the clone lands under the realpath'd live root, so on a
+// host whose temp dir is an alias (macOS /var → /private/var) the expected targets
+// must be spelled the same way.
+const SANDBOX = realpathSync(mkdtempSync(join(tmpdir(), "wrong-install-1765-")));
 /** The install the session is CONNECTED to (the reporter's krea-2 on :8189). */
 const CONNECTED = join(SANDBOX, "krea-2");
 /** The install the saved default workspace names (the reporter's qwen-image-edit). */

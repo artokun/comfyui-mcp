@@ -223,6 +223,48 @@ describe("panel_install_node registry verification (#2180)", () => {
     }
   });
 
+  // The live scan base reached through an ALIAS (macOS /var → /private/var, a
+  // junctioned install root, an 8.3 short name). The indirection check compared the
+  // pack's realpath with the as-given spelling, so EVERY pack under an aliased base
+  // read as an indirection and the fallback could never corroborate anything.
+  it("corroborates a pack under an ALIASED scan base, but not one behind a junctioned custom_nodes", async () => {
+    const lab = mkdtempSync(join(tmpdir(), "cmcp-2180-alias-"));
+    try {
+      const real = join(lab, "real");
+      const alias = join(lab, "alias");
+      mkdirSync(join(real, "custom_nodes"), { recursive: true });
+      symlinkSync(real, alias, "junction");
+      const writePack = (base: string) => () => {
+        const pack = join(base, "custom_nodes", "comfyui-reactor");
+        mkdirSync(pack, { recursive: true });
+        writeFileSync(join(pack, ".tracking"), "{}\n");
+        writeFileSync(join(pack, "__init__.py"), "NODE_CLASS_MAPPINGS = {}\n");
+      };
+
+      state.scanBase = alias;
+      state.afterDispatch = writePack(alias);
+      const viaAlias = await install("comfyui-reactor");
+      expect(viaAlias.installed).toBe(true);
+      expect(viaAlias.verified).toBe(true);
+      expect(viaAlias.verification_evidence).toBe("new-on-disk-registry-pack");
+
+      // The control: custom_nodes ITSELF redirected to another tree is still an
+      // indirection, so the same freshly-populated pack is not promoted.
+      const other = join(lab, "other");
+      const junctioned = join(lab, "junctioned");
+      mkdirSync(join(other, "custom_nodes"), { recursive: true });
+      mkdirSync(junctioned, { recursive: true });
+      symlinkSync(join(other, "custom_nodes"), join(junctioned, "custom_nodes"), "junction");
+      state.scanBase = junctioned;
+      state.afterDispatch = writePack(junctioned);
+      const viaJunction = await install("comfyui-reactor");
+      expect(viaJunction.installed).toBe(false);
+      expect(viaJunction.verification_evidence).toBeUndefined();
+    } finally {
+      rmSync(lab, { recursive: true, force: true });
+    }
+  });
+
   it("keeps installed:false while the settled queue is still processing", async () => {
     const root = mkdtempSync(join(tmpdir(), "cmcp-2180-"));
     try {

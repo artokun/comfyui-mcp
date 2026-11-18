@@ -8,10 +8,23 @@ on:
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    # `matrix.os` is the check label branch protection requires ("Build (windows-latest)"
+    # etc.); `matrix.runner`, when set, is the image the leg actually runs on.
+    runs-on: ${{ matrix.runner || matrix.os }}
     strategy:
+      # Let every OS finish and report — a red leg still fails the PR.
+      fail-fast: false
       matrix:
         os: [ubuntu-latest, windows-latest, macos-latest]
+        include:
+          # windows-latest is now Windows Server 2025 + Visual Studio 2026 (18.x). Node 22's
+          # bundled npm 10.9.x ships node-gyp 11.5, which only recognises VS 2017–2022, and
+          # `npm ci` runs better-sqlite3's implicit `node-gyp rebuild` (a no-op target when
+          # its prebuild exists, but node-gyp must still find a toolchain to configure it).
+          # windows-2022 carries VS 2022 17.x. Revisit when CI moves to an npm whose
+          # node-gyp is >= 12.1 (first release with VS 2026 support), or windows-2022 retires.
+          - os: windows-latest
+            runner: windows-2022
     name: Build (${{ matrix.os }})
     steps:
       # fetch-depth: 0 because `npm test` runs check:blog-stale, which asks git WHEN a pack
@@ -42,8 +55,7 @@ jobs:
       # model to call something that now 404s, which the model can't diagnose and
       # the user experiences as a broken feature. Deliberately unconditional so it
       # runs on every matrix leg: it is pure text analysis over `git ls-files`, and
-      # a path-separator or encoding difference is worth catching. (That only
-      # becomes real once the matrix actually varies the OS — comfyui-mcp-bi9.)
+      # a path-separator or encoding difference is worth catching.
       - run: npm run check:vocabulary
 
       # #796 — the "could not determine" -> "determined not" collapse. A caught
@@ -74,9 +86,7 @@ jobs:
       # this check was added (five pages had drifted behind description edits),
       # which is exactly why it exists.
       # Ubuntu only: generation is OS-independent, and a CRLF checkout on Windows
-      # would produce a spurious whole-file diff. (Note: every matrix leg is
-      # currently Ubuntu anyway — see comfyui-mcp-bi9 — so this condition is
-      # correct in intent and a no-op in effect until that is fixed.)
+      # would produce a spurious whole-file diff.
       - name: Tool Reference is current (docs:gen must be a no-op)
         if: matrix.os == 'ubuntu-latest'
         run: |
@@ -110,3 +120,20 @@ jobs:
       # (e.g. a files allowlist dropping a file the runtime needs) that unit
       # tests can't see.
       - run: node scripts/smoke-install.mjs
+
+  minimum-node:
+    # Node-API 10 first ships in Node 22.14. Earlier 22.x releases can crash
+    # loading the published SQLite prebuild, even when package engines pass.
+    name: Minimum Node (22.14.0)
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '22.14.0'
+          cache: npm
+      # Native packages ship prebuilds; build our package explicitly below.
+      - run: npm ci --ignore-scripts --no-audit --no-fund
+      - run: npm run build
+      - run: node scripts/smoke-native-deps.mjs
+      - run: node dist/index.js --help

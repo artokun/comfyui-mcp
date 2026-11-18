@@ -25,6 +25,9 @@
 
 import { beforeEach, describe, expect, it } from "vitest";
 import {
+  inheritedMcpServers,
+  PANEL_OWN_MCP_SERVERS,
+  panelOwnMcpServers,
   degradedMcpNotice,
   emptyToolsMcpNotice,
   resetMcpToolNamespacingLatchForTests,
@@ -500,5 +503,22 @@ describe("the connected-but-empty notice (#2742)", () => {
 
   it("does not claim to know why", () => {
     expect(emptyToolsMcpNotice(["panel"])).toContain("observation only");
+  });
+});
+
+describe("panel-owned vs inherited MCP servers", () => {
+  it("treats exactly comfyui and panel as the panel's own", () => {
+    expect([...PANEL_OWN_MCP_SERVERS].sort()).toEqual(["comfyui", "panel"]);
+  });
+
+  it("splits a session's server set without losing or duplicating a name", () => {
+    const names = ["comfyui", "poly-ops", "panel", "starforged"];
+    expect(panelOwnMcpServers(names)).toEqual(["comfyui", "panel"]);
+    expect(inheritedMcpServers(names)).toEqual(["poly-ops", "starforged"]);
+  });
+
+  it("returns nothing for an empty set", () => {
+    expect(panelOwnMcpServers([])).toEqual([]);
+    expect(inheritedMcpServers([])).toEqual([]);
   });
 });

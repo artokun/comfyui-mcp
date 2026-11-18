@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, sep } from "node:path";
@@ -46,7 +46,11 @@ import {
 import { configureWorkspace, resetWorkspaceConfig } from "../../services/workspace-env.js";
 
 async function tmpDir(): Promise<string> {
-  return mkdtemp(join(tmpdir(), "comfyui-extra-paths-"));
+  // Canonical from the start: the live root is realpath'd (ComfyUI anchors on
+  // realpath(__file__)), so on a host whose temp dir is an alias (macOS /var →
+  // /private/var) every expected path must be spelled the same way. Alias handling
+  // itself is covered by the tests that build an explicit symlink/junction/script.
+  return realpathSync(await mkdtemp(join(tmpdir(), "comfyui-extra-paths-")));
 }
 
 /** Can this machine create a file symlink? (Windows needs privileges/Developer Mode.) */

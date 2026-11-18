@@ -24,6 +24,11 @@ class FakeChild extends EventEmitter {
 const mockConfig = vi.hoisted(() => ({
   resolvedPort: 8188,
   comfyuiPath: undefined as string | undefined,
+  /** Mutable so a test can retarget mid-restart, as a second agent would. */
+  baseUrl: "http://127.0.0.1:8188",
+  remoteMode: false,
+  /** Mutable so an A→B→A retarget (same base, new generation) can be modelled. */
+  generation: 0,
 }));
 const mockExecSync = vi.hoisted(() => vi.fn());
 const mockSpawn = vi.hoisted(() => vi.fn());
@@ -37,12 +42,12 @@ vi.mock("node:os", () => ({ platform: () => "linux" }));
 
 vi.mock("../../config.js", () => ({
   config: mockConfig,
-  getComfyUIBaseUrl: () => "http://127.0.0.1:8188",
+  getComfyUIBaseUrl: () => mockConfig.baseUrl,
   getComfyUIAuthHeaders: () => ({}),
   // #848 instance fence — a stable target here; the retarget cases live in
   // desktop-restart.test.ts and panel-restart-health-readiness.test.ts.
-  getComfyuiTargetGeneration: () => 0,
-  isRemoteMode: () => false,
+  getComfyuiTargetGeneration: () => mockConfig.generation,
+  isRemoteMode: () => mockConfig.remoteMode,
 }));
 
 vi.mock("node:child_process", () => ({
@@ -104,7 +109,9 @@ vi.mock("../../services/instance-witness.js", async () => ({
 
 import {
   __processControlTestHooks,
+  describeLifecycleStatus,
   restartComfyUI,
+  startComfyUI,
 } from "../../services/process-control.js";
 
 // POSIX-DIALECT LITERALS, deliberately not `path.join`/`resolve`. The platform is
@@ -168,6 +175,9 @@ beforeEach(() => {
   process.env.COMFYUI_PORT_FREE_TIMEOUT_S = "1";
   mockConfig.resolvedPort = 8188;
   mockConfig.comfyuiPath = BASE;
+  mockConfig.baseUrl = "http://127.0.0.1:8188";
+  mockConfig.remoteMode = false;
+  mockConfig.generation = 0;
   mockFindComfyuiPython.mockReturnValue(PYTHON);
   mockExistsSync.mockImplementation((p: string) => {
     const s = String(p);
@@ -705,4 +715,396 @@ describe("restart_comfyui on POSIX — port release via lsof (#776)", () => {
 
     killSpy.mockRestore();
   }, 30_000);
+});
+
+// Moved from restart-target-anchor.test.ts (#2947). That file is pinned to win32,
+// where a local kill+relaunch now refuses before the stop; the post-stop window
+// these cover exists only off Windows, so they run here on the POSIX branch.
+describe("a local restart never abandons the instance it stopped", () => {
+  /** A live local server on 8188 that goes quiet once killed. */
+  const liveThenFree = (pid = 4321): { killed: () => boolean } => {
+    let killed = false;
+    mockExecSync.mockImplementation((cmd: string) => {
+      if (/kill/i.test(cmd)) {
+        killed = true;
+        return "";
+      }
+      if (/lsof/i.test(cmd)) {
+        if (killed) throw lsofNoMatches();
+        return `p${pid}\nn127.0.0.1:8188\n`;
+      }
+      return "";
+    });
+    return { killed: () => killed };
+  };
+
+  it("reports the stop honestly instead of throwing when another agent retargets to REMOTE mid-stop", async () => {
+    // The P0 in full: the stop commits, then the relaunch used to hit the
+    // remote-mode refusal and throw — unwinding past every report and leaving
+    // the caller with an exception where the fact "your server is down" should
+    // have been. This drives `restartComfyUI`, not the unit below it, so it
+    // fails if the refusal is reinstated OR if the post-stop catch is removed
+    // and something else throws past the same point.
+    const port = liveThenFree();
+    // The retarget lands during the post-stop window, exactly as a second agent
+    // on this rig would do it.
+    mockSpawn.mockImplementation(() => {
+      mockConfig.remoteMode = true;
+      mockConfig.baseUrl = "http://beta.example:8188";
+      throw new Error("relaunch could not be spawned");
+    });
+    // Nothing is listening after the failed relaunch — the ordinary case.
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => {
+        throw new Error("ECONNREFUSED");
+      }),
+    );
+    const killSpy = vi.spyOn(process, "kill").mockImplementation(() => true);
+
+    // The whole assertion is that this RESOLVES. A rejection here is the bug.
+    const res = await restartComfyUI();
+
+    expect(port.killed()).toBe(true); // the stop really did happen
+    expect(res.stopped).toBe(true); // ...and the report says so
+    expect(res.started).toBe(false);
+    // The relaunch WAS attempted and threw partway, so what we cannot say is
+    // whether it took effect. "not-attempted" would be a different claim, and a
+    // false one.
+    expect(res.startup).toBe("unconfirmed");
+    expect(res.message).toMatch(/relaunch failed partway/i);
+    // NOT a bare "ComfyUI is NOT running": nothing answered when asked, which is
+    // one observation, and this branch exists to stop exactly that becoming a
+    // verdict. The wording must keep the two apart.
+    expect(res.message).toMatch(/most likely down/i);
+    expect(res.message).toMatch(/not a settled fact/i);
+    // The one thing it must never say is the remote-mode refusal, which would be
+    // a bucket narrated as the cause of a dead local server.
+    expect(res.message).not.toMatch(/targeting a remote/i);
+
+    killSpy.mockRestore();
+  }, 20_000);
+
+  it("does NOT say nothing answered when the endpoint returns 503 — not healthy is not not-there", async () => {
+    // `waitForApiReady` counts a 502/503/504 as not-ready, which is right for
+    // readiness and wrong as evidence of absence. Reading `ready:false` as
+    // "nothing is listening" is the same fold one level down: a proxy answering
+    // 503 in front of a starting server would be reported as a dead machine.
+    liveThenFree();
+    mockSpawn.mockImplementation(() => {
+      throw new Error("relaunch could not be spawned");
+    });
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => new Response("service unavailable", { status: 503 })),
+    );
+    const killSpy = vi.spyOn(process, "kill").mockImplementation(() => true);
+
+    const res = await restartComfyUI();
+
+    expect(res.startup).toBe("unconfirmed");
+    expect(res.message).not.toMatch(/nothing answered/i);
+    // It may still say "most likely down" — that is a hedge, not a claim — but it
+    // must carry the caveat that something could be listening.
+    expect(res.message).toMatch(/not "?not there"?|may well be listening/i);
+
+    killSpy.mockRestore();
+  }, 20_000);
+
+  it("does NOT report down when something IS answering after a failed relaunch", async () => {
+    // The other half of the same finding: a supervisor may have brought the
+    // instance back while we were unwinding, or the throw may have landed after
+    // a spawn. Reporting "down" over a live server is the unverified negative in
+    // its most misleading form — the user goes looking for a dead process.
+    liveThenFree();
+    mockSpawn.mockImplementation(() => {
+      throw new Error("relaunch could not be spawned");
+    });
+    // The post-failure probe finds a live server.
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(
+        async () =>
+          new Response(JSON.stringify({ system: {} }), {
+            status: 200,
+            headers: { "content-type": "application/json" },
+          }),
+      ),
+    );
+    const killSpy = vi.spyOn(process, "kill").mockImplementation(() => true);
+
+    const res = await restartComfyUI();
+
+    expect(res.startup).toBe("unconfirmed");
+    expect(res.message).toMatch(/IS answering/i);
+    expect(res.message).not.toMatch(/most likely down/i);
+    // And it must not claim that server either — this call did not start it.
+    expect(res.started).toBe(false);
+    expect(res.message).toMatch(/cannot claim that server as its own/i);
+
+    killSpy.mockRestore();
+  }, 20_000);
+});
+
+// #2948 off Windows: action:"status" reports the POSIX routes, and is just as
+// read-only — no spawn, no kill, no Manager reboot, the saved record untouched.
+describe('restart_comfyui (action:"status") on POSIX (#2948)', () => {
+  function expectNoEffects(fetchSpy?: ReturnType<typeof vi.fn>): void {
+    expect(mockSpawn).not.toHaveBeenCalled();
+    expect(
+      mockExecSync.mock.calls.some(([c]) => /\bkill\b|pkill|taskkill/i.test(String(c))),
+    ).toBe(false);
+    for (const [input, init] of (fetchSpy?.mock.calls ?? []) as [unknown, RequestInit?][]) {
+      expect(new URL(String(input)).pathname).toBe("/system_stats");
+      expect((init?.method ?? "GET").toUpperCase()).toBe("GET");
+    }
+  }
+
+  it("a validated local install: restart is kill+relaunch, and a stop is recoverable with start", async () => {
+    mockExecSync.mockImplementation((cmd: string) =>
+      /lsof/i.test(cmd) ? "p4321\nn127.0.0.1:8188\n" : "",
+    );
+    const fetchSpy = vi.fn(async () => ({ ok: true }) as Response);
+    vi.stubGlobal("fetch", fetchSpy);
+    const killSpy = vi.spyOn(process, "kill").mockImplementation(() => true);
+
+    const status = await describeLifecycleStatus();
+
+    expect(status.windows_direct_launch_blocked).toBe(false);
+    expect(status.instance).toMatchObject({ identified: "yes", pid: 4321 });
+    expect(status.start.launches).toBe("no"); // already running: start is a no-op
+    expect(status.stop).toMatchObject({ allowed: "yes", recoverable_by_start: "yes" });
+    expect(status.restart).toMatchObject({
+      route: "kill-relaunch",
+      will_attempt: "yes",
+      evidence: "validated-command",
+    });
+    expectNoEffects(fetchSpy);
+    // Signal 0 is an existence probe; nothing may be SENT a real signal.
+    expect(killSpy.mock.calls.every(([, sig]) => sig === 0)).toBe(true);
+    expect(__processControlTestHooks.getLastProcessInfo()).toBeNull();
+    killSpy.mockRestore();
+  });
+
+  it("a remote target: Manager reboot with UNVERIFIED recovery, local actions unavailable, nothing contacted", async () => {
+    mockConfig.remoteMode = true;
+    mockConfig.baseUrl = "http://remote.example:8188";
+    const fetchSpy = vi.fn(async () => ({ ok: true }) as Response);
+    vi.stubGlobal("fetch", fetchSpy);
+
+    const status = await describeLifecycleStatus();
+
+    expect(status.target.remote).toBe(true);
+    expect(status.restart).toMatchObject({
+      route: "comfyui-manager-remote",
+      will_attempt: "yes",
+      evidence: "unverified-remote",
+    });
+    expect(status.start.launches).toBe("no");
+    expect(status.stop).toMatchObject({ allowed: "no", recoverable_by_start: "not-applicable" });
+    expect(status.instance.identified).toBe("unknown");
+    expect(fetchSpy).not.toHaveBeenCalled();
+    expect(mockGetSystemStats).not.toHaveBeenCalled();
+    expectNoEffects();
+  });
+
+  it("nothing running but a saved launch record that validates: start would launch it, and the record is unchanged", async () => {
+    mockGetSystemStats.mockRejectedValue(new Error("fetch failed"));
+    mockExecSync.mockImplementation((cmd: string) => {
+      if (/lsof/i.test(cmd)) throw lsofNoMatches();
+      if (/pgrep/i.test(cmd)) throw Object.assign(new Error("no match"), { status: 1 });
+      return "";
+    });
+    __processControlTestHooks.setLastProcessInfo({
+      pid: 4321,
+      port: 8188,
+      argv: ARGV,
+      isDesktopApp: false,
+    });
+    const saved = __processControlTestHooks.getLastProcessInfo();
+    const snapshot = JSON.stringify(saved);
+
+    const status = await describeLifecycleStatus();
+
+    expect(status.instance.identified).toBe("no");
+    expect(status.start.launches).toBe("yes");
+    expect(status.restart.will_attempt).toBe("no");
+    expectNoEffects();
+    expect(__processControlTestHooks.getLastProcessInfo()).toBe(saved);
+    expect(JSON.stringify(__processControlTestHooks.getLastProcessInfo())).toBe(snapshot);
+  });
+});
+
+// Review P2 on 06b6528e: status must reach the SAME start decision startComfyUI
+// reaches — fence first, then the port owner — and must never mix two targets.
+// Each case pairs the status answer with the actual (mocked) start decision.
+describe('action:"status" start prediction agrees with startComfyUI (#2948 review)', () => {
+  const validRecord = {
+    pid: 4321,
+    port: 8188,
+    argv: ARGV,
+    isDesktopApp: false,
+  };
+
+  /** Nothing answers /system_stats; lsof reports what `port` says. */
+  function serverUnreachable(port: "free" | "owned" | "unknown"): void {
+    mockGetSystemStats.mockRejectedValue(new Error("fetch failed"));
+    mockExecSync.mockImplementation((cmd: string) => {
+      if (/lsof/i.test(cmd)) {
+        if (port === "owned") return "p4321\nn127.0.0.1:8188\n";
+        if (port === "unknown") throw lsofMissing();
+        throw lsofNoMatches();
+      }
+      if (/pgrep/i.test(cmd)) throw Object.assign(new Error("no match"), { status: 1 });
+      return "";
+    });
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => {
+        throw new Error("ECONNREFUSED");
+      }),
+    );
+  }
+
+  it("a saved record with NO target fence: status says start refuses, start refuses, record untouched by status", async () => {
+    serverUnreachable("free");
+    const record = { ...validRecord };
+    __processControlTestHooks.setRawLastProcessInfo(record);
+
+    const status = await describeLifecycleStatus();
+
+    expect(status.start.launches).toBe("no");
+    expect(status.start.reason).toMatch(/no target identity/);
+    expect(__processControlTestHooks.getLastProcessInfo()).toBe(record);
+    expect(mockSpawn).not.toHaveBeenCalled();
+
+    const started = await startComfyUI();
+    expect(started.started).toBe(false);
+    expect(started.message).toMatch(/no target identity/);
+    expect(mockSpawn).not.toHaveBeenCalled();
+  });
+
+  it("a saved record for an OLDER target: status says start refuses, start refuses", async () => {
+    serverUnreachable("free");
+    const record = {
+      ...validRecord,
+      targetFence: { baseUrl: "http://old.example:8188", generation: 0, comfyuiPath: BASE },
+    };
+    __processControlTestHooks.setRawLastProcessInfo(record);
+
+    const status = await describeLifecycleStatus();
+
+    expect(status.start.launches).toBe("no");
+    expect(status.start.reason).toMatch(/older ComfyUI target/);
+    expect(__processControlTestHooks.getLastProcessInfo()).toBe(record);
+
+    const started = await startComfyUI();
+    expect(started.started).toBe(false);
+    expect(started.message).toMatch(/older ComfyUI target/);
+    expect(mockSpawn).not.toHaveBeenCalled();
+  });
+
+  it("an OCCUPIED port while /system_stats is unavailable: status says no launch, start reports already running", async () => {
+    serverUnreachable("owned");
+    __processControlTestHooks.setLastProcessInfo(validRecord);
+
+    const status = await describeLifecycleStatus();
+
+    expect(status.start.launches).toBe("no");
+    expect(status.start.reason).toMatch(/held by PID 4321/);
+
+    const started = await startComfyUI();
+    expect(started.started).toBe(false);
+    expect(started.message).toMatch(/already running on port 8188 \(PID 4321\)/);
+    expect(mockSpawn).not.toHaveBeenCalled();
+  });
+
+  it("an OCCUPIED port whose holder cannot be tied to the answering server (ambiguous PID): no false yes", async () => {
+    // /system_stats answers and lsof names PID 4321, but neither end of the
+    // request can stamp that process and no witness is available, so the instance
+    // is refused as ambiguous — acquireProcessInfo resolves nothing. Only the port
+    // probe knows the port is taken, and that is what start decides on.
+    mockGetSystemStats.mockResolvedValue({ system: { argv: ARGV } });
+    mockExecSync.mockImplementation((cmd: string) =>
+      /lsof/i.test(cmd) ? "p4321\nn127.0.0.1:8188\n" : "",
+    );
+    __processControlTestHooks.setProcessIdentityResolver(() => undefined);
+    __processControlTestHooks.setLastProcessInfo(validRecord);
+    vi.stubGlobal("fetch", vi.fn(async () => ({ ok: true }) as Response));
+
+    const status = await describeLifecycleStatus();
+
+    expect(status.instance.identified).toBe("unknown");
+    expect(status.start.launches).toBe("no");
+    expect(status.start.reason).toMatch(/held by PID 4321/);
+
+    const started = await startComfyUI();
+    expect(started.started).toBe(false);
+    expect(started.message).toMatch(/already running on port 8188 \(PID 4321\)/);
+    expect(mockSpawn).not.toHaveBeenCalled();
+  });
+
+  it("an UNDETERMINABLE port owner is not promoted to yes — start would still try, and status says exactly that", async () => {
+    serverUnreachable("unknown");
+    __processControlTestHooks.setLastProcessInfo(validRecord);
+
+    const status = await describeLifecycleStatus();
+
+    expect(status.start.launches).toBe("unknown");
+    expect(status.start.reason).toMatch(/could not be determined/);
+    expect(status.start.reason).toMatch(/would still try/);
+    expect(mockSpawn).not.toHaveBeenCalled();
+  });
+
+  it("KEEPS the positive case: free port + a current, disk-valid record → yes, and start does launch it", async () => {
+    serverUnreachable("free");
+    __processControlTestHooks.setLastProcessInfo(validRecord);
+
+    const status = await describeLifecycleStatus();
+    expect(status.start.launches).toBe("yes");
+    expect(mockSpawn).not.toHaveBeenCalled();
+
+    await startComfyUI();
+    expect(mockSpawn).toHaveBeenCalledTimes(1); // the MOCKED spawn: nothing real runs
+    expect((mockSpawn.mock.calls[0] as [string, string[]])[1][0]).toBe(MAIN);
+  }, 20_000);
+
+  it.each([
+    ["the base URL moves", () => { mockConfig.baseUrl = "http://127.0.0.1:9999"; }],
+    // A→B→A leaves the base equal; only the generation shows it.
+    ["only the generation moves (A→B→A)", () => { mockConfig.generation += 1; }],
+  ])("a target change DURING collection (%s) returns unknown + retry, never a mixed answer", async (_label, retarget) => {
+    mockExecSync.mockImplementation((cmd: string) =>
+      /lsof/i.test(cmd) ? "p4321\nn127.0.0.1:8188\n" : "",
+    );
+    mockGetSystemStats.mockImplementation(async () => {
+      retarget();
+      return { system: { argv: ARGV } };
+    });
+    const fetchSpy = vi.fn(async () => ({ ok: true }) as Response);
+    vi.stubGlobal("fetch", fetchSpy);
+    __processControlTestHooks.setLastProcessInfo(validRecord);
+    const saved = __processControlTestHooks.getLastProcessInfo();
+    const killSpy = vi.spyOn(process, "kill").mockImplementation(() => true);
+
+    const status = await describeLifecycleStatus();
+
+    expect(status.target_stable).toBe(false);
+    expect(status.target.base_url).toBe("http://127.0.0.1:8188"); // the target it began for
+    expect(status.instance.identified).toBe("unknown");
+    expect(status.start.launches).toBe("unknown");
+    expect(status.stop).toMatchObject({ allowed: "unknown", recoverable_by_start: "unknown" });
+    expect(status.restart).toMatchObject({ will_attempt: "unknown", evidence: "none" });
+    expect(status.summary).toMatch(/Retry/);
+    expect(mockSpawn).not.toHaveBeenCalled();
+    expect(killSpy.mock.calls.every(([, sig]) => sig === 0)).toBe(true);
+    expect(__processControlTestHooks.getLastProcessInfo()).toBe(saved);
+    killSpy.mockRestore();
+  });
+
+  it("a stable target reports target_stable:true", async () => {
+    serverUnreachable("free");
+    const status = await describeLifecycleStatus();
+    expect(status.target_stable).toBe(true);
+  });
 });

@@ -92,23 +92,26 @@ function viewing() {
   };
 }
 
-function ordinaryNode(id: unknown) {
+function ordinaryNode(id: unknown, text: unknown = "old") {
   return {
     id,
     type: "CLIPTextEncode",
     is_subgraph: false,
     node_identity: `node:${String(id)}`,
-    widgets: { text: "old" },
+    widgets: { text },
   };
 }
 
-function replyQuery(msg: Record<string, unknown>): Record<string, unknown> {
+function replyQuery(
+  msg: Record<string, unknown>,
+  liveText: ReadonlyMap<string, unknown>,
+): Record<string, unknown> {
   const ids = Array.isArray(msg.ids) ? msg.ids : [msg.node_id ?? 1];
   const id = ids[0];
   return {
     viewing: viewing(),
     truncated: false,
-    nodes: [ordinaryNode(id)],
+    nodes: [ordinaryNode(id, liveText.get(String(id)) ?? "old")],
     node_count: 1,
   };
 }
@@ -128,6 +131,9 @@ function setWidgetResult(msg: Record<string, unknown>): Record<string, unknown> 
  *  Reads/preflight commands reply at once so promotion probes cannot stall the batch. */
 function attachCoalescingPanel(sock: WebSocket): { applied: Array<Record<string, unknown>> } {
   const applied: Array<Record<string, unknown>> = [];
+  // Applied on receive, so a read (including panel_set_widget's own post-write
+  // read-back) sees the written value even before the coalesced ACK.
+  const liveText = new Map<string, unknown>();
   const pendingWrites: Array<Record<string, unknown>> = [];
   const flushWrites = () => {
     for (const msg of pendingWrites.splice(0)) {
@@ -140,13 +146,14 @@ function attachCoalescingPanel(sock: WebSocket): { applied: Array<Record<string,
     if (typeof msg.rid !== "string" || typeof msg.cmd !== "string") return;
     if (msg.cmd === "graph_set_widget") {
       applied.push({ node_id: msg.node_id, widget: msg.widget, value: msg.value });
+      liveText.set(String(msg.node_id), msg.value);
       pendingWrites.push(msg);
       if (pendingWrites.length >= WRITES.length) flushWrites();
       return;
     }
     const result =
       msg.cmd === "graph_query"
-        ? replyQuery(msg)
+        ? replyQuery(msg, liveText)
         : msg.cmd === "graph_get_subgraph"
           ? {
               viewing: viewing(),
@@ -209,8 +216,13 @@ describe("concurrent panel_set_widget settlement (#2559)", () => {
       expect(res.isError).not.toBe(true);
       expect(textOf(res)).not.toMatch(/did not reply/);
       expect(textOf(res)).not.toMatch(/did not settle/);
-      const payload = JSON.parse(textOf(res)) as { set?: { value?: unknown } };
+      const payload = JSON.parse(textOf(res)) as {
+        set?: { value?: unknown };
+        post_write_readback?: { status?: unknown };
+      };
       expect(payload.set?.value).toBeDefined();
+      // #2933 — the fenced read-back runs over the real bridge and sees each value.
+      expect(payload.post_write_readback?.status).toBe("matched");
     }
     sock.close();
   });

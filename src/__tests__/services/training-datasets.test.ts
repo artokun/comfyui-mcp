@@ -1,5 +1,14 @@
 import { describe, expect, it, beforeAll, afterAll, vi } from "vitest";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  symlinkSync,
+  utimesSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -94,6 +103,52 @@ describe('readTrainingFile (train_prepare_dataset action:"file")', () => {
     const big = join(bigDir, "big.png");
     writeFileSync(big, Buffer.alloc(2 * 1024 * 1024 + 1));
     expect(() => readTrainingFile(big)).toThrow(/too large/);
+  });
+});
+
+// The training root reached through an ALIAS (macOS /var → /private/var, a
+// symlinked home, a Windows junction). The root realpaths; a missing child does
+// not — and it used to be compared lexically against the root's real spelling,
+// so an ordinary unknown name was reported as an escape.
+describe("an ALIASED training root", () => {
+  let realRoot: string;
+  let aliasRoot: string;
+  let outside: string;
+  beforeAll(() => {
+    realRoot = join(root, "alias-lab", "real");
+    aliasRoot = join(root, "alias-lab", "alias");
+    outside = join(root, "alias-lab", "outside");
+    mkdirSync(join(realRoot, "datasets", "present"), { recursive: true });
+    writeFileSync(join(realRoot, "datasets", "present", "img_00001.png"), "fakepng");
+    mkdirSync(join(outside, "loot"), { recursive: true });
+    writeFileSync(join(outside, "loot", "img_00001.png"), "secret");
+    symlinkSync(realRoot, aliasRoot, "junction");
+    symlinkSync(join(outside, "loot"), join(realRoot, "datasets", "linked-out"), "junction");
+    process.env.COMFYUI_MCP_TRAINING_DIR = aliasRoot;
+  });
+  afterAll(() => {
+    process.env.COMFYUI_MCP_TRAINING_DIR = root;
+  });
+
+  it("an unknown name is 'no dataset', not an escape", () => {
+    expect(() => getDataset("no-such-set")).toThrow(/no dataset/);
+  });
+
+  it("a present dataset still resolves through the alias", () => {
+    expect(getDataset("present").items).toEqual([{ file: "img_00001.png", caption: null }]);
+  });
+
+  it("a dataset dir that LINKS outside the root is still an escape", () => {
+    expect(() => getDataset("linked-out")).toThrow(/escapes the datasets root/);
+    expect(() => readTrainingFile(join(aliasRoot, "datasets", "linked-out", "img_00001.png"))).toThrow(
+      /escapes/,
+    );
+  });
+
+  it("a missing file under the alias is an honest not-found, not an escape", () => {
+    expect(() => readTrainingFile(join(aliasRoot, "datasets", "present", "gone.png"))).toThrow(
+      /ENOENT/,
+    );
   });
 });
 

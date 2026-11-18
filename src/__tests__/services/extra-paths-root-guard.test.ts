@@ -14,7 +14,7 @@
  * root's stat is driven from a queue.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { existsSync } from "node:fs";
+import { existsSync, realpathSync } from "node:fs";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -112,7 +112,12 @@ import { configureWorkspace, resetWorkspaceConfig } from "../../services/workspa
 let dirs: string[] = [];
 
 async function trackTmp(): Promise<string> {
-  const dir = await mkdtemp(join(tmpdir(), "comfyui-root-guard-"));
+  // Canonical from the start. The scripted realpathSync answers below are spelled
+  // from these dirs while every UNscripted lookup goes to the real fs; on a host
+  // whose temp dir is an alias (macOS /var → /private/var) the two halves of that
+  // fake world disagreed, and the stat script keyed on the lexical root was never
+  // consumed. The aliasing each test means to model is the scripted one.
+  const dir = realpathSync(await mkdtemp(join(tmpdir(), "comfyui-root-guard-")));
   dirs.push(dir);
   return dir;
 }

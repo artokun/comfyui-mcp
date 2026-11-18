@@ -1,12 +1,6 @@
-// Unit tests for the Antigravity CLI backend (antigravity-backend.ts, issue #262).
-//
-// We cannot run the real `agy` here, so `node:child_process` is mocked: spawn()
-// returns an in-process fake child whose scripted stdout/stderr/exit behavior is
-// set per test. This exercises the real AntigravityBackend end-to-end: executable
-// resolution (env override), spawn argv shaping (-p / -c / --model / skip-
-// permissions), the stdout→delta→assistant→result event mapping, the terminal-
-// result invariant on failures, interrupt, `agy models` parsing, and the
-// merge-safe .agents/mcp_config.json writer.
+// Unit tests for the Antigravity ACP backend. Every child process is mocked.
+// The fake server exercises request framing, persistent sessions, streaming,
+// cancellation, model selection, attachments, and injected MCP config paths.
 
 import { mkdtempSync, readFileSync, writeFileSync, mkdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -21,6 +15,10 @@ const hoisted = vi.hoisted(() => ({
   // Scripted behavior for the NEXT spawned child(ren), consumed in order; the
   // last entry repeats.
   script: [] as Array<{ stdout?: string[]; stderr?: string; exit?: number | null; hang?: boolean }>,
+  // ACP: the fake child answers JSON-RPC requests through this router (null = a
+  // minimal default server: initialize + session/new + a plain prompt).
+  acp: null as null | ((msg: any) => { result?: unknown; error?: unknown; notifications?: any[]; hang?: boolean }),
+  acpMessages: [] as any[],
 }));
 
 vi.mock("node:child_process", async (importOriginal) => {
@@ -37,7 +35,39 @@ vi.mock("node:child_process", async (importOriginal) => {
     const stderr = new PassThrough();
     proc.stdout = stdout;
     proc.stderr = stderr;
-    proc.stdin = null;
+    // ACP writes JSON-RPC frames to stdin; the fake routes each one to the
+    // per-test router and writes the answers back on stdout.
+    const stdin = new PassThrough();
+    proc.stdin = stdin;
+    let buffer = "";
+    stdin.on("data", (chunk: Buffer | string) => {
+      buffer += chunk.toString();
+      let nl: number;
+      while ((nl = buffer.indexOf("\n")) >= 0) {
+        const line = buffer.slice(0, nl);
+        buffer = buffer.slice(nl + 1);
+        if (!line.trim()) continue;
+        let msg: any;
+        try {
+          msg = JSON.parse(line);
+        } catch {
+          continue;
+        }
+        hoisted.acpMessages.push(msg);
+        const router = hoisted.acp ?? acpDefault();
+        const out = router(msg) ?? {};
+        for (const n of out.notifications ?? []) {
+          stdout.write(JSON.stringify({ jsonrpc: "2.0", ...n }) + "\n");
+        }
+        if (out.hang) continue;
+        if (out.hang) continue;
+        if (out.error !== undefined) {
+          stdout.write(JSON.stringify({ jsonrpc: "2.0", id: msg.id, error: out.error }) + "\n");
+        } else if (msg.id !== undefined) {
+          stdout.write(JSON.stringify({ jsonrpc: "2.0", id: msg.id, result: out.result ?? {} }) + "\n");
+        }
+      }
+    });
     proc.kill = () => {
       if (proc.exitCode === null) {
         proc.exitCode = 1;
@@ -105,6 +135,47 @@ async function* channelOf(turns: NeutralTurn[]): AsyncGenerator<NeutralTurn> {
   for (const t of turns) yield t;
 }
 
+/** A minimal ACP server: initialize + session/new + one streamed reply. */
+const ACP_SESSION = "11111111-2222-4333-8444-555555555555";
+function acpDefault(opts: { reply?: string; sessionId?: string } = {}) {
+  const sessionId = opts.sessionId ?? ACP_SESSION;
+  const reply = opts.reply ?? "ok";
+  return (msg: any): { result?: unknown; error?: unknown; notifications?: any[]; hang?: boolean } => {
+    switch (msg.method) {
+      case "initialize":
+        return {
+          result: {
+            protocolVersion: 1,
+            agentCapabilities: {
+              loadSession: true,
+              promptCapabilities: { image: true, audio: false, embeddedContext: true },
+            },
+            agentInfo: { name: "Antigravity ACP Server", version: "test" },
+          },
+        };
+      case "session/new":
+        return { result: { sessionId, models: { currentModelId: "gemini-3.8-flash-medium" } } };
+      case "session/load":
+        return { result: {} };
+      case "session/prompt":
+        return {
+          notifications: [
+            {
+              method: "session/update",
+              params: {
+                sessionId,
+                update: { sessionUpdate: "agent_message_chunk", content: { type: "text", text: reply } },
+              },
+            },
+          ],
+          result: { stopReason: "end_turn" },
+        };
+      default:
+        return { result: {} };
+    }
+  };
+}
+
 async function collect(gen: AsyncIterable<AgentEvent>): Promise<AgentEvent[]> {
   const events: AgentEvent[] = [];
   for await (const ev of gen) events.push(ev);
@@ -118,6 +189,8 @@ beforeEach(() => {
   hoisted.procs.length = 0;
   hoisted.killed.length = 0;
   hoisted.script.length = 0;
+  hoisted.acp = null;
+  hoisted.acpMessages.length = 0;
   // killProcessTree has TWO platform paths: Windows shells out to `taskkill`
   // (mocked via spawnSync above), POSIX signals the process group with
   // process.kill(-pid). Only the Windows path was emulated, so on Linux/macOS
@@ -319,30 +392,30 @@ describe("mcp_config hardening (#271)", () => {
 });
 
 describe("effort + abandonment (#271)", () => {
-  it("passes a valid --effort through and ignores foreign scales", async () => {
-    hoisted.script.push({ stdout: ["a"], exit: 0 }, { stdout: ["b"], exit: 0 });
-    const backend = new AntigravityBackend({ cwd: workDir });
-    await collect(backend.run({ effort: "high", channel: channelOf([{ text: "q" }]) }));
-    const t1 = hoisted.spawns[0]!;
-    expect(t1.args[t1.args.indexOf("--effort") + 1]).toBe("high");
-    const b2 = new AntigravityBackend({ cwd: workDir });
-    await collect(b2.run({ effort: "xhigh", channel: channelOf([{ text: "q" }]) }));
-    expect(hoisted.spawns[1]!.args).not.toContain("--effort");
+  it("maps effort onto ACP's thought_level option", async () => {
+    hoisted.acp = acpDefault();
+    const backend = new AntigravityBackend({ cwd: workDir, mcpConfigPath: join(workDir, "mcp.json") });
+    await collect(backend.run({ channel: channelOf([{ text: "hi" }]), effort: "high" }));
+    const cfg = hoisted.acpMessages.find(
+      (m) => m.method === "session/set_config_option" && m.params?.configId === "thought_level",
+    );
+    expect(cfg?.params?.value).toBe("high");
+    await backend.close();
   });
 
-  it("kills the child when the generator is abandoned mid-turn without close()", async () => {
-    // Child streams a partial answer then freezes. The consumer pulls up to a
-    // mid-stream yield and abandons the generator (.return(), what a for-await
-    // break does) — the finally must kill the child and clear turn state.
-    hoisted.script.push({ stdout: ["partial "], hang: true });
-    const backend = new AntigravityBackend({ cwd: workDir });
-    const gen = backend.run({ channel: channelOf([{ text: "long" }]) });
-    let ev = await gen.next(); // session
-    while (!ev.done && (ev.value as { type: string }).type !== "stream_start") {
-      ev = await gen.next();
+  it("closes the ACP child when abandoned before the first prompt", async () => {
+    // A prompt that never resolves: the turn stays in flight.
+    hoisted.acp = (msg) => (msg.method === "session/prompt" ? { hang: true } : acpDefault()(msg));
+    const backend = new AntigravityBackend({ cwd: workDir, mcpConfigPath: join(workDir, "mcp.json") });
+    const gen = backend.run({ channel: channelOf([{ text: "hi" }]) });
+    const seen: AgentEvent[] = [];
+    for await (const ev of gen) {
+      seen.push(ev);
+      if (ev.type === "session") break; // abandon before the first prompt
     }
-    await gen.return(undefined); // abandon at a yield — finally must run
-    expect(hoisted.killed).toContain(hoisted.procs[0]!.pid);
+    expect(seen.some((e) => e.type === "session")).toBe(true);
+    expect(hoisted.spawns[0].args).toContain("acp");
+    expect(hoisted.procs[0].exitCode).not.toBeNull();
   });
 });
 
@@ -372,224 +445,188 @@ describe("resolveAgyBin / readiness", () => {
   });
 });
 
-describe("AntigravityBackend turns", () => {
-  it("spawns agy WITHOUT any tool-only secrets in its env (incl. GEMINI/GOOGLE — agy uses OAuth/keyring)", async () => {
-    // SECURITY (PR #270): agy is Google's LLM-vendor CLI — the user's TOOL
-    // secrets (RunPod/CivitAI/HF…) must NOT reach it. Per the official Antigravity
-    // CLI docs agy authenticates via native keyring + browser/SSH OAuth, with NO
-    // documented API-key env auth, so the GEMINI/GOOGLE keys (which panel-secrets
-    // classifies as tool secrets) are ALSO stripped — no keep-list.
-    const saved = {
-      RUNPOD_API_KEY: process.env.RUNPOD_API_KEY,
-      CIVITAI_API_TOKEN: process.env.CIVITAI_API_TOKEN,
-      GEMINI_API_KEY: process.env.GEMINI_API_KEY,
-    };
-    process.env.RUNPOD_API_KEY = "rp-tool-secret";
-    process.env.CIVITAI_API_TOKEN = "civ-tool-secret";
-    process.env.GEMINI_API_KEY = "AIza-own-key";
-    try {
-      hoisted.script.push({ stdout: ["ok"], exit: 0 });
-      const backend = new AntigravityBackend({ cwd: workDir });
-      await collect(backend.run({ channel: channelOf([{ text: "hi" }]) }));
-      const env = hoisted.spawns[0]!.opts.env as Record<string, string | undefined>;
-      expect(env.RUNPOD_API_KEY).toBeUndefined();
-      expect(env.CIVITAI_API_TOKEN).toBeUndefined();
-      expect(env.GEMINI_API_KEY).toBeUndefined(); // tool secret — stripped, no keep-list
-      expect(env.PATH ?? env.Path).toBeDefined();
-    } finally {
-      for (const [k, v] of Object.entries(saved)) {
-        if (v === undefined) delete process.env[k];
-        else process.env[k] = v;
-      }
-    }
+describe("AntigravityBackend turns (ACP)", () => {
+  it("spawns `agy acp` with skip-permissions and WITHOUT any tool-only secrets", async () => {
+    process.env.RUNPOD_API_KEY = "rpa_secret";
+    process.env.CIVITAI_API_TOKEN = "civ_secret";
+    process.env.GEMINI_API_KEY = "gm_secret";
+    hoisted.acp = acpDefault();
+    const backend = new AntigravityBackend({ cwd: workDir, mcpConfigPath: join(workDir, "mcp.json") });
+    await collect(backend.run({ channel: channelOf([{ text: "hi" }]) }));
+    const spawn = hoisted.spawns[0];
+    expect(spawn.args).toContain("acp");
+    expect(spawn.args).toContain("--dangerously-skip-permissions");
+    expect(spawn.args).not.toContain("-p");
+    const env = spawn.opts.env as NodeJS.ProcessEnv;
+    expect(env.RUNPOD_API_KEY).toBeUndefined();
+    expect(env.CIVITAI_API_TOKEN).toBeUndefined();
+    expect(env.GEMINI_API_KEY).toBeUndefined();
+    delete process.env.RUNPOD_API_KEY;
+    delete process.env.CIVITAI_API_TOKEN;
+    delete process.env.GEMINI_API_KEY;
+    await backend.close();
   });
 
-  it("streams stdout as deltas, commits the text, and continues with -c on turn 2", async () => {
-    hoisted.script.push(
-      { stdout: ["Hello ", "world"], exit: 0 },
-      { stdout: ["Second answer"], exit: 0 },
-    );
-    const backend = new AntigravityBackend({ cwd: workDir, model: "gemini-3-pro", systemAppend: "PERSONA" });
-    const events = await collect(
-      backend.run({ channel: channelOf([{ text: "hi" }, { text: "again" }]) }),
-    );
-
-    // Session first, then per-turn stream events + assistant commit + ok result.
-    expect(events[0]).toMatchObject({ type: "session", sessionId: "antigravity-latest", model: "gemini-3-pro" });
-    const kinds = events.map((e) => e.type);
-    expect(kinds).toContain("stream_start");
-    expect(events.filter((e) => e.type === "assistant").map((e) => (e as { text: string }).text)).toEqual([
-      "Hello world",
-      "Second answer",
-    ]);
-    expect(events.filter((e) => e.type === "result")).toEqual([
-      { type: "result", ok: true, subtype: "end_turn", turn: 1 },
-      { type: "result", ok: true, subtype: "end_turn", turn: 2 },
-    ]);
-
-    // Turn 1: fresh (-p, no -c), persona prepended, model + skip-permissions set.
-    const t1 = hoisted.spawns[0]!;
-    expect(t1.cmd).toBe(FAKE_BIN);
-    expect(t1.args).not.toContain("-c");
-    expect(t1.args).toContain("-p");
-    expect(t1.args[t1.args.indexOf("-p") + 1]).toContain("PERSONA");
-    expect(t1.args[t1.args.indexOf("-p") + 1]).toContain("hi");
-    expect(t1.args).toContain("--dangerously-skip-permissions");
-    expect(t1.args[t1.args.indexOf("--model") + 1]).toBe("gemini-3-pro");
-    // Turn 2: continues the latest conversation, no persona.
-    const t2 = hoisted.spawns[1]!;
-    expect(t2.args).toContain("-c");
-    expect(t2.args[t2.args.indexOf("-p") + 1]).toBe("again");
+  it("prepends the panel persona on the first turn only, streams deltas, commits one assistant + one result", async () => {
+    hoisted.acp = acpDefault({ reply: "hello there" });
+    const backend = new AntigravityBackend({
+      cwd: workDir,
+      mcpConfigPath: join(workDir, "mcp.json"),
+      systemAppend: "PANEL PERSONA",
+    });
+    const events = await collect(backend.run({ channel: channelOf([{ text: "first" }, { text: "second" }]) }));
+    const prompts = hoisted.acpMessages.filter((m) => m.method === "session/prompt");
+    expect(prompts).toHaveLength(2);
+    expect(prompts[0].params.prompt[0].text).toContain("PANEL PERSONA");
+    expect(prompts[1].params.prompt[0].text).not.toContain("PANEL PERSONA");
+    // deltas -> one committed assistant message -> result
+    expect(events.filter((e) => e.type === "assistant_delta").length).toBeGreaterThan(0);
+    const assistant = events.filter((e) => e.type === "assistant");
+    expect(assistant).toHaveLength(2);
+    expect(assistant[0].type === "assistant" && assistant[0].text).toBe("hello there");
+    const results = events.filter((e) => e.type === "result");
+    expect(results).toHaveLength(2);
+    expect(results.every((r) => r.type === "result" && r.ok)).toBe(true);
+    await backend.close();
   });
 
-  it("uses -c from the first turn when resuming, and skips the persona", async () => {
-    hoisted.script.push({ stdout: ["resumed"], exit: 0 });
-    const backend = new AntigravityBackend({ cwd: workDir, systemAppend: "PERSONA" });
+  it("attaches an attached image as an inline base64 ACP image block (vision, #3010)", async () => {
+    hoisted.acp = acpDefault();
+    const fetchMock = vi.fn(async () => ({
+      ok: true,
+      headers: { get: () => "image/png" },
+      arrayBuffer: async () => new Uint8Array([1, 2, 3, 4]).buffer,
+    }));
+    vi.stubGlobal("fetch", fetchMock);
+    const backend = new AntigravityBackend({
+      cwd: workDir,
+      mcpConfigPath: join(workDir, "mcp.json"),
+      comfyuiUrl: "http://127.0.0.1:8188",
+    });
     await collect(
-      backend.run({ resume: "antigravity-latest", channel: channelOf([{ text: "back" }]) }),
+      backend.run({ channel: channelOf([{ text: "what is this?", images: [{ filename: "shot.png", type: "input" }] }]) }),
     );
-    const t1 = hoisted.spawns[0]!;
-    expect(t1.args).toContain("-c");
-    expect(t1.args[t1.args.indexOf("-p") + 1]).toBe("back");
+    expect(fetchMock).toHaveBeenCalled();
+    expect(String(fetchMock.mock.calls[0][0])).toContain("/view?filename=shot.png");
+    const prompt = hoisted.acpMessages.find((m) => m.method === "session/prompt")!.params.prompt;
+    expect(prompt[0].type).toBe("text");
+    expect(prompt[1]).toMatchObject({
+      type: "image",
+      mimeType: "image/png",
+      data: Buffer.from([1, 2, 3, 4]).toString("base64"),
+    });
+    vi.unstubAllGlobals();
+    await backend.close();
+  });
+
+  it("tells the model which images did NOT arrive instead of dropping them silently", async () => {
+    hoisted.acp = acpDefault();
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => ({ ok: false, status: 404, headers: { get: () => null } })),
+    );
+    const backend = new AntigravityBackend({
+      cwd: workDir,
+      mcpConfigPath: join(workDir, "mcp.json"),
+      comfyuiUrl: "http://127.0.0.1:8188",
+    });
+    await collect(
+      backend.run({ channel: channelOf([{ text: "look", images: [{ filename: "gone.png", type: "input" }] }]) }),
+    );
+    const prompt = hoisted.acpMessages.find((m) => m.method === "session/prompt")!.params.prompt;
+    expect(prompt).toHaveLength(1); // no image block
+    expect(prompt[0].text).toContain("could not be delivered");
+    vi.unstubAllGlobals();
+    await backend.close();
+  });
+
+  it("surfaces a failed session/prompt as error + failed result (terminal-result invariant)", async () => {
+    hoisted.acp = (msg) =>
+      msg.method === "session/prompt"
+        ? { error: { code: -32000, message: "model overloaded" } }
+        : acpDefault()(msg);
+    const backend = new AntigravityBackend({ cwd: workDir, mcpConfigPath: join(workDir, "mcp.json") });
+    const events = await collect(backend.run({ channel: channelOf([{ text: "hi" }]) }));
+    const err = events.find((e) => e.type === "error");
+    expect(err && err.type === "error" ? err.message : "").toContain("model overloaded");
+    const res = events.find((e) => e.type === "result");
+    expect(res && res.type === "result" ? res.ok : true).toBe(false);
+    await backend.close();
+  });
+
+  it("interrupt sends session/cancel and kills the tree when the agent never settles", async () => {
+    hoisted.script.push({ hang: true }); // the ACP child stays alive and silent
+    hoisted.acp = (msg) => (msg.method === "session/prompt" ? { hang: true } : acpDefault()(msg));
+    const backend = new AntigravityBackend({ cwd: workDir, mcpConfigPath: join(workDir, "mcp.json") });
+    const gen = backend.run({ channel: channelOf([{ text: "hi" }]) });
+    const events: AgentEvent[] = [];
+    void (async () => {
+      for await (const ev of gen) events.push(ev);
+    })();
+    await waitFor(() => {
+      expect(hoisted.acpMessages.some((m) => m.method === "session/prompt")).toBe(true);
+    });
+    await backend.interrupt();
+    // vi.waitFor retries only while the callback THROWS — a falsy return is a
+    // success, so the condition must be an assertion.
+    await waitFor(() => {
+      expect(hoisted.acpMessages.some((m) => m.method === "session/cancel")).toBe(true);
+    });
+    // the 5s session/cancel failsafe: the hung agent must still lose its process tree
+    await waitFor(() => {
+      expect(hoisted.killed.length).toBeGreaterThan(0);
+    }, { timeout: 8000 });
+  });
+
+  it("resumes a real ACP session id with session/load and skips the persona", async () => {
+    hoisted.acp = acpDefault();
+    const backend = new AntigravityBackend({
+      cwd: workDir,
+      mcpConfigPath: join(workDir, "mcp.json"),
+      systemAppend: "PANEL PERSONA",
+    });
+    const uuid = "b3f1c2d4-5e6f-4a7b-8c9d-0e1f2a3b4c5d";
+    await collect(backend.run({ channel: channelOf([{ text: "again" }]), resume: uuid }));
+    const load = hoisted.acpMessages.find((m) => m.method === "session/load");
+    expect(load?.params?.sessionId).toBe(uuid);
+    const prompt = hoisted.acpMessages.find((m) => m.method === "session/prompt")!.params.prompt;
+    expect(prompt[0].text).not.toContain("PANEL PERSONA");
+    await backend.close();
   });
 
   it("drops a Claude id absent from the catalog but honors a catalog Claude model", async () => {
-    // A claude-shaped opts.model triggers ONE `agy models` catalog probe; the
-    // live agy catalog really does include claude-* entries (verified 2026-07-21),
-    // so only ids missing from the catalog (the panel's Anthropic-side default)
-    // are dropped.
-    hoisted.script.push(
-      { stdout: ["gemini-3.6-flash-medium\nclaude-sonnet-4-6\n"], exit: 0 }, // agy models
-      { stdout: ["x"], exit: 0 }, // turn 1
-      { stdout: ["y"], exit: 0 }, // turn 2
+    hoisted.acp = acpDefault();
+    hoisted.script.push({ stdout: ["claude-opus-5-5-medium\n"], exit: 0 }); // `agy models`
+    const backend = new AntigravityBackend({ cwd: workDir, mcpConfigPath: join(workDir, "mcp.json") });
+    await collect(backend.run({ channel: channelOf([{ text: "hi" }]), model: "claude-opus-5" }));
+    expect(hoisted.acpMessages.some((m) => m.method === "session/set_model" && m.params.modelId === "claude-opus-5")).toBe(
+      false,
     );
-    const backend = new AntigravityBackend({ cwd: workDir });
-    await collect(
-      backend.run({ model: "claude-opus-4-8", channel: channelOf([{ text: "q" }]) }),
-    );
-    expect(hoisted.spawns[0]!.args).toEqual(["models"]);
-    expect(hoisted.spawns[1]!.args).not.toContain("--model"); // panel default dropped
-    await backend.setModel("claude-sonnet-4-6"); // IN catalog → honored
-    await collect(backend.run({ resume: "antigravity-latest", channel: channelOf([{ text: "q2" }]) }));
-    const t2 = hoisted.spawns[2]!;
-    expect(t2.args[t2.args.indexOf("--model") + 1]).toBe("claude-sonnet-4-6");
+    await backend.close();
   });
 
-  it("honors a non-claude model without probing the catalog", async () => {
-    hoisted.script.push({ stdout: ["x"], exit: 0 });
-    const backend = new AntigravityBackend({ cwd: workDir });
-    await collect(backend.run({ model: "gemini-3.6-flash-low", channel: channelOf([{ text: "q" }]) }));
-    const t1 = hoisted.spawns[0]!;
-    expect(t1.args).not.toContain("models");
-    expect(t1.args[t1.args.indexOf("--model") + 1]).toBe("gemini-3.6-flash-low");
-  });
-
-  it("surfaces a failed exit as error + failed result (terminal-result invariant)", async () => {
-    hoisted.script.push({ stdout: [], stderr: "boom: quota exceeded", exit: 7 });
-    const backend = new AntigravityBackend({ cwd: workDir });
-    const events = await collect(backend.run({ channel: channelOf([{ text: "hi" }]) }));
-    const err = events.find((e) => e.type === "error") as { message: string };
-    expect(err.message).toContain("code 7");
-    expect(err.message).toContain("quota exceeded");
-    expect(events.filter((e) => e.type === "result")).toEqual([
-      { type: "result", ok: false, subtype: "error", turn: 1 },
-    ]);
-  });
-
-  it("maps an auth-looking failure to sign-in guidance", async () => {
-    hoisted.script.push({ stdout: [], stderr: "You are not signed in. Run agy to authenticate.", exit: 1 });
-    const backend = new AntigravityBackend({ cwd: workDir });
-    const events = await collect(backend.run({ channel: channelOf([{ text: "hi" }]) }));
-    const err = events.find((e) => e.type === "error") as { message: string };
-    expect(err.message).toMatch(/sign-?in/i);
-    expect(err.message).toContain("agy");
-  });
-
-  it("interrupt kills the in-flight child tree and yields a cancelled result", async () => {
-    hoisted.script.push({ hang: true });
-    const backend = new AntigravityBackend({ cwd: workDir });
-    const gen = backend.run({ channel: channelOf([{ text: "long job" }]) });
-    const events: AgentEvent[] = [];
-    const drain = (async () => {
-      for await (const ev of gen) events.push(ev);
-    })();
-    await waitFor(() => expect(hoisted.spawns.length).toBe(1));
-    await backend.interrupt();
-    await drain;
-    expect(hoisted.killed).toContain(hoisted.procs[0]!.pid);
-    expect(events.filter((e) => e.type === "result")).toEqual([
-      { type: "result", ok: false, subtype: "cancelled", turn: 1 },
-    ]);
-  });
-
-  it("honors an interrupt that lands BEFORE the child is assigned (spawn window)", async () => {
-    // The regression: interrupt() used to bail on `if (!this.child) return`
-    // WITHOUT setting `interrupted`. `this.child` is assigned only after
-    // spawn() returns, so a Stop pressed in that window was silently dropped
-    // and the turn ran forever (CI saw this as a 5s timeout in the interrupt
-    // test; a user sees the stop button do nothing).
-    hoisted.script.push({ hang: true });
-    const backend = new AntigravityBackend({ cwd: workDir });
-    const gen = backend.run({ channel: channelOf([{ text: "long job" }]) });
-    const events: AgentEvent[] = [];
-    const drain = (async () => {
-      for await (const ev of gen) events.push(ev);
-    })();
-
-    // Interrupt IMMEDIATELY — deliberately without waiting for the spawn, so
-    // this lands in (or before) the spawn window.
-    await backend.interrupt();
-
-    // Must still terminate. Pre-fix this hung until the test timeout.
-    await drain;
-
-    expect(events.filter((e) => e.type === "result")).toEqual([
-      { type: "result", ok: false, subtype: "cancelled", turn: 1 },
-    ]);
-    // and the child must not be left running
-    if (hoisted.procs[0]) expect(hoisted.killed).toContain(hoisted.procs[0]!.pid);
-  });
-
-  it("an idle interrupt expires and does not cancel the next turn (stale-flag regression)", async () => {
-    hoisted.script.push({ stdout: ["fine"], exit: 0 });
-    const backend = new AntigravityBackend({ cwd: workDir });
-    await backend.interrupt(); // stray Stop while idle — arms with a 500ms expiry
-    await new Promise((r) => setTimeout(r, 650)); // let it expire (no turn started)
-    const events = await collect(backend.run({ channel: channelOf([{ text: "hi" }]) }));
-    expect(events.filter((e) => e.type === "result")).toEqual([
-      { type: "result", ok: true, subtype: "end_turn", turn: 1 },
-    ]);
-    expect(hoisted.killed).toEqual([]);
-  });
-
-  it("rejects an over-32K prompt on Windows with a legible error instead of a cryptic spawn failure", async () => {
-    if (process.platform !== "win32") return; // preflight is win32-only
-    const backend = new AntigravityBackend({ cwd: workDir });
-    const events = await collect(
-      backend.run({ channel: channelOf([{ text: "x".repeat(31_000) }]) }),
-    );
-    expect(hoisted.spawns).toHaveLength(0); // never spawned
-    const err = events.find((e) => e.type === "error") as { message: string };
-    expect(err.message).toMatch(/too large/i);
-    expect(events.filter((e) => e.type === "result")).toEqual([
-      { type: "result", ok: false, subtype: "error", turn: 1 },
-    ]);
+  it("applies the selected model to the live session with session/set_model", async () => {
+    hoisted.acp = acpDefault();
+    const backend = new AntigravityBackend({ cwd: workDir, mcpConfigPath: join(workDir, "mcp.json") });
+    await collect(backend.run({ channel: channelOf([{ text: "hi" }]), model: "gemini-3.8-flash-medium" }));
+    const set = hoisted.acpMessages.find((m) => m.method === "session/set_model");
+    expect(set?.params?.modelId).toBe("gemini-3.8-flash-medium");
+    await backend.close();
   });
 
   it("prepare() fails fast with install guidance when agy is missing", async () => {
-    delete process.env.COMFYUI_MCP_ANTIGRAVITY_PATH;
-    const savedPath = process.env.PATH;
-    const savedLad = process.env.LOCALAPPDATA;
-    process.env.PATH = workDir;
+    process.env.COMFYUI_MCP_ANTIGRAVITY_PATH = "";
+    const backend = new AntigravityBackend({ cwd: workDir, mcpConfigPath: join(workDir, "mcp.json") });
+    // resolveAgyBin falls back to %LOCALAPPDATA%\agy\bin — hide both so this
+    // asserts the missing-binary path even on a machine that HAS agy installed.
+    const original = process.env.PATH;
+    const originalLocal = process.env.LOCALAPPDATA;
+    process.env.PATH = "";
     process.env.LOCALAPPDATA = workDir;
-    try {
-      const backend = new AntigravityBackend({ cwd: workDir });
-      await expect(backend.prepare()).rejects.toThrow(/antigravity\.google/);
-    } finally {
-      process.env.PATH = savedPath;
-      if (savedLad === undefined) delete process.env.LOCALAPPDATA;
-      else process.env.LOCALAPPDATA = savedLad;
-    }
+    await expect(backend.prepare()).rejects.toThrow(/agy.*not found|Install it from/i);
+    process.env.PATH = original;
+    process.env.LOCALAPPDATA = originalLocal;
+    process.env.COMFYUI_MCP_ANTIGRAVITY_PATH = FAKE_BIN;
   });
 });
 
@@ -643,5 +680,460 @@ describe("AntigravityBackend.listModels", () => {
     hoisted.script.push({ stdout: [], stderr: "not authenticated", exit: 2 });
     const backend = new AntigravityBackend({ cwd: workDir });
     await expect(backend.listModels()).rejects.toThrow(/Sign-In/i);
+  });
+});
+
+describe("ACP lifecycle regressions", () => {
+  const methods = (name: string) => hoisted.acpMessages.filter((m) => m.method === name);
+  const reply = (method: string, result: unknown, procIndex = 0) => {
+    const request = methods(method).at(-1);
+    (hoisted.procs[procIndex].stdout as { write: (s: string) => void }).write(
+      JSON.stringify({ jsonrpc: "2.0", id: request.id, result }) + "\n",
+    );
+  };
+  const backendForTest = () => new AntigravityBackend({
+    cwd: workDir, mcpConfigPath: join(workDir, "mcp.json"),
+    comfyuiUrl: "http://127.0.0.1:8188", systemAppend: "PERSONA",
+  });
+
+  beforeEach(() => { hoisted.script.push({ hang: true }); });
+
+  it("closes a child whose initialize request rejects", async () => {
+    hoisted.acp = () => ({ error: { code: -32000, message: "initialize rejected" } });
+    const backend = backendForTest();
+    try {
+      await expect(backend.prepare()).rejects.toThrow("initialize rejected");
+      expect(hoisted.procs[0].exitCode).not.toBeNull();
+    } finally { await backend.close(); (hoisted.procs[0].kill as () => void)(); }
+  });
+
+  it("shares one concurrent prepare and replaces an exited child", async () => {
+    hoisted.acp = (msg) => msg.method === "initialize" ? { hang: true } : acpDefault()(msg);
+    const backend = backendForTest();
+    try {
+      const first = backend.prepare();
+      const second = backend.prepare();
+      for (let i = 0; i < hoisted.procs.length; i++) reply("initialize", acpDefault()({ method: "initialize" }).result, i);
+      await Promise.all([first, second]);
+      expect(hoisted.spawns).toHaveLength(1);
+      (hoisted.procs[0].kill as () => void)();
+      await Promise.resolve();
+      hoisted.acp = acpDefault();
+      await backend.prepare();
+      expect(hoisted.spawns).toHaveLength(2);
+    } finally {
+      for (const proc of hoisted.procs) (proc.kill as () => void)();
+      await backend.close();
+    }
+  });
+
+  it.each([false, true])("keeps Stop armed through a slow initialize handshake (early Stop: %s)", async (earlyStop) => {
+    hoisted.acp = (msg) => msg.method === "initialize" ? { hang: true } : acpDefault()(msg);
+    const backend = backendForTest();
+    if (earlyStop) await backend.interrupt();
+    const collecting = collect(backend.run({ channel: channelOf([{ text: "cancel me" }]) }));
+    try {
+      await waitFor(() => expect(methods("initialize")).toHaveLength(1));
+      if (!earlyStop) await backend.interrupt();
+      await new Promise((r) => setTimeout(r, 650));
+      reply("initialize", acpDefault()({ method: "initialize" }).result);
+      const events = await collecting;
+      expect(methods("session/prompt")).toHaveLength(0);
+      expect(events.filter((e) => e.type === "result")).toEqual([
+        expect.objectContaining({ ok: false, subtype: "cancelled" }),
+      ]);
+    } finally { await backend.close(); }
+  });
+
+  it("cancels a slow image fetch without submitting a prompt or losing the persona", async () => {
+    let finishFetch!: (value: unknown) => void;
+    const fetchMock = vi.fn(() => new Promise((resolve) => { finishFetch = resolve; }));
+    vi.stubGlobal("fetch", fetchMock);
+    const backend = backendForTest();
+    let cancelled: AgentEvent[] = [];
+    async function* turns() {
+      yield { text: "cancel image", images: [{ filename: "shot.png", type: "input" as const }] };
+      cancelled = events.filter((e) => e.type === "result");
+      yield { text: "next" };
+    }
+    const events: AgentEvent[] = [];
+    const collecting = (async () => { for await (const ev of backend.run({ channel: turns() })) events.push(ev); })();
+    try {
+      await waitFor(() => expect(fetchMock).toHaveBeenCalled());
+      await backend.interrupt();
+      await new Promise((r) => setTimeout(r, 650));
+      finishFetch({ ok: false });
+      await collecting;
+      expect(cancelled).toEqual([expect.objectContaining({ ok: false, subtype: "cancelled" })]);
+      expect(methods("session/prompt")).toHaveLength(1);
+      expect(methods("session/prompt")[0].params.prompt[0].text).toContain("PERSONA");
+    } finally { vi.unstubAllGlobals(); await backend.close(); }
+  });
+
+  it("does not let a settled turn's cancellation timer kill the following turn", async () => {
+    hoisted.acp = (msg) => msg.method === "session/prompt" ? { hang: true } : acpDefault()(msg);
+    const backend = backendForTest();
+    const collecting = collect(backend.run({ channel: channelOf([{ text: "first" }, { text: "second" }]) }));
+    try {
+      await waitFor(() => expect(methods("session/prompt")).toHaveLength(1));
+      await backend.interrupt();
+      reply("session/prompt", { stopReason: "cancelled" });
+      await waitFor(() => expect(methods("session/prompt")).toHaveLength(2));
+      await new Promise((r) => setTimeout(r, 5200));
+      expect(hoisted.killed).toHaveLength(0);
+      reply("session/prompt", { stopReason: "end_turn" });
+      await collecting;
+    } finally { await backend.close(); await collecting; }
+  });
+
+  it("releases the process when abandoned at the initial session event", async () => {
+    const backend = backendForTest();
+    try {
+      for await (const ev of backend.run({ channel: channelOf([{ text: "unused" }]) })) {
+        if (ev.type === "session") break;
+      }
+      expect(hoisted.procs[0].exitCode).not.toBeNull();
+      expect(methods("session/prompt")).toHaveLength(0);
+    } finally { await backend.close(); }
+  });
+
+  it("releases an abandoned streaming prompt and suppresses its late events", async () => {
+    hoisted.acp = (msg) => msg.method === "session/prompt"
+      ? { ...acpDefault()(msg), hang: true }
+      : acpDefault()(msg);
+    // Send a delta, but hold the prompt's response after the fake router writes it.
+    const backend = backendForTest();
+    try {
+      for await (const ev of backend.run({ channel: channelOf([{ text: "hi" }]) })) {
+        if (ev.type === "assistant_delta") break;
+      }
+      expect(hoisted.procs[0].exitCode).not.toBeNull();
+    } finally { await backend.close(); }
+  });
+
+  it("applies a model change before the next prompt on the same run", async () => {
+    const backend = backendForTest();
+    async function* turns() {
+      yield { text: "first" };
+      await backend.setModel("gemini-next");
+      yield { text: "second" };
+    }
+    try {
+      await collect(backend.run({ channel: turns(), model: "gemini-first" }));
+      const relevant = hoisted.acpMessages.filter((m) => ["session/set_model", "session/prompt"].includes(m.method));
+      expect(relevant.map((m) => m.method === "session/set_model" ? m.params.modelId : m.params.prompt[0].text)).toEqual([
+        "gemini-first", expect.stringContaining("first"), "gemini-next", "second",
+      ]);
+    } finally { await backend.close(); }
+  });
+
+  it("does not claim a model or send a prompt when both model-selection methods fail", async () => {
+    hoisted.acp = (msg) => ["session/set_model", "session/set_config_option"].includes(msg.method)
+      ? { error: { code: -32601, message: "unsupported model selection" } }
+      : acpDefault()(msg);
+    const backend = backendForTest();
+    try {
+      await expect(collect(backend.run({ channel: channelOf([{ text: "hi" }]), model: "gemini-requested" })))
+        .rejects.toThrow(/model/i);
+      expect(methods("session/prompt")).toHaveLength(0);
+    } finally { await backend.close(); }
+  });
+});
+
+describe("ACP session and attachment boundaries", () => {
+  beforeEach(() => { hoisted.script.push({ hang: true }); });
+
+  it("resumes after a clean child exit instead of reusing its dead stdin", async () => {
+    const backend = new AntigravityBackend({ cwd: workDir });
+    await backend.prepare();
+    const first = hoisted.procs[0];
+    first.exitCode = 0;
+    (first.emit as (name: string, ...args: unknown[]) => void)("exit", 0, null);
+    await Promise.resolve();
+    try {
+      const events = await collect(backend.run({ channel: channelOf([{ text: "again" }]), resume: ACP_SESSION }));
+      expect(hoisted.spawns).toHaveLength(2);
+      expect(hoisted.acpMessages.find((m) => m.method === "session/load")?.params.sessionId).toBe(ACP_SESSION);
+      expect(events.filter((e) => e.type === "result")).toEqual([expect.objectContaining({ ok: true })]);
+    } finally { await backend.close(); }
+  });
+
+  it("does not send a prompt if the ACP process exits during image preparation", async () => {
+    let finish!: (value: unknown) => void;
+    const fetchMock = vi.fn(() => new Promise((resolve) => { finish = resolve; }));
+    vi.stubGlobal("fetch", fetchMock);
+    const backend = new AntigravityBackend({ cwd: workDir, comfyuiUrl: "http://127.0.0.1:8188" });
+    const collecting = collect(backend.run({ channel: channelOf([{ text: "look", images: [{ filename: "x.png" }] }]) }));
+    try {
+      await waitFor(() => expect(fetchMock).toHaveBeenCalled());
+      (hoisted.procs[0].kill as () => void)();
+      await Promise.resolve();
+      finish({ ok: false });
+      const events = await collecting;
+      expect(hoisted.acpMessages.filter((m) => m.method === "session/prompt")).toHaveLength(0);
+      expect(events.filter((e) => e.type === "result")).toEqual([expect.objectContaining({ ok: false })]);
+    } finally { vi.unstubAllGlobals(); await backend.close(); }
+  });
+
+  it("uses model config fallback only after set_model rejects", async () => {
+    hoisted.acp = (msg) => msg.method === "session/set_model"
+      ? { error: { code: -32601, message: "method unavailable" } }
+      : acpDefault()(msg);
+    const backend = new AntigravityBackend({ cwd: workDir });
+    try {
+      const events = await collect(backend.run({ channel: channelOf([{ text: "hi" }]), model: "gemini-requested" }));
+      expect(hoisted.acpMessages.find((m) => m.method === "session/set_config_option")?.params)
+        .toMatchObject({ configId: "model", value: "gemini-requested" });
+      expect(events[0]).toMatchObject({ type: "session", model: "gemini-requested" });
+    } finally { await backend.close(); }
+  });
+
+  it("fails only the affected turn when a live model change is rejected", async () => {
+    hoisted.acp = (msg) => (msg.method === "session/set_model" && msg.params.modelId === "gemini-bad")
+      || (msg.method === "session/set_config_option" && msg.params.value === "gemini-bad")
+      ? { error: { code: -32000, message: "model unavailable" } }
+      : acpDefault()(msg);
+    const backend = new AntigravityBackend({ cwd: workDir });
+    async function* turns() {
+      yield { text: "first" };
+      await backend.setModel("gemini-bad");
+      yield { text: "blocked" };
+      await backend.setModel("gemini-good");
+      yield { text: "third" };
+    }
+    try {
+      const events = await collect(backend.run({ channel: turns(), model: "gemini-good" }));
+      expect(events.filter((e) => e.type === "result").map((e) => e.type === "result" && e.ok)).toEqual([true, false, true]);
+      expect(hoisted.acpMessages.filter((m) => m.method === "session/prompt")).toHaveLength(2);
+    } finally { await backend.close(); }
+  });
+
+  it("does not fetch images when the provider explicitly disables vision", async () => {
+    hoisted.acp = (msg) => msg.method === "initialize"
+      ? { result: { protocolVersion: 1, agentCapabilities: { promptCapabilities: { image: false } } } }
+      : acpDefault()(msg);
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+    const backend = new AntigravityBackend({ cwd: workDir, comfyuiUrl: "http://127.0.0.1:8188" });
+    try {
+      await collect(backend.run({ channel: channelOf([{ text: "look", images: [{ filename: "x.png" }] }]) }));
+      expect(fetchMock).not.toHaveBeenCalled();
+      const prompt = hoisted.acpMessages.find((m) => m.method === "session/prompt").params.prompt;
+      expect(prompt).toHaveLength(1);
+      expect(prompt[0].text).toContain("could not be delivered");
+    } finally { vi.unstubAllGlobals(); await backend.close(); }
+  });
+
+  it("starts a fresh session with its persona when session/load rejects", async () => {
+    hoisted.acp = (msg) => msg.method === "session/load"
+      ? { error: { code: -32000, message: "session missing" } }
+      : acpDefault()(msg);
+    const backend = new AntigravityBackend({ cwd: workDir, systemAppend: "PERSONA" });
+    try {
+      await collect(backend.run({ channel: channelOf([{ text: "hi" }]), resume: ACP_SESSION }));
+      expect(hoisted.acpMessages.filter((m) => m.method === "session/new")).toHaveLength(1);
+      expect(hoisted.acpMessages.find((m) => m.method === "session/prompt").params.prompt[0].text).toContain("PERSONA");
+    } finally { await backend.close(); }
+  });
+
+  it("pairs tool completion with its original name and ignores another session's updates", async () => {
+    hoisted.acp = (msg) => msg.method === "session/prompt" ? {
+      notifications: [
+        { method: "session/update", params: { sessionId: "other", update: { sessionUpdate: "agent_message_chunk", content: { type: "text", text: "LEAK" } } } },
+        { method: "session/update", params: { sessionId: ACP_SESSION, update: { sessionUpdate: "tool_call", toolCallId: "tool-1", title: "panel_run" } } },
+        { method: "session/update", params: { sessionId: ACP_SESSION, update: { sessionUpdate: "tool_call_update", toolCallId: "tool-1", status: "failed" } } },
+      ],
+      result: { stopReason: "end_turn" },
+    } : acpDefault()(msg);
+    const backend = new AntigravityBackend({ cwd: workDir });
+    try {
+      const events = await collect(backend.run({ channel: channelOf([{ text: "hi" }]) }));
+      expect(events.filter((e) => e.type === "tool_call")).toEqual([
+        expect.objectContaining({ name: "panel_run", phase: "start" }),
+        expect.objectContaining({ name: "panel_run", phase: "end", detail: expect.objectContaining({ status: "failed" }) }),
+      ]);
+      expect(JSON.stringify(events)).not.toContain("LEAK");
+    } finally { await backend.close(); }
+  });
+});
+
+describe("ACP startup cancellation deadline", () => {
+  it.each(["initialize", "session/new", "session/load", "session/set_model", "session/set_config_option"])("kills a %s request that never settles after Stop", async (method) => {
+    hoisted.script.push({ hang: true });
+    hoisted.acp = (msg) => msg.method === method ? { hang: true } : acpDefault()(msg);
+    const backend = new AntigravityBackend({ cwd: workDir });
+    const stoppedBeforeRun = method === "session/new";
+    if (stoppedBeforeRun) { await backend.prepare(); await backend.interrupt(); }
+    const collecting = collect(backend.run({
+      channel: channelOf([{ text: "cancel" }]),
+      ...(method === "session/load" ? { resume: ACP_SESSION } : {}),
+      ...(method === "session/set_model" ? { model: "gemini-test" } : {}),
+      ...(method === "session/set_config_option" ? { effort: "high" as const } : {}),
+    }))
+      .then(() => null, (err: unknown) => err);
+    try {
+      await waitFor(() => expect(hoisted.acpMessages.some((m) => m.method === method)).toBe(true));
+      if (!stoppedBeforeRun) await backend.interrupt();
+      await waitFor(() => expect(hoisted.killed).toHaveLength(1), { timeout: 8000 });
+      expect(await collecting).toBeInstanceOf(Error);
+      expect(hoisted.acpMessages.some((m) => m.method === "session/prompt")).toBe(false);
+      hoisted.acp = acpDefault();
+      const recovered = await collect(backend.run({ channel: channelOf([{ text: "retry" }]) }));
+      expect(recovered.filter((e) => e.type === "result")).toEqual([expect.objectContaining({ ok: true })]);
+      expect(hoisted.spawns).toHaveLength(2);
+    } finally { await backend.close(); }
+  });
+});
+
+describe("ACP independent review regressions", () => {
+  beforeEach(() => { hoisted.script.push({ hang: true }); });
+
+  it.each([false, true])("stops standalone prepare (Stop before prepare: %s)", async (stopBeforePrepare) => {
+    vi.useFakeTimers();
+    hoisted.acp = (msg) => msg.method === "initialize" ? { hang: true } : acpDefault()(msg);
+    const backend = new AntigravityBackend({ cwd: workDir });
+    try {
+      if (stopBeforePrepare) await backend.interrupt();
+      const preparing = backend.prepare().then(() => null, (err: unknown) => err);
+      if (!stopBeforePrepare) await backend.interrupt();
+      await vi.advanceTimersByTimeAsync(5100);
+      expect(hoisted.killed).toHaveLength(1);
+      expect(await preparing).toBeInstanceOf(Error);
+      expect(hoisted.acpMessages.some((m) => m.method === "session/prompt")).toBe(false);
+      hoisted.acp = acpDefault();
+      await backend.prepare();
+      expect(hoisted.spawns).toHaveLength(2);
+    } finally {
+      for (const proc of hoisted.procs) (proc.kill as () => void)();
+      vi.useRealTimers();
+      await backend.close();
+    }
+  });
+
+  it.each(["malformed stdout", "pipe error"])("closes a still-running child after %s", async (failure) => {
+    vi.useFakeTimers();
+    const backend = new AntigravityBackend({ cwd: workDir });
+    try {
+      await backend.prepare();
+      const proc = hoisted.procs[0];
+      expect(proc.exitCode).toBeNull();
+      if (failure === "malformed stdout") {
+        (proc.stdout as { write: (s: string) => void }).write("{invalid JSON\n");
+      } else {
+        (proc.stdin as { emit: (name: string, err: Error) => void }).emit("error", new Error("broken pipe"));
+      }
+      // Transport failure is not a child-exit event.
+      expect(proc.exitCode).toBeNull();
+      await vi.advanceTimersByTimeAsync(100);
+      expect(hoisted.killed).toEqual([proc.pid]);
+      expect(proc.exitCode).not.toBeNull();
+      await backend.prepare();
+      expect(hoisted.spawns).toHaveLength(2);
+    } finally {
+      for (const proc of hoisted.procs) (proc.kill as () => void)();
+      vi.useRealTimers();
+      await backend.close();
+    }
+  });
+
+  it.each(["\u2713", "\u2714", "\u2022"])("parses the supported Unicode model marker %s", (marker) => {
+    const models = parseAgyModels("gemini-3-flash\n" + marker + " claude-opus-5\n");
+    expect(models.map((m) => m.id).sort()).toEqual(["claude-opus-5", "gemini-3-flash"]);
+    if (marker !== "\u2022") expect(models[0].id).toBe("claude-opus-5");
+  });
+});
+
+describe("standalone preparation cancellation race", () => {
+  it("rejects a handshake completed after Stop and leaves the next run usable", async () => {
+    vi.useFakeTimers();
+    hoisted.script.push({ hang: true });
+    hoisted.acp = (msg) => msg.method === "initialize" ? { hang: true } : acpDefault()(msg);
+    const backend = new AntigravityBackend({ cwd: workDir });
+    try {
+      const preparing = backend.prepare().then(() => null, (err: unknown) => err);
+      await backend.interrupt();
+      const request = hoisted.acpMessages.find((m) => m.method === "initialize");
+      (hoisted.procs[0].stdout as { write: (s: string) => void }).write(JSON.stringify({
+        jsonrpc: "2.0", id: request.id, result: acpDefault()({ method: "initialize" }).result,
+      }) + "\n");
+      await vi.advanceTimersByTimeAsync(100);
+      expect(await preparing).toBeInstanceOf(Error);
+      expect(hoisted.procs[0].exitCode).not.toBeNull();
+      vi.useRealTimers();
+      hoisted.acp = acpDefault();
+      const events = await collect(backend.run({ channel: channelOf([{ text: "retry" }]) }));
+      expect(events.filter((e) => e.type === "result")).toEqual([expect.objectContaining({ ok: true })]);
+    } finally {
+      for (const proc of hoisted.procs) (proc.kill as () => void)();
+      vi.useRealTimers();
+      await backend.close();
+    }
+  });
+});
+
+describe("ACP transport failure fallbacks", () => {
+  it.each([
+    ["session/load", "malformed"], ["session/set_model", "malformed"],
+    ["session/load", "clean exit"], ["session/set_model", "clean exit"],
+  ])("does not retry %s after %s", async (method, failure) => {
+    vi.useFakeTimers();
+    hoisted.script.push({ hang: true });
+    hoisted.acp = (msg) => msg.method === method ? { hang: true } : acpDefault()(msg);
+    const backend = new AntigravityBackend({ cwd: workDir });
+    let outcome: unknown;
+    try {
+      void collect(backend.run({
+        channel: channelOf([{ text: "never sent" }]),
+        ...(method === "session/load" ? { resume: ACP_SESSION } : { model: "gemini-test" }),
+      })).then((value) => { outcome = value; }, (err) => { outcome = err; });
+      await vi.advanceTimersByTimeAsync(0);
+      expect(hoisted.acpMessages.some((m) => m.method === method)).toBe(true);
+      const proc = hoisted.procs[0];
+      if (failure === "malformed") {
+        (proc.stdout as { write: (s: string) => void }).write("{invalid JSON\n");
+      } else {
+        proc.exitCode = 0;
+        (proc.emit as (name: string, ...args: unknown[]) => void)("exit", 0, null);
+      }
+      await vi.advanceTimersByTimeAsync(100);
+      const fallback = method === "session/load" ? "session/new" : "session/set_config_option";
+      expect(hoisted.acpMessages.filter((m) => m.method === fallback)).toHaveLength(0);
+      expect(outcome).toBeInstanceOf(Error);
+    } finally {
+      for (const proc of hoisted.procs) (proc.kill as () => void)();
+      vi.useRealTimers();
+      await backend.close();
+    }
+  });
+});
+
+describe("ACP successful response followed by transport failure", () => {
+  it.each(["malformed", "clean exit"])("does not send a new request after a same-tick %s", async (failure) => {
+    vi.useFakeTimers();
+    hoisted.script.push({ hang: true });
+    hoisted.acp = (msg) => msg.method === "session/new" ? { hang: true } : acpDefault()(msg);
+    const backend = new AntigravityBackend({ cwd: workDir });
+    let outcome: unknown;
+    try {
+      void collect(backend.run({ channel: channelOf([{ text: "never sent" }]), model: "gemini-test" }))
+        .then((value) => { outcome = value; }, (err) => { outcome = err; });
+      await vi.advanceTimersByTimeAsync(0);
+      const request = hoisted.acpMessages.find((m) => m.method === "session/new");
+      expect(request).toBeDefined();
+      const proc = hoisted.procs[0];
+      const response = JSON.stringify({ jsonrpc: "2.0", id: request.id, result: { sessionId: ACP_SESSION } }) + "\n";
+      (proc.stdout as { write: (s: string) => void }).write(response + (failure === "malformed" ? "{invalid JSON\n" : ""));
+      if (failure === "clean exit") {
+        proc.exitCode = 0;
+        (proc.emit as (name: string, ...args: unknown[]) => void)("exit", 0, null);
+      }
+      await vi.advanceTimersByTimeAsync(100);
+      expect(hoisted.acpMessages.some((m) => ["session/set_model", "session/prompt"].includes(m.method))).toBe(false);
+      expect(outcome).toBeInstanceOf(Error);
+    } finally {
+      for (const proc of hoisted.procs) (proc.kill as () => void)();
+      vi.useRealTimers();
+      await backend.close();
+    }
   });
 });

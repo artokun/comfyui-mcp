@@ -35,6 +35,18 @@ vi.mock("../../config.js", () => ({
   targetIsOnThisMachine: () => mockLocality.onThisMachine,
 }));
 
+// #2947: a Windows host never relaunches (restart refuses before the stop; see
+// restart-windows-direct-launch.test.ts), so on the Windows CI leg these
+// relaunch cases run the POSIX branch instead. Other hosts keep their own
+// platform.
+vi.mock("node:os", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("node:os")>();
+  return {
+    ...actual,
+    platform: () => (actual.platform() === "win32" ? "linux" : actual.platform()),
+  };
+});
+
 vi.mock("node:child_process", () => ({
   execSync: mockExecSync,
   spawn: mockSpawn,
@@ -1186,61 +1198,11 @@ describe("parseListenerPidFromNetstat — locale-independent port→PID (#449)",
 });
 
 describe("findPidByPort resilience to localized netstat state (#449)", () => {
-  // IS_WIN is captured from os.platform() at module load, so this test exercises
-  // the Windows `netstat` branch only on Windows. On Ubuntu CI findPidByPort
-  // takes the `lsof` path and this wiring test is not meaningful — the pure
-  // parseListenerPidFromNetstat suite above covers the locale mechanism on every
-  // platform. (The reachable-diagnostic tests below are platform-agnostic: they
-  // resolve no PID on either branch.)
-  const winIt = process.platform === "win32" ? it : it.skip;
-  winIt("restart_comfyui (action:\"stop\") finds the listener PID even on non-English Windows", async () => {
-    // Realistic German netstat -ano blob: state column is 'ABHÖREN', not
-    // 'LISTENING'. The mock emulates the actual shell pipeline — a chained
-    // `findstr LISTENING` (the OLD detector) would filter every line out,
-    // reproducing the false 'no process on port' failure. The current detector
-    // parses `netstat -ano` directly and must still map the port to PID 6789.
-    const GERMAN_BLOB = [
-      "Aktive Verbindungen",
-      "",
-      "  Proto  Lokale Adresse     Remoteadresse      Status      PID",
-      "  TCP    0.0.0.0:8188       0.0.0.0:0          ABHÖREN     6789",
-      "  TCP    [::]:8188          [::]:0             ABHÖREN     6789",
-      "  TCP    127.0.0.1:54210    127.0.0.1:8188     HERGESTELLT 4444",
-    ].join("\n");
-
-    let killed = false;
-    mockExecSync.mockImplementation((cmd: string) => {
-      if (/taskkill/i.test(cmd)) {
-        killed = true;
-        return "";
-      }
-      if (cmd.includes("netstat")) {
-        if (killed) return ""; // port freed after kill → waitForPortFree resolves
-        // Emulate the shell: a chained `findstr LISTENING` filters by that word.
-        if (/findstr\s+LISTENING/i.test(cmd)) {
-          return GERMAN_BLOB.split("\n")
-            .filter((l) => l.includes("LISTENING"))
-            .join("\n");
-        }
-        return GERMAN_BLOB;
-      }
-      if (cmd.includes("lsof")) throw noListener();
-      return ""; // tasklist / powershell fallback / `if exist` → nothing
-    });
-    mockGetSystemStats.mockResolvedValue({
-      system: { argv: ["python", "main.py", "--port", "8188"] },
-    });
-
-    const result = await stopComfyUI();
-
-    expect(result.stopped).toBe(true);
-    expect(result.message).toContain("6789");
-    expect(
-      mockExecSync.mock.calls.some(([c]) => /taskkill/i.test(String(c))),
-    ).toBe(true);
-    expect(mockResetClient).toHaveBeenCalled();
-  });
-
+  // The Windows `netstat` wiring (a German locale's ABHÖREN state) lives in
+  // restart-windows-direct-launch.test.ts, which pins win32 on every host; this
+  // file runs the POSIX branch on a Windows host (#2947). The pure
+  // parseListenerPidFromNetstat suite above covers the locale mechanism. These
+  // reachable-diagnostic tests resolve no PID on either branch.
   it("restart reports a REACHABLE diagnostic (not 'no process') when the server answers but no PID maps", async () => {
     // /system_stats answers (server reachable) but every port→PID lookup comes
     // back empty. Liveness is the reachable server, so we must NOT claim the

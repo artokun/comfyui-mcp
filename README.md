@@ -1,13 +1,5 @@
 # comfyui-mcp — drive ComfyUI with ANY LLM
 
-> [!NOTE]
-> **Limited maintenance has resumed.** We support the local Agent Panel and your choice of
-> provider, including offline models. Releases focus on verified critical fixes; there is
-> no broad feature roadmap. Automatic issue reporting remains disabled.
->
-> We will reassess support when Comfy’s official local panel becomes publicly available.
-> [Maintenance update](https://comfyui-mcp.artokun.io/docs/blog/goodbye).
-
 <p align="center">
   <a href="https://comfyui-mcp.artokun.io/docs">
     <img src="docs/images/demo-poster.jpg" width="760"
@@ -24,7 +16,7 @@
 **The local-first, agent-native control plane for [ComfyUI](https://github.com/comfyanonymous/ComfyUI).** An MCP server plus a live sidebar agent that generates images, video and audio, authors and runs workflows, manages models and custom nodes, and **edits your live ComfyUI graph in natural language**. Bring whatever model you have: **Claude or ChatGPT on your subscription, Gemini on your Google login, a free local model via Ollama (fully offline), or any hosted model over one API key** (DeepSeek, GLM, MiMo, Kimi, GPT, Claude via OpenRouter). The tools and the panel are the same on every tier, and the built-in [LLM Arena](https://comfyui-mcp.artokun.io/docs/arena) scores each model on real ComfyUI tasks so you know what yours can do. One config targets local installs, LAN, VPS, or Comfy Cloud.
 
 [![npm version](https://img.shields.io/npm/v/comfyui-mcp)](https://www.npmjs.com/package/comfyui-mcp)
-[![Node.js](https://img.shields.io/badge/node-%3E%3D22.0.0-brightgreen)](https://nodejs.org)
+[![Node.js](https://img.shields.io/badge/node-22.14%2B%20(22.x)%20or%2024%2B-brightgreen)](https://nodejs.org)
 [![License](https://img.shields.io/npm/l/comfyui-mcp)](./LICENSE)
 [![Documentation](https://img.shields.io/badge/docs-comfyui--mcp.artokun.io-2563EB?logo=readthedocs&logoColor=white)](https://comfyui-mcp.artokun.io/docs)
 
@@ -383,8 +375,9 @@ Install [comfy-cli](https://docs.comfy.org/comfy-cli/getting-started#install-cli
 | Tool | Description |
 |------|-------------|
 | `restart_comfyui` `action:"restart"` | Stop and restart ComfyUI, preserving all launch arguments |
-| `restart_comfyui` `action:"stop"` | Stop the running ComfyUI process (saves PID and launch args for restart) |
-| `restart_comfyui` `action:"start"` | Start ComfyUI using info saved from a previous stop |
+| `restart_comfyui` `action:"stop"` | Stop the running ComfyUI process (saves PID and launch args for restart; on Windows, `action:"start"` cannot bring it back) |
+| `restart_comfyui` `action:"start"` | Start ComfyUI using info saved from a previous stop (macOS/Linux; refused on Windows) |
+| `restart_comfyui` `action:"status"` | Read-only: what start/stop/restart would do now, and whether a stop could be undone by this tool. Call it before `stop` |
 
 ### Generation Tracker
 
@@ -743,7 +736,7 @@ All communication with the MCP client (Claude Code) happens over stdio using the
 
 ### Prerequisites
 
-- [Node.js](https://nodejs.org) >= 22.0.0
+- [Node.js](https://nodejs.org) 22.14 or later in the 22.x line, or 24+. The native SQLite dependency requires Node-API 10; earlier Node 22 releases and Node 23 are not supported.
 - [ComfyUI](https://github.com/comfyanonymous/ComfyUI) running locally
 
 ### Setup

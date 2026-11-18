@@ -98,6 +98,9 @@ type SendCtx = {
   reject: (e: Error) => void;
   command: BridgeCommand;
   timeoutMs: number;
+  /** #2955 — who issued this send, read synchronously at send() entry (see
+   *  setMutationOwnership). Opaque to the bridge. */
+  owner?: unknown;
   tabId: string;
   /** True for anything that could have a side effect on the panel/ComfyUI (e.g.
    *  graph_run queues a real render). Mutating commands are NEVER auto-retried on
@@ -206,6 +209,24 @@ type Pending = {
   cmd: string;
   ctx: SendCtx;
 };
+
+/**
+ * #2955 — the in-flight reply map, reporting every removal. A command leaves it
+ * on its reply, reply timeout, mid-command drop, workflow replacement, send
+ * failure or bridge stop; each of those exits deletes from this one map, so a
+ * waiter asking "is this mutation's reply still awaited?" cannot miss one.
+ */
+class PendingReplies extends Map<string, Pending> {
+  constructor(private readonly onRemoved: () => void) {
+    super();
+  }
+
+  override delete(rid: string): boolean {
+    const removed = super.delete(rid);
+    if (removed) this.onRemoved();
+    return removed;
+  }
+}
 
 interface Conn {
   sock: BridgeSocket;
@@ -2042,7 +2063,121 @@ export type DeliveredMutationReceipt = {
   ts: number;
   frame: Record<string, unknown>;
   status: "in_flight" | "timed_out";
+  /** #2955 — the connection incarnation (browser document) the frame was written to. */
+  incarnation?: string;
 };
+
+/** #2955 — how far a delivered mutation's outcome is known (see mutationSettlement). */
+export type MutationSettlement = "settled" | "awaiting" | "unknown";
+
+/** #2955 — a delivered mutation whose outcome is not yet definite. */
+export type UnsettledMutation = DeliveredMutationReceipt & { settlement: "awaiting" | "unknown" };
+
+/** #2955 — a definite outcome, plus — when the panel answered THIS rid with ok —
+ *  the exact command and receiver it answered for (see markMutationReconciled). */
+type SettledMutation = {
+  tabId: string;
+  ts: number;
+  answeredOk?: { incarnation?: string; key?: string };
+};
+
+/** #2955 — the marker key that applies to every tab (marker-capacity overflow). */
+export const ALL_TABS_UNCERTAINTY = "*";
+
+/**
+ * #2955 — unknown-outcome receipts the bridge had to forget (TTL or capacity),
+ * compacted for one canonical tab. `count` is how many were evicted and are
+ * still unresolved; `rids` tracks up to MAX_UNCERTAIN_RIDS of them so each one's
+ * OWN late reply can resolve it. The evicted frame is not kept, so nothing else
+ * can prove a retry was the same command on the same target: a retry_of never
+ * clears a marker, and neither does a disconnect: untracked ones (count >
+ * rids.size) never clear in this process. They bind only runs on the same
+ * browser document (or any, when that is unknown/anonymous).
+ */
+type EvictedUncertainty = {
+  /** Canonical tab id, or ALL_TABS_UNCERTAINTY. */
+  tab: string;
+  /** The browser document (connection incarnation) that received them; absent =
+   *  unknown or merged, i.e. it applies to every document on the tab. */
+  incarnation?: string;
+  workflowUuids: Set<string>;
+  unstamped: boolean;
+  count: number;
+  rids: Set<string>;
+  cmds: Set<string>;
+  since: number;
+};
+
+/** #2955 — a read-only view of one uncertainty marker. */
+export type UncertainTarget = {
+  tabId: string;
+  incarnation?: string;
+  count: number;
+  workflowUuids: string[];
+  unstamped: boolean;
+  rids: string[];
+  cmds: string[];
+  since: number;
+};
+
+/**
+ * #2955 — does this panel reply leave the mutation's OWN outcome unknown?
+ *
+ * The one classification every settlement path uses (an ordinary reply, a late
+ * reply to a kept receipt, a late reply to an evicted marker). A reply settles a
+ * mutation only when it is definite:
+ *  - a refusal (`ok:false`) is definite — the panel finished with this rid —
+ *    unless it explicitly says otherwise;
+ *  - `applied:true` / `applied:false` / no `applied` at all is definite;
+ *  - an explicit `applied` of any OTHER value (the panel's `applied:"unknown"`)
+ *    or `queued_unknown:true`, at the message or result level, is NOT: the
+ *    command may have applied or may still apply.
+ * A deferral (`deferred:true`) is a definite "not applied now"; its later
+ * replay has no settle signal and stays a disclosed limit.
+ */
+export function replyLeavesOutcomeUnknown(msg: { ok?: unknown; result?: unknown }): boolean {
+  const unresolved = (v: unknown): boolean => {
+    if (!v || typeof v !== "object" || Array.isArray(v)) return false;
+    const body = v as Record<string, unknown>;
+    if (
+      Object.prototype.hasOwnProperty.call(body, "applied") &&
+      body.applied !== true &&
+      body.applied !== false
+    ) {
+      return true;
+    }
+    return body.queued_unknown === true;
+  };
+  return unresolved(msg) || unresolved(msg.result);
+}
+
+/**
+ * #2955 — the EXACT command a frame carried: every argument, including the
+ * trusted workflow stamp the bridge wrote, in a key-order-independent form.
+ * Only the bridge-owned correlation fields (`rid`, `retry_of`, `timeout_ms`)
+ * are left out — they differ between an original and its retry by design.
+ * Undefined means the frame cannot be represented exactly (not provable).
+ */
+export function exactFrameKey(frame: Record<string, unknown>): string | undefined {
+  const canon = (v: unknown): unknown => {
+    if (Array.isArray(v)) return v.map(canon);
+    if (v && typeof v === "object") {
+      const out: Record<string, unknown> = {};
+      for (const k of Object.keys(v as Record<string, unknown>).sort()) {
+        out[k] = canon((v as Record<string, unknown>)[k]);
+      }
+      return out;
+    }
+    return v;
+  };
+  try {
+    const { rid: _rid, retry_of: _retryOf, timeout_ms: _timeout, ...rest } = frame;
+    const key = JSON.stringify(canon(rest));
+    return typeof key === "string" ? key : undefined;
+  } catch {
+    return undefined;
+  }
+}
 
 /** Peek of a delivered mutation, including one that already settled late. */
 export type PeekedDeliveredMutation = {
@@ -2404,7 +2539,9 @@ export class UiBridge {
    *  push()-path frames (agent turn output). Bounded per tab. */
   private missedFrames = new Map<string, Record<string, unknown>[]>();
   private static readonly MAX_MISSED_FRAMES = 100;
-  private pending = new Map<string, Pending>();
+  private pending = new PendingReplies(() => this.notifyMutationReplyWaiters());
+  /** #2955 — re-checked whenever an in-flight reply leaves `pending`. */
+  private mutationReplyWaiters = new Set<() => void>();
   /**
    * #2069 / #2559 — per-tab chain of `graph_*` dispatches. The panel's WS
    * listener is async-per-message, so concurrent READ frames share the main
@@ -2507,7 +2644,15 @@ export class UiBridge {
    */
   private deliveredMutations = new Map<
     string,
-    { cmd: string; tabId: string; ts: number; frame: Record<string, unknown>; status: "in_flight" | "timed_out" }
+    {
+      cmd: string;
+      tabId: string;
+      ts: number;
+      frame: Record<string, unknown>;
+      status: "in_flight" | "timed_out";
+      /** #2955 — the connection incarnation the frame was written to. */
+      incarnation?: string;
+    }
   >();
   /** Installed by the retry-token layer; see setLateMutationFilter. Null means
    *  retain nothing. */
@@ -2528,6 +2673,26 @@ export class UiBridge {
   >();
   /** Waiters blocked on a tab's outcome-unknown mutations settling (#2527). */
   private mutationSettleWaiters: Array<{ tabId: string; finish: () => void }> = [];
+  /** #2955 — delivered mutations with a DEFINITE outcome: answered (ok or a
+   *  refusal), never written, acknowledged late, or reconciled by an exact
+   *  retry_of. Leaving `pending` is not settlement — a reply timeout, a
+   *  mid-command drop and a workflow replacement all leave it with the outcome
+   *  unknown — so a run barrier reads settlement only from here. */
+  private settledMutations = new Map<string, SettledMutation>();
+  /** #2955 — see setMutationOwnership. */
+  private mutationOwnerReader: (() => unknown) | null = null;
+  private ownedMutationObserver: ((rid: string, owner: unknown) => void) | null = null;
+  /** #2955 — what bounded memory could not keep: unknown-outcome receipts evicted
+   *  by TTL or capacity, compacted per (canonical tab, receiving browser document)
+   *  plus one global overflow marker. A marker is cleared only by the late reply of
+   *  a tracked rid — never by elapsed time, and never by a disconnect outlasting
+   *  its grace (the document may still be alive and finish the edit). A run on a
+   *  DIFFERENT proven document under the same key is not affected by it; see
+   *  panel-tools incarnationRelevant. */
+  private uncertainty = new Map<string, EvictedUncertainty>();
+  private static readonly MAX_UNCERTAIN_TARGETS = 64;
+  private static readonly MAX_UNCERTAIN_RIDS = 32;
+  private static readonly MAX_UNCERTAIN_CMDS = 8;
   /** Exact prompt receipts sent by the Panel after its graph_run command returned. */
   private lateRunReceipts = new Map<
     string,
@@ -3627,6 +3792,11 @@ export class UiBridge {
           if (fifo) {
             this.askRidToId.delete(rid);
             this.settlePendingReply(fifo.rid, fifo.pending, msg, sock);
+            // #2955 — the reply still names ITS OWN rid: if that is a delivered
+            // receipt whose outcome was unknown (a timed-out original whose retry is
+            // the waiter just unblocked), this is that original's definite late
+            // outcome too. Record it; the FIFO hand-off above is unchanged.
+            this.recordLateMutation(rid, msg);
             return;
           }
           this.recordLateMutation(rid, msg);
@@ -4799,8 +4969,19 @@ export class UiBridge {
    */
   private recordLateMutation(rid: string, msg: { ok?: unknown; result?: unknown }): void {
     const started = this.deliveredMutations.get(rid);
-    if (!started) return;
+    // #2955 — an explicitly unresolved late answer is not an outcome: keep the
+    // receipt (or the evicted marker) exactly as it is.
+    if (replyLeavesOutcomeUnknown(msg)) return;
+    if (!started) {
+      // #2955 — the receipt itself was evicted while its outcome was unknown; a
+      // definite late reply (either verdict) is still that rid's own outcome.
+      this.resolveEvictedRid(rid);
+      return;
+    }
     this.deliveredMutations.delete(rid);
+    // #2955 — a late refusal is as definite as a late success for a run barrier:
+    // the frontend has finished with this command either way.
+    this.recordMutationSettled(rid, started.tabId);
     if (msg.ok !== true) {
       this.notifyMutationSettled(started.tabId);
       return;
@@ -4921,6 +5102,304 @@ export class UiBridge {
       this.mutationSettleWaiters.push(waiter);
       if (this.listOutstandingMutations(tabId).length === 0) finish();
     });
+  }
+
+  /**
+   * #2955 — every mutation on `tabId` (or on the socket it is routed to) whose
+   * outcome is not yet DEFINITE, oldest first:
+   *  - `awaiting` — the frame is on the panel and its reply is still awaited;
+   *  - `unknown`  — nothing is awaiting it any more but no outcome arrived: a
+   *    reply timeout, a mid-command drop, or a same-tab workflow replacement
+   *    that cancelled the waiter (dropQueuedDeliveries). The command may still
+   *    have applied, or may yet.
+   * In-flight requests are enumerated from `pending` itself as well, so an
+   * awaited mutation stays discoverable whatever the bounded receipt cache
+   * holds. Receipts the cache had to forget are reported separately by
+   * listUncertainTargets. graph_run frames are excluded: one run's
+   * acknowledgement does not change what another run serializes.
+   */
+  listUnsettledMutations(tabId: string): UnsettledMutation[] {
+    this.pruneLateMutations();
+    const { canonical, routedSock } = this.routeForReceipts(tabId);
+    const matches = (receiptTab: string, p: Pending | undefined) =>
+      receiptTab === tabId ||
+      receiptTab === canonical ||
+      p?.ctx.tabId === tabId ||
+      p?.ctx.tabId === canonical ||
+      (routedSock !== undefined && p !== undefined && p.sock === routedSock);
+    const out: UnsettledMutation[] = [];
+    for (const [rid, e] of this.deliveredMutations) {
+      if (e.cmd === "graph_run") continue;
+      const p = this.pending.get(rid);
+      if (!matches(e.tabId, p)) continue;
+      out.push({
+        rid,
+        cmd: e.cmd,
+        tabId: e.tabId,
+        ts: e.ts,
+        frame: e.frame,
+        status: e.status,
+        ...(e.incarnation ? { incarnation: e.incarnation } : {}),
+        settlement: p !== undefined && e.status === "in_flight" ? "awaiting" : "unknown",
+      });
+    }
+    for (const [rid, p] of this.pending) {
+      if (this.deliveredMutations.has(rid) || !this.isTrackedMutation(p.cmd)) continue;
+      if (!matches(p.ctx.tabId, p)) continue;
+      const incarnation = p.sock ? this.sockIncarnation.get(p.sock)?.incarnation : undefined;
+      out.push({
+        rid,
+        cmd: p.cmd,
+        tabId: p.ctx.tabId,
+        ts: p.ctx.deadline - p.ctx.timeoutMs,
+        frame: cloneDeliveredMutationFrame(p.ctx.command),
+        status: "in_flight",
+        ...(incarnation ? { incarnation } : {}),
+        settlement: "awaiting",
+      });
+    }
+    return out;
+  }
+
+  /**
+   * #2955 — attribute delivered mutation receipts to whoever issued them.
+   * `reader` is called synchronously at the start of every send() and returns
+   * the issuer (or undefined); `observer` is told each recorded mutation
+   * receipt's rid with that issuer, right after the frame is written. panel-tools
+   * uses it so a run barrier knows exactly which receipts its snapshotted
+   * in-progress edit calls produced — whatever send path those calls took.
+   */
+  setMutationOwnership(
+    reader: (() => unknown) | null,
+    observer: ((rid: string, owner: unknown) => void) | null,
+  ): void {
+    this.mutationOwnerReader = reader;
+    this.ownedMutationObserver = observer;
+  }
+
+  /** #2955 — the awaited subset of {@link listUnsettledMutations}. */
+  listAwaitedMutations(tabId: string): DeliveredMutationReceipt[] {
+    return this.listUnsettledMutations(tabId)
+      .filter((m) => m.settlement === "awaiting")
+      .map(({ settlement: _settlement, ...receipt }) => receipt);
+  }
+
+  /**
+   * #2955 — unknown-outcome receipts that were evicted from bounded memory and
+   * are still unresolved, for `tabId`'s canonical tab plus the all-tabs
+   * overflow marker. A run must treat each as an outcome it cannot see.
+   */
+  listUncertainTargets(tabId: string): UncertainTarget[] {
+    this.pruneLateMutations();
+    const { canonical } = this.routeForReceipts(tabId);
+    const out: UncertainTarget[] = [];
+    for (const marker of this.uncertainty.values()) {
+      if (marker.tab !== canonical && marker.tab !== tabId && marker.tab !== ALL_TABS_UNCERTAINTY) {
+        continue;
+      }
+      out.push({
+        tabId: marker.tab,
+        ...(marker.incarnation ? { incarnation: marker.incarnation } : {}),
+        count: marker.count,
+        workflowUuids: [...marker.workflowUuids],
+        unstamped: marker.unstamped,
+        rids: [...marker.rids],
+        cmds: [...marker.cmds],
+        since: marker.since,
+      });
+    }
+    return out;
+  }
+
+  /**
+   * #2955 — the outcome of one mutation as a run barrier may rely on it. Only a
+   * recorded definite outcome is `settled`; an rid the bridge no longer holds,
+   * or holds only as an evicted uncertainty, is `unknown`, never `settled`.
+   */
+  mutationSettlement(rid: string): MutationSettlement {
+    if (this.settledMutations.has(rid) || this.lateMutations.has(rid)) return "settled";
+    const p = this.pending.get(rid);
+    if (p && this.isTrackedMutation(p.cmd) && this.deliveredMutations.get(rid)?.status !== "timed_out") {
+      return "awaiting";
+    }
+    return "unknown";
+  }
+
+  /**
+   * #2955 — resolve once every one of `rids` is settled, or when `budgetMs`
+   * elapses. Event-driven (reply, late reply, reconcile); resolves without
+   * throwing, and the caller re-reads mutationSettlement for the verdict.
+   */
+  waitForMutationSettlement(rids: readonly string[], budgetMs: number): Promise<void> {
+    const open = () => rids.some((rid) => this.mutationSettlement(rid) !== "settled");
+    if (!open()) return Promise.resolve();
+    const budget = Number.isFinite(budgetMs) ? Math.max(0, Math.floor(budgetMs)) : 0;
+    if (budget <= 0) return Promise.resolve();
+    return new Promise((resolve) => {
+      const finish = () => {
+        clearTimeout(timer);
+        this.mutationReplyWaiters.delete(check);
+        resolve();
+      };
+      const check = () => {
+        if (!open()) finish();
+      };
+      const timer = setTimeout(finish, budget);
+      this.mutationReplyWaiters.add(check);
+    });
+  }
+
+  /**
+   * #2955 — settle outcome-unknown receipt `rid` from its retry `retryRid`, ONLY
+   * when the retry provably re-issued the same command to the same receiver:
+   *  - `rid` is still a full receipt here (an evicted marker kept no frame, so
+   *    nothing can prove identity for it — it stays uncertain until its own
+   *    definite late reply);
+   *  - the retry's own receipt was answered ok under its OWN rid (a terminal
+   *    reply is checked by the caller; a #2559 FIFO-matched ack does not count);
+   *  - both were written to the same canonical tab and the same connection
+   *    incarnation — a different tab's or page's ledger never saw the original
+   *    and would have failed open;
+   *  - their exact frames are identical: every argument plus the trusted
+   *    workflow stamp (exactFrameKey), so another workflow, another position,
+   *    another graph payload or connection is a different command.
+   * The panel's ledger then answered that retry with the original's own outcome
+   * (awaiting it if still running) or, holding no record of it, ran the identical
+   * command on the identical receiver — in either case the requested command is
+   * in effect there and nothing of the original is still running behind it.
+   * Anything not provable returns false and leaves the outcome unknown.
+   */
+  markMutationReconciled(rid: string, retryRid: string): boolean {
+    const e = this.deliveredMutations.get(rid);
+    if (!e || this.mutationSettlement(rid) !== "unknown") return false;
+    const retry = this.settledMutations.get(retryRid)?.answeredOk;
+    if (!retry || retryRid === rid) return false;
+    const retryTab = this.settledMutations.get(retryRid)?.tabId;
+    if (retryTab !== e.tabId) return false;
+    if (!e.incarnation || retry.incarnation !== e.incarnation) return false;
+    const originalKey = exactFrameKey(e.frame);
+    if (originalKey === undefined || retry.key !== originalKey) return false;
+    this.deliveredMutations.delete(rid);
+    this.recordMutationSettled(rid, e.tabId);
+    this.notifyMutationSettled(e.tabId);
+    return true;
+  }
+
+  private recordMutationSettled(
+    rid: string,
+    tabId: string,
+    answeredOk?: SettledMutation["answeredOk"],
+  ): void {
+    this.settledMutations.set(rid, { tabId, ts: Date.now(), ...(answeredOk ? { answeredOk } : {}) });
+    this.pruneLateMutations();
+    this.notifyMutationReplyWaiters();
+  }
+
+  /** Commands whose receipts the retry-token layer tracks (setLateMutationFilter). */
+  private isTrackedMutation(cmd: string): boolean {
+    return cmd !== "graph_run" && this.lateMutationFilter?.(cmd) === true;
+  }
+
+  /** Route `tabId` the way send() does, for receipt matching (#884 scope addresses). */
+  private routeForReceipts(tabId: string): { canonical: string; routedSock: BridgeSocket | undefined } {
+    try {
+      const conn = this.resolveTarget(tabId);
+      return { canonical: conn.tabId, routedSock: conn.sock };
+    } catch {
+      return { canonical: tabId, routedSock: this.conns.get(tabId)?.sock };
+    }
+  }
+
+  /**
+   * #2955 — forget one delivered receipt whose reply is not awaited. A receipt
+   * whose outcome is unknown leaves a compact, target-bound marker: its tab,
+   * the workflow stamp it carried, the receiving browser document, and (while
+   * there is room) its rid. Memory stays bounded — MAX_UNCERTAIN_TARGETS markers, each
+   * tracking at most MAX_UNCERTAIN_RIDS rids — and overflow folds into the
+   * all-tabs marker, so uncertainty is compacted but never silently dropped.
+   */
+  private evictUnsettledReceipt(
+    rid: string,
+    e: { cmd: string; tabId: string; frame: Record<string, unknown>; incarnation?: string },
+  ): void {
+    this.deliveredMutations.delete(rid);
+    if (e.cmd === "graph_run") return;
+    let key = JSON.stringify([e.tabId, e.incarnation ?? null]);
+    let tab = e.tabId;
+    let incarnation = e.incarnation;
+    if (!this.uncertainty.has(key) && this.uncertainty.size >= UiBridge.MAX_UNCERTAIN_TARGETS) {
+      // Fold the OLDEST per-target marker into the all-tabs one to make room.
+      for (const [oldKey, old] of this.uncertainty) {
+        if (oldKey === ALL_TABS_UNCERTAINTY) continue;
+        this.uncertainty.delete(oldKey);
+        this.mergeUncertainty(ALL_TABS_UNCERTAINTY, { ...old, tab: ALL_TABS_UNCERTAINTY, incarnation: undefined });
+        break;
+      }
+      if (this.uncertainty.size >= UiBridge.MAX_UNCERTAIN_TARGETS) {
+        key = ALL_TABS_UNCERTAINTY;
+        tab = ALL_TABS_UNCERTAINTY;
+        incarnation = undefined;
+      }
+    }
+    const stamp = typeof e.frame.workflow_uuid === "string" ? e.frame.workflow_uuid : undefined;
+    this.mergeUncertainty(key, {
+      tab,
+      ...(incarnation ? { incarnation } : {}),
+      workflowUuids: new Set(stamp ? [stamp] : []),
+      unstamped: stamp === undefined,
+      count: 1,
+      rids: new Set([rid]),
+      cmds: new Set([e.cmd]),
+      since: Date.now(),
+    });
+    logger.debug(
+      `[ui-bridge] "${e.cmd}" receipt ${rid} on ${e.tabId} evicted with its outcome UNKNOWN — kept as an uncertainty marker (#2955)`,
+    );
+  }
+
+  private mergeUncertainty(key: string, add: EvictedUncertainty): void {
+    const into = this.uncertainty.get(key) ?? {
+      tab: add.tab,
+      ...(add.incarnation ? { incarnation: add.incarnation } : {}),
+      workflowUuids: new Set<string>(),
+      unstamped: false,
+      count: 0,
+      rids: new Set<string>(),
+      cmds: new Set<string>(),
+      since: add.since,
+    };
+    for (const uuid of add.workflowUuids) {
+      if (into.workflowUuids.size < UiBridge.MAX_UNCERTAIN_RIDS) into.workflowUuids.add(uuid);
+      else into.unstamped = true; // too many to bind: treat as applying to any workflow on the tab
+    }
+    into.unstamped ||= add.unstamped;
+    into.count += add.count;
+    for (const rid of add.rids) {
+      if (into.rids.size < UiBridge.MAX_UNCERTAIN_RIDS) into.rids.add(rid);
+    }
+    for (const cmd of add.cmds) {
+      if (into.cmds.size < UiBridge.MAX_UNCERTAIN_CMDS) into.cmds.add(cmd);
+    }
+    into.since = Math.min(into.since, add.since);
+    this.uncertainty.set(key, into);
+  }
+
+  /** The evicted rid's OWN late reply (its definite outcome): drop it from its marker. */
+  private resolveEvictedRid(rid: string): boolean {
+    for (const [key, marker] of this.uncertainty) {
+      if (!marker.rids.has(rid)) continue;
+      marker.rids.delete(rid);
+      marker.count -= 1;
+      if (marker.count <= 0) this.uncertainty.delete(key);
+      this.recordMutationSettled(rid, key);
+      return true;
+    }
+    return false;
+  }
+
+
+  private notifyMutationReplyWaiters(): void {
+    for (const check of [...this.mutationReplyWaiters]) check();
   }
 
   private outstandingTimedOutCount(tabId: string): number {
@@ -5072,7 +5551,11 @@ export class UiBridge {
     const prunedTabs = new Set<string>();
     for (const [rid, e] of this.deliveredMutations) {
       if (now - e.ts > UiBridge.LATE_MUTATION_TTL_MS) {
-        this.deliveredMutations.delete(rid);
+        // #2955 — a receipt whose reply is still awaited is never evicted (it is
+        // bounded by `pending` itself), and one whose outcome is unknown leaves a
+        // compact uncertainty marker: forgetting it is not evidence it settled.
+        if (this.pending.has(rid)) continue;
+        this.evictUnsettledReceipt(rid, e);
         prunedTabs.add(e.tabId);
       }
     }
@@ -5085,11 +5568,29 @@ export class UiBridge {
     for (const [rid, e] of this.lateRunReceiptHandoffs) {
       if (e.expiresAt <= now) this.lateRunReceiptHandoffs.delete(rid);
     }
+    for (const [rid, e] of this.settledMutations) {
+      if (now - e.ts > UiBridge.LATE_MUTATION_TTL_MS) this.settledMutations.delete(rid);
+    }
     // Map iteration is insertion-ordered, so dropping from the front drops the
     // oldest. Quiet, unlike the ask-mapping overflow: losing one of 256 late
     // completions costs the caller a notice they can still get by looking, where
     // losing an ask mapping loses a user's answer outright.
-    for (const map of [this.deliveredMutations, this.lateMutations, this.lateRunReceipts, this.lateRunReceiptHandoffs]) {
+    // #2955 — capacity for delivered receipts: evict the oldest whose reply is not
+    // awaited, into the uncertainty markers; awaited ones stay discoverable.
+    if (this.deliveredMutations.size > UiBridge.MAX_LATE_MUTATIONS) {
+      for (const [rid, e] of this.deliveredMutations) {
+        if (this.deliveredMutations.size <= UiBridge.MAX_LATE_MUTATIONS) break;
+        if (this.pending.has(rid)) continue;
+        this.evictUnsettledReceipt(rid, e);
+        prunedTabs.add(e.tabId);
+      }
+    }
+    for (const map of [
+      this.lateMutations,
+      this.lateRunReceipts,
+      this.lateRunReceiptHandoffs,
+      this.settledMutations,
+    ]) {
       while (map.size > UiBridge.MAX_LATE_MUTATIONS) {
         const oldest = map.keys().next();
         if (oldest.done) break;
@@ -5409,7 +5910,15 @@ export class UiBridge {
     clearTimeout(pending.timer);
     this.pending.delete(rid);
     this.askRidToId.delete(rid);
-    this.forgetDeliveredMutation(rid);
+    // #2955 — completing the WAITER is not proof the mutation settled. Only a
+    // reply under this rid's OWN id with a definite outcome settles its receipt.
+    // A #2559 FIFO-borrowed ack (another rid's reply handed to this waiter so the
+    // call is not stranded) and an explicitly unresolved answer leave the receipt
+    // in place — outcome unknown, nothing awaiting it — until its own definite
+    // outcome arrives (recordLateMutation) or it is reconciled exactly.
+    if (msg.rid === rid && !replyLeavesOutcomeUnknown(msg)) {
+      this.forgetDeliveredMutation(rid, msg.ok === true);
+    }
     if (msg.ok) {
       // #422 — the panel DEMONSTRABLY served this command. Record it on the LIVE
       // connection (following a same-socket tmp:→wf: migration whose reply landed
@@ -5948,6 +6457,9 @@ export class UiBridge {
       maxReconnectRetries?: number;
     } = {},
   ): Promise<unknown> {
+    // #2955 — the issuer, read at the synchronous start of send(), before any await
+    // or lane wait can change the ambient context. Opaque; see setMutationOwnership.
+    const owner = this.mutationOwnerReader?.();
     // #357: read (idempotent) ops get a more tolerant default so a busy-but-alive
     // panel main thread (e.g. Preview3D loading a large FBX) isn't declared frozen;
     // mutating ops keep the tight default. An explicit opts.timeoutMs always wins.
@@ -6575,6 +7087,7 @@ export class UiBridge {
           // frame, not read back later from `conns` (by resume time the key may be
           // held by somebody else, which is the whole point of storing it).
           issuedToTabSessionId: live.tabSessionId,
+          ...(owner !== undefined ? { owner } : {}),
           // #570 — graph ops resolve from the CALLER'S intended tab (opts.tabId), NOT
           // the canonical conn.tabId: after a same-socket switch the two differ, and
           // we must stamp the workflow the command was ISSUED FOR (so the panel, now
@@ -6879,7 +7392,16 @@ export class UiBridge {
       if (ctx.workflowUuid) frame.workflow_uuid = ctx.workflowUuid;
       else delete frame.workflow_uuid;
       conn.sock.send(JSON.stringify(frame));
-      this.rememberDeliveredMutation(rid, cmd.cmd, ctx.tabId, frame);
+      this.rememberDeliveredMutation(rid, cmd.cmd, ctx.tabId, frame, conn.incarnationId);
+      // #2955 — tell the issuer which receipt its send became. Only a recorded
+      // mutation receipt (never a read, never a run) is reported.
+      if (ctx.owner !== undefined && cmd.cmd !== "graph_run" && this.deliveredMutations.has(rid)) {
+        try {
+          this.ownedMutationObserver?.(rid, ctx.owner);
+        } catch {
+          // an observer fault must not affect the dispatch
+        }
+      }
       try { ctx.onDispatchedRid?.(rid); } catch { /* observer faults are non-fatal */ }
     } catch (err) {
       clearTimeout(timer);
@@ -6913,6 +7435,7 @@ export class UiBridge {
     cmd: string,
     tabId: string,
     frame: Record<string, unknown>,
+    incarnation?: string,
   ): void {
     if (!rid || !this.lateMutationFilter?.(cmd)) return;
     this.pruneLateMutations();
@@ -6922,13 +7445,22 @@ export class UiBridge {
       ts: Date.now(),
       frame: cloneDeliveredMutationFrame(frame),
       status: "in_flight",
+      ...(incarnation ? { incarnation } : {}),
     });
   }
 
-  private forgetDeliveredMutation(rid: string): void {
+  /** `answeredOk`: the panel replied ok, definitely, under THIS rid (never a #2559 FIFO match). */
+  private forgetDeliveredMutation(rid: string, answeredOk = false): void {
     const hit = this.deliveredMutations.get(rid);
     if (!hit) return;
     this.deliveredMutations.delete(rid);
+    // #2955 — both callers are definite outcomes: the panel answered THIS rid
+    // definitely (settlePendingReply), or the frame was never written (send failure).
+    this.recordMutationSettled(
+      rid,
+      hit.tabId,
+      answeredOk ? { incarnation: hit.incarnation, key: exactFrameKey(hit.frame) } : undefined,
+    );
     if (hit.status === "timed_out") this.notifyMutationSettled(hit.tabId);
   }
 
@@ -6939,20 +7471,23 @@ export class UiBridge {
    */
   private retainAbandonedMutation(rid: string, cmd: string, tabId: string): void {
     if (!rid || !this.lateMutationFilter?.(cmd)) return;
-    this.pruneLateMutations();
+    // #2955 — update this rid's OWN receipt before pruning: its waiter has just
+    // left `pending`, so a capacity pass run first would evict it as unknown and
+    // the line below would mint a second receipt for the same rid.
     const prior = this.deliveredMutations.get(rid);
     if (prior) {
       prior.status = "timed_out";
       prior.ts = Date.now();
-      return;
+    } else {
+      this.deliveredMutations.set(rid, {
+        cmd,
+        tabId,
+        ts: Date.now(),
+        frame: { cmd },
+        status: "timed_out",
+      });
     }
-    this.deliveredMutations.set(rid, {
-      cmd,
-      tabId,
-      ts: Date.now(),
-      frame: { cmd },
-      status: "timed_out",
-    });
+    this.pruneLateMutations();
   }
 
   /** A pending command's socket died before its reply arrived. Decide, WITHOUT

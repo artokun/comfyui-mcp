@@ -348,7 +348,14 @@ describe("panel_set_widget shares schema refresh recovery (#2007, #2274)", () =>
 
     expect(res.isError).toBeFalsy();
     expect(calls.filter((c) => c === "graph_set_widget")).toHaveLength(2);
-    expect(calls).toEqual(["graph_set_widget", "refresh_nodes", "graph_set_widget"]);
+    expect(calls).toEqual([
+      // #2931 — each untyped `text` attempt takes one read-only identity probe first.
+      "graph_query",
+      "graph_set_widget",
+      "refresh_nodes",
+      "graph_query",
+      "graph_set_widget",
+    ]);
     expect(text).not.toMatch(/no whole schema/);
   });
 
@@ -363,7 +370,7 @@ describe("panel_set_widget shares schema refresh recovery (#2007, #2274)", () =>
     );
 
     expect(res.isError).toBe(true);
-    expect(calls).toEqual(["graph_set_widget", "refresh_nodes"]);
+    expect(calls).toEqual(["graph_query", "graph_set_widget", "refresh_nodes"]);
     expect(text).toMatch(/missing or malformed refresh result/);
     expect(text).toMatch(/nothing was written/i);
   });
@@ -469,7 +476,13 @@ describe("panel_set_widget shares schema refresh recovery (#2007, #2274)", () =>
     const [refreshResult, writeResult] = await Promise.all([refreshCall, writeCall]);
     expect(refreshResult.isError).toBeFalsy();
     expect(writeResult.isError).toBeFalsy();
-    expect(calls).toEqual(["refresh_nodes", "graph_set_widget", "graph_set_widget"]);
+    expect(calls).toEqual([
+      "refresh_nodes",
+      "graph_query",
+      "graph_set_widget",
+      "graph_query",
+      "graph_set_widget",
+    ]);
   });
 
   it("keeps the write refused when the shared refresh acknowledgement times out", async () => {
@@ -486,7 +499,7 @@ describe("panel_set_widget shares schema refresh recovery (#2007, #2274)", () =>
     );
 
     expect(res.isError).toBe(true);
-    expect(calls).toEqual(["graph_set_widget", "refresh_nodes"]);
+    expect(calls).toEqual(["graph_query", "graph_set_widget", "refresh_nodes"]);
     expect(text).toMatch(/refresh acknowledgement timed out/i);
     expect(text).toMatch(/nothing was written/i);
   });
@@ -518,7 +531,7 @@ describe("panel_set_widget shares schema refresh recovery (#2007, #2274)", () =>
       ctx,
     );
     expect(unrelated.isError).toBeFalsy();
-    expect(calls).toEqual(["graph_set_widget", "refresh_nodes", "graph_set_widget"]);
+    expect(calls).toEqual(["graph_set_widget", "refresh_nodes", "graph_query", "graph_set_widget"]);
   });
 
   it("does not refresh for an ordinary combo-value refusal", async () => {

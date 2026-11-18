@@ -1,4 +1,5 @@
 import { describe, expect, it, beforeEach, afterEach } from "vitest";
+import { realpathSync } from "node:fs";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, sep } from "node:path";
@@ -29,7 +30,10 @@ const COMFY_ARGV = [
 let dir: string;
 beforeEach(async () => {
   clearLaunchedInterpreter();
-  dir = await mkdtemp(join(tmpdir(), "comfyui-live-"));
+  // Canonical from the start: a correlated launch script is reported realpath'd,
+  // so on a host whose temp dir is an alias (macOS /var → /private/var) the expected
+  // script must be spelled the same way.
+  dir = realpathSync(await mkdtemp(join(tmpdir(), "comfyui-live-")));
 });
 afterEach(async () => {
   clearLaunchedInterpreter();

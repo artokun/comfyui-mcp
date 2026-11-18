@@ -93,6 +93,21 @@ vi.mock("../../config.js", () => ({
   isRemoteMode: () => false,
 }));
 
+// #2947: a Windows host never relaunches (restart refuses before the stop; see
+// restart-windows-direct-launch.test.ts), so on the Windows CI leg these
+// relaunch cases run the POSIX branch instead. Other hosts keep their own
+// platform. The Windows-only anchoring cases below load their own module
+// instance at the real host platform (`windowsProcessControl`).
+const platformPin = vi.hoisted(() => ({ value: undefined as NodeJS.Platform | undefined }));
+vi.mock("node:os", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("node:os")>();
+  return {
+    ...actual,
+    platform: () =>
+      platformPin.value ?? (actual.platform() === "win32" ? "linux" : actual.platform()),
+  };
+});
+
 vi.mock("node:child_process", () => ({
   execSync: mockExecSync,
   spawn: mockSpawn,
@@ -270,7 +285,23 @@ afterEach(() => {
   vi.unstubAllGlobals();
   process.env = { ...ORIGINAL_ENV };
   __processControlTestHooks.reset();
+  platformPin.value = undefined;
 });
+
+/**
+ * A process-control instance on the real Windows platform, for the Windows-only
+ * anchoring cases (#2252/#2260). Those run only on a Windows host, so the host's
+ * path rules match. The anchor still decides the read-only preflight that gates
+ * the panel's Manager reboot, and which refusal a restart gives — but the
+ * restart itself refuses before stopping anything (#2947).
+ */
+async function windowsProcessControl(): Promise<typeof import("../../services/process-control.js")> {
+  platformPin.value = "win32";
+  vi.resetModules();
+  const pc = await import("../../services/process-control.js");
+  pc.__processControlTestHooks.reset();
+  return pc;
+}
 
 describe("restart_comfyui — live-first script resolution (#476, #426)", () => {
   const winIt = process.platform === "win32" ? it : it.skip;
@@ -442,6 +473,9 @@ describe("restart_comfyui — live-first script resolution (#476, #426)", () => 
       // guess this embedded layout, so the script stayed relative and preflight
       // refused before stopping anything. The narrow repair may use this pair
       // only because the interpreter came from the PID-correlated command line.
+      // #2947: on Windows the anchor now decides the preflight verdict and which
+      // refusal a restart gives; the restart itself never stops or spawns.
+      const pc = await windowsProcessControl();
       mockResolveBase.mockReturnValue(undefined);
       mockLiveRootFromArgv.mockReturnValue(undefined);
       mockGetSystemStats.mockResolvedValue({
@@ -457,13 +491,13 @@ describe("restart_comfyui — live-first script resolution (#476, #426)", () => 
         );
       });
       mockFindComfyuiPython.mockReturnValue("python");
-      __processControlTestHooks.setLiveCwdResolver(() => undefined);
+      pc.__processControlTestHooks.setLiveCwdResolver(() => undefined);
       mockResolveLiveServerRoot.mockReturnValue({
         source: "observed-process",
         anchorDir: EMBEDDED_ROOT,
         observedPid: 4321,
       });
-      __processControlTestHooks.setProcessIdentityResolver(() => ({
+      pc.__processControlTestHooks.setProcessIdentityResolver(() => ({
         startedAt: "stable-stamp",
         commandLine: `"${EMBEDDED_PYTHON}" main.py --port 8188`,
         argv: [EMBEDDED_PYTHON, "main.py", "--port", "8188"],
@@ -474,16 +508,19 @@ describe("restart_comfyui — live-first script resolution (#476, #426)", () => 
       vi.stubGlobal("fetch", vi.fn(async () => ({ ok: true }) as Response));
       const killSpy = vi.spyOn(process, "kill").mockImplementation(() => true);
 
-      const result = await restartComfyUI();
+      const preflight = await pc.preflightLocalRestart();
+      const result = await pc.restartComfyUI();
 
-      expect(result.message).not.toMatch(/refusing to restart/i);
-      expect(result.stopped).toBe(true);
-      expect(result.started).toBe(true);
-      expect(mockSpawn).toHaveBeenCalledTimes(1);
-      const [exe, args, opts] = mockSpawn.mock.calls[0];
-      expect(exe).toBe(EMBEDDED_PYTHON);
-      expect(args[0]).toBe(EMBEDDED_MAIN);
-      expect((opts as { cwd?: string }).cwd).toBe(EMBEDDED_ROOT);
+      // The anchored command validated: the preflight passes, and the restart
+      // reaches the Windows refusal rather than "script does not exist".
+      expect(preflight.ok).toBe(true);
+      expect(result.message).toMatch(/does not launch ComfyUI itself/i);
+      expect(result.message).not.toMatch(/does not exist on disk/i);
+      expect(result.stopped).toBe(false);
+      expect(result.started).toBe(false);
+      expect(mockSpawn).not.toHaveBeenCalled();
+      expect(mockExecSync.mock.calls.some(([c]) => /taskkill/i.test(String(c)))).toBe(false);
+      expect(killSpy).not.toHaveBeenCalled();
 
       killSpy.mockRestore();
     },
@@ -496,6 +533,8 @@ describe("restart_comfyui — live-first script resolution (#476, #426)", () => 
       // <bundle>\\ComfyUI\\main.py. Its launcher can enter the inner checkout
       // before invoking bare main.py, which the shared live-root resolver
       // deliberately cannot infer from the sibling interpreter alone.
+      // #2947: as in the #2252 case above — preflight and refusal, never a spawn.
+      const pc = await windowsProcessControl();
       mockResolveBase.mockReturnValue(undefined);
       mockLiveRootFromArgv.mockReturnValue(undefined);
       mockGetSystemStats.mockResolvedValue({
@@ -509,9 +548,9 @@ describe("restart_comfyui — live-first script resolution (#476, #426)", () => 
         return value === PORTABLE_MAIN || value === PORTABLE_PYTHON;
       });
       mockFindComfyuiPython.mockReturnValue(PORTABLE_PYTHON);
-      __processControlTestHooks.setLiveCwdResolver(() => undefined);
+      pc.__processControlTestHooks.setLiveCwdResolver(() => undefined);
       mockResolveLiveServerRoot.mockReturnValue({ source: "unresolved" });
-      __processControlTestHooks.setProcessIdentityResolver(() => ({
+      pc.__processControlTestHooks.setProcessIdentityResolver(() => ({
         startedAt: "stable-stamp",
         commandLine: `"${PORTABLE_PYTHON}" main.py --port 8188`,
         argv: [PORTABLE_PYTHON, "main.py", "--port", "8188"],
@@ -522,19 +561,21 @@ describe("restart_comfyui — live-first script resolution (#476, #426)", () => 
       vi.stubGlobal("fetch", vi.fn(async () => ({ ok: true }) as Response));
       const killSpy = vi.spyOn(process, "kill").mockImplementation(() => true);
 
-      const result = await restartComfyUI();
+      const preflight = await pc.preflightLocalRestart();
+      const result = await pc.restartComfyUI();
 
-      expect(result.message).not.toMatch(/refusing to restart/i);
-      expect(result.stopped).toBe(true);
-      expect(result.started).toBe(true);
+      expect(preflight.ok).toBe(true);
       expect(mockFindComfyuiPython).toHaveBeenCalledWith(
         PORTABLE_SERVER_ROOT,
         ["main.py", "--port", "8188"],
       );
-      const [exe, args, opts] = mockSpawn.mock.calls[0];
-      expect(exe).toBe(PORTABLE_PYTHON);
-      expect(args[0]).toBe(PORTABLE_MAIN);
-      expect((opts as { cwd?: string }).cwd).toBe(PORTABLE_SERVER_ROOT);
+      expect(result.message).toMatch(/does not launch ComfyUI itself/i);
+      expect(result.message).not.toMatch(/does not exist on disk/i);
+      expect(result.stopped).toBe(false);
+      expect(result.started).toBe(false);
+      expect(mockSpawn).not.toHaveBeenCalled();
+      expect(mockExecSync.mock.calls.some(([c]) => /taskkill/i.test(String(c)))).toBe(false);
+      expect(killSpy).not.toHaveBeenCalled();
 
       killSpy.mockRestore();
     },
@@ -543,6 +584,7 @@ describe("restart_comfyui — live-first script resolution (#476, #426)", () => 
   winIt(
     "#2260: keeps refusing the sibling-interpreter layout without an absolute reported cwd",
     async () => {
+      const pc = await windowsProcessControl();
       mockResolveBase.mockReturnValue(undefined);
       mockLiveRootFromArgv.mockReturnValue(undefined);
       mockGetSystemStats.mockResolvedValue({
@@ -556,7 +598,7 @@ describe("restart_comfyui — live-first script resolution (#476, #426)", () => 
       });
       mockFindComfyuiPython.mockReturnValue(PORTABLE_PYTHON);
       mockResolveLiveServerRoot.mockReturnValue({ source: "unresolved" });
-      __processControlTestHooks.setProcessIdentityResolver(() => ({
+      pc.__processControlTestHooks.setProcessIdentityResolver(() => ({
         startedAt: "stable-stamp",
         commandLine: `"${PORTABLE_PYTHON}" main.py --port 8188`,
         argv: [PORTABLE_PYTHON, "main.py", "--port", "8188"],
@@ -565,9 +607,12 @@ describe("restart_comfyui — live-first script resolution (#476, #426)", () => 
       mockLivePortThenFree();
       const killSpy = vi.spyOn(process, "kill").mockImplementation(() => true);
 
-      const result = await restartComfyUI();
+      const preflight = await pc.preflightLocalRestart();
+      const result = await pc.restartComfyUI();
 
+      expect(preflight.ok).toBe(false);
       expect(result.message).toMatch(/refusing to restart/i);
+      expect(result.message).toMatch(/does not exist on disk/i);
       expect(result.stopped).toBe(false);
       expect(result.started).toBe(false);
       expect(mockSpawn).not.toHaveBeenCalled();
@@ -583,6 +628,7 @@ describe("restart_comfyui — live-first script resolution (#476, #426)", () => 
       // Keep a separate, valid canonical install available. Without the hard
       // refusal in resolveLaunchCommand, this fixture would incorrectly pass by
       // relaunching that install after the observed embedded layout failed.
+      const pc = await windowsProcessControl();
       mockResolveBase.mockReturnValue(BASE);
       mockLiveRootFromArgv.mockReturnValue(undefined);
       mockGetSystemStats.mockResolvedValue({
@@ -601,13 +647,13 @@ describe("restart_comfyui — live-first script resolution (#476, #426)", () => 
       });
       mockFindComfyuiPython.mockReturnValue(ABS_PYTHON);
       mockIsFile.mockImplementation((p: string) => String(p) !== EMBEDDED_MAIN);
-      __processControlTestHooks.setLiveCwdResolver(() => undefined);
+      pc.__processControlTestHooks.setLiveCwdResolver(() => undefined);
       mockResolveLiveServerRoot.mockReturnValue({
         source: "observed-process",
         anchorDir: EMBEDDED_ROOT,
         observedPid: 4321,
       });
-      __processControlTestHooks.setProcessIdentityResolver(() => ({
+      pc.__processControlTestHooks.setProcessIdentityResolver(() => ({
         startedAt: "stable-stamp",
         commandLine: `"${EMBEDDED_PYTHON}" main.py --port 8188`,
         argv: [EMBEDDED_PYTHON, "main.py", "--port", "8188"],
@@ -616,9 +662,13 @@ describe("restart_comfyui — live-first script resolution (#476, #426)", () => 
       mockLivePortThenFree();
       const killSpy = vi.spyOn(process, "kill").mockImplementation(() => true);
 
-      const result = await restartComfyUI();
+      const preflight = await pc.preflightLocalRestart();
+      const result = await pc.restartComfyUI();
 
+      // The embedded layout's explicit refusal must not fall through to BASE.
+      expect(preflight.ok).toBe(false);
       expect(result.message).toMatch(/refusing to restart/i);
+      expect(result.message).not.toMatch(/does not launch ComfyUI itself/i);
       expect(result.stopped).toBe(false);
       expect(result.started).toBe(false);
       expect(mockSpawn).not.toHaveBeenCalled();

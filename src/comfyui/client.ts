@@ -1737,11 +1737,14 @@ function validateViewResponseOrigin(res: Response, expectedOrigin: string, label
   }
 }
 
-function viewTooLarge(filename: string, maxBytes: number): ComfyUIError {
+function viewTooLarge(filename: string, maxBytes: number, servedUrl?: string): ComfyUIError {
   return new ComfyUIError(
     `ComfyUI /view response for "${filename}" exceeds the ${maxBytes / 1024 ** 2} MB safety limit.`,
     "VIEW_TOO_LARGE",
-    { filename, maxBytes },
+    // #3002 — the URL that actually answered, so a refusal that names a
+    // download route names THIS server, not whatever the target is by the time
+    // the error is rendered (a panel-selected target can move in between).
+    { filename, maxBytes, ...(servedUrl ? { url: servedUrl } : {}) },
   );
 }
 
@@ -1757,9 +1760,16 @@ async function readViewResponseBounded(
     return await readResponseBodyBounded(res, timeoutMs, limit, signal);
   } catch (error) {
     if (error instanceof BoundedResponseError) {
-      if (error.kind === "too-large") throw viewTooLarge(filename, limit);
+      if (error.kind === "too-large") throw viewTooLarge(filename, limit, res.url || undefined);
+      // #3002 — this used to be reachable only when the reader's own timer won
+      // the race against the fetch ceiling, which it never did; a stalled video
+      // body surfaced as the bare "The operation was aborted due to timeout".
       throw new ComfyUIError(
-        `ComfyUI /view did not finish sending "${filename}" within ${timeoutMs / 1000}s; the response was aborted.`,
+        `ComfyUI /view did not finish sending "${filename}" within ${timeoutMs / 1000}s; the response was aborted. ` +
+          `The headers had arrived, so the file exists on the server — the body stalled or the link is too slow ` +
+          `for the ceiling. Nothing was saved locally. The output is still intact on the ComfyUI server; do NOT ` +
+          `re-run the render. Raise COMFYUI_MCP_HTTP_TIMEOUT_S (seconds) and retry, or download the file ` +
+          `directly from the server's /view URL.`,
         "VIEW_READ_TIMEOUT",
         { filename, timeout_ms: timeoutMs },
       );
