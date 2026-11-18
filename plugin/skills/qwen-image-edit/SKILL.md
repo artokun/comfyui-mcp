@@ -72,7 +72,7 @@ Outputs (10):
 
 ### Other Conditioning Variants
 
-- **TextEncodeQwenImageEditPlus** (built-in) accepts up to three optional reference images (`image1`, `image2`, and `image3`) and outputs only CONDITIONING. Requires separate EmptyLatentImage. Good for quick edits.
+- **TextEncodeQwenImageEditPlus** (built-in) accepts up to three optional reference images (`image1`, `image2`, and `image3`) and outputs only CONDITIONING. Supply the sampler latent separately using the workflow for your model.
 - **TextEncodeQwenImageEditPlus_lrzjason**: 5 image inputs, resize toggles, but less control than Advance
 - **TextEncodeQwenImageEditPlusPro_lrzjason**: Per-image VL resize selection via `vl_resize_indexs` string, `main_image_index` control
 
@@ -354,10 +354,7 @@ This produces a grid image showing all combinations, useful for finding the best
 
 ## VRAM Considerations
 
-- Qwen 2511 edit bf16: ~10GB VRAM
-- CLIP (fp8): ~7GB VRAM
-- VAE: ~200MB
-- Total: ~17-18GB, fits comfortably on 24GB GPUs
+The [official diffusion weights](https://huggingface.co/Comfy-Org/Qwen-Image-Edit_ComfyUI/tree/main/split_files/diffusion_models) are about 40.9 GB for BF16 and 20.5 GB for FP8 mixed on disk. Peak VRAM depends on which weights stay on the GPU, CPU offloading, image dimensions, and batch size. Check the workflow and memory settings before estimating whether a run will fit.
 - **Always `clear_vram` before loading** if switching from another model family
 
 ## Tips
