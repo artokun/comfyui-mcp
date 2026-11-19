@@ -4808,7 +4808,11 @@ describe("node-management service", () => {
       const fetchMock = vi.fn(
         async (url: string, init?: RequestInit): Promise<Response> => {
           const method = init?.method ?? "GET";
-          const body = init?.body ? JSON.parse(init.body as string) : undefined;
+          const body = init?.body
+            ? new URL(url).pathname === "/customnode/install/git_url"
+              ? init.body
+              : JSON.parse(init.body as string)
+            : undefined;
           calls.push({ url, method, body });
           const path = new URL(url).pathname;
           if (path.startsWith("/v2/")) {
@@ -4952,7 +4956,7 @@ describe("node-management service", () => {
       });
     });
 
-    it("installs a git URL natively via { version:'unknown', files:[url] }", async () => {
+    it("installs an arbitrary git URL via the synchronous raw-URL endpoint", async () => {
       const { calls } = stubLegacyFetch({
         installedBody: { bar: { ver: "unknown", aux_id: "foo/bar", enabled: true } },
       });
@@ -4961,12 +4965,10 @@ describe("node-management service", () => {
         source: "git",
       });
       expect(res.mechanism).toBe("manager-http");
-      const install = legacyCallTo(calls, "/manager/queue/install");
-      expect(install?.body).toMatchObject({
-        version: "unknown",
-        selected_version: "unknown",
-        files: ["https://github.com/foo/bar"],
-      });
+      const install = legacyCallTo(calls, "/customnode/install/git_url");
+      expect(install?.body).toBe("https://github.com/foo/bar");
+      expect(legacyCallTo(calls, "/manager/queue/install")).toBeUndefined();
+      expect(legacyCallTo(calls, "/manager/queue/start")).toBeUndefined();
     });
 
     it("routes update / fix to the per-operation legacy endpoints", async () => {
