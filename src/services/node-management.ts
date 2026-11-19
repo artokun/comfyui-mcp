@@ -4473,21 +4473,23 @@ async function installCustomNodeImpl(
       ? await resolveInstallLocalWorkspace(opts)
       : opts.comfyuiPath ?? resolveEffectiveComfyUIBase();
   assertInstallTargetStable(targetGeneration, managerBase);
-  const presenceCtx = capturePackPresenceContext(cliWorkspace, {
-    allowConfiguredFallback: cliWorkspace !== undefined,
-  });
-  // #1765 — and is that root the install this session is actually CONNECTED to?
-  // Pinned to the very cliWorkspace the write will use, so a panel retarget
-  // mid-call cannot judge one install's root against another's server.
-  //
-  // Taken only when a LOCAL write is reachable for this call: a registry install
-  // goes through ComfyUI-Manager, which targets the connected server by
-  // construction and has no local destination to misdirect.
-  const localWriteMismatch =
-    source === "git" || opts.useCmCli === true
-      ? await detectLocalWriteTargetMismatch(cliWorkspace)
-      : undefined;
+  // #2893: Manager writes to the connected server, whereas CLI/clone writes
+  // use cliWorkspace. A configured local root must not disprove a Manager
+  // install that landed under the server's different --base-directory.
+  const localWriteMismatch = await detectLocalWriteTargetMismatch(cliWorkspace);
   assertInstallTargetStable(targetGeneration, managerBase);
+  let managerScanRoot = cliWorkspace;
+  if (localWriteMismatch) {
+    try {
+      managerScanRoot = await resolveCustomNodesScanBaseLiveStrict({ requireLive: true });
+    } catch {
+      managerScanRoot = undefined;
+    }
+    assertInstallTargetStable(targetGeneration, managerBase);
+  }
+  const presenceCtx = capturePackPresenceContext(managerScanRoot, {
+    allowConfiguredFallback: managerScanRoot !== undefined,
+  });
   // THE PRE-STATE, OBSERVED BEFORE THE OPERATION (codex gate P0). The "already
   // installed" verdict below used to be inferred from POST-op disk state alone:
   // a pack that was absent before the call and installed as a registry ZIP —
@@ -4721,8 +4723,10 @@ async function installCustomNodeImpl(
     // A HUSK throws; a scan that could not answer (remote, no proven scan root, an
     // unreadable custom_nodes) keeps the Manager result and says the disk was not
     // checked. "Could not look" is never folded into "not there".
+    let managerListError: string | undefined;
     const installed = await listInstalledNodesAt(managerBase).catch(
       (err) => {
+        managerListError = err instanceof Error ? err.message : String(err);
         if (emptyV2Enqueue) {
           const listError = err instanceof Error ? err.message : String(err);
           throw new NodeManagementError(
@@ -4840,8 +4844,39 @@ async function installCustomNodeImpl(
     const replaceOrigin =
       originMismatch ? listedNode?.auxId : undefined;
     if (localWriteMismatch) {
-      throw new ProcessControlError(
-        wrongInstallRefusal(localWriteMismatch, 'install_custom_node (action:"install", git clone)', managerBase),
+      // Manager has already accepted and drained this operation. Its listing
+      // may omit a source/ZIP pack; observe the connected root before deciding
+      // what can be said. Never replay it into the configured, different root.
+      const disk = presenceCtx.diskRoot
+        ? findPackOnDisk(gitId, presenceCtx.diskRoot)
+        : undefined;
+      if (!originMismatch && disk?.state === "found" && looksLikeAPack(disk.dir)) {
+        return withCliNote({
+          mechanism: "manager-http",
+          message:
+            `"${repoName}" is present on disk at ${disk.dir} after the Manager queue drained. ` +
+            `Whether this call installed or changed it could not be verified. No local fallback ` +
+            `was run. Restart may be required to load new nodes.`,
+          details: status,
+        });
+      }
+      throw new NodeManagementError(
+        `ComfyUI-Manager accepted the install for "${repoName}" on ${managerBase}, but its outcome ` +
+          `could not be verified against the connected server. The result is UNKNOWN; Manager may have ` +
+          `written files. No local fallback was run because the configured destination ${cliWorkspace} ` +
+          `differs from the connected server's root ${localWriteMismatch.liveRoot}. Verify the pack on ` +
+          `the connected server before reissuing the install.`,
+        {
+          kind: "manager-install-unverified-target-mismatch",
+          status,
+          managerBase,
+          configuredRoot: cliWorkspace,
+          liveRoot: localWriteMismatch.liveRoot,
+          scanRoot: presenceCtx.diskRoot,
+          disk,
+          originMismatch,
+          managerListError,
+        },
       );
     }
     const localFallback = !isRemoteMode();
