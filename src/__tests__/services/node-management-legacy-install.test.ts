@@ -1,11 +1,14 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
 
-const state = vi.hoisted(() => ({ remote: true, base: "http://manager.test:8188" }));
+const state = vi.hoisted(() => ({ remote: true, base: "http://manager.test:8188", generation: 0, root: undefined as string | undefined, mismatch: false }));
 const noProcess = vi.hoisted(() => vi.fn(() => { throw new Error("Unexpected subprocess"); }));
 vi.mock("../../config.js", () => ({
   config: { comfyuiPath: undefined },
   getComfyUIBaseUrl: () => state.base,
-  getComfyuiTargetGeneration: () => 0,
+  getComfyuiTargetGeneration: () => state.generation,
   isRemoteMode: () => state.remote,
 }));
 vi.mock("../../comfyui/fetch.js", () => ({
@@ -15,10 +18,10 @@ vi.mock("../../comfyui/fetch.js", () => ({
 }));
 vi.mock("../../comfyui/client.js", () => ({ resetObjectInfoCache: vi.fn() }));
 vi.mock("../../services/workspace-env.js", () => ({
-  detectLocalWriteTargetMismatch: async () => undefined,
+  detectLocalWriteTargetMismatch: async () => state.mismatch ? { configuredRoot: "stale", liveRoot: state.root } : undefined,
   resolveEffectiveComfyUIBase: () => undefined,
   resolveEffectiveComfyUICodeBase: () => undefined,
-  resolveCustomNodesScanBaseLiveStrict: async () => undefined,
+  resolveCustomNodesScanBaseLiveStrict: async () => state.root,
   resolveInstallInterpreter: noProcess,
 }));
 vi.mock("../../services/panel-pin-guard.js", () => ({
@@ -73,13 +76,15 @@ function stub(options: {
 }
 beforeEach(() => {
   calls = []; unexpected = []; state.remote = true; state.base = "http://manager.test:8188";
+  state.generation = 0; state.root = undefined; state.mismatch = false;
   noProcess.mockClear(); resetManagerApiCache();
   setQueueTimingForTests({ pollIntervalMs: 1, startupGraceMs: 0, timeoutMs: 25 });
 });
-afterEach(() => {
+afterEach(async () => {
   expect(unexpected).toEqual([]);
   expect(noProcess).not.toHaveBeenCalled();
   vi.unstubAllGlobals(); resetManagerApiCache(); setQueueTimingForTests();
+  if (state.root) await rm(state.root, { recursive: true, force: true });
 });
 const mutations = () => calls.filter((c) => c.method === "POST");
 
@@ -132,6 +137,51 @@ describe("legacy install endpoint contracts (#2883)", () => {
       expect(mutations()).toHaveLength(1);
     },
   );
+  it.each([undefined, "", "malformed", "github.com.evil/example/uncatalogued-pack",
+    "https://gitlab.com/example/uncatalogued-pack", "https://github.com.evil/example/uncatalogued-pack",
+  ])("requires positive host-aware origin evidence, not aux_id %s", async (aux_id) => {
+    stub({ installedResponse: () => Response.json({ "uncatalogued-pack": { ver: "unknown", aux_id } }) });
+    await expect(installCustomNode({ id: URL })).rejects.toMatchObject({ details: { kind: "manager-git-url-unverified" } });
+    expect(mutations()).toHaveLength(1);
+  });
+  it("does not treat GitHub shorthand as proof for a different requested host", async () => {
+    stub();
+    await expect(installCustomNode({ id: "https://gitlab.com/example/uncatalogued-pack" })).rejects.toThrow(/UNKNOWN/);
+    expect(mutations()).toHaveLength(1);
+  });
+  it.each(["https://github.com/example/uncatalogued-pack.git", "git@github.com:example/uncatalogued-pack.git"])(
+    "accepts positively matching full origin %s", async (aux_id) => {
+      stub({ installedResponse: () => Response.json({ "uncatalogued-pack": { ver: "unknown", aux_id } }) });
+      await expect(installCustomNode({ id: URL })).resolves.toMatchObject({ mechanism: "manager-http" });
+    },
+  );
+  it.each(["absent", "husk"])("does not override a connected-root %s contradiction with a Manager listing", async (diskState) => {
+    state.remote = false;
+    state.root = await mkdtemp(join(tmpdir(), "legacy-install-2883-"));
+    state.mismatch = true; // The supplied root is stale; the live root wins.
+    await mkdir(join(state.root, "custom_nodes"));
+    if (diskState === "husk") {
+      const pack = join(state.root, "custom_nodes", "uncatalogued-pack");
+      await mkdir(pack);
+      await writeFile(join(pack, ".tracking"), "metadata only");
+    }
+    stub();
+    await expect(installCustomNode({ id: URL, comfyuiPath: join(state.root, "stale") })).rejects.toMatchObject({
+      details: { kind: "manager-git-url-unverified", corroboration: { state: diskState } },
+    });
+    expect(mutations()).toHaveLength(1);
+  });
+  it("corroborates a listed pack under the connected root without claiming node registration", async () => {
+    state.remote = false;
+    state.root = await mkdtemp(join(tmpdir(), "legacy-install-2883-"));
+    const pack = join(state.root, "custom_nodes", "uncatalogued-pack");
+    await mkdir(pack, { recursive: true });
+    await writeFile(join(pack, "__init__.py"), "NODE_CLASS_MAPPINGS = {}\n");
+    stub();
+    const result = await installCustomNode({ id: URL });
+    expect(result.details).toMatchObject({ corroboration: { state: "corroborated", dir: pack }, runtimeVerified: false });
+    expect(result.message).toContain("node registration was not verified");
+  });
   it("preserves policy refusal and explains why requested CLI was not used", async () => {
     state.remote = false;
     stub({ gitResponse: () => Response.json({ error: "security_level" }, { status: 403 }) });
@@ -187,10 +237,18 @@ describe("legacy install endpoint contracts (#2883)", () => {
       expect(mutations()).toEqual([]);
     },
   );
-  it("keeps verification on the original target after an in-flight retarget", async () => {
-    stub({ gitResponse: () => { state.base = "http://other.test:8188"; return new Response(""); } });
-    const result = await installCustomNode({ id: URL });
+  it.each(["post", "list"])("stops after a target generation change during %s with a truthful started receipt", async (phase) => {
+    const retarget = () => { state.base = "http://other.test:8188"; state.generation++; };
+    stub({
+      gitResponse: () => { if (phase === "post") retarget(); return new Response(""); },
+      installedResponse: () => { if (phase === "list") retarget(); return Response.json(installed); },
+    });
+    const error = await installCustomNode({ id: URL }).catch((err) => err);
+    expect(error.message).toMatch(/UNKNOWN.*may already have written/s);
+    expect(error.message).not.toMatch(/request.*refused/);
+    expect(error.details).toMatchObject({ kind: "target-generation-changed", phase: "started", managerBase: "http://manager.test:8188" });
     expect(calls.every((c) => c.url.startsWith("http://manager.test:8188"))).toBe(true);
-    expect(result.details).toMatchObject({ base: "http://manager.test:8188" });
+    expect(mutations()).toHaveLength(1);
+    if (phase === "post") expect(calls.some((c) => c.path === "/customnode/installed")).toBe(false);
   });
 });

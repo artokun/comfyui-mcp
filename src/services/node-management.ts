@@ -4666,6 +4666,7 @@ async function installCustomNodeImpl(
             cause: err instanceof ComfyUIError ? err.details : undefined },
         );
       }
+      assertInstallTargetStable(targetGeneration, managerBase, "started");
       // Empty 200 means success OR already-present (skip). It contains no repo
       // identity, so a same-name checkout cannot by itself prove this URL won.
       let listed: InstalledNode | undefined;
@@ -4679,7 +4680,8 @@ async function installCustomNodeImpl(
           { kind: "manager-git-url-unverified", base: managerBase, path },
         );
       }
-      if (!listed || !gitOriginMatchesRequested(gitId, listed.auxId)) {
+      assertInstallTargetStable(targetGeneration, managerBase, "started");
+      if (!listed || !legacyInstalledOriginMatches(gitId, listed.auxId)) {
         throw new NodeManagementError(
           "Manager completed the git-URL request (which may skip an existing checkout), " +
             "but did not provide an installed-pack record with the requested source origin. " +
@@ -4688,12 +4690,28 @@ async function installCustomNodeImpl(
           { kind: "manager-git-url-unverified", base: managerBase, path, repoName },
         );
       }
+      const corroboration = presenceCtx.remote || !presenceCtx.diskRoot
+        ? undefined
+        : diskCorroboratesManagerInstall(gitId, listed, presenceCtx.diskRoot);
+      if (corroboration?.state === "absent" || corroboration?.state === "husk") {
+        throw new NodeManagementError(
+          "Manager completed the git-URL request and listed the requested source, but " +
+            (corroboration.state === "absent"
+              ? `the pack is absent from the connected server's scan root ${corroboration.scanned}. `
+              : `${corroboration.dir} contains no usable node-pack code. `) +
+            "The install outcome is UNKNOWN; no replay, cleanup, or local fallback was attempted.",
+          { kind: "manager-git-url-unverified", base: managerBase, path, corroboration },
+        );
+      }
       return withCliNote({
         mechanism: "manager-http",
         message: `ComfyUI-Manager reports "${repoName}" installed or already present from the ` +
-          `requested Git origin. The server handled the git-URL request; local disk contents ` +
-          `and node registration were not verified. Restart may be required.`,
-        details: { base: managerBase, path, origin: listed.auxId, runtimeVerified: false },
+          `requested Git origin. The server handled the git-URL request; ` +
+          (corroboration?.state === "corroborated"
+            ? `node-pack files are present at ${corroboration.dir}, but node registration was not verified. `
+            : `local disk contents and node registration were not verified. `) +
+          `Restart may be required.`,
+        details: { base: managerBase, path, origin: listed.auxId, corroboration, runtimeVerified: false },
       });
     }
 
@@ -6845,6 +6863,35 @@ function gitOriginsDiffer(wanted: string, other: string | undefined): boolean {
  */
 function gitOriginMatchesRequested(gitId: string, auxId: string | undefined): boolean {
   return !gitOriginsDiffer(gitId, auxId);
+}
+
+/** Positive identity for the synchronous legacy endpoint's success-or-skip ack.
+ * Pinned Manager's identify_node_pack_from_path / normalize_to_github_id reports
+ * GitHub origins as owner/repo; other hosts normally lose all but the basename,
+ * which is insufficient evidence. Compatible adapters may supply a full URL. */
+function legacyInstalledOriginMatches(wanted: string, reported: string | undefined): boolean {
+  const identity = (value: string): { host: string; path: string } | undefined => {
+    try {
+      const scp = /^git@([^/:]+):(.+)$/.exec(value);
+      const url = new URL(scp ? `ssh://git@${scp[1]}/${scp[2]}` : value);
+      if (!["https:", "http:", "ssh:", "git:"].includes(url.protocol) || url.search || url.hash) return;
+      const host = url.host.toLowerCase();
+      const path = url.pathname.replace(/^\/+|\/+$/g, "").replace(/\.git$/i, "");
+      if (!host || !path) return;
+      return { host, path: host === "github.com" ? path.toLowerCase() : path };
+    } catch {
+      return undefined;
+    }
+  };
+  const expected = identity(wanted);
+  if (!expected || !reported?.trim()) return false;
+  const value = reported.trim();
+  // The shorthand is a GitHub-specific upstream contract, not a hostless
+  // alias for any service with the same owner/repository spelling.
+  const actual = /^[\w.-]+\/[\w.-]+$/.test(value) && expected.host === "github.com"
+    ? identity(`https://github.com/${value}`)
+    : identity(value);
+  return actual !== undefined && actual.host === expected.host && actual.path === expected.path;
 }
 
 function readGitRemoteOrigin(nodeDir: string): string | undefined {
