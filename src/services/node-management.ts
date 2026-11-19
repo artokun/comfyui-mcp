@@ -4391,14 +4391,20 @@ async function resolveInstallLocalWorkspace(
 function assertInstallTargetStable(
   expectedGeneration: number,
   managerBase: string,
+  phase: "prepared" | "started" = "prepared",
 ): void {
   const actualGeneration = getComfyuiTargetGeneration();
   if (actualGeneration === expectedGeneration) return;
   throw new ProcessControlError(
-    "ComfyUI's target changed while this custom-node install was being prepared. " +
-      "The Manager request and any local clone were refused; retry after the target settles.",
+    phase === "started"
+      ? "ComfyUI's target changed while this custom-node install was in progress. " +
+        "Its outcome is UNKNOWN; the Manager or local installer may already have written files. " +
+        "No further fallback or replay was run. Verify the original target before reissuing the install."
+      : "ComfyUI's target changed while this custom-node install was being prepared. " +
+        "The Manager request and any local clone were refused; retry after the target settles.",
     {
       kind: "target-generation-changed",
+      phase,
       managerBase,
       expectedGeneration,
       actualGeneration,
@@ -4416,11 +4422,12 @@ function withLocalInstallMutationLock<T>(
   expectedGeneration: number,
   managerBase: string,
   op: () => Promise<T>,
+  phase: "prepared" | "started" = "prepared",
 ): Promise<T> {
   return withPanelMutationLock(async () => {
     // Another local writer may have held the lock while the target changed.
     // Refuse before touching the captured filesystem target in that case.
-    assertInstallTargetStable(expectedGeneration, managerBase);
+    assertInstallTargetStable(expectedGeneration, managerBase, phase);
     return op();
   });
 }
@@ -4639,9 +4646,9 @@ async function installCustomNodeImpl(
       // A remote target keeps the original error: the clone would write to a
       // LOCAL tree that is not the server we are connected to, so "the Manager
       // refused" is the honest and complete answer there.
-      assertInstallTargetStable(targetGeneration, managerBase);
+      assertInstallTargetStable(targetGeneration, managerBase, "started");
       const absenceAllows = await managerAbsenceAllowsGitFallback(err, managerBase);
-      assertInstallTargetStable(targetGeneration, managerBase);
+      assertInstallTargetStable(targetGeneration, managerBase, "started");
       if (isRemoteMode() || !absenceAllows) {
         throw err;
       }
@@ -4701,9 +4708,9 @@ async function installCustomNodeImpl(
       let cloned: NodeOpResult;
       try {
         cloned = localFallback
-          ? await withLocalInstallMutationLock(targetGeneration, managerBase, clone)
+          ? await withLocalInstallMutationLock(targetGeneration, managerBase, clone, "started")
           : await clone();
-        assertInstallTargetStable(targetGeneration, managerBase);
+        assertInstallTargetStable(targetGeneration, managerBase, "started");
       } catch (err) {
         if (localFallback) notifyLocalFallbackSettled(opts, "failed");
         throw err;
@@ -4711,7 +4718,7 @@ async function installCustomNodeImpl(
       if (localFallback) notifyLocalFallbackSettled(opts, "applied");
       return withCliNote(cloned);
     }
-    assertInstallTargetStable(targetGeneration, managerBase);
+    assertInstallTargetStable(targetGeneration, managerBase, "started");
 
     // VERIFY: the Manager's installed-pack list is the FIRST witness — but it is
     // Manager's own bookkeeping, not the filesystem, so #2714 crosses it with a
@@ -4746,7 +4753,7 @@ async function installCustomNodeImpl(
         return [] as InstalledNode[];
       },
     );
-    assertInstallTargetStable(targetGeneration, managerBase);
+    assertInstallTargetStable(targetGeneration, managerBase, "started");
     const listedNode = findInstalledNode(gitId, installed);
     // A registry/CNR identity can intentionally point at a differently named
     // source checkout (the #2714 aux-id alias test); only a bare from-source
@@ -4850,16 +4857,9 @@ async function installCustomNodeImpl(
       const disk = presenceCtx.diskRoot
         ? findPackOnDisk(gitId, presenceCtx.diskRoot)
         : undefined;
-      if (!originMismatch && disk?.state === "found" && looksLikeAPack(disk.dir)) {
-        return withCliNote({
-          mechanism: "manager-http",
-          message:
-            `"${repoName}" is present on disk at ${disk.dir} after the Manager queue drained. ` +
-            `Whether this call installed or changed it could not be verified. No local fallback ` +
-            `was run. Restart may be required to load new nodes.`,
-          details: status,
-        });
-      }
+      // A same-name directory is not proof of the requested repository or ref.
+      // Preserve it as an observation, but do not turn missing Manager identity
+      // evidence into a successful result (or replay the install locally).
       throw new NodeManagementError(
         `ComfyUI-Manager accepted the install for "${repoName}" on ${managerBase}, but its outcome ` +
           `could not be verified against the connected server. The result is UNKNOWN; Manager may have ` +
@@ -4876,6 +4876,8 @@ async function installCustomNodeImpl(
           disk,
           originMismatch,
           managerListError,
+          requestedRepository: gitId,
+          requestedRef: gitRef,
         },
       );
     }
@@ -4905,9 +4907,9 @@ async function installCustomNodeImpl(
     let cloned: NodeOpResult;
     try {
       cloned = localFallback
-        ? await withLocalInstallMutationLock(targetGeneration, managerBase, clone)
+        ? await withLocalInstallMutationLock(targetGeneration, managerBase, clone, "started")
         : await clone();
-      assertInstallTargetStable(targetGeneration, managerBase);
+      assertInstallTargetStable(targetGeneration, managerBase, "started");
     } catch (err) {
       if (localFallback) notifyLocalFallbackSettled(opts, "failed");
       throw err;
@@ -4929,12 +4931,12 @@ async function installCustomNodeImpl(
     channel,
     mode,
   }, managerBase);
-  assertInstallTargetStable(targetGeneration, managerBase);
+  assertInstallTargetStable(targetGeneration, managerBase, "started");
   // #797: verify across BOTH sources (Manager list + local disk) and keep
   // "could not determine" distinct from "determined absent" — an unreadable
   // Manager list collapsed to [] used to read as "not found in the registry".
   const presence = await resolvePackPresence(id, managerBase, presenceCtx);
-  assertInstallTargetStable(targetGeneration, managerBase);
+  assertInstallTargetStable(targetGeneration, managerBase, "started");
   switch (presence.state) {
     case "manager-listed":
       return withCliNote({

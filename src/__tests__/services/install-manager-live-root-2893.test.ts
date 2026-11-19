@@ -12,6 +12,7 @@ const WORKSPACE_JSON = join(SANDBOX, "workspace.json");
 writeFileSync(WORKSPACE_JSON, JSON.stringify({ defaultWorkspace: CONNECTED }));
 
 const cfg = vi.hoisted(() => ({
+  generation: 0,
   comfyuiPath: undefined as string | undefined,
   comfyuiCodePath: undefined as string | undefined,
   resolvedPort: 8188,
@@ -22,7 +23,7 @@ const cfg = vi.hoisted(() => ({
 vi.mock("../../config.js", () => ({
   config: cfg,
   getComfyUIBaseUrl: () => `http://${cfg.comfyuiHost}:${cfg.resolvedPort}`,
-  getComfyuiTargetGeneration: () => 0,
+  getComfyuiTargetGeneration: () => cfg.generation,
   getComfyUIAuthHeaders: () => ({}),
   isLoopbackHost: (host: string | undefined) =>
     !host || ["127.0.0.1", "::1", "localhost", "0.0.0.0", "::"].includes(host),
@@ -35,9 +36,11 @@ vi.mock("../../config.js", () => ({
 const live = vi.hoisted(() => ({
   argv: [] as string[],
   reachable: true,
+  retargetDuringPreparation: false,
 }));
 vi.mock("../../comfyui/client.js", () => ({
   getSystemStats: async () => {
+    if (live.retargetDuringPreparation) cfg.generation++;
     if (!live.reachable) throw new Error("connect ECONNREFUSED 127.0.0.1:8188");
     return { system: { argv: live.argv } };
   },
@@ -61,6 +64,7 @@ const manager = vi.hoisted(() => ({
   listFails: false,
   installPack: false,
   emptyAck: false,
+  retargetAt: "" as "" | "enqueue" | "list",
 }));
 vi.mock("../../comfyui/fetch.js", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../../comfyui/fetch.js")>();
@@ -75,6 +79,7 @@ vi.mock("../../comfyui/fetch.js", async (importOriginal) => {
       manager.calls.push(url);
       const { pathname } = new URL(url);
       if (pathname === "/v2/manager/queue/task") {
+        if (manager.retargetAt === "enqueue") cfg.generation++;
         if (manager.installPack) makePackDir(REPO_NAME, { "__init__.py": "NODE_CLASS_MAPPINGS = {}\n" });
         return manager.emptyAck ? new Response("", { status: 200 }) : json({ ui_id: "queued" });
       }
@@ -83,6 +88,7 @@ vi.mock("../../comfyui/fetch.js", async (importOriginal) => {
         return json({ is_processing: false, done_count: 2, total_count: 2 });
       }
       if (pathname === "/v2/customnode/installed") {
+        if (manager.retargetAt === "list") cfg.generation++;
         if (manager.listFails) throw new Error("listing unavailable");
         return json(manager.installed);
       }
@@ -165,6 +171,9 @@ beforeEach(() => {
   manager.listFails = false;
   manager.installPack = true;
   manager.emptyAck = false;
+  manager.retargetAt = "";
+  cfg.generation = 0;
+  live.retargetDuringPreparation = false;
   live.reachable = true;
   live.argv = [join(OTHER, "main.py"), "--base-directory", CONNECTED, "--port", "8188"];
   cfg.comfyuiPath = undefined;
@@ -203,9 +212,14 @@ describe("#2893 Manager outcomes use the connected root", () => {
     it(`observes an unlisted ${source} pack in the live root`, async () => {
       manager.installed = {};
       const result = await install({ id: source === "git" ? REPO : REPO_NAME, source });
-      expect(result.error).toBeUndefined();
-      expect(result.ok?.message).toContain(PACK_DIR);
-      expect(result.ok?.message).not.toMatch(/ALREADY|NOTHING was written/);
+      if (source === "git") {
+        expect(result.ok).toBeUndefined();
+        expect(result.error).toMatch(/UNKNOWN/);
+      } else {
+        expect(result.error).toBeUndefined();
+        expect(result.ok?.message).toContain(PACK_DIR);
+        expect(result.ok?.message).not.toMatch(/ALREADY|NOTHING was written/);
+      }
       expect(clonedInto()).toBeUndefined();
     });
   }
@@ -253,4 +267,66 @@ describe("#2893 Manager outcomes use the connected root", () => {
     expect(result.error).toMatch(/UNKNOWN/);
     expect(clonedInto()).toBeUndefined();
   });
+  for (const listFails of [false, true]) {
+    it(`keeps a same-name pack from another repository unknown when the listing is ${listFails ? "unreadable" : "missing"}`, async () => {
+      manager.installed = {};
+      manager.listFails = listFails;
+      manager.installPack = false;
+      makePackDir(REPO_NAME, {
+        "__init__.py": "NODE_CLASS_MAPPINGS = {}\n",
+        ".git/config": "[remote \"origin\"]\nurl = https://github.com/other-owner/comfyui_controlnet_aux\n",
+      });
+      await expect(installCustomNode({ id: REPO, source: "git" })).rejects.toMatchObject({
+        details: {
+          kind: "manager-install-unverified-target-mismatch",
+          disk: { state: "found", dir: PACK_DIR },
+          requestedRepository: REPO,
+        },
+      });
+      expect(clonedInto()).toBeUndefined();
+      expect(git.calls).toEqual([]);
+    });
+  }
+  it("does not report success for an unverified explicit ref on an existing same-name checkout", async () => {
+    manager.installed = {};
+    manager.installPack = false;
+    makePackDir(REPO_NAME, {
+      "__init__.py": "NODE_CLASS_MAPPINGS = {}\n",
+      ".git/config": `[remote "origin"]\nurl = ${REPO}\n`,
+      ".git/HEAD": "ref: refs/heads/main\n",
+    });
+    await expect(installCustomNode({ id: REPO, source: "git", ref: "release" })).rejects.toMatchObject({
+      details: {
+        kind: "manager-install-unverified-target-mismatch",
+        disk: { state: "found", dir: PACK_DIR },
+        requestedRepository: REPO,
+        requestedRef: "release",
+      },
+    });
+    expect(clonedInto()).toBeUndefined();
+    expect(git.calls).toEqual([]);
+  });
+
+  for (const source of ["git", "registry"] as const) {
+    for (const retargetAt of ["enqueue", "list"] as const) {
+      it(`keeps a ${source} outcome unknown after retargeting during ${retargetAt}`, async () => {
+        manager.retargetAt = retargetAt;
+        const result = await install({ id: source === "git" ? REPO : REPO_NAME, source });
+        expect(result.ok).toBeUndefined();
+        expect(result.error).toMatch(/UNKNOWN/);
+        expect(result.error).toMatch(/may already have written/);
+        expect(result.error).not.toMatch(/request and any local clone were refused/);
+        expect(manager.calls.filter(url => new URL(url).pathname === "/v2/manager/queue/task")).toHaveLength(1);
+        expect(clonedInto()).toBeUndefined();
+      });
+    }
+  }
+  it("still reports a true refusal when the target changes before submission", async () => {
+    live.retargetDuringPreparation = true;
+    const result = await install({ id: REPO, source: "git" });
+    expect(result.error).toMatch(/request and any local clone were refused/);
+    expect(manager.calls.some(url => new URL(url).pathname === "/v2/manager/queue/task")).toBe(false);
+    expect(clonedInto()).toBeUndefined();
+  });
+
 });
