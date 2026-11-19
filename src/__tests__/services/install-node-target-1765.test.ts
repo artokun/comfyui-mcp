@@ -101,7 +101,7 @@ vi.mock("../../comfyui/client.js", () => ({
 
 // ── ComfyUI-Manager. BOTH roads to the direct-clone fallback are exercised:
 //
-//   "refuse-enqueue"  HTTP 403 on the enqueue — a 3.x security_level /
+//   "refuse-enqueue"  HTTP 403 on the enqueue — a v4 security_level /
 //                     allow_git_url_install gate; the #1129 divert.
 //   "accept-enqueue"  the queue ACCEPTS and drains, but the pack is not in the
 //                     installed list afterwards, because it is unregistered —
@@ -169,13 +169,13 @@ vi.mock("../../comfyui/fetch.js", async (importOriginal) => {
         // Manager-absent path.
         return new Response("", { status: 200 });
       }
-      if (pathname === "/manager/queue/install") return json({ ui_id: "queued" });
-      if (pathname === "/manager/queue/start") return json({});
-      if (pathname === "/manager/queue/status") {
+      if (pathname === "/v2/manager/queue/task") return json({ ui_id: "queued" });
+      if (pathname === "/v2/manager/queue/start") return json({});
+      if (pathname === "/v2/manager/queue/status") {
         return json({ is_processing: false, done_count: 1, total_count: 1 });
       }
       // Unregistered: the Manager drained the task without installing anything.
-      if (pathname === "/customnode/installed") return json([]);
+      if (pathname === "/v2/customnode/installed") return json([]);
       return new Response("no such route", { status: 404, statusText: "Not Found" });
     },
   };
@@ -311,9 +311,11 @@ beforeEach(() => {
   priorEnvPath = process.env.COMFYUI_PATH;
   delete process.env.COMFYUI_PATH;
   configureWorkspace({ configPath: WORKSPACE_JSON });
-  // The 403 below is the ENQUEUE refusal, not a dialect probe — pin the dialect
-  // so detection does not consume it.
-  setManagerApiCacheForTests("http://127.0.0.1:8189", "legacy");
+  // These target-safety tests exercise the v4 queue/local-fallback path. Legacy
+  // Git URLs use the synchronous direct endpoint and are covered separately in
+  // node-management-legacy-install.test.ts. Pin v4 so detection cannot consume
+  // the simulated enqueue refusal.
+  setManagerApiCacheForTests("http://127.0.0.1:8189", "v2");
 });
 
 afterEach(() => {
@@ -353,7 +355,7 @@ describe("#1765 — install_custom_node must not write into an install this sess
     expect(ok).toMatchObject({ mechanism: "git-clone" });
     expect(clonedInto()).toBe(join(CONNECTED, PACK_DIR));
     expect(existsSync(join(SAVED_DEFAULT, PACK_DIR))).toBe(false);
-    expect(http.calls.some((url) => url.endsWith("/manager/queue/install"))).toBe(false);
+    expect(http.calls.some((url) => url.endsWith("/v2/manager/queue/task"))).toBe(false);
     expect(ok).toMatchObject({
       details: { managerStatus: { manager_unavailable: true } },
     });
@@ -658,15 +660,17 @@ describe("#1765 — install_custom_node must not write into an install this sess
     }
   });
 
-  it("does not touch the registry path, which the Manager routes to the connected server", async () => {
+  it("keeps registry writes Manager-only while verifying the connected root", async () => {
     // A plain CNR id is installed BY the connected ComfyUI-Manager: there is no
-    // local destination to misdirect, so the guard must not fire (and must not
-    // spend a /system_stats probe).
+    // local destination to misdirect, so the local-write refusal must not fire.
+    // #2893 still needs live-root evidence for post-install disk verification.
     const { error } = await install({ id: "comfyui-kjnodes" });
 
     expect(error).toBeDefined();
     expect(error).not.toMatch(/two DIFFERENT ComfyUI installs/);
-    expect(live.statsCalls).toBe(0);
+    expect(live.statsCalls).toBeGreaterThan(0);
+    expect(git.calls).toEqual([]);
+    expect(clonedInto()).toBeUndefined();
   });
 });
 
@@ -755,7 +759,7 @@ describe("#463 — apply_manifest uses the verified panel-connected local scan r
     expect(result.results).toMatchObject([
       { action: "custom_node", item: REPO, status: "failed" },
     ]);
-    expect(http.calls.some((url) => url.endsWith("/manager/queue/install"))).toBe(true);
+    expect(http.calls.some((url) => url.endsWith("/v2/manager/queue/task"))).toBe(true);
     expect(clonedInto()).toBeUndefined();
     expect(result.results[0]?.message).toMatch(/no ComfyUI path is set|local ComfyUI install/i);
   });
@@ -774,7 +778,7 @@ describe("#463 — apply_manifest uses the verified panel-connected local scan r
     expect(result.results).toMatchObject([
       { action: "custom_node", item: REPO, status: "failed" },
     ]);
-    expect(http.calls.some((url) => url.endsWith("/manager/queue/install"))).toBe(true);
+    expect(http.calls.some((url) => url.endsWith("/v2/manager/queue/task"))).toBe(true);
     expect(clonedInto()).toBeUndefined();
     expect(result.results[0]?.message).not.toMatch(/could not verify.*custom_nodes root/i);
   });
