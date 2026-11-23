@@ -410,6 +410,12 @@ pode servir o transporte **streamable-HTTP** para setups remotos/multi-cliente.
 <ParamField path="MCP_PORT" type="number" default="9100">
   Porta de bind HTTP (com `--http`). Flag: `--port`.
 </ParamField>
+<ParamField path="COMFYUI_MCP_SESSION_IDLE_MS" type="number" default="1800000">
+  Close an HTTP session after this many milliseconds with no request (default 30 minutes).
+  Each session holds its own server instance, so clients that never send `DELETE`
+  (gateways, health probes, crashed agents) would otherwise grow memory without bound.
+  A session with an open request or `GET` stream is never closed. `0` disables expiry.
+</ParamField>
 
 ```bash Run the HTTP transport
 npx comfyui-mcp@latest --http --host 0.0.0.0 --port 9100 --comfyui-url https://my-comfy.example.com
