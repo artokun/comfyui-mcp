@@ -28,6 +28,28 @@ export interface HttpServerOptions {
    * downgrade the failure to a warning and start anyway.
    */
   allowUnauthenticated?: boolean;
+  /**
+   * Close a session after this many milliseconds with no request. A session is
+   * otherwise kept until the client sends DELETE, and every session holds its
+   * own McpServer, so clients that never send DELETE (gateways, health probes,
+   * crashed agents) grow memory without bound. A session with a request in
+   * flight or an open GET/SSE stream is never closed. 0 disables expiry.
+   * Default: DEFAULT_SESSION_IDLE_MS (env COMFYUI_MCP_SESSION_IDLE_MS).
+   */
+  sessionIdleMs?: number;
+}
+
+/** Default idle window before an HTTP MCP session is closed: 30 minutes. */
+export const DEFAULT_SESSION_IDLE_MS = 30 * 60 * 1000;
+
+/**
+ * Parse COMFYUI_MCP_SESSION_IDLE_MS. Unset or not a non-negative number →
+ * the default (a typo never turns expiry off); "0" disables expiry.
+ */
+export function parseSessionIdleMs(raw: string | undefined): number {
+  if (raw === undefined || raw.trim() === "") return DEFAULT_SESSION_IDLE_MS;
+  const n = Number(raw);
+  return Number.isFinite(n) && n >= 0 ? n : DEFAULT_SESSION_IDLE_MS;
 }
 
 // Hostnames that keep traffic on the local machine. Anything else (including
@@ -102,6 +124,11 @@ export async function startHttpServer(opts: HttpServerOptions): Promise<http.Ser
   const path = opts.path ?? "/mcp";
   const token = opts.token?.trim() || undefined;
   const transports = new Map<string, StreamableHTTPServerTransport>();
+  const idleMs = opts.sessionIdleMs ?? DEFAULT_SESSION_IDLE_MS;
+  // Per session: when its last request ended, and how many are still open
+  // (an open GET/SSE stream counts until it closes).
+  const lastSeen = new Map<string, number>();
+  const openRequests = new Map<string, number>();
 
   if (!token && !LOOPBACK_HOSTS.has(opts.host.toLowerCase())) {
     if (!opts.allowUnauthenticated) {
@@ -140,6 +167,14 @@ export async function startHttpServer(opts: HttpServerOptions): Promise<http.Ser
 
       const sessionId = req.headers["mcp-session-id"] as string | undefined;
       let transport = sessionId ? transports.get(sessionId) : undefined;
+      if (sessionId && transport) {
+        lastSeen.set(sessionId, Date.now());
+        openRequests.set(sessionId, (openRequests.get(sessionId) ?? 0) + 1);
+        res.on("close", () => {
+          lastSeen.set(sessionId, Date.now());
+          openRequests.set(sessionId, Math.max(0, (openRequests.get(sessionId) ?? 1) - 1));
+        });
+      }
 
       if (req.method === "POST") {
         const body = await readBody(req);
@@ -152,12 +187,17 @@ export async function startHttpServer(opts: HttpServerOptions): Promise<http.Ser
             sessionIdGenerator: () => randomUUID(),
             onsessioninitialized: (sid) => {
               transports.set(sid, transport!);
+              lastSeen.set(sid, Date.now());
               logger.info("HTTP MCP session initialized", { session: sid });
             },
           });
           transport.onclose = () => {
             const sid = transport!.sessionId;
-            if (sid) transports.delete(sid);
+            if (sid) {
+              transports.delete(sid);
+              lastSeen.delete(sid);
+              openRequests.delete(sid);
+            }
           };
           const server = await opts.createServer();
           await server.connect(transport);
@@ -178,6 +218,30 @@ export async function startHttpServer(opts: HttpServerOptions): Promise<http.Ser
       });
       if (!res.headersSent) sendJsonError(res, 500, "Internal server error");
     }
+  });
+
+  // Started only once the server is going to run (after the safety gate).
+  let reaper: NodeJS.Timeout | undefined;
+  if (idleMs > 0) {
+    reaper = setInterval(
+      () => {
+        const now = Date.now();
+        for (const [sid, t] of transports) {
+          if ((openRequests.get(sid) ?? 0) > 0) continue;
+          if (now - (lastSeen.get(sid) ?? now) > idleMs) {
+            logger.info("HTTP MCP session expired (idle)", { session: sid });
+            // transport.onclose removes it from the maps.
+            t.close().catch(() => {});
+          }
+        }
+      },
+      Math.min(60_000, Math.max(1_000, Math.floor(idleMs / 2))),
+    );
+    reaper.unref();
+  }
+
+  httpServer.on("close", () => {
+    if (reaper) clearInterval(reaper);
   });
 
   await new Promise<void>((resolve) => httpServer.listen(opts.port, opts.host, resolve));

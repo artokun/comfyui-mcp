@@ -14,7 +14,7 @@ import { configurePersistentLogFile, logger } from "./utils/logger.js";
 import { readPackageVersion } from "./utils/package-version.js";
 import { JobWatcher } from "./services/job-watcher.js";
 import { parseCliArgs, validateConnectUrl, exportExplicitToolMode, type ToolMode } from "./transport/cli.js";
-import { startHttpServer } from "./transport/http.js";
+import { parseSessionIdleMs, startHttpServer } from "./transport/http.js";
 import { resolveToolSurfacePolicy } from "./tools/tool-surface-filter.js";
 import { isLocalMode } from "./config.js";
 import { ensurePanelInstalled } from "./services/panel-installer.js";
@@ -667,6 +667,7 @@ async function main() {
       port: cli.port,
       token,
       allowUnauthenticated: cli.allowUnauthenticated,
+      sessionIdleMs: parseSessionIdleMs(process.env.COMFYUI_MCP_SESSION_IDLE_MS),
       createServer: () => createConfiguredServer(cli.toolMode),
     });
     const advertised = advertisedOriginForBind(cli.host, cli.port);
